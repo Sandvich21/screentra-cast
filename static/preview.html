@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Ripley Layout Preview</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body,#stage{width:100vw;height:100vh;background:#000;overflow:hidden;color:#fff;font-family:system-ui,sans-serif}
+#stage{position:relative;background:#0b1220}
+ #stage{container-type:inline-size}
+body.preview-portrait{background:#111;}
+body.preview-portrait #stage{width:min(92vw,calc((100vh - 5rem) * .5625));height:auto;aspect-ratio:9 / 16;margin:3.5rem auto 0;background:#0b1220;box-shadow:0 0 0 1px rgba(255,255,255,.15),0 18px 60px rgba(0,0,0,.45);}
+.widget{position:absolute;overflow:hidden}
+.text{display:flex;align-items:center;justify-content:center;width:100%;height:100%}
+iframe{width:100%;height:100%;border:0;background:transparent}
+#preview-status{position:fixed;top:2.1rem;left:0;right:0;background:rgba(2,6,23,.85);color:#cbd5e1;font-size:.8rem;padding:.3rem .75rem;z-index:9999}#preview-status.ok{color:#86efac}#preview-status.error{color:#fca5a5}
+.interactive-preview-widget{padding:.35rem;border:1px dashed #38bdf8;background:rgba(15,23,42,.9);overflow:auto}.interactive-preview-box{display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:clamp(11px,1.4vw,20px)}.interactive-preview-box label{display:flex;flex-direction:column;gap:.3rem;width:100%}.interactive-preview-box input,.interactive-preview-box select,.interactive-preview-box button{font:inherit;padding:.35rem;border-radius:4px;border:1px solid #64748b}.interactive-preview-box fieldset{padding:.4rem}.interactive-preview-box button{cursor:pointer;background:#2563eb;color:white}.interactive-preview-widget.submitted{border-color:#22c55e}
+</style>
+</head>
+<body>
+<div class="titlebar" id="title">Loading preview…</div>
+<div id="preview-status" aria-live="polite" hidden></div>
+<div id="stage"></div>
+<script src="/js/weather-icons.js?v=1791477110-alert-condition-icons"></script>
+<script src="/js/traffic-runtime.js?v=20261011140500-manual-traffic-closure-classification"></script>
+<script src="/js/player.js?v=20261011134500-manual-traffic-blocks"></script>
+<script src="/js/preview.js?v=20261011134500-manual-traffic-blocks"></script>
+</body></html>

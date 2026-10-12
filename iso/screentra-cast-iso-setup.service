@@ -1,0 +1,13 @@
+[Unit]
+Description=Screentra Cast ISO role setup
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/etc/screentra-cast-iso/setup-complete
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/screentra-cast-iso-setup
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

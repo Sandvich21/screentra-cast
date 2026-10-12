@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{width:100vw;height:100vh;background:#000;overflow:hidden;cursor:none;}
+html.virtual-player,html.virtual-player body{cursor:auto;}
+#player{width:100vw;height:100vh;overflow:hidden;position:relative;}
+.region{position:relative;overflow:hidden;background:#000;}
+/* ── Crossfade layers ────────────────────────────────────────── */
+#player .ly{position:absolute;inset:0;opacity:0;transition:opacity .8s ease-in-out;pointer-events:none;}
+#player .ly.active{opacity:1;pointer-events:auto;}
+</style>
+
+<style id="ripley-link-guard-style">
+.was-link,.ripley-was-link{display:inline-flex;align-items:center;gap:.45em;border:1px dashed rgba(125,211,252,.65);background:rgba(14,116,144,.16);color:#bae6fd;border-radius:999px;padding:.14em .55em;text-decoration:none;cursor:default;}
+.was-link::after,.ripley-was-link::after{content:"was link";font-size:.68em;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;}
+</style>
+</head>
+<body>
+<div id="player">
+  <div class="ly" id="ly0"></div>
+  <div class="ly" id="ly1"></div>
+</div>
+<script src="/js/sound.js"></script>
+<script src="/js/weather-icons.js?v=1791477110-alert-condition-icons"></script>
+<script src="/js/traffic-runtime.js?v=20261011140500-manual-traffic-closure-classification"></script>
+<script src="/js/player.js?v=20261011134500-manual-traffic-blocks"></script>
+
+<script src="/js/ripley-link-guard.js?v=1789242127"></script>
+</body>
+</html>

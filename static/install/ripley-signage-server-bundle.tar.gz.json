@@ -1,0 +1,8 @@
+{
+  "ok": true,
+  "path": "/home/tech/ripley-kiosk/static/install/ripley-signage-server-bundle.tar.gz",
+  "url": "/install/ripley-signage-server-bundle.tar.gz",
+  "size_bytes": 9066282,
+  "sha256": "fcc2e1bedbb28fddc85c79685b570604d83a2ed16e09f3b2242eaa00e7afc004",
+  "bootstrap_url": "/install/ripley-signage-server-bundle-install.sh"
+}

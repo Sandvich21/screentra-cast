@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Screentra Cast Player display</title>
+<style>
+  :root {
+    --bg: #0b1220;
+    --bg2: #0f172a;
+    --line: rgba(148,163,184,.18);
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent2: #22d3ee;
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --err: #ef4444;
+    --card: rgba(15,23,42,.72);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    cursor: none; margin: 0; padding: 0; height: 100%; }
+  body {
+    background:
+      radial-gradient(1200px 800px at 75% -10%, rgba(56,189,248,.18), transparent 60%),
+      radial-gradient(900px 700px at 10% 110%, rgba(34,211,238,.14), transparent 55%),
+      linear-gradient(160deg, var(--bg) 0%, var(--bg2) 100%);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    overflow: hidden;
+  }
+  .wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    padding: 4vh 4vw;
+  }
+  .card {
+    width: min(1100px, 92vw);
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: clamp(20px, 3vw, 40px);
+    backdrop-filter: blur(12px);
+    box-shadow: 0 30px 80px rgba(0,0,0,.45);
+    position: relative;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 14px;
+  }
+  .brand .dot {
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 24px var(--accent);
+  }
+  .brand .name {
+    font-size: clamp(22px, 2.4vw, 32px);
+    font-weight: 700;
+    letter-spacing: .5px;
+  }
+  .brand .role {
+    margin-left: auto;
+    margin-right: 60px;
+    color: var(--muted);
+    font-size: 12px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+  }
+  .title {
+    font-size: clamp(28px, 3.4vw, 48px);
+    font-weight: 800;
+    margin: 6px 0 4px;
+    line-height: 1.1;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .subtitle {
+    color: var(--muted);
+    margin: 0 0 22px;
+    font-size: clamp(14px, 1.4vw, 18px);
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: rgba(2,6,23,.4);
+  }
+  .row .k {
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+  }
+  .row .v {
+    margin-top: 4px;
+    font-size: clamp(14px, 1.3vw, 18px);
+    font-weight: 600;
+    word-break: break-word;
+  }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    border: 1px solid var(--line);
+    background: rgba(15,23,42,.6);
+  }
+  .pill.ok    { color: var(--ok);   border-color: rgba(34,197,94,.4); }
+  .pill.warn  { color: var(--warn); border-color: rgba(245,158,11,.4); }
+  .pill.err   { color: var(--err);  border-color: rgba(239,68,68,.4); }
+  .pill.activating { color: var(--warn); border-color: rgba(245,158,11,.4); }
+
+  .touchline {
+    margin-top: 18px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border: 1px dashed var(--line);
+    border-radius: 12px;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .touchline strong { color: var(--text); font-weight: 600; }
+  .admin-link {
+    margin-top: 12px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--accent);
+    text-decoration: none;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 8px 12px;
+    background: rgba(2,6,23,.35);
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .admin-link:hover { border-color: var(--accent); }
+  .admin-card {
+    margin-top: 14px;
+    display: block;
+    padding: 14px 16px;
+    border: 1px solid rgba(56,189,248,.35);
+    border-radius: 14px;
+    background: rgba(14,116,144,.14);
+  }
+  .admin-card .label {
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+  }
+  .admin-card .url {
+    margin-top: 4px;
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: clamp(16px, 1.8vw, 24px);
+    font-weight: 800;
+    word-break: break-all;
+  }
+  .admin-card .hint { margin-top: 4px; color: var(--muted); font-size: 13px; }
+  .admin-card .button {
+    color: #03131f;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    border-radius: 999px;
+    padding: 11px 15px;
+    text-decoration: none;
+    font-weight: 900;
+    white-space: nowrap;
+    box-shadow: 0 10px 30px rgba(56,189,248,.22);
+  }
+
+  .gear {
+    position: absolute;
+    top: 18px;
+    right: 18px;
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: rgba(2,6,23,.6);
+    border: 1px solid var(--line);
+    display: grid;
+    place-items: center;
+    cursor: pointer;
+    transition: transform .15s ease, background .15s ease;
+    z-index: 50;
+    touch-action: manipulation;
+    pointer-events: auto;
+  }
+  .gear:hover, .gear:active { background: rgba(56,189,248,.25); transform: rotate(30deg); }
+  .gear svg { width: 28px; height: 28px; stroke: var(--accent); fill: none; stroke-width: 1.8; pointer-events: none; }
+  .gear#calGear { right: 92px; }
+  .gear#calGear:hover, .gear#calGear:active { transform: rotate(0deg); background: rgba(234,179,8,.25); }
+  .gear#calGear svg { width: 24px; height: 24px; fill: var(--accent); stroke: none; }
+
+  /* Modal */
+  .modal-back {
+    position: fixed;
+    inset: 0;
+    background: rgba(2,6,23,.72);
+    backdrop-filter: blur(6px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  .modal-back.on { display: flex; }
+  .modal {
+    width: min(720px, 92vw);
+    max-height: 86vh;
+    overflow: auto;
+    background: var(--bg2);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 28px;
+    box-shadow: 0 30px 80px rgba(0,0,0,.6);
+  }
+  .modal h2 {
+    margin: 0 0 4px;
+    font-size: 22px;
+    font-weight: 700;
+  }
+  .modal .sub { color: var(--muted); margin-bottom: 18px; font-size: 14px; }
+  .device {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    cursor: none;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .device:hover { background: rgba(56,189,248,.06); }
+  .device.selected { border-color: var(--accent); background: rgba(56,189,248,.12); }
+  .device .name { font-weight: 600; }
+  .device .path { color: var(--muted); font-size: 12px; }
+  .device .pick { margin-left: auto; }
+
+  .testpad {
+    margin: 16px 0;
+    height: 110px;
+    border: 1px dashed var(--accent);
+    border-radius: 10px;
+    display: grid;
+    place-items: center;
+    color: var(--accent);
+    font-size: 14px;
+    background: rgba(56,189,248,.05);
+    user-select: none;
+  }
+  .actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 18px;
+  }
+  button {
+    background: rgba(2,6,23,.6);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 18px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: none;
+  }
+  button.primary { background: linear-gradient(90deg, var(--accent), var(--accent2)); color: #002133; border: none; }
+  button:hover { background: rgba(56,189,248,.12); }
+  button.primary:hover { filter: brightness(1.05); }
+
+  .pulse {
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,100% { opacity: .55; }
+    50% { opacity: 1; }
+  }
+
+  .foot {
+    margin-top: 18px;
+    color: var(--muted);
+    font-size: 12px;
+    text-align: right;
+    letter-spacing: .04em;
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="brand">
+        <span class="dot pulse"></span>
+        <span class="name">Screentra Cast</span>
+        <span class="role" id="role">Digital Signage Player</span>
+      </div>
+
+      <div class="title" id="title">No layout assigned</div>
+      <p class="subtitle" id="subtitle">Waiting for the server to push a layout to this display.</p>
+
+      <div class="grid">
+        <div class="row" style="flex-wrap:wrap; gap:10px;">
+          <div style="flex:0 0 auto;">
+            <div class="k">Status</div>
+            <div class="v"><span class="pill ok" id="statusPill">CONNECTED</span></div>
+          </div>
+          <div class="k" id="lastSeen" style="text-align:right; flex:1 1 auto;">Last seen —</div>
+        </div>
+        <div class="row">
+          <div>
+            <div class="k">Server</div>
+            <div class="v" id="serverUrl">—</div>
+          </div>
+          <div class="k" id="serverLatency">— ms</div>
+        </div>
+        <div class="row">
+          <div>
+            <div class="k">Hostname</div>
+            <div class="v" id="hostname">—</div>
+          </div>
+          <div class="k">Role · player</div>
+        </div>
+        <div class="row">
+          <div>
+            <div class="k">Display</div>
+            <div class="v" id="displayInfo">—</div>
+          </div>
+          <div class="k" id="displayIdx">idx —</div>
+        </div>
+        <div class="row" style="grid-column: span 2">
+          <div>
+            <div class="k">Client ID</div>
+            <div class="v" id="clientId" style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px;">—</div>
+
+          </div>
+          <div class="k" id="assignedLayout">No layout assigned</div>
+        </div>
+      </div>
+
+      <div class="touchline" id="touchline">
+        Touchscreen <strong id="touchState">— detecting —</strong>
+      </div>
+      <div class="admin-card" id="adminCard">
+        <div>
+          <div class="label">Local admin / easy setup</div>
+          <div class="url" id="adminUrl">http://this-device:3910/</div>
+          <div class="hint">Displayed for setup only. Type this URL from a phone or laptop on the same LAN for status, logs, touch calibration, and CA repair.</div>
+        </div>
+      </div>
+
+      <div class="foot" id="foot">Screentra Cast · build __BUILD__ · client __CLIENT_ID__</div>
+      <div id="__dbg" style="position:absolute;bottom:4px;left:8px;font-size:10px;color:rgba(148,163,184,.5);font-family:ui-monospace,monospace;">JS starting…</div>
+
+      <div class="gear" id="calGear" title="Run touchscreen calibration test"><svg viewBox="0 0 24 24"><path d="M12 2L9 9H2l5 4-2 8 7-5 7 5-2-8 5-4h-7z"/></svg></div><div class="gear" id="gear" title="Configure touchscreen">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </div>
+    </div>
+  </div>
+
+  <!-- Touchscreen configuration modal -->
+  <div class="modal-back" id="modal">
+    <div class="modal">
+      <h2>Touchscreen configuration</h2>
+      <p class="sub">Pick the device this display should use as its touch input. If auto-detect missed it, choose from the list below.</p>
+
+      <div id="deviceList">Detecting…</div>
+
+      <div class="testpad" id="testpad">Tap here to test</div>
+
+      <div class="actions">
+        <button id="cancelBtn">Cancel</button>
+        <button id="rescanBtn">Rescan</button>
+        <button class="primary" id="saveBtn">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Bottom-left diagnostic: shows JS state so silent failures are visible.
+    const __dbg = (m) => { const d = document.getElementById("__dbg"); if (d) d.textContent = m + " " + new Date().toISOString().slice(11,19); };
+    window.addEventListener("error", e => __dbg("err " + (e.message || e)));
+    window.addEventListener("unhandledrejection", e => __dbg("rej " + (e.reason && e.reason.message || e.reason || e)));
+    const $ = (id) => document.getElementById(id);
+    let currentDevices = [];
+    let selectedPath = null;
+
+    async function refreshStatus() {
+      try {
+        const r = await fetch('/api/status.json', { cache: 'no-store' });
+        if (!r.ok) return;
+        const s = await r.json();
+        if (s.display_index != null) document.title = 'Screentra Cast Player display ' + s.display_index;
+        $('serverUrl').textContent = s.server_url || '—';
+        $('hostname').textContent  = s.hostname || '—';
+        $('clientId').textContent  = s.client_id || '—';
+        const adminUrl = s.admin_url || (s.lan_ip ? ('http://' + s.lan_ip + ':3910/') : 'http://11.1.1.54:3910/');
+        const adminUrlEl = $('adminUrl');
+        if (adminUrlEl) adminUrlEl.textContent = adminUrl;
+        $('lastSeen').textContent  = 'Last seen ' + (s.last_seen || '—');
+        $('serverLatency').textContent = (s.server_latency_ms != null ? s.server_latency_ms + ' ms' : '— ms');
+        $('displayIdx').textContent = 'idx ' + (s.display_index != null ? s.display_index : '—');
+        $('displayInfo').textContent =
+          (s.display_label || '—') +
+          (s.display_resolution ? ' · ' + s.display_resolution : '') +
+          (s.display_connector ? ' · ' + s.display_connector : '');
+        $('role').textContent = s.role || 'Digital Signage Player';
+        $('assignedLayout').textContent = s.assigned_layout_id
+          ? 'Layout ' + s.assigned_layout_id.slice(0,8) + '…'
+          : 'No layout assigned';
+
+        const pill = $('statusPill');
+        if (s.connection === 'online') { pill.textContent='CONNECTED'; pill.className='pill ok'; }
+        else if (s.connection === 'stale') { pill.textContent='STALE'; pill.className='pill warn'; }
+        else { pill.textContent='OFFLINE'; pill.className='pill err'; }
+
+        const tl = $('touchline');
+        if (s.touch_device) {
+          tl.innerHTML = 'Touchscreen <strong>'+ s.touch_device +'</strong>' +
+                         (s.touch_path ? ' <span style="color:var(--muted)">('+ s.touch_path +')</span>' : '') +
+                         ' · <a style="color:var(--accent)" id="cfgLink" href="#">configure</a>';
+          $('cfgLink').addEventListener('click', openModal);
+        } else {
+          tl.innerHTML = 'Touchscreen <strong>not detected</strong> · ' +
+                         '<a style="color:var(--accent)" id="cfgLink" href="#">configure</a>';
+          $('cfgLink').addEventListener('click', openModal);
+        }
+
+        $('foot').textContent = 'Screentra Cast · build ' + (s.build || '?') +
+                                ' · display ' + (s.display_index != null ? s.display_index : '?') +
+                                ' · port ' + (s.port || '?');
+        __dbg('JS ok cid=' + (s.client_id || '-').slice(0, 12));
+      } catch (e) {
+        __dbg('JS err ' + (e && e.message || e));
+      }
+    }
+
+    async function openModal() {
+      $('modal').classList.add('on');
+      await loadDevices();
+    }
+    function closeModal() { $('modal').classList.remove('on'); }
+
+    async function loadDevices() {
+      const list = $('deviceList');
+      list.textContent = 'Detecting…';
+      try {
+        const r = await fetch('/api/touchscreen.json', { cache: 'no-store' });
+        const data = await r.json();
+        currentDevices = data.devices || [];
+        selectedPath = data.selected || null;
+        if (currentDevices.length === 0) {
+          list.innerHTML = '<div class="sub">No input devices detected. Try Rescan.</div>';
+          return;
+        }
+        list.innerHTML = '';
+        for (const d of currentDevices) {
+          const el = document.createElement('div');
+          el.className = 'device' + ((selectedPath && d.path === selectedPath) ? ' selected' : (d.recommended ? ' selected' : ''));
+          el.innerHTML = '<div><div class="name">' + d.name + '</div>' +
+                         '<div class="path">' + d.path + (d.type ? ' · ' + d.type : '') + '</div></div>' +
+                         '<div class="pick"><span class="pill ' + (d.recommended ? 'ok' : '') + '">' +
+                         (d.recommended ? 'RECOMMENDED' : 'USE') + '</span></div>';
+          el.addEventListener('click', () => {
+            selectedPath = d.path;
+            for (const c of list.children) c.classList.remove('selected');
+            el.classList.add('selected');
+          });
+          list.appendChild(el);
+          if (d.recommended && !selectedPath) selectedPath = d.path;
+        }
+      } catch (e) {
+        list.innerHTML = '<div class="sub">Detection failed: ' + e + '</div>';
+      }
+    }
+
+    async function saveSelection() {
+      try {
+        const r = await fetch('/api/touchscreen/select', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: selectedPath }),
+        });
+        if (r.ok) {
+          closeModal();
+          refreshStatus();
+        } else {
+          alert('Save failed: ' + r.status);
+        }
+      } catch (e) {
+        alert('Save failed: ' + e);
+      }
+    }
+
+    // Touch test pad
+    $('testpad').addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      const r = ev.target.getBoundingClientRect();
+      const x = Math.round((ev.clientX - r.left) / r.width  * 100);
+      const y = Math.round((ev.clientY - r.top ) / r.height * 100);
+      ev.target.textContent = 'Tapped at ' + x + '%, ' + y + '%';
+      ev.target.style.background = 'rgba(34,197,94,.18)';
+      setTimeout(() => {
+        ev.target.style.background = '';
+        ev.target.textContent = 'Tap here to test';
+      }, 1200);
+    });
+
+    document.addEventListener('DOMContentLoaded', () => {
+      $('gear').addEventListener('click', openModal);
+      $('cancelBtn').addEventListener('click', closeModal);
+      $('rescanBtn').addEventListener('click', loadDevices);
+      $('saveBtn').addEventListener('click', saveSelection);
+    });
+    const __calBtn = document.getElementById('calibrateBtn');
+    if (__calBtn) __calBtn.addEventListener('click', () => {
+      // Open the calibration page in the same tab. The renderer serves
+      // /touch-calibration.html which posts back to /api/touch-calibration.json.
+      window.location.href = '/touch-calibration.html';
+    });
+    const __calGear = document.getElementById('calGear');
+    if (__calGear) {
+      __calGear.addEventListener('click', () => {
+        if (confirm('Run touchscreen calibration test? You\'ll tap 4 corners, a grid, edge bars, then drag a circle.')) {
+          window.location.href = '/touch-calibration.html';
+        }
+      });
+    }
+    // Wire the gear icon to open the touchscreen configuration modal.
+    // Without this, tapping the gear icon (top-right, SVG) does nothing
+    // because the cfgLink anchor is inside the touchline, not the gear.
+    const __gear = document.getElementById('gear');
+    if (__gear) __gear.addEventListener('click', openModal);
+
+    refreshStatus();
+
+
+
+    async function checkAssignedLayoutAndReload() {
+      try {
+        const r = await fetch('/assigned-layout.json?ts=' + Date.now(), { cache: 'no-store' });
+        if (r.ok) {
+          const txt = await r.text();
+          if (txt && txt.trim() && txt.trim() !== '{}') {
+            window.location.reload();
+          }
+        }
+      } catch (e) {}
+    }
+    setInterval(refreshStatus, 4000);
+    setInterval(checkAssignedLayoutAndReload, 5000);
+    setTimeout(checkAssignedLayoutAndReload, 1200);
+
+    // === Cursor auto-hide (3.5s default, configurable via /api/cursor-config.json) ===
+    let __cursorIdle = Date.now();
+    let __cursorHideSecs = 3.5;
+    const __cursorShow = () => { __cursorIdle = Date.now(); document.documentElement.style.cursor = 'default'; };
+    ['pointermove','pointerdown','pointerup','mousemove','mousedown','mouseup','touchstart','touchmove','wheel','keydown','scroll'].forEach(ev =>
+      window.addEventListener(ev, __cursorShow, { capture: true, passive: true }));
+    async function __cursorLoadConfig() {
+      try {
+        const r = await fetch('/api/cursor-config.json', { cache: 'no-store' });
+        if (r.ok) { const c = await r.json(); __cursorHideSecs = Number(c.hide_secs) || 3.5; }
+      } catch (e) {}
+    }
+    setInterval(() => {
+      if (Date.now() - __cursorIdle > __cursorHideSecs * 1000) {
+        document.documentElement.style.cursor = 'none';
+      }
+    }, 200);
+    __cursorLoadConfig();
+
+    // === Watchdog: chrome tab/renderer-process crashes silently on this
+    // labwc/wayland box and leaves the page black while still capturing
+    // touch events. Force a full page reload every 5 min as a safety net
+    // so the user recovers without manual intervention.
+    setTimeout(() => { try { window.location.reload(); } catch (_e) {} }, 5 * 60 * 1000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: screentra-cast
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["127.0.0.1:3000"]
+
+rule_files:
+  - /etc/prometheus/screentra-cast-alerts.yml

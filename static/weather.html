@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weather Widget</title>
+    <style>
+        :root {
+            --text-color: #ffffff;
+            --accent-color: #e94560;
+            --bg-transparent: transparent;
+            --base-font-size: 3vh;
+        }
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg-transparent);
+            color: var(--text-color);
+        }
+        #app {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            padding: 2vh;
+            box-sizing: border-box;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2vh;
+        }
+        .header-left {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5vh;
+        }
+        .location {
+            font-size: 3.5vh;
+            font-weight: bold;
+        }
+
+
+        .current-temp {
+            font-size: 6vh;
+            font-weight: bold;
+        }
+        .forecast-container {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5vh;
+            justify-content: space-between;
+            overflow-y: auto;
+        }
+        .forecast-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1.5vh 1vw;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 1vh;
+        }
+        .day {
+            font-size: 2.5vh;
+            font-weight: 500;
+            width: 12vw;
+        }
+        .icon {
+            /* Inline SVG icons scale to fill the container, retaining aspect ratio. */
+            width: 6vw;
+            height: 6vw;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .icon svg {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        .icon picture,
+        .icon picture img {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        .morning-split-icon {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            height: 100%;
+            gap: 1%;
+        }
+        .morning-split-icon > div {
+            width: 48%;
+            height: 100%;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .morning-split-icon > div > svg,
+        .morning-split-icon > div > img,
+        .morning-split-icon > div > picture,
+        .morning-split-icon > div > picture img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+        .morning-split-icon > span {
+            width: 4%;
+            color: #64748b;
+            font-size: 18%;
+            line-height: 1;
+        }
+        .temps {
+            display: flex;
+            gap: 1.5vw;
+            font-size: 3vh;
+        }
+        .temp-max {
+            font-weight: bold;
+        }
+        .temp-min {
+            opacity: 0.7;
+        }
+        .error {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            text-align: center;
+            color: #ff4d4d;
+            font-size: 3vh;
+            padding: 4vh;
+        }
+        /* Template-specific styles */
+        .template-week .forecast-item {
+            flex-direction: row;
+        }
+        /* Compact mode: each row has a fixed height, no header/current-temp */
+        .compact .forecast-item {
+            height: var(--row-height, 8vh);
+            min-height: var(--row-height, 8vh);
+            max-height: var(--row-height, 8vh);
+            flex-shrink: 0;
+            box-sizing: border-box;
+        }
+        .compact .forecast-container {
+            gap: 0;
+            overflow: hidden;
+        }
+        .compact body, .compact html {
+            padding: 0;
+        }
+        </style>
+
+<style id="ripley-link-guard-style">
+.was-link,.ripley-was-link{display:inline-flex;align-items:center;gap:.45em;border:1px dashed rgba(125,211,252,.65);background:rgba(14,116,144,.16);color:#bae6fd;border-radius:999px;padding:.14em .55em;text-decoration:none;cursor:default;}
+.was-link::after,.ripley-was-link::after{content:"was link";font-size:.68em;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;}
+</style>
+</head>
+<body>
+    <div id="app">
+        <div id="loading" style="display:flex;align-items:center;justify-content:center;height:100%;">Loading weather...</div>
+    </div>
+
+
+
+    <script src="/js/weather-icons.js?v=1791477110-alert-condition-icons"></script>
+    <script src="/js/weather.js?v=1791473460"></script>
+
+
+
+<script src="/js/ripley-link-guard.js?v=1785288216"></script>
+</body>
+</html>

@@ -1,0 +1,3 @@
+Meteocons SVG assets: @meteocons/svg 3.0.0-next.10
+License: MIT
+Animated assets are under fill/; reduced-motion assets are under fill-static/.

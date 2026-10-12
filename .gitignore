@@ -1,0 +1,27 @@
+# Rust / build output
+target/
+.hermes/
+player-client/.hermes/
+**/__pycache__/
+
+# Runtime and machine-local data
+certs/
+static/download/
+static/uploads/
+uploads/
+*.db
+*.sqlite*
+player-client/**/*.db
+*.log
+*.swp
+*.swo
+.DS_Store
+
+# Secrets and local credentials
+*.key
+*.pem
+.env
+.env.*
+
+# Keep generated installer bundles that are small enough for source distribution.
+# Large release binaries, ISOs, and static archives belong in GitHub Releases.

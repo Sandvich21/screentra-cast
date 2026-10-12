@@ -1,0 +1,34 @@
+groups:
+  - name: screentra-cast-server
+    rules:
+      - alert: Screentra CastServerDown
+        expr: up{job="screentra-cast"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Screentra Cast server is unreachable
+          description: Prometheus cannot scrape the Screentra Cast metrics endpoint.
+
+      - alert: Screentra CastDatabaseNotReady
+        expr: screentra_cast_database_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Screentra Cast database is not ready
+          description: The server's readiness probe has not completed successfully.
+
+      - alert: Screentra CastHighServerErrorRate
+        expr: |
+          (
+            rate(screentra_cast_http_responses_total{class="5xx"}[5m])
+            /
+            clamp_min(rate(screentra_cast_http_requests_total[5m]), 0.1)
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Screentra Cast HTTP 5xx rate is elevated
+          description: More than 5% of requests have returned 5xx responses for 10 minutes.

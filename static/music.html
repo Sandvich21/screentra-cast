@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:linear-gradient(135deg,#1a1a2e,#16213e);color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow:hidden;display:flex;align-items:center;justify-content:center;height:100vh;}
+.container{text-align:center;padding:2rem;}
+.icon{font-size:6rem;margin-bottom:1rem;opacity:0.8;}
+h1{font-weight:300;margin:0 0 0.5rem;font-size:2rem;}
+p{color:#aaa;font-size:1rem;max-width:400px;margin:0 auto;line-height:1.5;}
+audio{position:absolute;bottom:1rem;left:1rem;opacity:0.3;}
+audio:hover{opacity:1;transition:opacity 0.3s;}
+</style>
+<style id="ripley-link-guard-style">
+.was-link,.ripley-was-link{display:inline-flex;align-items:center;gap:.45em;border:1px dashed rgba(125,211,252,.65);background:rgba(14,116,144,.16);color:#bae6fd;border-radius:999px;padding:.14em .55em;text-decoration:none;cursor:default;}
+.was-link::after,.ripley-was-link::after{content:"was link";font-size:.68em;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;}
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="icon">🎵</div>
+    <h1>Music Widget</h1>
+    <p>Background music placeholder. The audio source will be configured in the widget properties.</p>
+</div>
+<!-- Default silent audio element. Replace src with the configured music URL via JS injection. -->
+<audio id="audio" loop preload="auto" src=""></audio>
+<script src="/js/music.js?v=1785288216"></script>
+
+<script src="/js/ripley-link-guard.js?v=1785288216"></script>
+</body>
+</html>

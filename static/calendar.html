@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{background:transparent;width:100vw;height:100vh;overflow:hidden;cursor:none;
+  font-family:'Segoe UI',Roboto,Arial,sans-serif;color:#fff;}
+#calendar{width:100%;height:100%;padding:2vh 2vw;overflow:hidden;}
+.cal-list{display:flex;flex-direction:column;gap:1vh;}
+.cal-list .event{display:flex;align-items:flex-start;gap:1vw;padding:1vh 1vw;
+  background:rgba(255,255,255,0.06);border-radius:8px;border-left:4px solid var(--accent);}
+.cal-list .event-date{font-size:2.5vh;font-weight:bold;min-width:12vw;text-align:center;line-height:1.2;}
+.cal-list .event-date .day{font-size:3.5vh;}
+.cal-list .event-date .month{font-size:1.8vh;text-transform:uppercase;opacity:0.8;}
+.cal-list .event-info{flex:1;}
+.cal-list .event-title{font-size:2.2vh;font-weight:600;margin-bottom:0.3vh;}
+.cal-list .event-time{font-size:1.6vh;opacity:0.7;}
+.cal-list .event-weather{font-size:1.8vh;margin-left:0.5vw;}
+.cal-agenda{display:flex;flex-direction:column;gap:1.5vh;}
+.cal-agenda .agenda-day{font-size:1.8vh;text-transform:uppercase;letter-spacing:1px;
+  opacity:0.6;border-bottom:1px solid rgba(255,255,255,0.15);padding-bottom:0.5vh;margin-bottom:0.8vh;}
+.cal-agenda .event{display:flex;align-items:center;gap:1.5vw;padding:0.8vh 0;}
+.cal-agenda .event-time{font-size:1.8vh;min-width:10vw;text-align:right;opacity:0.8;}
+.cal-agenda .event-dot{width:1vh;height:1vh;border-radius:50%;background:var(--accent);flex-shrink:0;}
+.cal-agenda .event-title{font-size:2vh;font-weight:500;flex:1;}
+.cal-agenda .event-weather{font-size:1.6vh;margin-left:0.5vw;}
+.cal-today{display:flex;flex-direction:column;justify-content:center;height:100%;}
+.cal-today .today-header{font-size:3vh;text-transform:uppercase;letter-spacing:2px;
+  opacity:0.6;margin-bottom:2vh;text-align:center;}
+.cal-today .today-date{font-size:6vh;font-weight:300;text-align:center;margin-bottom:3vh;}
+.cal-today .event{display:flex;align-items:center;gap:2vw;padding:1.5vh 2vw;margin-bottom:1vh;
+  background:rgba(255,255,255,0.06);border-radius:8px;}
+.cal-today .event-time{font-size:2.5vh;min-width:12vw;font-weight:600;}
+.cal-today .event-title{font-size:2.5vh;flex:1;}
+.cal-today .no-events{font-size:2.5vh;text-align:center;opacity:0.5;margin-top:3vh;}
+.cal-mini-month{display:flex;flex-direction:column;height:100%;}
+.cal-mini-month .month-header{font-size:2.5vh;font-weight:600;margin-bottom:1vh;text-align:center;}
+.cal-mini-month .grid{display:grid;grid-template-columns:repeat(7,1fr);gap:0.3vh;flex:1;}
+.cal-mini-month .dow{font-size:1.3vh;text-align:center;opacity:0.5;text-transform:uppercase;padding:0.5vh 0;}
+.cal-mini-month .cell{font-size:1.6vh;text-align:center;padding:0.8vh 0;border-radius:6px;position:relative;min-height:4vh;}
+.cal-mini-month .cell.other{opacity:0.2;}
+.cal-mini-month .cell.today{background:var(--accent);color:#000;font-weight:bold;}
+.cal-mini-month .cell.has-event::after{content:'';position:absolute;bottom:0.3vh;left:50%;
+  transform:translateX(-50%);width:0.8vh;height:0.8vh;border-radius:50%;background:var(--accent);}
+</style>
+
+<style id="ripley-link-guard-style">
+.was-link,.ripley-was-link{display:inline-flex;align-items:center;gap:.45em;border:1px dashed rgba(125,211,252,.65);background:rgba(14,116,144,.16);color:#bae6fd;border-radius:999px;padding:.14em .55em;text-decoration:none;cursor:default;}
+.was-link::after,.ripley-was-link::after{content:"was link";font-size:.68em;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;}
+</style>
+</head>
+<body>
+<div id="calendar"></div>
+<script src="/js/calendar.js?v=1790652214"></script>
+
+<script src="/js/ripley-link-guard.js?v=1785288216"></script>
+</body>
+</html>

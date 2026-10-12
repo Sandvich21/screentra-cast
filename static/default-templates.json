@@ -1,0 +1,487 @@
+[
+  {
+    "id": "default-weather-simple-rows",
+    "name": "Weather Simple Rows",
+    "widget_type": "weather",
+    "props": {
+      "accent": "#4a90d9",
+      "color": "#ffffff",
+      "snap_grid": {
+        "enabled": true,
+        "size": 10,
+        "snap_size": 10,
+        "visible": true
+      },
+      "template_elements": [
+        {
+          "height": 120,
+          "id": "tpl-el-1789490682283-537300b076785",
+          "props": {
+            "color": "#1e293b",
+            "opacity": 50,
+            "radius": 12,
+            "radius_bl": 12,
+            "radius_br": 12,
+            "radius_tl": 12,
+            "radius_tr": 12,
+            "shape": "rounded"
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 10,
+            "mode": "none"
+          },
+          "type": "rectangle",
+          "width": 480,
+          "x": 10,
+          "y": 10,
+          "z": 0
+        },
+        {
+          "height": 100,
+          "id": "tpl_1789490696082_zsa0x",
+          "props": {
+            "color": "#1e293b",
+            "opacity": 50,
+            "radius": 12,
+            "radius_bl": 12,
+            "radius_br": 12,
+            "radius_tl": 12,
+            "radius_tr": 12,
+            "shape": "rounded"
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 5,
+            "group": "repeat-group-1",
+            "mode": "rows"
+          },
+          "type": "rectangle",
+          "width": 480,
+          "x": 10,
+          "y": 140,
+          "z": 0
+        },
+        {
+          "height": 120,
+          "id": "tpl-el-1789490761814-9b5c75d09987e",
+          "props": {
+            "align": "left",
+            "color": "#ffffff",
+            "day_offset": 0,
+            "default_text": "Monday, Jan 1",
+            "display_mode": "text",
+            "font_size": 16,
+            "label": "Date Text",
+            "variable_key": "full_date",
+            "variable_source": "date",
+            "weather_day_offset": 0
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 10,
+            "mode": "none"
+          },
+          "type": "variable_text",
+          "width": 120,
+          "x": 20,
+          "y": 10,
+          "z": 2
+        },
+        {
+          "height": 120,
+          "id": "tpl-el-1789490790646-07a653084179",
+          "props": {
+            "align": "center",
+            "color": "#ffffff",
+            "default_text": "🌤️",
+            "display_mode": "weather_icon",
+            "font_size": 30,
+            "icon_style": "custom_icons",
+            "label": "Weather Icon",
+            "variable_key": "weather_icon",
+            "variable_source": "weather",
+            "weather_day_offset": 0
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 10,
+            "mode": "none"
+          },
+          "type": "variable_icon",
+          "width": 130,
+          "x": 110,
+          "y": 10,
+          "z": 3
+        },
+        {
+          "height": 100,
+          "id": "tpl_1789491975513_c67c7",
+          "props": {
+            "align": "center",
+            "color": "#ffffff",
+            "day_offset": 1,
+            "default_text": "🌤️",
+            "display_mode": "weather_icon",
+            "font_size": 30,
+            "icon_style": "custom_icons",
+            "label": "Weather Icon",
+            "variable_key": "weather_icon",
+            "variable_source": "weather",
+            "weather_day_offset": 1
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 5,
+            "group": "repeat-group-1",
+            "mode": "rows"
+          },
+          "type": "variable_icon",
+          "width": 130,
+          "x": 110,
+          "y": 140,
+          "z": 3
+        },
+        {
+          "height": 100,
+          "id": "tpl_1789491997493_7xqu5",
+          "props": {
+            "align": "left",
+            "color": "#ffffff",
+            "day_offset": 1,
+            "default_text": "Monday, Jan 1",
+            "display_mode": "text",
+            "font_size": 14,
+            "label": "Date Text",
+            "variable_key": "full_date",
+            "variable_source": "date",
+            "weather_day_offset": 1
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 5,
+            "group": "repeat-group-1",
+            "mode": "rows"
+          },
+          "type": "variable_text",
+          "width": 120,
+          "x": 20,
+          "y": 140,
+          "z": 2
+        },
+        {
+          "height": 70,
+          "id": "tpl_1789492122658_zs7k6",
+          "props": {
+            "align": "left",
+            "color": "#ffffff",
+            "day_offset": 1,
+            "default_text": "Monday, Jan 1",
+            "display_mode": "text",
+            "font_size": 12,
+            "label": "Date Text",
+            "variable_key": "weather_description",
+            "variable_source": "weather",
+            "weather_day_offset": 1
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 5,
+            "group": "repeat-group-1",
+            "mode": "rows"
+          },
+          "type": "variable_text",
+          "width": 100,
+          "x": 270,
+          "y": 140,
+          "z": 4
+        },
+        {
+          "height": 120,
+          "id": "tpl_1789492162586_hdrqd",
+          "props": {
+            "align": "left",
+            "color": "#ffffff",
+            "day_offset": 0,
+            "default_text": "Monday, Jan 1",
+            "display_mode": "text",
+            "font_size": 12,
+            "label": "Date Text",
+            "variable_key": "weather_description",
+            "variable_source": "weather",
+            "weather_day_offset": 0
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 10,
+            "mode": "none"
+          },
+          "type": "variable_text",
+          "width": 100,
+          "x": 270,
+          "y": 10,
+          "z": 4
+        },
+        {
+          "height": 50,
+          "id": "tpl-el-1789492196178-9ae8d48a4edcf8",
+          "props": {
+            "align": "left",
+            "color": "#ffffff",
+            "day_offset": 0,
+            "default_text": "Monday, Jan 1",
+            "display_mode": "text",
+            "font_size": 12,
+            "label": "Date Text",
+            "variable_key": "wind_speed",
+            "variable_source": "weather",
+            "weather_day_offset": 0
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 10,
+            "mode": "none"
+          },
+          "type": "variable_text",
+          "width": 100,
+          "x": 270,
+          "y": 80,
+          "z": 5
+        },
+        {
+          "height": 50,
+          "id": "tpl_1789492490870_1gls7",
+          "props": {
+            "align": "left",
+            "color": "#ffffff",
+            "day_offset": 1,
+            "default_text": "Monday, Jan 1",
+            "display_mode": "text",
+            "font_size": 12,
+            "label": "Date Text",
+            "variable_key": "wind_speed",
+            "variable_source": "weather",
+            "weather_day_offset": 1
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 5,
+            "group": "repeat-group-1",
+            "mode": "rows"
+          },
+          "type": "variable_text",
+          "width": 100,
+          "x": 270,
+          "y": 190,
+          "z": 5
+        },
+        {
+          "height": 50,
+          "id": "tpl-el-1789492535557-e0889c8c4e8d38",
+          "props": {
+            "align": "center",
+            "color": "#ffffff",
+            "day_offset": 0,
+            "default_text": "Monday, Jan 1",
+            "display_mode": "text",
+            "font_size": 24,
+            "label": "Date Text",
+            "variable_key": "current_temp",
+            "variable_source": "weather",
+            "weather_day_offset": 0
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 10,
+            "mode": "none"
+          },
+          "type": "variable_text",
+          "width": 90,
+          "x": 270,
+          "y": 10,
+          "z": 6
+        },
+        {
+          "height": 120,
+          "id": "tpl-el-1789492846981-e683c309f74d2",
+          "props": {
+            "align": "center",
+            "color": "#ffffff",
+            "day_offset": 0,
+            "default_text": "Monday, Jan 1",
+            "display_mode": "text",
+            "font_size": 24,
+            "label": "Date Text",
+            "variable_key": "precip_chance",
+            "variable_source": "weather",
+            "weather_day_offset": 0
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 10,
+            "mode": "none"
+          },
+          "type": "variable_text",
+          "width": 70,
+          "x": 210,
+          "y": 10,
+          "z": 7
+        },
+        {
+          "height": 100,
+          "id": "tpl_1789492992085_fse8p",
+          "props": {
+            "align": "center",
+            "color": "#ffffff",
+            "day_offset": 1,
+            "default_text": "Monday, Jan 1",
+            "display_mode": "text",
+            "font_size": 24,
+            "label": "Date Text",
+            "variable_key": "precip_chance",
+            "variable_source": "weather",
+            "weather_day_offset": 1
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 5,
+            "group": "repeat-group-1",
+            "mode": "rows"
+          },
+          "type": "variable_text",
+          "width": 70,
+          "x": 210,
+          "y": 140,
+          "z": 7
+        },
+        {
+          "height": 120,
+          "id": "tpl-el-1789493010576-2696f5afa0c618",
+          "props": {
+            "align": "center",
+            "color": "#ffffff",
+            "day_offset": 0,
+            "default_text": "Monday, Jan 1",
+            "display_mode": "text",
+            "font_size": 20,
+            "label": "Date Text",
+            "variable_key": "high_temp",
+            "variable_source": "weather",
+            "weather_day_offset": 0
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 10,
+            "mode": "none"
+          },
+          "type": "variable_text",
+          "width": 80,
+          "x": 350,
+          "y": 10,
+          "z": 8
+        },
+        {
+          "height": 120,
+          "id": "tpl_1789493053793_8obw9",
+          "props": {
+            "align": "center",
+            "color": "#ffffff",
+            "day_offset": 0,
+            "default_text": "Monday, Jan 1",
+            "display_mode": "text",
+            "font_size": 20,
+            "label": "Date Text",
+            "variable_key": "low_temp",
+            "variable_source": "weather",
+            "weather_day_offset": 0
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 10,
+            "mode": "none"
+          },
+          "type": "variable_text",
+          "width": 70,
+          "x": 420,
+          "y": 10,
+          "z": 8
+        },
+        {
+          "height": 100,
+          "id": "tpl_1789493108604_qooma",
+          "props": {
+            "align": "center",
+            "color": "#ffffff",
+            "day_offset": 1,
+            "default_text": "Monday, Jan 1",
+            "display_mode": "text",
+            "font_size": 20,
+            "label": "Date Text",
+            "variable_key": "high_temp",
+            "variable_source": "weather",
+            "weather_day_offset": 1
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 5,
+            "group": "repeat-group-1",
+            "mode": "rows"
+          },
+          "type": "variable_text",
+          "width": 80,
+          "x": 350,
+          "y": 140,
+          "z": 8
+        },
+        {
+          "height": 100,
+          "id": "tpl_1789493122902_x9lxy",
+          "props": {
+            "align": "center",
+            "color": "#ffffff",
+            "day_offset": 1,
+            "default_text": "Monday, Jan 1",
+            "display_mode": "text",
+            "font_size": 20,
+            "label": "Date Text",
+            "variable_key": "low_temp",
+            "variable_source": "weather",
+            "weather_day_offset": 1
+          },
+          "repeat": {
+            "count": 1,
+            "gap_x": 0,
+            "gap_y": 5,
+            "group": "repeat-group-1",
+            "mode": "rows"
+          },
+          "type": "variable_text",
+          "width": 70,
+          "x": 420,
+          "y": 140,
+          "z": 8
+        }
+      ],
+      "template_height": 250,
+      "template_width": 500,
+      "unit": "f"
+    },
+    "assets": []
+  }
+]

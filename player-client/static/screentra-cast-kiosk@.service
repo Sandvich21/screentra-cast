@@ -1,0 +1,26 @@
+[Unit]
+Description=Screentra Cast Kiosk Display %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+ExecStart=/usr/local/bin/screentra-kiosk.sh
+Restart=always
+RestartSec=5
+Environment=HOME=/home/board
+# AMD amdgpu APUs need the GLES2 renderer for reliable DRM scan-out.
+# Pixman can start Sway but repeatedly fails to import the Chromium buffer,
+# leaving the physical output black.
+Environment=WLR_RENDERER=gles2
+Environment=SCREENTRA_DISPLAY_INDEX=%i
+Environment=SCREENTRA_RENDER_BASE_PORT=3900
+Environment=SCREENTRA_RENDERER_URL=http://127.0.0.1:3900/
+Environment=SCREENTRA_BOARD_USER=board
+
+[Install]
+WantedBy=multi-user.target

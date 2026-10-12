@@ -1,0 +1,1147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Digital Signage — Layout Editor</title>
+    <link rel="stylesheet" href="/css/main.css?v=20261009091728-template-shape-opacity">
+    <link rel="stylesheet" href="/css/editor.css?v=20261011000553-layout-rotation-picker-save-fix">
+    <link rel="stylesheet" href="/css/interactive-editor.css?v=20261002240000">
+
+<style id="ripley-link-guard-style">
+.was-link,.ripley-was-link{display:inline-flex;align-items:center;gap:.45em;border:1px dashed rgba(125,211,252,.65);background:rgba(14,116,144,.16);color:#bae6fd;border-radius:999px;padding:.14em .55em;text-decoration:none;cursor:default;}
+.was-link::after,.ripley-was-link::after{content:"was link";font-size:.68em;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc;}
+</style>
+</head>
+<body>
+    <div id="auth-login-overlay" class="auth-login-overlay" hidden>
+      <form id="auth-login-form" class="auth-login-card" autocomplete="on">
+        <h2 class="auth-login-title">Sign in</h2>
+        <p class="auth-login-sub">Enter the admin password to manage signage.</p>
+        <label class="auth-login-label" for="auth-login-username">Username <span style="color:#94a3b8;font-weight:400;">(optional for built-in admin)</span></label>
+        <input id="auth-login-username" name="username" type="text" class="auth-login-input" autocomplete="username" placeholder="admin or created user" />
+        <label class="auth-login-label" for="auth-login-password">Password</label>
+        <input id="auth-login-password" name="password" type="password" class="auth-login-input" autocomplete="current-password" required autofocus />
+        <div class="auth-login-actions">
+          <button type="submit" class="btn btn-primary auth-login-submit">Sign in</button>
+          <button type="button" id="auth-google-login" class="btn btn-secondary auth-google-login">Google</button>
+          <span id="auth-login-error" class="auth-login-error" hidden></span>
+        </div>
+        <p class="auth-login-hint">Default password is set via <code>SIGNAGE_ADMIN_PASSWORD</code>.</p>
+      </form>
+    </div>
+    <div id="auth-setup-overlay" class="auth-login-overlay" hidden>
+      <form id="auth-setup-form" class="auth-login-card" autocomplete="off">
+        <h2 class="auth-login-title">Set up Screentra Cast</h2>
+        <p class="auth-login-sub">Create the first administrator account for this server.</p>
+        <label class="auth-login-label" for="auth-setup-username">Username</label>
+        <input id="auth-setup-username" name="username" type="text" class="auth-login-input" autocomplete="username" required minlength="2" maxlength="48" placeholder="your name" />
+        <label class="auth-login-label" for="auth-setup-display-name">Display name <span style="color:#94a3b8;font-weight:400;">(optional)</span></label>
+        <input id="auth-setup-display-name" name="display_name" type="text" class="auth-login-input" autocomplete="name" placeholder="Your name" />
+        <label class="auth-login-label" for="auth-setup-password">Password</label>
+        <input id="auth-setup-password" name="password" type="password" class="auth-login-input" autocomplete="new-password" required minlength="12" />
+        <label class="auth-login-label" for="auth-setup-confirm">Confirm password</label>
+        <input id="auth-setup-confirm" name="confirm_password" type="password" class="auth-login-input" autocomplete="new-password" required minlength="12" />
+        <div class="auth-login-actions">
+          <button type="submit" class="btn btn-primary">Create administrator</button>
+          <span id="auth-setup-error" class="auth-login-error" hidden></span>
+        </div>
+        <p class="auth-login-hint">Use a password of at least 12 characters. Setup closes after the first administrator is created.</p>
+      </form>
+    </div>
+    <div id="app"><aside></aside>
+    <div id="account-popup-overlay" class="account-popup-overlay" hidden>
+      <div class="account-popup" role="dialog" aria-modal="true" aria-labelledby="account-popup-title">
+        <div class="account-popup-head">
+          <div><h2 id="account-popup-title">Account</h2><p id="account-popup-sub">Manage your sign-in options.</p></div>
+          <button id="account-popup-close" class="btn btn-secondary btn-sm" type="button">Close</button>
+        </div>
+        <div class="account-popup-grid">
+          <section class="account-card">
+            <h3>Profile</h3>
+            <div class="account-kv"><span>User</span><b id="account-profile-username">—</b></div>
+            <div class="account-kv"><span>Role</span><b id="account-profile-role">—</b></div>
+            <div class="account-kv"><span>Google</span><b id="account-profile-google">—</b></div>
+          </section>
+          <section class="account-card">
+            <h3>Change Password</h3>
+            <label>Current password<input id="account-current-password" class="select" type="password" autocomplete="current-password"></label>
+            <label>New password<input id="account-new-password" class="select" type="password" autocomplete="new-password" placeholder="8+ characters"></label>
+            <button id="btn-account-password" class="btn btn-primary" type="button">Update Password</button>
+            <div id="account-password-status" class="account-status"></div>
+          </section>
+          <section class="account-card">
+            <h3>Google Single Sign-On</h3>
+            <p class="account-note">Bind this account to Google to sign in with Google when you are already signed into that browser.</p>
+            <div id="account-google-status" class="account-status">Loading…</div>
+            <div style="display:flex;gap:.5rem;flex-wrap:wrap;">
+              <button id="btn-account-google-bind" class="btn btn-accent" type="button">Bind Google Account</button>
+              <button id="btn-account-google-unbind" class="btn btn-secondary" type="button">Unbind</button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+        <!-- Sidebar Navigation -->
+        <nav id="sidebar">
+            <div class="sidebar-header account-header">
+                <button id="account-menu-btn" class="account-menu-btn" type="button" title="Account settings" aria-haspopup="dialog">
+                    <span class="account-avatar" aria-hidden="true">👤</span>
+                    <span class="account-label"><span id="account-menu-name">Account</span><small id="account-menu-role">Signed in</small></span>
+                </button>
+                <button id="sidebar-collapse-btn" class="btn btn-icon" title="Collapse sidebar" style="background:transparent; border:none; color:inherit; font-size:1.2rem; cursor:pointer; padding:0.25rem;">◀</button>
+            </div>
+            <ul class="nav-links">
+                <li class="nav-link active" data-page="editor">
+                    <span class="nav-icon">🖌️</span><span class="nav-text">Layout Editor</span>
+                </li>
+
+                <li class="nav-link" data-page="interactive-data">
+                    <span class="nav-icon">📥</span><span class="nav-text">Data Collection</span>
+                </li>
+                <li class="nav-link" data-page="widget-templates">
+                    <span class="nav-icon">🎨</span><span class="nav-text">Widget Templates</span>
+                </li>
+                <li class="nav-link" data-page="schedules">
+                    <span class="nav-icon">⏰</span><span class="nav-text">Schedules</span>
+                </li>
+                <li class="nav-link" data-page="displays">
+                    <span class="nav-icon">📺</span><span class="nav-text">Connected Clients</span>
+                </li>
+                <li class="nav-link" data-page="system">
+                    <span class="nav-icon">⚙️</span><span class="nav-text">System</span>
+                </li>
+            </ul>
+            <div class="sidebar-footer">
+                <span id="connection-status" class="status-dot ok"></span>
+                <span id="connection-text">Connected</span>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main id="content">
+            <!-- ── Layout Editor Page ── -->
+            <div id="page-editor" class="page active">
+                <div class="toolbar">
+                    <div class="toolbar-left">
+                        <div id="layout-browser" style="position:relative;display:inline-block;min-width:210px;">
+                            <button id="layout-browser-button" class="btn btn-secondary" type="button" style="width:100%;text-align:left;display:flex;align-items:center;justify-content:space-between;gap:.5rem;">
+                                <span id="layout-browser-current">Select Layout</span><span aria-hidden="true">▾</span>
+                            </button>
+                            <div id="layout-browser-panel" style="display:none;position:absolute;top:100%;left:0;z-index:10000;width:360px;max-height:520px;overflow:hidden;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);margin-top:4px;">
+                                <div style="padding:.6rem;border-bottom:1px solid var(--border);display:flex;gap:.4rem;">
+                                    <input id="layout-browser-search" class="text-input" type="search" placeholder="Search layouts..." style="flex:1;min-width:0;padding:.4rem .5rem;">
+                                    <button id="layout-browser-new-folder" class="btn btn-secondary" type="button" title="New folder" style="padding:.35rem .5rem;">📁+</button>
+                                </div>
+                                <div id="layout-browser-breadcrumb" style="padding:.45rem .65rem;font-size:.75rem;color:var(--text-muted);border-bottom:1px solid var(--border);">Layouts</div>
+                                <div id="layout-browser-list" style="overflow:auto;max-height:400px;padding:.35rem;"></div>
+                                <div style="padding:.45rem .6rem;border-top:1px solid var(--border);display:flex;justify-content:flex-end;">
+                                    <button id="layout-browser-new" class="btn btn-primary btn-sm" type="button">+ New Layout</button>
+                                </div>
+                            </div>
+                        </div>
+                        <select id="layout-select" class="select" style="display:none;" aria-hidden="true">
+                            <option value="">— Select Layout —</option>
+                        </select>
+                        <button id="btn-editor-save" class="btn btn-success">Save</button>
+                        <button id="btn-editor-delete" class="btn btn-danger">Delete</button>
+                        <button id="btn-editor-publish" class="btn btn-primary" disabled title="Save the current layout and tell players to refresh">Publish</button>
+                        <span id="editor-publish-status" role="status" aria-live="polite" style="font-size:.75rem;color:var(--text-dim);min-width:12rem;"></span>
+                        <div id="snap-options-dropdown" style="position:relative;display:inline-block;">
+                            <button id="btn-snap-options" class="btn btn-secondary" title="Canvas snap and grid options" style="font-size:0.8rem;padding:0.3rem 0.75rem;">⚙ Snap &amp; Grid ▾</button>
+                            <div id="snap-options-panel" style="display:none;position:absolute;top:100%;left:0;z-index:9999;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;padding:0.75rem;min-width:280px;box-shadow:0 4px 12px rgba(0,0,0,0.4);margin-top:4px;">
+                                <div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:0.5rem;font-weight:bold;">Snap &amp; Grid Options</div>
+                                <div class="prop-group">
+                                    <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.8rem;color:var(--text);">
+                                        <input type="checkbox" id="snap-enabled" checked> Snap to Grid
+                                    </label>
+                                    <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;font-size:0.8rem;color:var(--text);margin-top:0.3rem;">
+                                        <input type="checkbox" id="snap-visible" checked> Show Grid
+                                    </label>
+                                </div>
+                                <div class="prop-group" style="margin-top:0.5rem;">
+                                    <label style="font-size:0.75rem;color:var(--text-dim);display:block;margin-bottom:0.2rem;">Grid Size (px)</label>
+                                    <input type="number" id="snap-grid-size" class="text-input" min="2" max="100" value="10" style="width:100%;font-size:0.8rem;padding:0.3rem 0.5rem;">
+                                </div>
+                                <div class="prop-group" style="margin-top:0.5rem;">
+                                    <label style="font-size:0.75rem;color:var(--text-dim);display:block;margin-bottom:0.2rem;">Snap Size (px)</label>
+                                    <input type="number" id="snap-snap-size" class="text-input" min="1" max="100" value="10" style="width:100%;font-size:0.8rem;padding:0.3rem 0.5rem;">
+                                </div>
+                                <div style="font-size:0.7rem;color:var(--text-dim);margin-top:0.4rem;">Grid = visible spacing. Snap = move/resize increment.</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="toolbar-right">
+                        <div id="assign-layout-dropdown" style="position:relative;display:inline-block;">
+                            <button id="btn-assign-layout" class="btn btn-warning" title="Assign this layout to a client display">Assign Layout ▾</button>
+                            <div id="assign-dropdown-panel" style="display:none;position:absolute;top:100%;left:0;z-index:9999;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;padding:0.75rem;min-width:320px;box-shadow:0 4px 12px rgba(0,0,0,0.4);margin-top:4px;">
+                                <div style="font-size:0.8rem;color:var(--text-dim);margin-bottom:0.5rem;font-weight:bold;">Assign to Display</div>
+                                <div class="prop-group">
+                                    <label style="font-size:0.75rem;color:var(--text-dim);display:block;margin-bottom:0.2rem;">Device</label>
+                                    <select id="assign-client" class="select" style="width:100%;">
+                                        <option value="">— Select a device —</option>
+                                    </select>
+                                </div>
+                                <div class="prop-group" style="margin-top:0.5rem;">
+                                    <label style="font-size:0.75rem;color:var(--text-dim);display:block;margin-bottom:0.2rem;">Display</label>
+                                    <select id="assign-display" class="select" style="width:100%;" disabled>
+                                        <option value="">— Select a display —</option>
+                                    </select>
+                                </div>
+                                <div id="assign-display-hint" style="font-size:0.7rem;color:var(--text-dim);margin-top:0.2rem;"></div>
+                                <div id="assign-status" style="display:none;font-size:0.8rem;padding:0.4rem;border-radius:4px;margin-top:0.5rem;"></div>
+                                <div style="display:flex;gap:0.5rem;margin-top:0.75rem;justify-content:flex-end;">
+                                    <button id="assign-cancel" class="btn btn-secondary btn-sm">Cancel</button>
+                                    <button id="assign-do" class="btn btn-primary btn-sm" disabled>Assign</button>
+                                </div>
+                            </div>
+                        </div>
+                        <button id="btn-editor-preview" class="btn btn-secondary">Preview</button>
+                        <button id="btn-editor-export" class="btn btn-secondary">Export JSON</button>
+                    </div>
+                </div>
+
+                <div class="editor-body">
+                    <!-- Widget Palette (rendered dynamically by Editor.renderPalette()) -->
+                    <div id="interactive-widget-palette" class="palette"></div>
+
+                    <!-- Canvas -->
+                    <div id="interactive-canvas-wrapper" class="canvas-wrapper">
+                        <div id="interactive-canvas" class="canvas" tabindex="0">
+                            <div class="canvas-empty">Select or create a layout to begin</div>
+                        </div>
+                        <div id="interactive-canvas-info" class="canvas-info"></div>
+                    </div>
+
+                    <!-- Properties Panel -->
+                    <div id="properties-panel" class="properties">
+                        <h3>Properties</h3>
+                        <div id="interactive-props-content" class="props-content">
+                            <p class="props-empty">Select a widget to edit its properties</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+
+
+            <!-- ── Displays / Connected Clients Page ── -->
+            <div id="page-displays" class="page">
+                <div class="page-header">
+                    <div>
+                        <h2>Connected Clients</h2>
+                        <p class="page-description" style="margin:.25rem 0 0 0;">Detect, monitor, and manage player/client devices. Click a client to view its display previews and per-display actions.</p>
+                    </div>
+                    <div style="display:flex;gap:.5rem;">
+                        <button id="btn-client-search" class="btn btn-accent">🔍 Client Detection Search</button>
+                        <button id="btn-refresh-displays" class="btn btn-secondary">↻ Refresh List</button>
+                    </div>
+                </div>
+                <div style="display:flex;align-items:center;gap:.75rem;margin:0 0 1rem 0;padding:.75rem 1rem;border:1px solid var(--border,#30363d);border-radius:8px;background:var(--bg-card,#161b22);">
+                    <button id="btn-create-virtual" class="btn btn-primary" type="button">＋ Create Virtual Client</button>
+                    <span style="color:var(--text-muted,#9ca3af);font-size:.9rem;">Create a browser-based virtual player for testing layouts and displays.</span>
+                </div>
+                <div id="client-search-status" class="client-search-status" style="margin-bottom:1rem;">Showing known connected/seen clients.</div>
+                <div id="connected-clients-page-body" class="connected-clients-page-body">
+                    <div id="connected-clients-list" class="connected-clients-list">
+                        <div class="client-empty">Loading connected clients...</div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="vc-modal" hidden style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.7);align-items:center;justify-content:center;">
+                <div style="width:min(520px,calc(100vw - 2rem));background:var(--bg-card,#161b22);border:1px solid var(--border,#30363d);border-radius:10px;padding:1.25rem;box-shadow:0 18px 50px rgba(0,0,0,.5);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;"><h3 style="margin:0;">Create Virtual Client</h3><button type="button" id="vc-modal-close" class="btn btn-secondary">×</button></div>
+                    <label style="display:block;margin-bottom:.75rem;">Client name<input id="vc-name" class="input" type="text" placeholder="Virtual Client" style="width:100%;margin-top:.35rem;"></label>
+                    <div id="vc-result" hidden style="display:none;flex-direction:column;gap:.5rem;margin-top:1rem;"><label>Client URL<input id="vc-url" class="input" type="text" readonly style="width:100%;margin-top:.35rem;"></label><button type="button" id="vc-copy" class="btn btn-secondary" style="width:max-content;">Copy URL</button><span id="vc-copy-msg" aria-live="polite"></span></div>
+                    <div style="display:flex;justify-content:flex-end;gap:.5rem;margin-top:1rem;"><button type="button" id="vc-modal-cancel" class="btn btn-secondary">Cancel</button><button type="button" id="vc-modal-create" class="btn btn-primary">Create</button></div>
+                </div>
+            </div>
+
+            <!-- ── Schedules Page ── -->
+            <div id="page-schedules" class="page">
+                <div class="page-header">
+                    <h2>Scheduled Layout Switches</h2>
+                    <div style="display:flex; gap:.5rem;">
+                        <button id="btn-new-schedule" class="btn btn-primary">+ New Layout Schedule</button>
+                        <button id="btn-new-task" class="btn btn-accent">+ New Task</button>
+                        <button id="btn-new-power-schedule" class="btn btn-warning">+ Display Power Schedule</button>
+                    </div>
+                </div>
+                <p class="page-description">
+                    Schedules automatically switch the layout on a display at the configured time. Each schedule
+                    defines a time range, a day of the week, and the target display. The background scheduler checks
+                    for active schedules every 30 seconds and applies them.
+                </p>
+                <div id="schedules-list" class="schedules-list">
+                    <p>Loading schedules...</p>
+                </div>
+            </div>
+            
+            <!-- ── Widget Templates Page ── -->
+            <!-- ── Widget Template Editor (page) ── -->
+            <div id="page-widget-templates" class="page" style="flex-direction:column; height:calc(100vh - 60px); margin:0; padding:0;">
+                <div class="page-header" style="padding:1rem 1.5rem; border-bottom:1px solid var(--border,#333); display:flex; align-items:center; justify-content:space-between; flex-shrink:0;">
+                    <h2 style="margin:0;">🎨 Widget Templates</h2>
+                    <div style="display:flex; gap:.5rem; align-items:center;">
+                        <button class="btn btn-accent" id="btn-reset-default-templates">↻ Default Templates</button>
+                        <button class="btn btn-secondary" id="btn-import-template">⬆ Import</button>
+                        <input type="file" id="import-template-file" accept=".json" style="display:none">
+                        <button class="btn btn-success" id="btn-new-template-page">+ New Template</button>
+                    </div>
+                </div>
+                <div style="display:flex; flex:1; min-height:0;">
+                    <!-- Sidebar: list of templates with search/filter -->
+                    <div id="tpl-page-sidebar" style="width:300px; border-right:1px solid var(--border,#333); display:flex; flex-direction:column; background:rgba(0,0,0,0.2); flex-shrink:0;">
+                        <div style="padding:0.75rem; border-bottom:1px solid var(--border,#333);">
+                            <input type="text" id="tpl-page-search" placeholder="🔍 Search templates..." style="width:100%; padding:0.4rem 0.6rem; background:rgba(0,0,0,0.3); color:#fff; border:1px solid #444; border-radius:4px; font-size:0.85rem;">
+                            <select id="tpl-page-filter" style="width:100%; margin-top:0.5rem; padding:0.3rem; background:rgba(0,0,0,0.3); color:#fff; border:1px solid #444; border-radius:4px; font-size:0.8rem;">
+                                <option value="">All types</option>
+                                <option value="calendar">Calendar</option>
+                                <option value="weather">Weather</option>
+                                <option value="traffic">Traffic</option>
+                                <option value="music">Music</option>
+                                <option value="rectangle">Shape</option>
+                            </select>
+                            <div id="tpl-element-palette" class="tpl-element-palette sidebar-palette" aria-label="Template element palette">
+                                <div class="tpl-palette-title">Template Elements</div>
+                                <button type="button" class="tpl-palette-item" draggable="true" data-tpl-add="text">📝 Text Box</button>
+                                <button type="button" class="tpl-palette-item" draggable="true" data-tpl-add="variable_text">🔠 Variable Text</button>
+                                <button type="button" class="tpl-palette-item" draggable="true" data-tpl-add="variable_icon">🌤️ Variable Icon</button>
+                                <button type="button" class="tpl-palette-item" draggable="true" data-tpl-add="image">🖼️ Image</button>
+                                <button type="button" class="tpl-palette-item" draggable="true" data-tpl-add="rectangle">⬛ Shape</button>
+                            </div>
+                        </div>
+                        <div id="tpl-page-list" style="flex:1; overflow-y:auto; padding:0.5rem;"></div>
+                    </div>
+
+                    <!-- Main editor area -->
+                    <div id="tpl-page-editor" style="flex:1; display:flex; flex-direction:column; min-width:0; background:var(--bg-page,#0a0a14);">
+                        <div id="tpl-page-empty" style="flex:1; display:flex; align-items:center; justify-content:center; color:var(--text-dim,#888); font-size:1.1rem;">
+                            <div style="text-align:center;">
+                                <div style="font-size:3rem; margin-bottom:1rem;">🎨</div>
+                                <div>Select a template from the sidebar to edit,</div>
+                                <div>or click <strong style="color:var(--accent,#4a90d9);">+ New Template</strong> to create one.</div>
+                            </div>
+                        </div>
+                        <div id="tpl-page-form" style="display:none; flex:1; flex-direction:column; min-height:0;">
+                            <!-- Editor header -->
+                            <div style="padding:0.75rem 1.5rem; border-bottom:1px solid var(--border,#333); display:flex; align-items:center; justify-content:space-between; flex-shrink:0;">
+                                <div style="display:flex; gap:0.75rem; align-items:flex-end; flex:1; min-width:0;">
+                                    <div style="flex:2; min-width:0;">
+                                        <div style="font-size:0.7rem; color:var(--text-dim); text-transform:uppercase; margin-bottom:0.2rem;">Template Name</div>
+                                        <input type="text" id="tpl-name" placeholder="Modern Dark" class="text-input" style="width:100%;">
+                                    </div>
+                                    <div style="flex:1; min-width:140px;">
+                                        <div style="font-size:0.7rem; color:var(--text-dim); text-transform:uppercase; margin-bottom:0.2rem;">Widget Type</div>
+                                        <select id="tpl-widget-type" class="select" style="width:100%;">
+                                            <optgroup label="Atomic (hardcoded defaults)">
+                                                <option value="text" disabled>📝 Text — uses hardcoded defaults</option>
+                                                <option value="image" disabled>🖼️ Image — uses hardcoded defaults</option>
+                                                <option value="video" disabled>🎬 Video — uses hardcoded defaults</option>
+                                                <option value="clock" disabled>🕐 Clock — uses hardcoded defaults</option>
+                                                <option value="datetime" disabled>📅 Date — uses hardcoded defaults</option>
+                                                <option value="countdown" disabled>⏱️ Countdown — uses hardcoded defaults</option>
+                                            </optgroup>
+                                            <optgroup label="Complex (build a custom template)">
+                                                <option value="weather">🌤️ Weather</option>
+                                                <option value="traffic">🚧 Traffic</option>
+                                                <option value="calendar">📆 Calendar</option>
+                                                <option value="news">📰 News Ticker</option>
+                                                <option value="webpage">🔗 Embedded (web page / iframe)</option>
+                                                <option value="music">🎵 Music</option>
+                                                <option value="rectangle">⬛ Shape</option>
+                                            </optgroup>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div style="display:flex; gap:.5rem;">
+                                    <button type="button" class="btn btn-success btn-sm" id="tpl-page-save">💾 Save</button>
+                                    <button type="button" class="btn btn-secondary btn-sm" id="tpl-page-download">⬇ Download</button>
+                                    <div style="position:relative;">
+                                        <button type="button" class="btn btn-danger btn-sm" id="tpl-page-delete">🗑 Delete</button>
+                                        <div id="tpl-delete-confirm" style="display:none; position:fixed; top:0; left:0; margin-top:0; background:var(--bg-card,#161b22); border:1px solid var(--border,#30363d); border-radius:8px; padding:.6rem .75rem; box-shadow:0 6px 18px rgba(0,0,0,.45); z-index:1000; flex-direction:column; gap:.4rem; min-width:220px;">
+                                            <span style="font-size:.85rem;">Delete this template?</span>
+                                            <div style="display:flex; gap:.4rem; justify-content:flex-end;">
+                                                <button type="button" class="btn btn-secondary btn-sm" id="btn-tpl-cancel-delete">Cancel</button>
+                                                <button type="button" class="btn btn-danger btn-sm" id="btn-tpl-confirm-delete">Delete</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Main split: Preview (middle) + Properties (right) -->
+                            <div style="flex:1; display:flex; min-height:0; min-width:0;">
+                                <!-- Middle: Widget Preview -->
+                                <div id="tpl-page-preview-pane" class="tpl-template-preview-pane">
+                                    <div class="tpl-preview-header">
+                                        <span>👁️ Visual Template Builder</span>
+                                        <span>Drag items into the preview · repeat rows/columns from selected item</span>
+                                    </div>
+                                    <div id="tpl-preview" class="tpl-preview-stage tpl-visual-stage">
+                                        <p style="color:#888;">Drag Text, Variable Text, Variable Icon, Image, or Shape here to build template JSON.</p>
+                                    </div>
+                                </div>
+                                <!-- Right: Editing Properties -->
+                                <aside id="tpl-page-block-editor" class="tpl-template-properties-panel">
+  <div class="tpl-properties-title">
+    <div class="tpl-props-tabs">
+      <button class="tpl-props-tab active" data-tpl-tab="element">Element</button>
+      <button class="tpl-props-tab" data-tpl-tab="template">Template</button>
+    </div>
+  </div>
+  <div id="tpl-el-top-bar" class="tpl-el-top-bar">
+    <button class="btn btn-secondary btn-sm" id="tpl-el-top-duplicate" disabled type="button">Duplicate</button>
+    <button class="btn btn-danger btn-sm" id="tpl-el-top-delete" disabled type="button">Delete</button>
+    <span id="tpl-el-top-label" class="tpl-field-help">Select an element in the preview to edit it.</span>
+  </div>
+
+  <div id="tpl-element-sections">
+  <details class="tpl-prop-section" id="tpl-position-section" open>
+    <summary><span>📍 Position & Size</span></summary>
+    <div class="tpl-prop-section-body">
+      <div id="tpl-position-props"></div>
+      <div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.5rem;">
+        <button class="btn btn-secondary btn-sm" id="tpl-el-front" type="button">Bring Front</button>
+        <button class="btn btn-secondary btn-sm" id="tpl-el-back" type="button">Send Back</button>
+      </div>
+    </div>
+  </details>
+
+  <details class="tpl-prop-section" id="tpl-variable-section">
+    <summary><span>🔗 Variable</span></summary>
+    <div class="tpl-prop-section-body">
+      <div id="tpl-variable-props"></div>
+    </div>
+  </details>
+
+  <details class="tpl-prop-section" id="tpl-text-section">
+    <summary><span>✏️ Text</span></summary>
+    <div class="tpl-prop-section-body">
+      <div id="tpl-text-props"></div>
+    </div>
+  </details>
+
+  <details class="tpl-prop-section" id="tpl-image-section">
+    <summary><span>🖼️ Image</span></summary>
+    <div class="tpl-prop-section-body">
+      <div id="tpl-image-props"></div>
+    </div>
+  </details>
+
+  <details class="tpl-prop-section" id="tpl-shape-section">
+    <summary><span>🔲 Shape</span></summary>
+    <div class="tpl-prop-section-body">
+      <div id="tpl-shape-props"></div>
+    </div>
+  </details>
+
+  <details class="tpl-prop-section" id="tpl-repeat-section">
+    <summary><span>📋 Repeat</span></summary>
+    <div class="tpl-prop-section-body">
+      <div id="tpl-repeat-props"></div>
+    </div>
+  </details>
+  </div>
+  <div id="tpl-builder-sections">
+    <div class="tpl-template-properties-heading">Template Properties</div>
+  <details class="tpl-prop-section" id="tpl-canvas-size-section">
+    <summary><span>▣ Canvas Size</span><small>Template bounds</small></summary>
+    <div class="tpl-prop-section-body">
+      <div class="tpl-field-help">Resize the visual builder canvas. These dimensions are saved with the template and used to scale Template Elements in the Layout Editor and player.</div>
+      <div id="tpl-canvas-size-props" class="tpl-element-props"></div>
+    </div>
+  </details>
+  <details class="tpl-prop-section" id="tpl-snap-grid-section">
+    <summary><span>▦ Snap Grid</span><small>Canvas alignment</small></summary>
+    <div class="tpl-prop-section-body">
+      <div class="tpl-field-help">Show an alignment grid on the visual builder and snap element moves/resizes to grid increments.</div>
+      <div id="tpl-snap-grid-props" class="tpl-element-props"></div>
+    </div>
+  </details>
+  <div id="wtfk-form"></div>
+  <details class="tpl-prop-section" id="wtfk-extras-section">
+    <summary><span>🔧 Custom Properties</span><small>Extra key/value rows</small></summary>
+    <div class="tpl-prop-section-body">
+      <div class="tpl-field-help">Add arbitrary props not covered by the schema above. Useful for experimental or type-specific options.</div>
+      <div id="wtfk-extras"></div>
+    </div>
+  </details>
+  <details class="tpl-prop-section" id="wtfk-weather-icons-section" style="display:none;">
+    <summary><span>🖼️ Custom Icons</span><small>Weather icon overrides</small></summary>
+    <div class="tpl-prop-section-body">
+      <div class="tpl-field-help">Override the default icon for each weather code. Click an icon to upload, or paste a URL.</div>
+      <div style="margin-bottom:0.5rem;">
+        <input type="file" id="tpl-icon-upload" accept="image/*" style="display:none">
+        <button class="btn btn-secondary btn-sm" id="tpl-icon-upload-btn">⬆ Upload Icon for Last Selected Code</button>
+        <span id="tpl-icon-upload-status" class="tpl-inline-status"></span>
+      </div>
+      <div id="tpl-weather-icons" class="tpl-weather-icons-grid"></div>
+    </div>
+  </details>
+  <details class="tpl-prop-section" id="tpl-raw-props-section">
+    <summary><span>📋 Raw Props JSON</span><small>Advanced view</small></summary>
+    <div class="tpl-prop-section-body">
+      <div class="tpl-raw-actions">
+        <button class="btn btn-secondary btn-sm" id="tpl-raw-copy">Copy</button>
+        <button class="btn btn-secondary btn-sm" id="tpl-raw-format">Format</button>
+      </div>
+      <textarea id="tpl-raw-props" class="tpl-raw-props" spellcheck="false"></textarea>
+    </div>
+  </details>
+  </div>
+</aside>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            </div>
+
+            <!-- ── Interactive Data Collection ── -->
+            <div id="page-interactive-data" class="page">
+                <div class="toolbar">
+                    <div class="toolbar-left">
+                        <h2 style="margin:0;">📥 Interactive Data Collection</h2>
+                        <span id="interactive-data-subtitle" class="nav-text" style="color:var(--text-dim,#94a3b8); font-size:.85rem;">Submissions from interactive widgets (textbox, radio, dropdown, etc.)</span>
+                    </div>
+                    <div class="toolbar-right">
+                        <button id="btn-interactive-data-refresh" class="btn btn-secondary">↻ Refresh</button>
+                        <button id="btn-interactive-data-export" class="btn btn-primary">⬇ Export CSV</button>
+                        <button id="btn-interactive-data-sync" class="btn btn-accent">☁ Sync to Google</button>
+                    </div>
+                </div>
+
+                <div id="interactive-data-google-banner" class="interactive-data-banner" style="display:none;">
+                    <strong>⚠ Google Workspace not configured.</strong>
+                    <span>Submissions are stored locally and can be exported as CSV.</span>
+                    <a href="#" id="interactive-data-open-google-settings">Configure in System settings →</a>
+                </div>
+
+                <div class="interactive-data-stats-row">
+                    <div class="interactive-data-stat" data-status="total">
+                        <span class="interactive-data-stat-num" id="interactive-data-stat-total">—</span>
+                        <span class="interactive-data-stat-label">Total</span>
+                    </div>
+                    <div class="interactive-data-stat pending" data-status="pending">
+                        <span class="interactive-data-stat-num" id="interactive-data-stat-pending">—</span>
+                        <span class="interactive-data-stat-label">Pending Sync</span>
+                    </div>
+                    <div class="interactive-data-stat success" data-status="success">
+                        <span class="interactive-data-stat-num" id="interactive-data-stat-success">—</span>
+                        <span class="interactive-data-stat-label">Synced to Google</span>
+                    </div>
+                    <div class="interactive-data-stat failed" data-status="failed">
+                        <span class="interactive-data-stat-num" id="interactive-data-stat-failed">—</span>
+                        <span class="interactive-data-stat-label">Failed / Skipped</span>
+                    </div>
+                </div>
+
+                <div class="interactive-data-filters">
+                    <label>Client
+                        <select id="interactive-data-filter-client" class="select">
+                            <option value="">All clients</option>
+                        </select>
+                    </label>
+                    <label>Layout
+                        <select id="interactive-data-filter-page" class="select">
+                            <option value="">All pages</option>
+                        </select>
+                    </label>
+                    <label>Sync Status
+                        <select id="interactive-data-filter-status" class="select">
+                            <option value="">All</option>
+                            <option value="pending">Pending</option>
+                            <option value="success">Synced</option>
+                            <option value="failed">Failed</option>
+                            <option value="skipped">Skipped</option>
+                        </select>
+                    </label>
+                    <button id="btn-interactive-data-apply-filters" class="btn btn-secondary btn-sm">Apply Filters</button>
+                    <button id="btn-interactive-data-clear-filters" class="btn btn-ghost btn-sm">Clear</button>
+                </div>
+
+                <div class="interactive-data-bulk-actions" id="interactive-data-bulk-actions" style="display:none;">
+                    <span><span id="interactive-data-selected-count">0</span> selected</span>
+                    <div class="interactive-data-bulk-actions-spacer"></div>
+                    <button id="btn-interactive-data-sync-selected" class="btn btn-accent btn-sm">☁ Sync Selected to Google</button>
+                    <button id="btn-interactive-data-delete-selected" class="btn btn-danger btn-sm">🗑 Delete Selected</button>
+                    <button id="btn-interactive-data-export-selected" class="btn btn-secondary btn-sm">⇩ Export Selected (CSV)</button>
+                </div>
+
+                <div id="interactive-data-table-wrap" class="interactive-data-table-wrap">
+                    <table class="interactive-data-table">
+                        <thead>
+                            <tr>
+                                <th><input type="checkbox" id="interactive-data-select-all"></th>
+                                <th>Collected At</th>
+                                <th>Client</th>
+                                <th>Page</th>
+                                <th>Widget</th>
+                                <th>Value</th>
+                                <th>Sync Status</th>
+                                <th>Synced At</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="interactive-data-tbody">
+                            <tr><td colspan="9" class="interactive-data-empty">Loading…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ── System Page ── -->
+            <div id="page-system" class="page system-page">
+                <div class="page-header system-page-header">
+                    <div>
+                        <h2 id="system-status-header">System Status</h2>
+                        <p class="page-description system-page-description">Server health, global settings, backups, version, and service controls.</p>
+                    </div>
+                    <button id="btn-refresh-system" class="btn btn-secondary">↻ Refresh</button>
+                </div>
+                <div id="system-info" class="system-grid system-status-grid">
+                    <p>Loading system info...</p>
+                </div>
+
+
+                
+
+                <!-- ── Collapsible: System Variables ── -->
+                <details class="sys-collapsible" id="vars-system" style="margin-top:1rem;">
+                    <summary>
+                        <span class="sys-collapsible-icon">⚙️</span>
+                        <span class="sys-collapsible-title">System Variables & Time</span>
+                        <span class="sys-collapsible-hint">Sound, defaults, timezone, and clock</span>
+                    </summary>
+                    <div class="sys-collapsible-body">
+                        <!-- Sound Settings (moved from its own section) -->
+                        <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
+                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">🔊 Sound</h3>
+                            <div style="display:flex; align-items:center; gap:1rem; flex-wrap:wrap;">
+                                <div style="flex:1; min-width:240px;">
+                                    <div style="font-weight:bold; margin-bottom:0.25rem;">Sound Ducking</div>
+                                    <div style="font-size:0.8rem; color:var(--text-dim,#888);">
+                                        When a higher-priority sound source plays, lower-priority sources are
+                                        reduced to this volume. "Mute" fully silences them while a higher
+                                        source is active.
+                                    </div>
+                                </div>
+                                <div style="min-width:200px;">
+                                    <select id="global-duck-volume" class="select" style="width:100%;">
+                                        <option value="0">🔇 Mute (0%)</option>
+                                        <option value="0.10">🔈 10% — almost silent</option>
+                                        <option value="0.20">🔉 20% — very faint</option>
+                                        <option value="0.35">🔉 35% — noticeable but subordinate</option>
+                                        <option value="0.45" selected>🔉 45% — default</option>
+                                        <option value="0.60">🔊 60% — light ducking</option>
+                                        <option value="0.80">🔊 80% — barely reduced</option>
+                                        <option value="1.0">🔊 100% — no ducking (all play at full)</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div id="duck-status" style="margin-top:0.75rem; font-size:0.8rem; color:var(--text-dim,#888);">
+                                Active duck volume: <span id="duck-current">45%</span>
+                            </div>
+                        </div>
+
+                        <!-- Display & Time -->
+                        <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
+                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">🕒 Display &amp; Time</h3>
+                            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:1rem;">
+                                <div>
+                                    <div style="font-weight:bold; margin-bottom:0.25rem;">Clock Format</div>
+                                    <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.4rem;">How clock widgets display time</div>
+                                    <select id="var-clock-format" class="select" style="width:100%;">
+                                        <option value="24" selected>24-hour (14:30)</option>
+                                        <option value="12">12-hour (2:30 PM)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <div style="font-weight:bold; margin-bottom:0.25rem;">Player Refresh Interval</div>
+                                    <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.4rem;">How often the player re-renders (seconds)</div>
+                                    <select id="var-refresh-interval" class="select" style="width:100%;">
+                                        <option value="5">5s (very frequent)</option>
+                                        <option value="10" selected>10s (default)</option>
+                                        <option value="30">30s (low CPU)</option>
+                                        <option value="60">60s (minimal)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <div style="font-weight:bold; margin-bottom:0.25rem;">Theme</div>
+                                    <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.4rem;">Editor color theme</div>
+                                    <select id="var-theme" class="select" style="width:100%;">
+                                        <option value="dark" selected>🌑 Dark (default)</option>
+                                        <option value="light">☀️ Light</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Layout Defaults (submenu) -->
+                        <details class="sys-collapsible" style="margin-top:0.75rem;">
+                            <summary style="cursor:pointer; padding:0.5rem 0.75rem; border-radius:8px; background:rgba(15,23,42,.45); border:1px solid rgba(148,163,184,.2);">
+                                <span style="font-weight:600; font-size:0.9rem;">📐 Layout Defaults</span>
+                                <span style="font-size:0.78rem; color:var(--text-dim,#888); margin-left:0.5rem;">Text color, accent, and alignment for new widgets</span>
+                            </summary>
+                            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:0.75rem; padding:0.75rem 0.25rem 0.25rem;">
+                                <div>
+                                    <div style="font-weight:bold; font-size:0.82rem; margin-bottom:0.2rem;">Text Color</div>
+                                    <input type="color" id="var-default-color" value="#ffffff" style="width:100%; height:32px;">
+                                </div>
+                                <div>
+                                    <div style="font-weight:bold; font-size:0.82rem; margin-bottom:0.2rem;">Accent</div>
+                                    <input type="color" id="var-default-accent" value="#e94560" style="width:100%; height:32px;">
+                                </div>
+                                <div>
+                                    <div style="font-weight:bold; font-size:0.82rem; margin-bottom:0.2rem;">Alignment</div>
+                                    <select id="var-default-align" class="select" style="width:100%;">
+                                        <option value="left">Left</option>
+                                        <option value="center" selected>Center</option>
+                                        <option value="right">Right</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </details>
+
+                        <!-- System Time -->
+                        <div class="sys-card" style="padding:1rem 1.25rem; margin-top:1rem;">
+                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">🕒 System Time &amp; Timezone</h3>
+
+                            <!-- Current time display -->
+                            <div style="display:flex; flex-wrap:wrap; gap:0.75rem; align-items:flex-end; margin-bottom:1rem; padding:0.75rem; background:rgba(255,255,255,0.03); border-radius:6px;">
+                                <div style="flex:1; min-width:200px;">
+                                    <div style="font-size:0.7rem; color:var(--text-dim,#888); text-transform:uppercase;">Current Local Time</div>
+                                    <div id="sys-now-time" style="font-size:1.4rem; font-weight:600; font-variant-numeric:tabular-nums;">—</div>
+                                </div>
+                                <div style="min-width:120px;">
+                                    <div style="font-size:0.7rem; color:var(--text-dim,#888); text-transform:uppercase;">Date</div>
+                                    <div id="sys-now-date" style="font-size:1rem;">—</div>
+                                </div>
+                                <div style="min-width:120px;">
+                                    <div style="font-size:0.7rem; color:var(--text-dim,#888); text-transform:uppercase;">Timezone</div>
+                                    <div id="sys-now-tz" style="font-size:1rem; font-weight:600;">—</div>
+                                </div>
+                                <div style="min-width:100px;">
+                                    <div style="font-size:0.7rem; color:var(--text-dim,#888); text-transform:uppercase;">NTP</div>
+                                    <div id="sys-now-ntp" style="font-size:0.95rem;">—</div>
+                                </div>
+                                <div style="display:flex; flex-direction:column; gap:0.25rem;">
+                                    <button class="btn btn-secondary" id="btn-time-refresh" style="font-size:0.8rem; padding:0.3rem 0.6rem;">↻ Refresh</button>
+                                </div>
+                            </div>
+
+                            <!-- Timezone -->
+                            <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(240px, 1fr)); gap:0.75rem; margin-bottom:0.75rem;">
+                                <div>
+                                    <div style="font-weight:bold; margin-bottom:0.25rem;">Timezone</div>
+                                    <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.4rem;">Sets the IANA timezone for the entire system</div>
+                                    <div style="display:flex; gap:0.4rem;">
+                                        <select id="var-timezone-select" class="select" style="flex:1;">
+                                            <option value="">Loading...</option>
+                                        </select>
+                                        <button class="btn btn-primary" id="btn-tz-apply" style="font-size:0.85rem;">Apply</button>
+                                    </div>
+                                    <div style="font-size:0.7rem; color:var(--text-dim,#888); margin-top:0.25rem;">Or enter a custom IANA name (e.g. <code>America/Chicago</code>)</div>
+                                </div>
+                            </div>
+
+                            <!-- Set custom time -->
+                            <div style="border-top:1px solid var(--border,#333); padding-top:0.75rem; margin-top:0.5rem;">
+                                <div style="font-weight:bold; margin-bottom:0.4rem;">Set System Time Manually</div>
+                                <div style="font-size:0.78rem; color:var(--text-dim,#888); margin-bottom:0.6rem;">
+                                    Set the system clock to a specific time. NTP will be temporarily disabled and re-enabled after.
+                                    Use only if NTP is unavailable or the clock has drifted significantly.
+                                </div>
+                                <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:flex-end;">
+                                    <div>
+                                        <div style="font-size:0.75rem; color:var(--text-dim,#888); margin-bottom:0.2rem;">Date</div>
+                                        <input type="date" id="var-set-date" class="select" style="padding:0.3rem 0.5rem;">
+                                    </div>
+                                    <div>
+                                        <div style="font-size:0.75rem; color:var(--text-dim,#888); margin-bottom:0.2rem;">Time</div>
+                                        <input type="time" id="var-set-time" class="select" style="padding:0.3rem 0.5rem;">
+                                    </div>
+                                    <button class="btn btn-danger" id="btn-set-time">⚠ Set Time</button>
+                                    <button class="btn btn-secondary" id="btn-sync-ntp">⟳ Sync from NTP</button>
+                                    <span id="time-action-status" style="font-size:0.85rem; color:var(--text-dim,#888); margin-left:0.5rem;"></span>
+                                </div>
+                            </div>
+
+                            <!-- Trash: deleted files -->
+                            <div style="border-top:1px solid var(--border,#333); padding-top:0.75rem; margin-top:0.5rem;">
+                                <div style="font-weight:bold; margin-bottom:0.4rem;">🗑 File Trash</div>
+                                <div style="font-size:0.78rem; color:var(--text-dim,#888); margin-bottom:0.6rem;">
+                                    Deleted files are held here for 2 weeks, then automatically purged. Restore to put them back on the server.
+                                </div>
+                                <button class="btn btn-secondary" id="btn-open-trash" style="margin-bottom:0.75rem;">Open Trash</button>
+                                <div id="trash-list" style="display:none;"></div>
+                            </div>
+                        </div>
+
+                        <!-- External Monitoring (health endpoint for Uptime Kuma / Prometheus) -->
+                        <div class="sys-card" style="padding:1rem 1.25rem; margin-top:1rem;">
+                            <h3 style="margin:0 0 0.5rem 0; font-size:1rem;">📡 External Monitoring</h3>
+                            <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.75rem;">
+                                Screentra Cast exposes a lightweight unauthenticated health probe at
+                                <code>/api/system/health</code>. Drop the URL below into Uptime Kuma,
+                                Prometheus <code>blackbox_exporter</code>, Datadog HTTP check, or a plain
+                                <code>curl</code> loop. The endpoint is exempt from auth on purpose so
+                                external monitors can probe it without credentials. Returns:
+                                <code>db_ok</code>, <code>stale_clients</code> (count of players that
+                                haven't pinged in 5 min), <code>server_time</code>, <code>version</code>.
+                            </div>
+
+                            <!-- Health URL -->
+                            <div style="display:flex; align-items:stretch; gap:0.4rem; margin-bottom:0.6rem;">
+                                <div style="flex:1; padding:0.5rem 0.75rem; background:rgba(255,255,255,0.04); border:1px solid var(--border,#30363d); border-radius:6px; font-family:ui-monospace,Menlo,monospace; font-size:0.85rem; word-break:break-all; user-select:all;" id="monitor-health-url">—</div>
+                                <button class="btn btn-secondary" id="btn-monitor-copy-url" style="font-size:0.8rem; padding:0.3rem 0.7rem;" title="Copy URL">📋 Copy</button>
+                            </div>
+
+                            <!-- curl example -->
+                            <div style="margin-bottom:0.4rem; font-weight:600; font-size:0.82rem;">curl one-liner</div>
+                            <div style="display:flex; align-items:stretch; gap:0.4rem; margin-bottom:0.85rem;">
+                                <div style="flex:1; padding:0.5rem 0.75rem; background:rgba(0,0,0,0.25); border:1px solid var(--border,#30363d); border-radius:6px; font-family:ui-monospace,Menlo,monospace; font-size:0.78rem; word-break:break-all; user-select:all;" id="monitor-curl">—</div>
+                                <button class="btn btn-secondary" id="btn-monitor-copy-curl" style="font-size:0.8rem; padding:0.3rem 0.7rem;" title="Copy curl command">📋 Copy</button>
+                            </div>
+
+                            <!-- Monitor hints -->
+                            <details style="margin-top:0.5rem;">
+                                <summary style="cursor:pointer; padding:0.4rem 0.5rem; border-radius:6px; background:rgba(255,255,255,0.03); border:1px solid var(--border,#30363d); font-size:0.85rem; font-weight:600;">
+                                    🔧 Setup hints per monitor
+                                </summary>
+                                <div style="padding:0.6rem 0.4rem 0.2rem; font-size:0.82rem; line-height:1.5;">
+                                    <div style="margin-bottom:0.4rem;">
+                                        <b>Uptime Kuma:</b> Add monitor → type
+                                        <code style="background:rgba(255,255,255,0.06); padding:0.05rem 0.3rem; border-radius:3px;">HTTP(s) - Keyword</code> →
+                                        paste the URL above → accepted status code
+                                        <code style="background:rgba(255,255,255,0.06); padding:0.05rem 0.3rem; border-radius:3px;">200</code> →
+                                        keyword <code style="background:rgba(255,255,255,0.06); padding:0.05rem 0.3rem; border-radius:3px;">"db_ok":true</code>.
+                                    </div>
+                                    <div style="margin-bottom:0.4rem;">
+                                        <b>Prometheus blackbox_exporter:</b> Add a job with
+                                        <code style="background:rgba(255,255,255,0.06); padding:0.05rem 0.3rem; border-radius:3px;">probe_http_status_code == 200</code> as the success condition.
+                                        The body is JSON; the exporter will record <code>probe_failed_due_to_regex</code>
+                                        if you add a regex for <code>"db_ok":true</code>.
+                                    </div>
+                                    <div style="margin-bottom:0.4rem;">
+                                        <b>Datadog / New Relic HTTP check:</b> URL above, check frequency
+                                        60s, timeout 10s. The body's <code>stale_clients</code> field is
+                                        a useful custom metric to alert on (>0 = a player went dark).
+                                    </div>
+                                    <div style="margin-bottom:0.4rem;">
+                                        <b>Plain shell loop:</b> run the curl one-liner from cron or a
+                                        systemd timer. Non-zero exit on non-200. Pipe through
+                                        <code style="background:rgba(255,255,255,0.06); padding:0.05rem 0.3rem; border-radius:3px;">jq .stale_clients</code>
+                                        to surface per-run player liveness counts.
+                                    </div>
+                                </div>
+                            </details>
+                        </div>
+
+                        <div style="margin-top:1rem; display:flex; gap:0.5rem; align-items:center;">
+                            <button class="btn btn-success" id="btn-vars-save">💾 Save Variables</button>
+                            <button class="btn btn-secondary" id="btn-vars-reset">↺ Reset to Defaults</button>
+                            <span id="vars-save-status" style="font-size:0.85rem; color:var(--text-dim,#888); margin-left:0.5rem;"></span>
+                        </div>
+                    </div>
+                </details>
+
+                <!-- ── Collapsible: User Manager ── -->
+                <details class="sys-collapsible" id="vars-users" style="margin-top:1rem;">
+                    <summary>
+                        <span class="sys-collapsible-icon">👥</span>
+                        <span class="sys-collapsible-title">User Manager</span>
+                        <span class="sys-collapsible-hint">Create users, set roles, reset passwords, enable/disable access</span>
+                    </summary>
+                    <div class="sys-collapsible-body">
+                        <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
+                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">➕ Create User</h3>
+                            <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.75rem;">
+                                Roles are stored now for permission planning. The built-in env admin password still works as a fallback.
+                            </div>
+                            <div class="user-manager-form" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:0.65rem; align-items:end;">
+                                <label style="font-size:0.8rem;">Username<input id="user-new-username" class="select" type="text" placeholder="jane" autocomplete="off"></label>
+                                <label style="font-size:0.8rem;">Display name<input id="user-new-display" class="select" type="text" placeholder="Jane Smith" autocomplete="off"></label>
+                                <label style="font-size:0.8rem;">Role<select id="user-new-role" class="select"><option value="admin">admin</option><option value="layout-manager" selected>layout-manager</option><option value="operator">operator</option><option value="viewer">viewer</option></select></label>
+                                <label style="font-size:0.8rem;">Password<input id="user-new-password" class="select" type="password" placeholder="8+ characters" autocomplete="new-password"></label>
+                                <button class="btn btn-primary" id="btn-user-create">Create User</button>
+                            </div>
+                            <div id="user-manager-status" style="font-size:0.85rem; color:var(--text-dim,#888); margin-top:0.65rem;"></div>
+                        </div>
+                        <div class="sys-card" style="padding:1rem 1.25rem;">
+                            <div class="page-header" style="margin-bottom:0.5rem;">
+                                <h3 style="margin:0; font-size:1rem;">Existing Users</h3>
+                                <button class="btn btn-secondary" id="btn-users-refresh">↻ Refresh</button>
+                            </div>
+                            <div id="users-list" class="users-list"><p>Loading users...</p></div>
+                        </div>
+                    </div>
+                </details>
+
+                <!-- ── Collapsible: Google OAuth / API ── -->
+                <details class="sys-collapsible" id="vars-google-oauth" style="margin-top:1rem;">
+                    <summary>
+                        <span class="sys-collapsible-icon">🔐</span>
+                        <span class="sys-collapsible-title">Google OAuth / API</span>
+                        <span class="sys-collapsible-hint">Manage Google SSO status, OAuth redirect, and Workspace API setup</span>
+                    </summary>
+                    <div class="sys-collapsible-body">
+                        <div class="sys-card google-oauth-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
+                            <div class="page-header" style="margin-bottom:0.65rem;">
+                                <div>
+                                    <h3 style="margin:0; font-size:1rem;">Google Connection Status</h3>
+                                    <p style="margin:0.25rem 0 0; color:var(--text-dim,#888); font-size:0.8rem;">Used for Google sign-in and future interactive widget integrations with Docs, Sheets, Slides, Calendar, and Meet.</p>
+                                </div>
+                                <button id="btn-google-oauth-refresh" class="btn btn-secondary">↻ Refresh</button>
+                            </div>
+                            <div class="google-oauth-status-grid">
+                                <div class="account-kv"><span>OAuth Configured</span><b id="sys-google-configured">—</b></div>
+                                <div class="account-kv"><span>Current Account Bound</span><b id="sys-google-bound">—</b></div>
+                                <div class="account-kv"><span>Google Email</span><b id="sys-google-email">—</b></div>
+                                <div class="account-kv"><span>Login Type</span><b id="sys-google-login-type">—</b></div>
+                            </div>
+                            <div id="sys-google-status" class="account-status" style="margin-top:0.75rem;">Loading…</div>
+                            <div style="display:flex; flex-wrap:wrap; gap:0.5rem; margin-top:0.75rem;">
+                                <button id="btn-sys-google-bind" class="btn btn-accent" type="button">Bind Current User to Google</button>
+                                <button id="btn-sys-google-unbind" class="btn btn-secondary" type="button">Unbind Google</button>
+                            </div>
+                        </div>
+
+                        <div class="sys-card google-oauth-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
+                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">OAuth Client Setup</h3>
+                            <div class="google-oauth-setup-grid">
+                                <div>
+                                    <div style="font-weight:bold; margin-bottom:0.25rem;">Authorized Redirect URI</div>
+                                    <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.4rem;">Add this exact URL in Google Cloud Console → OAuth Client.</div>
+                                    <div class="copy-row"><input id="sys-google-redirect-uri" class="select" type="text" readonly value=""><button id="btn-copy-google-redirect" class="btn btn-secondary" type="button">Copy</button></div>
+                                </div>
+                                <div>
+                                    <div style="font-weight:bold; margin-bottom:0.25rem;">Required Environment Variables</div>
+                                    <div class="google-oauth-code-list">
+                                        <code>SIGNAGE_GOOGLE_CLIENT_ID</code>
+                                        <code>SIGNAGE_GOOGLE_CLIENT_SECRET</code>
+                                        <code>SIGNAGE_PUBLIC_URL</code>
+                                    </div>
+                                    <div style="font-size:0.78rem; color:var(--text-dim,#888); margin-top:0.4rem;">Set these in <code>~/.config/ripley-kiosk/server.env</code>, then restart the server service.</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="sys-card google-oauth-card" style="padding:1rem 1.25rem;">
+                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">Google APIs for Interactive Integrations</h3>
+                            <div style="font-size:0.82rem; color:var(--text-dim,#888); margin-bottom:0.65rem;">Enable the APIs you want the interactive widget integrations to use. SSO only needs Google OAuth/OpenID; Docs/Sheets/Slides/Calendar/Meet actions require Workspace API scopes and backend execution support.</div>
+                            <div class="google-api-checklist">
+                                <label><input type="checkbox" checked disabled> Google OAuth / OpenID Connect</label>
+                                <label><input type="checkbox" disabled> Google Drive API</label>
+                                <label><input type="checkbox" disabled> Google Docs API</label>
+                                <label><input type="checkbox" disabled> Google Sheets API</label>
+                                <label><input type="checkbox" disabled> Google Slides API</label>
+                                <label><input type="checkbox" disabled> Google Calendar API</label>
+                            </div>
+                            <div class="google-oauth-links">
+                                <a class="btn btn-secondary" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Open OAuth Credentials</a>
+                                <a class="btn btn-secondary" href="https://console.cloud.google.com/apis/library" target="_blank" rel="noopener">Open API Library</a>
+                                <a class="btn btn-secondary" href="https://console.cloud.google.com/auth/audience" target="_blank" rel="noopener">OAuth Test Users</a>
+                            </div>
+                        </div>
+                    </div>
+                </details>
+
+                <!-- ── Collapsible: Backups ── -->
+                <details class="sys-collapsible" id="vars-backups" style="margin-top:1rem;">
+                    <summary>
+                        <span class="sys-collapsible-icon">💾</span>
+                        <span class="sys-collapsible-title">Backups</span>
+                        <span class="sys-collapsible-hint">Create, upload, restore, download, or delete backups</span>
+                    </summary>
+                    <div class="sys-collapsible-body">
+                        <div id="backup-section" class="backup-section">
+                            <div class="page-header" style="margin-bottom:0.5rem;">
+                                <h3 style="margin:0; font-size:1rem;">Manage Backups</h3>
+                                <div style="display:flex; flex-direction:column; gap:0.5rem; align-items:flex-end;">
+                                    <button id="btn-create-backup" class="btn btn-primary">Create New Backup</button>
+                                    <input type="file" id="upload-backup-file" accept=".tar.gz" style="display:none">
+                                    <button id="btn-upload-backup" class="btn btn-accent">Upload Backup</button>
+                                    <div id="backup-progress-container" style="display:none; width:100%; min-width:200px;">
+                                        <div style="font-size:0.75rem; margin-bottom:0.25rem; text-align:right; color:var(--text-dim)">Creating backup...</div>
+                                        <div class="progress-bar">
+                                            <div id="backup-progress-fill" class="progress-fill" style="width:0%"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div id="backups-list" class="backups-list">
+                                <p>Loading backups...</p>
+                            </div>
+                        </div>
+                    </div>
+                </details>
+
+                
+                
+
+<!-- ── Collapsible: Version Manager ── -->
+                <details class="sys-collapsible" id="vars-version" style="margin-top:1rem;">
+                    <summary>
+                        <span class="sys-collapsible-icon">📦</span>
+                        <span class="sys-collapsible-title">Version Manager</span>
+                        <span class="sys-collapsible-hint">Version info, migration export/import, and service restart</span>
+                    </summary>
+                    <div class="sys-collapsible-body">
+                        <!-- Current version info -->
+                        <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
+                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">ℹ️ Current Version</h3>
+                            <div id="version-info-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:0.75rem;">
+                                <div><div style="font-size:0.75rem; color:var(--text-dim,#888);">Version</div><div id="vi-version" style="font-weight:600;">—</div></div>
+                                <div><div style="font-size:0.75rem; color:var(--text-dim,#888);">Build Time</div><div id="vi-build-time" style="font-weight:600;">—</div></div>
+                                <div><div style="font-size:0.75rem; color:var(--text-dim,#888);">Git Commit</div><div id="vi-git-commit" style="font-weight:600; font-family:monospace;">—</div></div>
+                                <div><div style="font-size:0.75rem; color:var(--text-dim,#888);">Uptime</div><div id="vi-uptime" style="font-weight:600;">—</div></div>
+                                <div><div style="font-size:0.75rem; color:var(--text-dim,#888);">Install Dir</div><div id="vi-install-dir" style="font-weight:600; font-family:monospace; font-size:0.85rem; word-break:break-all;">—</div></div>
+                                <div><div style="font-size:0.75rem; color:var(--text-dim,#888);">Database</div><div id="vi-db-path" style="font-weight:600; font-family:monospace; font-size:0.85rem; word-break:break-all;">—</div></div>
+                            </div>
+                        </div>
+
+                        <!-- Migration -->
+                        <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
+                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">🚚 Migration (Move to a new device)</h3>
+                            <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:1rem;">
+                                Bundle the entire app state (database, uploads, backups index) into a single tarball,
+                                transfer it to the new device, then import it. Backup files (.tar.gz) are
+                                intentionally excluded to keep the bundle small — re-export them separately if needed.
+                            </div>
+                            <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+                                <button class="btn btn-primary" id="btn-version-export">⬇ Export State Bundle</button>
+                                <input type="file" id="version-import-file" accept=".tar.gz" style="display:none">
+                                <button class="btn btn-accent" id="btn-version-import">⬆ Import State Bundle</button>
+                                <span id="version-migration-status" style="font-size:0.85rem; color:var(--text-dim,#888); margin-left:0.5rem; align-self:center;"></span>
+                            </div>
+                        </div>
+
+                        <!-- Application Update -->
+                        <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
+                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">⬆️ Application Update (Move code changes)</h3>
+                            <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:1rem;">
+                                Export a portable update file containing this instance's server binary, static frontend files,
+                                and runtime dependency manifest. Import that file on another instance to update it to these changes.
+                                State/data is not included here — use Migration for database/uploads.
+                            </div>
+                            <div id="version-update-preview" style="font-size:0.78rem; color:var(--text-dim,#888); margin-bottom:0.75rem; font-family:monospace; white-space:pre-wrap;">Loading update manifest...</div>
+                            <div id="version-update-last-failure-banner" class="version-update-failure-banner" style="display:none;">
+                                <strong>⚠ Last update failed and was auto-rolled back.</strong>
+                                <div class="version-update-failure-detail">
+                                    <span id="version-update-failure-time"></span>
+                                    <span id="version-update-failure-commit"></span>
+                                    <span id="version-update-failure-error"></span>
+                                </div>
+                                <div class="version-update-failure-hint">Check the force-update box below to retry without auto-rollback if you believe the bundle is correct despite the failure.</div>
+                            </div>
+                            <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
+                                <button class="btn btn-primary" id="btn-version-update-export">⬇ Export Update File</button>
+                                <input type="file" id="version-update-import-file" accept=".tar.gz,.update.tar.gz" style="display:none">
+                                <button class="btn btn-accent" id="btn-version-update-import">⬆ Import Update File</button>
+                                <label id="version-update-force-wrap" style="display:none; font-size:0.78rem; color:var(--text-dim,#cbd5e1); align-items:center; gap:0.35rem; padding:0.25rem 0.5rem; border-radius:4px; background:rgba(252,165,165,0.15); border:1px solid rgba(252,165,165,0.35); cursor:pointer;" title="Skip auto-rollback on partial failure. Use only if you know the bundle is correct and want to see what went wrong without losing the new binary.">
+                                    <input type="checkbox" id="version-update-force">
+                                    <span>Force update (skip auto-rollback)</span>
+                                </label>
+                                <span id="version-update-status" style="font-size:0.85rem; color:var(--text-dim,#888); margin-left:0.5rem; align-self:center;"></span>
+                            </div>
+                        </div>
+
+
+                        <!-- Player Client Bundle -->
+                        <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
+                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">🧩 Player Client Tarball</h3>
+                            <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:1rem;">
+                                Build a downloadable tarball installer for Debian/player devices from the current player-client package.
+                                This is code/scripts/assets only (normally around 45–60 KB compressed): no layouts, cache, DB, uploads, or assignments are included.
+                                This is separate from State Bundles and Application Update Files, so client/player updates do not require a new server app version.
+                            </div>
+                            <div id="version-player-bundle-preview" style="font-size:0.78rem; color:var(--text-dim,#888); margin-bottom:0.75rem; font-family:monospace; white-space:pre-wrap;">Bundle not built in this browser session.</div>
+                            <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+                                <button class="btn btn-primary" id="btn-version-player-bundle-build">⚙ Build/Refresh Tarball</button>
+                                <button class="btn btn-secondary" id="btn-version-player-bundle-download" type="button">⬇ Download Tarball</button>
+                                <button class="btn btn-secondary" id="btn-version-player-bootstrap-download" type="button">⬇ Download Bootstrap Script</button>
+                                <span id="version-player-bundle-status" style="font-size:0.85rem; color:var(--text-dim,#888); margin-left:0.5rem; align-self:center;"></span>
+                            </div>
+                        </div>
+
+                        <!-- Server Bundle -->
+                        <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
+                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">🖥️ Server Tarball</h3>
+                            <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:1rem;">
+                                Build a downloadable server install tarball for the signage server code/static/scripts/tools.
+                                This is code/assets only: no database, layouts, uploads, backups, target build artifacts, cert private keys, or runtime state are included.
+                                The bootstrap script downloads the tarball, installs/checks server build requirements, copies the code, builds the release binary, and can optionally start a user service.
+                            </div>
+                            <div id="version-server-bundle-preview" style="font-size:0.78rem; color:var(--text-dim,#888); margin-bottom:0.75rem; font-family:monospace; white-space:pre-wrap;">Server bundle not built in this browser session.</div>
+                            <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+                                <button class="btn btn-primary" id="btn-version-server-bundle-build" type="button">⚙ Build/Refresh Server Tarball</button>
+                                <button class="btn btn-secondary" id="btn-version-server-bundle-download" type="button">⬇ Download Server Tarball</button>
+                                <button class="btn btn-secondary" id="btn-version-server-bootstrap-download" type="button">⬇ Download Server Install Script</button>
+                                <span id="version-server-bundle-status" style="font-size:0.85rem; color:var(--text-dim,#888); margin-left:0.5rem; align-self:center;"></span>
+                            </div>
+                        </div>
+
+                        <!-- Service control -->
+                        <div class="sys-card" style="padding:1rem 1.25rem;">
+                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">🔄 Service Control</h3>
+                            <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:1rem;">
+                                Restart the signage service to pick up a new binary or apply config changes.
+                                The current connection will drop — the page will reload automatically.
+                            </div>
+                            <button class="btn btn-danger" id="btn-version-restart">↻ Restart Service</button>
+                            <span id="version-restart-status" style="font-size:0.85rem; color:var(--text-dim,#888); margin-left:0.5rem;"></span>
+                        </div>
+                    </div>
+                </details>
+            </div>
+      </div>
+        </main>
+    </div>
+
+    <!-- Context menu for template elements -->
+    <div id="tpl-element-menu" class="tpl-el-menu" style="display:none; position:fixed; z-index:99999; background:#1e1e2e; border:1px solid rgba(255,255,255,.1); border-radius:8px; padding:.3rem 0; min-width:160px; box-shadow:0 8px 32px rgba(0,0,0,.5);">
+      <button class="tpl-el-menu-item" data-menu-action="duplicate" type="button" style="width:100%; text-align:left; padding:.45rem .85rem; background:none; border:none; color:#e2e8f0; font-size:.8rem; cursor:pointer; display:flex; align-items:center; gap:.5rem;">
+        <span style="opacity:.6;">⧉</span> Duplicate
+      </button>
+      <button class="tpl-el-menu-item" data-menu-action="front" type="button" style="width:100%; text-align:left; padding:.45rem .85rem; background:none; border:none; color:#e2e8f0; font-size:.8rem; cursor:pointer; display:flex; align-items:center; gap:.5rem;">
+        <span style="opacity:.6;">⬆</span> Bring to Front
+      </button>
+      <button class="tpl-el-menu-item" data-menu-action="back" type="button" style="width:100%; text-align:left; padding:.45rem .85rem; background:none; border:none; color:#e2e8f0; font-size:.8rem; cursor:pointer; display:flex; align-items:center; gap:.5rem;">
+        <span style="opacity:.6;">⬇</span> Send to Back
+      </button>
+      <div style="height:1px; background:rgba(255,255,255,.08); margin:.25rem 0;"></div>
+      <button class="tpl-el-menu-item tpl-el-menu-danger" data-menu-action="delete" type="button" style="width:100%; text-align:left; padding:.45rem .85rem; background:none; border:none; color:#f87171; font-size:.8rem; cursor:pointer; display:flex; align-items:center; gap:.5rem;">
+        <span style="opacity:.6;">🗑</span> Delete
+      </button>
+    </div>
+
+    <script defer src="/js/auth.js?v=20261003004000"></script>
+    <script defer src="/js/traffic-runtime.js?v=20261011140500-manual-traffic-closure-classification"></script>
+    <script defer src="/js/api.js?v=20261011113000-layout-rotation-persistence"></script>
+    <script src="/js/filebrowser.js?v=1789404930"></script>
+    
+    <script src="/js/weather-icons.js?v=1791477110-alert-condition-icons"></script>
+    <script src="/js/editor.js?v=20261011134500-manual-traffic-blocks"></script>
+    <script src="/js/widget-schemas.js?v=1789404930"></script>
+    <script src="/js/widget-template-editor.js?v=1789404930"></script>
+    <!-- Layout Picker Modal for Layout Sets -->
+    <div id="ls-layout-picker" class="modal-overlay" hidden style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center;">
+        <div class="modal" style="background:var(--bg-modal,#16162a);border:1px solid var(--border-color,#333);border-radius:8px;padding:1.5rem;width:480px;max-width:90vw;max-height:80vh;display:flex;flex-direction:column;gap:1rem;">
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+                <h3 style="margin:0;">Add Layouts to Set</h3>
+                <button id="ls-picker-close" class="btn btn-icon" style="background:transparent;border:none;color:inherit;font-size:1.2rem;cursor:pointer;">✕</button>
+            </div>
+            <p style="margin:0;color:var(--text-muted,#888);font-size:.9rem;">Select one or more layouts to add. Click a layout to toggle it.</p>
+            <div id="ls-picker-list" style="overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:.4rem;min-height:200px;"></div>
+            <div style="display:flex;justify-content:flex-end;gap:.5rem;">
+                <button class="btn btn-secondary" id="ls-picker-cancel">Cancel</button>
+                <button class="btn btn-primary" id="ls-picker-confirm">Add Selected (<span id="ls-picker-count">0</span>)</button>
+            </div>
+        </div>
+    </div>
+
+<script defer src="/js/app.js?v=20261010132105-google-traffic-map"></script>
+
+<script src="/js/ripley-link-guard.js?v=1789404930"></script>
+</body>
+</html>
