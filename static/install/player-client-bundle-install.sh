@@ -48,5 +48,6 @@ if [ ! -f "$UPDATE_PUBLIC_KEY" ]; then
 fi
 openssl pkeyutl -verify -rawin -pubin -inkey "$UPDATE_PUBLIC_KEY" -sigfile "$INSTALL_SIG" -in "$INSTALL_SH" >/dev/null
 export RIPLEY_SERVER_URL="$SERVER_URL"
+export RIPLEY_CA_CERT="$CA_FILE"
 export SCREENTRA_CAST_UPDATE_PUBLIC_KEY_SOURCE="$WORK_DIR/ripley-player-client-bundle/payload/install/screentra-cast-client-update.pub"
 exec "$INSTALL_SH" "$@"

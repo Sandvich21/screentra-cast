@@ -468,8 +468,6 @@ def tls_context(cache_dir: Path | None = None):
                 return ssl.create_default_context(cafile=str(cafile))
             except Exception as e:
                 print(f'warning: failed to load Screentra Cast CA {cafile}: {e}', flush=True)
-    if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
-        return ssl._create_unverified_context()
     return None
 
 def urlopen_ripley(req, timeout=10, cache_dir: Path | None = None):
@@ -579,9 +577,10 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
         return True, f'would download and run {installer_url}', details
     with tempfile.NamedTemporaryFile(prefix='ripley-player-update-', suffix='.sh', delete=False) as tmp:
         tmp_path = Path(tmp.name)
+    signature_path = tmp_path.with_suffix('.sig')
     try:
         # Use the same TLS verification as the rest of the actor (Screentra Cast CA
-        # bundle or system trust), never `ssl._create_unverified_context`.
+        # bundle or system trust; never bypass certificate verification.
         # The installer script is downloaded from the same server as the
         # heartbeat, and a MITM that can rewrite the heartbeat can also
         # rewrite the installer.
@@ -591,8 +590,29 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
             kw['context'] = ctx_ssl
         with urllib.request.urlopen(installer_url, **kw) as r:
             data = r.read()
+        signature_url = server + '/install/player-client.sh.sig'
+        with urllib.request.urlopen(signature_url, **kw) as r:
+            signature = r.read()
+        public_key = Path(
+            os.environ.get('SCREENTRA_CAST_UPDATE_PUBLIC_KEY_PATH')
+            or '/etc/screentra-cast/client-update-signing.pub'
+        )
+        if not public_key.is_file():
+            return False, f'client update refused: pinned signing key is missing at {public_key}', details
         tmp_path.write_bytes(data)
         tmp_path.chmod(0o755)
+        signature_path.write_bytes(signature)
+        verify = subprocess.run(
+            [
+                'openssl', 'pkeyutl', '-verify', '-rawin', '-pubin',
+                '-inkey', str(public_key), '-sigfile', str(signature_path),
+                '-in', str(tmp_path),
+            ],
+            capture_output=True, text=True, timeout=20,
+        )
+        details['signature_verified'] = verify.returncode == 0
+        if verify.returncode != 0:
+            return False, 'client update refused: installer signature verification failed', details
         p = subprocess.run(['/bin/bash', str(tmp_path)], env=env, capture_output=True, text=True, timeout=int(payload.get('timeout_seconds') or 180))
         out = (p.stdout or '').strip()
         err = (p.stderr or '').strip()
@@ -608,6 +628,10 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
     finally:
         try:
             tmp_path.unlink()
+        except Exception:
+            pass
+        try:
+            signature_path.unlink()
         except Exception:
             pass
 

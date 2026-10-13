@@ -183,9 +183,13 @@ create_board_user() {
         run_privileged mkdir -p "$board_home"
     fi
     run_privileged install -d -o "$board_user" -g "$board_user" -m 0755 "$board_home"
-    run_privileged usermod -aG sudo,video,render,input,tty,audio "$board_user" 2>/dev/null || true
+    run_privileged usermod -aG video,render,input,tty,audio "$board_user" 2>/dev/null || true
+    run_privileged gpasswd -d "$board_user" sudo 2>/dev/null || true
+    # Grant only the device-control commands used by the actor. Do not add the
+    # player account to sudo or grant unrestricted NOPASSWD access.
     run_privileged tee /etc/sudoers.d/"$board_user" > /dev/null << 'SUDOERS'
-%sudo ALL=(ALL) NOPASSWD: ALL
+Cmnd_Alias SCREENTRA_DEVICE_CONTROL = /usr/bin/ddcutil, /usr/bin/cec-client, /usr/bin/systemctl restart screentra-cast-kiosk@*.service, /usr/bin/systemctl try-restart screentra-cast-kiosk@*.service, /usr/bin/systemctl disable --now screentra-cast-kiosk@*.service, /usr/bin/systemctl reboot, /usr/sbin/reboot
+board ALL=(root) NOPASSWD: SCREENTRA_DEVICE_CONTROL
 SUDOERS
     run_privileged chmod 0440 /etc/sudoers.d/"$board_user" 2>/dev/null || true
     run_privileged chown -R "$board_user:$board_user" "$INSTALL_DIR"
@@ -426,29 +430,21 @@ EOF
 }
 
 install_screentra_ca_trust() {
-    local ca_url="$SERVER_URL/install/screentra-cast-signage-ca.crt"
     local ca_file="$INSTALL_DIR/screentra-cast-signage-ca.crt"
     local installed=0
-    echo "Installing Screentra Cast HTTPS trust anchor from $ca_url (best effort)..."
+    echo "Installing Screentra Cast HTTPS trust anchor (operator-provided CA required)..."
     # Skip if the file already exists and looks like a valid PEM.
     if [ -s "$ca_file" ] && grep -q 'BEGIN CERTIFICATE' "$ca_file" 2>/dev/null; then
         echo "Screentra CA already present at $ca_file; skipping download."
     else
-        python3 - "$ca_url" "$ca_file" <<'PY_CA_FETCH' || true
-import ssl, sys, urllib.request
-url, out = sys.argv[1], sys.argv[2]
-ctx = ssl._create_unverified_context()
-try:
-    with urllib.request.urlopen(url, context=ctx, timeout=20) as r:
-        data = r.read()
-    if b"BEGIN CERTIFICATE" not in data:
-        raise SystemExit("downloaded file is not a PEM certificate")
-    open(out, "wb").write(data)
-    print(f"Downloaded Screentra Cast CA certificate to {out}")
-except Exception as e:
-    print(f"WARNING: failed to download Screentra Cast CA certificate: {e}")
-    raise SystemExit(1)
-PY_CA_FETCH
+        local ca_source="${RIPLEY_CA_CERT:-${SCREENTRA_CA_CERT_SOURCE:-}}"
+        if [ -n "$ca_source" ] && [ -s "$ca_source" ]; then
+            install -m 0644 "$ca_source" "$ca_file"
+            echo "Copied operator-provided Screentra Cast CA certificate to $ca_file"
+        else
+            echo "WARNING: no operator-provided CA certificate is available; refusing unverified CA bootstrap."
+            echo "Set RIPLEY_CA_CERT or SCREENTRA_CA_CERT_SOURCE to the server CA before installing."
+        fi
     fi
     if [ ! -s "$ca_file" ]; then
         echo "Screentra CA trust not installed: CA certificate unavailable."

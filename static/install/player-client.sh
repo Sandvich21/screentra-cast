@@ -185,9 +185,13 @@ create_board_user() {
         run_privileged mkdir -p "$board_home"
     fi
     run_privileged install -d -o "$board_user" -g "$board_user" -m 0755 "$board_home"
-    run_privileged usermod -aG sudo,video,render,input,tty,audio "$board_user" 2>/dev/null || true
+    run_privileged usermod -aG video,render,input,tty,audio "$board_user" 2>/dev/null || true
+    run_privileged gpasswd -d "$board_user" sudo 2>/dev/null || true
+    # Grant only the device-control commands used by the actor. Do not add the
+    # player account to sudo or grant unrestricted NOPASSWD access.
     run_privileged tee /etc/sudoers.d/"$board_user" > /dev/null << 'SUDOERS'
-%sudo ALL=(ALL) NOPASSWD: ALL
+Cmnd_Alias SCREENTRA_DEVICE_CONTROL = /usr/bin/ddcutil, /usr/bin/cec-client, /usr/bin/systemctl restart screentra-cast-kiosk@*.service, /usr/bin/systemctl try-restart screentra-cast-kiosk@*.service, /usr/bin/systemctl disable --now screentra-cast-kiosk@*.service, /usr/bin/systemctl reboot, /usr/sbin/reboot
+board ALL=(root) NOPASSWD: SCREENTRA_DEVICE_CONTROL
 SUDOERS
     run_privileged chmod 0440 /etc/sudoers.d/"$board_user" 2>/dev/null || true
     run_privileged chown -R "$board_user:$board_user" "$INSTALL_DIR"
@@ -428,29 +432,21 @@ EOF
 }
 
 install_screentra_ca_trust() {
-    local ca_url="$SERVER_URL/install/screentra-cast-signage-ca.crt"
     local ca_file="$INSTALL_DIR/screentra-cast-signage-ca.crt"
     local installed=0
-    echo "Installing Screentra Cast HTTPS trust anchor from $ca_url (best effort)..."
+    echo "Installing Screentra Cast HTTPS trust anchor (operator-provided CA required)..."
     # Skip if the file already exists and looks like a valid PEM.
     if [ -s "$ca_file" ] && grep -q 'BEGIN CERTIFICATE' "$ca_file" 2>/dev/null; then
         echo "Screentra CA already present at $ca_file; skipping download."
     else
-        python3 - "$ca_url" "$ca_file" <<'PY_CA_FETCH' || true
-import ssl, sys, urllib.request
-url, out = sys.argv[1], sys.argv[2]
-ctx = ssl._create_unverified_context()
-try:
-    with urllib.request.urlopen(url, context=ctx, timeout=20) as r:
-        data = r.read()
-    if b"BEGIN CERTIFICATE" not in data:
-        raise SystemExit("downloaded file is not a PEM certificate")
-    open(out, "wb").write(data)
-    print(f"Downloaded Screentra Cast CA certificate to {out}")
-except Exception as e:
-    print(f"WARNING: failed to download Screentra Cast CA certificate: {e}")
-    raise SystemExit(1)
-PY_CA_FETCH
+        local ca_source="${RIPLEY_CA_CERT:-${SCREENTRA_CA_CERT_SOURCE:-}}"
+        if [ -n "$ca_source" ] && [ -s "$ca_source" ]; then
+            install -m 0644 "$ca_source" "$ca_file"
+            echo "Copied operator-provided Screentra Cast CA certificate to $ca_file"
+        else
+            echo "WARNING: no operator-provided CA certificate is available; refusing unverified CA bootstrap."
+            echo "Set RIPLEY_CA_CERT or SCREENTRA_CA_CERT_SOURCE to the server CA before installing."
+        fi
     fi
     if [ ! -s "$ca_file" ]; then
         echo "Screentra CA trust not installed: CA certificate unavailable."
@@ -703,8 +699,6 @@ def tls_context():
             return ssl.create_default_context(cafile=cafile)
         except Exception as e:
             return None
-    if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
-        return ssl._create_unverified_context()
     return None
 
 def urlopen_ripley(req, timeout=10):
@@ -1111,8 +1105,6 @@ def tls_context():
             return ssl.create_default_context(cafile=cafile)
         except Exception as e:
             print(f'warning: failed to load Screentra Cast CA {cafile}: {e}', flush=True)
-    if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
-        return ssl._create_unverified_context()
     return None
 
 def urlopen_ripley(req, timeout=10):
@@ -3182,7 +3174,10 @@ def _refresh_ca_from_server() -> dict:
     if not server_url: return {'ok': False, 'error': 'server URL empty'}
     url = server_url + '/install/screentra-cast-signage-ca.crt'; out = _ca_file()
     try:
-        ctx = ssl._create_unverified_context() if server_url.startswith('https://') else None
+        ca_path = _ca_file()
+        if not ca_path.exists():
+            return {'ok': False, 'error': 'existing CA certificate is required to refresh trust', 'url': url}
+        ctx = _ssl.create_default_context(cafile=str(ca_path))
         data = _ur.urlopen(url, context=ctx, timeout=10).read()
         if len(data) < 200 or b'BEGIN CERTIFICATE' not in data:
             return {'ok': False, 'error': f'downloaded CA did not look like a certificate ({len(data)} bytes)', 'url': url}
@@ -3745,11 +3740,6 @@ def _server_reachable(server_url: str, timeout: float) -> bool:
             return False
         ctx = None
         if u.scheme == 'https':
-            # Try the explicit RIPLEY_CA_CERT first, then the bundled
-            # ~/.local/share/screentra-client/screentra-cast-signage-ca.crt.
-            # Only fall back to system trust, and only as a last resort fall
-            # back to _create_unverified_context when the operator has
-            # explicitly opted in via RIPLEY_INSECURE_SSL=1.
             ca_candidates = []
             env_ca = os.environ.get('RIPLEY_CA_CERT')
             if env_ca:
@@ -3762,14 +3752,9 @@ def _server_reachable(server_url: str, timeout: float) -> bool:
                         break
                     except Exception:
                         ctx = None
+            # No CA available: fail closed and keep the cached fallback page.
             if ctx is None:
-                if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
-                    ctx = _ssl._create_unverified_context()
-                else:
-                    # No CA available and operator hasn't opted in — fail
-                    # closed (return False). Better to show the cached
-                    # fallback page than to silently MITM the probe.
-                    return False
+                return False
         req = _ur.Request((u.scheme + '://' + (host if not u.port else f'{host}:{port}') + path), method='GET')
         with _ur.urlopen(req, timeout=timeout, context=ctx) as r:
             return 200 <= r.status < 500
@@ -5135,8 +5120,6 @@ def tls_context(cache_dir: Path | None = None):
                 return ssl.create_default_context(cafile=str(cafile))
             except Exception as e:
                 print(f'warning: failed to load Screentra Cast CA {cafile}: {e}', flush=True)
-    if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
-        return ssl._create_unverified_context()
     return None
 
 def urlopen_ripley(req, timeout=10, cache_dir: Path | None = None):
@@ -5246,9 +5229,10 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
         return True, f'would download and run {installer_url}', details
     with tempfile.NamedTemporaryFile(prefix='ripley-player-update-', suffix='.sh', delete=False) as tmp:
         tmp_path = Path(tmp.name)
+    signature_path = tmp_path.with_suffix('.sig')
     try:
         # Use the same TLS verification as the rest of the actor (Screentra Cast CA
-        # bundle or system trust), never `ssl._create_unverified_context`.
+        # bundle or system trust; never bypass certificate verification.
         # The installer script is downloaded from the same server as the
         # heartbeat, and a MITM that can rewrite the heartbeat can also
         # rewrite the installer.
@@ -5258,8 +5242,29 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
             kw['context'] = ctx_ssl
         with urllib.request.urlopen(installer_url, **kw) as r:
             data = r.read()
+        signature_url = server + '/install/player-client.sh.sig'
+        with urllib.request.urlopen(signature_url, **kw) as r:
+            signature = r.read()
+        public_key = Path(
+            os.environ.get('SCREENTRA_CAST_UPDATE_PUBLIC_KEY_PATH')
+            or '/etc/screentra-cast/client-update-signing.pub'
+        )
+        if not public_key.is_file():
+            return False, f'client update refused: pinned signing key is missing at {public_key}', details
         tmp_path.write_bytes(data)
         tmp_path.chmod(0o755)
+        signature_path.write_bytes(signature)
+        verify = subprocess.run(
+            [
+                'openssl', 'pkeyutl', '-verify', '-rawin', '-pubin',
+                '-inkey', str(public_key), '-sigfile', str(signature_path),
+                '-in', str(tmp_path),
+            ],
+            capture_output=True, text=True, timeout=20,
+        )
+        details['signature_verified'] = verify.returncode == 0
+        if verify.returncode != 0:
+            return False, 'client update refused: installer signature verification failed', details
         p = subprocess.run(['/bin/bash', str(tmp_path)], env=env, capture_output=True, text=True, timeout=int(payload.get('timeout_seconds') or 180))
         out = (p.stdout or '').strip()
         err = (p.stderr or '').strip()
@@ -5275,6 +5280,10 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
     finally:
         try:
             tmp_path.unlink()
+        except Exception:
+            pass
+        try:
+            signature_path.unlink()
         except Exception:
             pass
 

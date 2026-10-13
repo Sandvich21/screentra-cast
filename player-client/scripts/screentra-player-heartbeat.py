@@ -232,8 +232,6 @@ def tls_context():
             return ssl.create_default_context(cafile=cafile)
         except Exception as e:
             print(f'warning: failed to load Screentra Cast CA {cafile}: {e}', flush=True)
-    if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
-        return ssl._create_unverified_context()
     return None
 
 def urlopen_ripley(req, timeout=10):

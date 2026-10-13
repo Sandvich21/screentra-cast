@@ -545,7 +545,10 @@ def _refresh_ca_from_server() -> dict:
     if not server_url: return {'ok': False, 'error': 'server URL empty'}
     url = server_url + '/install/screentra-cast-signage-ca.crt'; out = _ca_file()
     try:
-        ctx = ssl._create_unverified_context() if server_url.startswith('https://') else None
+        ca_path = _ca_file()
+        if not ca_path.exists():
+            return {'ok': False, 'error': 'existing CA certificate is required to refresh trust', 'url': url}
+        ctx = _ssl.create_default_context(cafile=str(ca_path))
         data = _ur.urlopen(url, context=ctx, timeout=10).read()
         if len(data) < 200 or b'BEGIN CERTIFICATE' not in data:
             return {'ok': False, 'error': f'downloaded CA did not look like a certificate ({len(data)} bytes)', 'url': url}
@@ -1108,11 +1111,6 @@ def _server_reachable(server_url: str, timeout: float) -> bool:
             return False
         ctx = None
         if u.scheme == 'https':
-            # Try the explicit RIPLEY_CA_CERT first, then the bundled
-            # ~/.local/share/screentra-client/screentra-cast-signage-ca.crt.
-            # Only fall back to system trust, and only as a last resort fall
-            # back to _create_unverified_context when the operator has
-            # explicitly opted in via RIPLEY_INSECURE_SSL=1.
             ca_candidates = []
             env_ca = os.environ.get('RIPLEY_CA_CERT')
             if env_ca:
@@ -1125,14 +1123,9 @@ def _server_reachable(server_url: str, timeout: float) -> bool:
                         break
                     except Exception:
                         ctx = None
+            # No CA available: fail closed and keep the cached fallback page.
             if ctx is None:
-                if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
-                    ctx = _ssl._create_unverified_context()
-                else:
-                    # No CA available and operator hasn't opted in — fail
-                    # closed (return False). Better to show the cached
-                    # fallback page than to silently MITM the probe.
-                    return False
+                return False
         req = _ur.Request((u.scheme + '://' + (host if not u.port else f'{host}:{port}') + path), method='GET')
         with _ur.urlopen(req, timeout=timeout, context=ctx) as r:
             return 200 <= r.status < 500
