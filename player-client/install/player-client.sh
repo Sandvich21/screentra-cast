@@ -864,6 +864,15 @@ if [ ! -f "$CLIENT_ID_FILE" ]; then
   fi
 fi
 CLIENT_ID="$(cat "$CLIENT_ID_FILE")"
+CLIENT_AUTH_TOKEN_FILE="$INSTALL_DIR/client-auth-token"
+if [ ! -s "$CLIENT_AUTH_TOKEN_FILE" ]; then
+  umask 077
+  python3 - <<'PY_TOKEN' > "$CLIENT_AUTH_TOKEN_FILE"
+import secrets
+print(secrets.token_urlsafe(48))
+PY_TOKEN
+fi
+chmod 0600 "$CLIENT_AUTH_TOKEN_FILE"
 
 cat > "$HEARTBEAT" <<'PY'
 #!/usr/bin/env python3
@@ -5461,6 +5470,7 @@ Environment=RIPLEY_PENDING_FILE=$INSTALL_DIR/cache/pending-command.json
 Environment=RIPLEY_RESULT_FILE=$INSTALL_DIR/cache/command-result.json
 Environment=SCREENTRA_SERVER_URL=$SERVER_URL
 Environment=RIPLEY_CA_CERT=$INSTALL_DIR/screentra-cast-signage-ca.crt
+Environment=RIPLEY_CLIENT_AUTH_TOKEN_FILE=$INSTALL_DIR/client-auth-token
 Environment=RIPLEY_CLIENT_ID=$CLIENT_ID
 Environment=RIPLEY_CLIENT_CACHE_DIR=$INSTALL_DIR/cache
 ExecStart="$ACTOR" --pending-file "$INSTALL_DIR/cache/pending-command.json" --result-file "$INSTALL_DIR/cache/command-result.json" --server "$SERVER_URL" --client-id "$CLIENT_ID" --cache-dir "$INSTALL_DIR/cache"
@@ -5520,6 +5530,7 @@ Environment=RIPLEY_SERVER_URL=$SERVER_URL
 Environment=RIPLEY_CLIENT_ID=$CLIENT_ID
 Environment=RIPLEY_CLIENT_CACHE_DIR=$INSTALL_DIR/cache
 Environment=RIPLEY_CA_CERT=$INSTALL_DIR/screentra-cast-signage-ca.crt
+Environment=RIPLEY_CLIENT_AUTH_TOKEN_FILE=$INSTALL_DIR/client-auth-token
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$ACTOR --pending-file $INSTALL_DIR/cache/pending-command.json --result-file $INSTALL_DIR/cache/command-result.json --server "$SERVER_URL" --client-id "$CLIENT_ID" --cache-dir $INSTALL_DIR/cache --watch
 Restart=always
@@ -5575,7 +5586,7 @@ if command -v systemctl >/dev/null 2>&1; then
   # Debian/minimal install does not report a false "no display session" blocker.
   if ( command -v apt-get >/dev/null 2>&1 || command -v apt >/dev/null 2>&1 ); then
     NEED=()
-    command -v  >/dev/null 2>&1 || NEED+=("")
+    command -v sway >/dev/null 2>&1 || NEED+=("sway")
     command -v wlr-randr >/dev/null 2>&1 || NEED+=("wlr-randr")
     command -v bluetoothctl >/dev/null 2>&1 || NEED+=("bluez")
     command -v wpctl >/dev/null 2>&1 || NEED+=("pipewire" "wireplumber" "libspa-0.2-bluetooth")
@@ -5653,7 +5664,7 @@ fi
 # leave the complete appliance tree owned by the runtime user.
 run_privileged chown -R "${SCREENTRA_BOARD_USER:-board}:${SCREENTRA_BOARD_USER:-board}" "$INSTALL_DIR"
 
-"$HEARTBEAT" --once --server "$SERVER_URL" --client-id "$CLIENT_ID" --client-auth-token-file "$CLIENT_AUTH_TOKEN_FILE" --name "$CLIENT_NAME" --role "$ROLE" --version "$VERSION"
+"$HEARTBEAT" --once --server "$SERVER_URL" --client-id "$CLIENT_ID" --name "$CLIENT_NAME" --role "$ROLE" --version "$VERSION"
 
 echo "Screentra player client installed."
 echo "Server: $SERVER_URL"

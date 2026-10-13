@@ -244,14 +244,35 @@ def urlopen_ripley(req, timeout=10):
     return urllib.request.urlopen(req, **kw)
 
 
+def client_auth_token():
+    """Read the per-client token without ever printing or logging it."""
+    token = os.environ.get('RIPLEY_CLIENT_AUTH_TOKEN', '').strip()
+    if token:
+        return token
+    path = os.environ.get(
+        'RIPLEY_CLIENT_AUTH_TOKEN_FILE',
+        str(Path.home() / '.local/share/screentra-client/client-auth-token'),
+    )
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return ''
+
+
+def client_auth_headers():
+    token = client_auth_token()
+    return {'X-SCREENTRA-CLIENT-TOKEN': token} if token else {}
+
+
 def poll_command(server, client_id):
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command'
     try:
-        with urlopen_ripley(url, timeout=5) as r:
+        req = urllib.request.Request(url, headers=client_auth_headers())
+        with urlopen_ripley(req, timeout=5) as r:
             data = r.read().decode()
             return json.loads(data)
     except urllib.error.HTTPError as e:
-        if e.code == 404:
+        if e.code in (401, 404, 429):
             return None
         raise
     except Exception:
@@ -261,7 +282,7 @@ def poll_command(server, client_id):
 def ack_command(server, client_id):
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command'
     try:
-        req = urllib.request.Request(url, method='DELETE')
+        req = urllib.request.Request(url, headers=client_auth_headers(), method='DELETE')
         with urlopen_ripley(req, timeout=5) as r:
             return r.read().decode()
     except Exception as e:
@@ -300,7 +321,8 @@ def read_command_result(cache_dir):
 def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='assigned-layout-display-{index}.json'):
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/displays/' + str(display_index) + '/config'
     try:
-        with urlopen_ripley(url, timeout=10) as r:
+        req = urllib.request.Request(url, headers=client_auth_headers())
+        with urlopen_ripley(req, timeout=10) as r:
             data = json.loads(r.read().decode())
         # Preserve theme (set by heartbeat from local config, sent to server)
         # so it survives across config sync cycles.
@@ -348,7 +370,8 @@ def fetch_admin_users(server, client_id, cache_dir):
     """
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/admin-users'
     try:
-        with urlopen_ripley(url, timeout=10) as r:
+        req = urllib.request.Request(url, headers=client_auth_headers())
+        with urlopen_ripley(req, timeout=10) as r:
             data = json.loads(r.read().decode())
         users = data.get('users') or []
         if users:
@@ -368,10 +391,14 @@ def fetch_admin_users(server, client_id, cache_dir):
 
 def post(server, data):
     url = server.rstrip('/') + '/api/clients/register'
+    payload = dict(data)
+    token = client_auth_token()
+    if token:
+        payload.setdefault('client_auth_token', token)
     req = urllib.request.Request(
         url,
-        data=json.dumps(data).encode(),
-        headers={'Content-Type': 'application/json'},
+        data=json.dumps(payload).encode(),
+        headers={'Content-Type': 'application/json', **client_auth_headers()},
         method='POST',
     )
     with urlopen_ripley(req, timeout=10) as r:

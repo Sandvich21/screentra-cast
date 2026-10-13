@@ -21,14 +21,6 @@ RENDER_SERVICE="$SYSTEMD_USER_DIR/screentra-client-renderer@.service"
 ADMIN_SERVICE="$SYSTEMD_USER_DIR/screentra-client-admin.service"
 KIOSK_SERVICE="$SYSTEMD_USER_DIR/screentra-kiosk-browser@.service"
 SYSTEMD_KIOSK_UNIT="/etc/systemd/system/screentra-cast-kiosk@.service"
-UPDATE_PUBLIC_KEY_PATH="${SCREENTRA_CAST_UPDATE_PUBLIC_KEY_PATH:-/etc/screentra-cast/client-update-signing.pub}"
-UPDATE_PUBLIC_KEY_SOURCE="${SCREENTRA_CAST_UPDATE_PUBLIC_KEY_SOURCE:-}"
-UPDATE_STATE_DIR="/var/lib/screentra-cast/update"
-UPDATE_REQUEST_FILE="$UPDATE_STATE_DIR/request"
-UPDATE_DIGEST_FILE="/var/lib/screentra-cast/client-update-sha256"
-UPDATER_SCRIPT="/usr/local/libexec/screentra-client-updater.py"
-UPDATER_SERVICE="/etc/systemd/system/screentra-client-updater.service"
-UPDATER_PATH_UNIT="/etc/systemd/system/screentra-client-updater.path"
 
 is_ssh_session() {
     if [ -n "${SSH_CONNECTION:-}" ]; then return 0; fi
@@ -134,224 +126,6 @@ run_privileged() {
     fi
 }
 
-install_update_public_key() {
-    # Keep the update trust anchor outside the board user's writable state.
-    # Never replace an existing key during a reinstall; key rotation is an
-    # explicit operator action.
-    [ -n "$UPDATE_PUBLIC_KEY_SOURCE" ] || return 0
-    [ -f "$UPDATE_PUBLIC_KEY_SOURCE" ] || return 0
-    if [ -f "$UPDATE_PUBLIC_KEY_PATH" ]; then
-        return 0
-    fi
-    run_privileged install -d -m 0755 "$(dirname "$UPDATE_PUBLIC_KEY_PATH")"
-    run_privileged install -o root -g root -m 0644 "$UPDATE_PUBLIC_KEY_SOURCE" "$UPDATE_PUBLIC_KEY_PATH"
-    echo "Installed client-update signing trust anchor at $UPDATE_PUBLIC_KEY_PATH"
-}
-
-install_update_public_key
-
-install_privileged_update_service() {
-    local board_user="${SCREENTRA_BOARD_USER:-board}"
-    local board_home="$(getent passwd "$board_user" | cut -d: -f6 2>/dev/null || true)"
-    : "${board_home:=/home/$board_user}"
-    echo "Installing root-owned client update service..."
-    run_privileged install -d -o root -g "$board_user" -m 0770 "$UPDATE_STATE_DIR"
-    run_privileged install -d -o root -g root -m 0755 "$(dirname "$UPDATER_SCRIPT")"
-    run_privileged tee "$UPDATER_SCRIPT" >/dev/null <<'PY_UPDATER'
-#!/usr/bin/env python3
-"""Verified Screentra Cast client updater.
-
-This process is the only component allowed to install client updates. The
-board user can create the fixed request marker, but cannot choose a command,
-URL, environment, or executable for this root process.
-"""
-from __future__ import annotations
-
-import hashlib
-import json
-import os
-import pwd
-import ssl
-import subprocess
-import tempfile
-import urllib.parse
-import urllib.request
-from pathlib import Path
-
-INSTALL_DIR = Path(os.environ.get("RIPLEY_CLIENT_DIR", "/home/board/.local/share/screentra-client"))
-REQUEST_FILE = Path("/var/lib/screentra-cast/update/request")
-DIGEST_FILE = Path("/var/lib/screentra-cast/client-update-sha256")
-PUBLIC_KEY = Path("/etc/screentra-cast/client-update-signing.pub")
-RESULT_FILE = INSTALL_DIR / "cache/command-result.json"
-
-
-def atomic_json(path: Path, value: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=f".{path.name}.", delete=False) as stream:
-        json.dump(value, stream, indent=2)
-        stream.write("\n")
-        temporary = Path(stream.name)
-    os.chmod(temporary, 0o644)
-    try:
-        board = pwd.getpwnam(os.environ.get("SCREENTRA_BOARD_USER", "board"))
-        os.chown(temporary, board.pw_uid, board.pw_gid)
-    except (KeyError, PermissionError):
-        pass
-    os.replace(temporary, path)
-
-
-def result(ok: bool, message: str, requested_at: str | None, details: dict) -> None:
-    atomic_json(RESULT_FILE, {
-        "action": "update_client",
-        "ok": ok,
-        "message": message,
-        "details": details,
-        "requested_at": requested_at,
-    })
-
-
-def tls_context(ca_file: Path) -> ssl.SSLContext:
-    if not ca_file.is_file():
-        raise RuntimeError("client CA bundle is missing")
-    return ssl.create_default_context(cafile=str(ca_file))
-
-
-def same_origin(base: str, candidate: str, expected_path: str) -> str:
-    base_parts = urllib.parse.urlsplit(base)
-    target = urllib.parse.urljoin(base.rstrip("/") + "/", candidate)
-    parts = urllib.parse.urlsplit(target)
-    if (parts.scheme, parts.netloc) != (base_parts.scheme, base_parts.netloc) or parts.path != expected_path:
-        raise RuntimeError("server returned an unexpected update URL")
-    return target
-
-
-def main() -> int:
-    requested_at = None
-    try:
-        if REQUEST_FILE.exists():
-            try:
-                requested_at = json.loads(REQUEST_FILE.read_text()).get("requested_at")
-            except Exception:
-                requested_at = None
-            REQUEST_FILE.unlink(missing_ok=True)
-
-        server = (INSTALL_DIR / "server").read_text().strip().rstrip("/")
-        client_id = (INSTALL_DIR / "client-id").read_text().strip()
-        token = (INSTALL_DIR / "client-auth-token").read_text().strip()
-        if not server or not client_id or not token:
-            raise RuntimeError("client update identity is incomplete")
-        ca_file = INSTALL_DIR / "screentra-cast-signage-ca.crt"
-        context = tls_context(ca_file)
-        try:
-            current_digest = DIGEST_FILE.read_text().strip()
-        except OSError:
-            current_digest = ""
-        if len(current_digest) != 64 or any(c not in "0123456789abcdef" for c in current_digest):
-            current_digest = ""
-
-        query = urllib.parse.urlencode({"current_sha256": current_digest})
-        check_url = f"{server}/api/clients/{urllib.parse.quote(client_id, safe='')}/update-check?{query}"
-        request = urllib.request.Request(check_url, headers={"X-SCREENTRA-CLIENT-TOKEN": token})
-        with urllib.request.urlopen(request, timeout=20, context=context) as response:
-            manifest = json.loads(response.read().decode())
-        expected_digest = str(manifest.get("sha256") or "")
-        if len(expected_digest) != 64 or any(c not in "0123456789abcdef" for c in expected_digest):
-            raise RuntimeError("server returned an invalid update digest")
-        if not manifest.get("update_required"):
-            result(True, "client is already up to date", requested_at, {"update_required": False, "sha256": expected_digest})
-            return 0
-
-        installer_url = same_origin(server, str(manifest.get("artifact_url") or ""), "/install/player-client.sh")
-        signature_url = same_origin(server, str(manifest.get("signature_url") or ""), "/install/player-client.sh.sig")
-        installer_request = urllib.request.Request(installer_url, headers={"X-SCREENTRA-CLIENT-TOKEN": token})
-        with urllib.request.urlopen(installer_request, timeout=60, context=context) as response:
-            installer = response.read()
-        signature_request = urllib.request.Request(signature_url, headers={"X-SCREENTRA-CLIENT-TOKEN": token})
-        with urllib.request.urlopen(signature_request, timeout=20, context=context) as response:
-            signature = response.read()
-        actual_digest = hashlib.sha256(installer).hexdigest()
-        if actual_digest != expected_digest:
-            raise RuntimeError("downloaded update digest does not match the server manifest")
-        if not PUBLIC_KEY.is_file():
-            raise RuntimeError("client update signing key is missing")
-
-        with tempfile.TemporaryDirectory(prefix="screentra-cast-client-update-", dir="/var/lib/screentra-cast/update") as work:
-            installer_path = Path(work) / "player-client.sh"
-            signature_path = Path(work) / "player-client.sh.sig"
-            installer_path.write_bytes(installer)
-            signature_path.write_bytes(signature)
-            installer_path.chmod(0o755)
-            verify = subprocess.run([
-                "openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(PUBLIC_KEY),
-                "-sigfile", str(signature_path), "-in", str(installer_path),
-            ], capture_output=True, text=True, timeout=20)
-            if verify.returncode != 0:
-                raise RuntimeError("client update signature verification failed")
-            env = os.environ.copy()
-            env.update({
-                "HOME": "/home/board",
-                "RIPLEY_SERVER_URL": server,
-                "RIPLEY_CLIENT_ID": client_id,
-                "RIPLEY_CLIENT_DIR": str(INSTALL_DIR),
-                "RIPLEY_CA_CERT": str(ca_file),
-                "SCREENTRA_BOARD_USER": os.environ.get("SCREENTRA_BOARD_USER", "board"),
-            })
-            completed = subprocess.run([
-                "/bin/bash", str(installer_path),
-            ], env=env, capture_output=True, text=True, timeout=600)
-            if completed.returncode != 0:
-                raise RuntimeError(f"verified installer exited with code {completed.returncode}")
-        DIGEST_FILE.parent.mkdir(parents=True, exist_ok=True)
-        temporary = DIGEST_FILE.with_suffix(".tmp")
-        temporary.write_text(expected_digest + "\n")
-        os.chmod(temporary, 0o644)
-        temporary.replace(DIGEST_FILE)
-        result(True, "client update installed successfully", requested_at, {"update_required": True, "sha256": expected_digest})
-        return 0
-    except Exception as exc:
-        result(False, f"client update failed: {exc}", requested_at, {"update_required": True})
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-PY_UPDATER
-    run_privileged chmod 0755 "$UPDATER_SCRIPT"
-    run_privileged tee "$UPDATER_SERVICE" >/dev/null <<EOF_UPDATER_SERVICE
-[Unit]
-Description=Screentra Cast verified client updater
-After=network-online.target
-Wants=network-online.target
-ConditionPathExists=$INSTALL_DIR/server
-
-[Service]
-Type=oneshot
-User=root
-Group=root
-Environment=RIPLEY_CLIENT_DIR=$INSTALL_DIR
-Environment=SCREENTRA_BOARD_USER=$board_user
-ExecStart=$UPDATER_SCRIPT
-TimeoutStartSec=10min
-
-[Install]
-WantedBy=multi-user.target
-EOF_UPDATER_SERVICE
-    run_privileged tee "$UPDATER_PATH_UNIT" >/dev/null <<EOF_UPDATER_PATH
-[Unit]
-Description=Start Screentra Cast verified updater on a board request
-
-[Path]
-PathExists=$UPDATE_REQUEST_FILE
-Unit=screentra-client-updater.service
-
-[Install]
-WantedBy=multi-user.target
-EOF_UPDATER_PATH
-    run_privileged systemctl daemon-reload
-    run_privileged systemctl enable screentra-client-updater.path
-    run_privileged systemctl start screentra-client-updater.path
-    echo "Verified client update service installed: screentra-client-updater.path"
-}
 
 install_screentra_cast_service() {
     echo "Installing screentra-cast-kiosk@.service..."
@@ -411,12 +185,11 @@ create_board_user() {
         run_privileged mkdir -p "$board_home"
     fi
     run_privileged install -d -o "$board_user" -g "$board_user" -m 0755 "$board_home"
-    # The player account is intentionally not an administrator. Keep only the
-    # device groups it needs for rendering/input/audio and remove legacy broad
-    # sudo grants that would turn a compromised update into a root compromise.
-    run_privileged usermod -aG video,render,input,tty,audio "$board_user" 2>/dev/null || true
-    run_privileged gpasswd -d "$board_user" sudo 2>/dev/null || true
-    run_privileged rm -f /etc/sudoers.d/"$board_user" /etc/sudoers.d/screentra-cast-board-nopasswd
+    run_privileged usermod -aG sudo,video,render,input,tty,audio "$board_user" 2>/dev/null || true
+    run_privileged tee /etc/sudoers.d/"$board_user" > /dev/null << 'SUDOERS'
+%sudo ALL=(ALL) NOPASSWD: ALL
+SUDOERS
+    run_privileged chmod 0440 /etc/sudoers.d/"$board_user" 2>/dev/null || true
     run_privileged chown -R "$board_user:$board_user" "$INSTALL_DIR"
     echo "[board] board user ready at $board_home"
 }
@@ -666,7 +439,7 @@ install_screentra_ca_trust() {
         python3 - "$ca_url" "$ca_file" <<'PY_CA_FETCH' || true
 import ssl, sys, urllib.request
 url, out = sys.argv[1], sys.argv[2]
-ctx = ssl.create_default_context()
+ctx = ssl._create_unverified_context()
 try:
     with urllib.request.urlopen(url, context=ctx, timeout=20) as r:
         data = r.read()
@@ -931,7 +704,7 @@ def tls_context():
         except Exception as e:
             return None
     if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
-        return ssl.create_default_context()
+        return ssl._create_unverified_context()
     return None
 
 def urlopen_ripley(req, timeout=10):
@@ -1093,25 +866,15 @@ if [ ! -f "$CLIENT_ID_FILE" ]; then
   fi
 fi
 CLIENT_ID="$(cat "$CLIENT_ID_FILE")"
-CLIENT_AUTH_TOKEN_FILE="${RIPLEY_CLIENT_AUTH_TOKEN_FILE:-$INSTALL_DIR/client-auth-token}"
+CLIENT_AUTH_TOKEN_FILE="$INSTALL_DIR/client-auth-token"
 if [ ! -s "$CLIENT_AUTH_TOKEN_FILE" ]; then
-  python3 - "$CLIENT_AUTH_TOKEN_FILE" <<'PY_CLIENT_AUTH_TOKEN'
-import os
+  umask 077
+  python3 - <<'PY_TOKEN' > "$CLIENT_AUTH_TOKEN_FILE"
 import secrets
-import sys
-
-path = sys.argv[1]
-token = secrets.token_urlsafe(32)
-fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-try:
-    os.write(fd, token.encode('ascii'))
-finally:
-    os.close(fd)
-os.chmod(path, 0o600)
-PY_CLIENT_AUTH_TOKEN
-else
-  chmod 600 "$CLIENT_AUTH_TOKEN_FILE"
+print(secrets.token_urlsafe(48))
+PY_TOKEN
 fi
+chmod 0600 "$CLIENT_AUTH_TOKEN_FILE"
 
 cat > "$HEARTBEAT" <<'PY'
 #!/usr/bin/env python3
@@ -1122,7 +885,6 @@ can show enrolled player uptime and usage.
 """
 import argparse
 import json
-import secrets
 import ssl
 import os
 import socket
@@ -1149,21 +911,6 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     temporary.write_text(text)
     os.chmod(temporary, mode)
     os.replace(temporary, path)
-
-
-def client_auth_token(args):
-    """Read or create the persistent player credential without logging it."""
-    path = Path(args.client_auth_token_file)
-    try:
-        token = path.read_text().strip()
-        if 32 <= len(token) <= 256 and token.isascii():
-            return token
-    except Exception:
-        pass
-    path.parent.mkdir(parents=True, exist_ok=True)
-    token = secrets.token_urlsafe(32)
-    _atomic_write_text(path, token, 0o600)
-    return token
 
 
 def _display_governance_count(which):
@@ -1327,7 +1074,6 @@ def payload(args):
         'client_agent': True,
         'client_installed': True,
         'identity_source': 'persistent_client_id',
-        'client_auth_token': client_auth_token(args),
         'client_id': client_id,
         'hostname': args.name or hostname,
         'address': local_ip(),
@@ -1366,7 +1112,7 @@ def tls_context():
         except Exception as e:
             print(f'warning: failed to load Screentra Cast CA {cafile}: {e}', flush=True)
     if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
-        return ssl.create_default_context()
+        return ssl._create_unverified_context()
     return None
 
 def urlopen_ripley(req, timeout=10):
@@ -1377,29 +1123,45 @@ def urlopen_ripley(req, timeout=10):
     return urllib.request.urlopen(req, **kw)
 
 
-def poll_command(server, client_id, client_token):
+def client_auth_token():
+    """Read the per-client token without ever printing or logging it."""
+    token = os.environ.get('RIPLEY_CLIENT_AUTH_TOKEN', '').strip()
+    if token:
+        return token
+    path = os.environ.get(
+        'RIPLEY_CLIENT_AUTH_TOKEN_FILE',
+        str(Path.home() / '.local/share/screentra-client/client-auth-token'),
+    )
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return ''
+
+
+def client_auth_headers():
+    token = client_auth_token()
+    return {'X-SCREENTRA-CLIENT-TOKEN': token} if token else {}
+
+
+def poll_command(server, client_id):
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command'
     try:
-        req = urllib.request.Request(url, headers={'X-SCREENTRA-CLIENT-TOKEN': client_token})
+        req = urllib.request.Request(url, headers=client_auth_headers())
         with urlopen_ripley(req, timeout=5) as r:
             data = r.read().decode()
             return json.loads(data)
     except urllib.error.HTTPError as e:
-        if e.code == 404:
+        if e.code in (401, 404, 429):
             return None
         raise
     except Exception:
         return None
 
 
-def ack_command(server, client_id, client_token):
-    url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command/ack'
+def ack_command(server, client_id):
+    url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command'
     try:
-        req = urllib.request.Request(
-            url,
-            headers={'X-SCREENTRA-CLIENT-TOKEN': client_token},
-            method='POST',
-        )
+        req = urllib.request.Request(url, headers=client_auth_headers(), method='DELETE')
         with urlopen_ripley(req, timeout=5) as r:
             return r.read().decode()
     except Exception as e:
@@ -1438,7 +1200,8 @@ def read_command_result(cache_dir):
 def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='assigned-layout-display-{index}.json'):
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/displays/' + str(display_index) + '/config'
     try:
-        with urlopen_ripley(url, timeout=10) as r:
+        req = urllib.request.Request(url, headers=client_auth_headers())
+        with urlopen_ripley(req, timeout=10) as r:
             data = json.loads(r.read().decode())
         # Preserve theme (set by heartbeat from local config, sent to server)
         # so it survives across config sync cycles.
@@ -1486,7 +1249,8 @@ def fetch_admin_users(server, client_id, cache_dir):
     """
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/admin-users'
     try:
-        with urlopen_ripley(url, timeout=10) as r:
+        req = urllib.request.Request(url, headers=client_auth_headers())
+        with urlopen_ripley(req, timeout=10) as r:
             data = json.loads(r.read().decode())
         users = data.get('users') or []
         if users:
@@ -1506,10 +1270,14 @@ def fetch_admin_users(server, client_id, cache_dir):
 
 def post(server, data):
     url = server.rstrip('/') + '/api/clients/register'
+    payload = dict(data)
+    token = client_auth_token()
+    if token:
+        payload.setdefault('client_auth_token', token)
     req = urllib.request.Request(
         url,
-        data=json.dumps(data).encode(),
-        headers={'Content-Type': 'application/json'},
+        data=json.dumps(payload).encode(),
+        headers={'Content-Type': 'application/json', **client_auth_headers()},
         method='POST',
     )
     with urlopen_ripley(req, timeout=10) as r:
@@ -1537,7 +1305,6 @@ def main():
     ap.add_argument('--interval', type=int, default=int(os.environ.get('RIPLEY_HEARTBEAT_INTERVAL', '30')))
     ap.add_argument('--once', action='store_true')
     ap.add_argument('--client-id', default=os.environ.get('RIPLEY_CLIENT_ID'))
-    ap.add_argument('--client-auth-token-file', default=os.environ.get('RIPLEY_CLIENT_AUTH_TOKEN_FILE', os.path.expanduser('~/.local/share/screentra-client/client-auth-token')))
     ap.add_argument('--name', default=os.environ.get('RIPLEY_CLIENT_NAME'))
     ap.add_argument('--role', default=os.environ.get('RIPLEY_CLIENT_ROLE', 'player'))
     ap.add_argument('--version', default=os.environ.get('RIPLEY_CLIENT_VERSION', '0.1.0'))
@@ -1619,10 +1386,10 @@ def main():
         fetch_all_displays(args.server, data['client_id'], args.cache_dir, len(data.get('displays') or []), args.display_config_pattern)
         fetch_admin_users(args.server, data['client_id'], args.cache_dir)
         assigned = cfg.get('assigned_layout_id') if cfg else None
-        cmd = poll_command(args.server, data['client_id'], data['client_auth_token'])
+        cmd = poll_command(args.server, data['client_id'])
         if cmd:
             write_pending_command(cmd, args.cache_dir)
-            ack = ack_command(args.server, data['client_id'], data['client_auth_token'])
+            ack = ack_command(args.server, data['client_id'])
             print(f'heartbeat status={status} client_id={data["client_id"]} assigned_layout={assigned} command={cmd.get("action")} ack={ack}', flush=True)
         else:
             print(f'heartbeat status={status} client_id={data["client_id"]} assigned_layout={assigned}', flush=True)
@@ -3415,7 +3182,7 @@ def _refresh_ca_from_server() -> dict:
     if not server_url: return {'ok': False, 'error': 'server URL empty'}
     url = server_url + '/install/screentra-cast-signage-ca.crt'; out = _ca_file()
     try:
-        ctx = ssl.create_default_context() if server_url.startswith('https://') else None
+        ctx = ssl._create_unverified_context() if server_url.startswith('https://') else None
         data = _ur.urlopen(url, context=ctx, timeout=10).read()
         if len(data) < 200 or b'BEGIN CERTIFICATE' not in data:
             return {'ok': False, 'error': f'downloaded CA did not look like a certificate ({len(data)} bytes)', 'url': url}
@@ -3830,18 +3597,15 @@ function wmoIconHtml(code,p){const key=String(code),custom=p&&p.custom_icons&&p.
 function weatherFor(p,i){const d=p._weather_data||{},q=d.daily||{},codes=q.weather_code||q.weathercode||[],code=codes[i]??d.current_weather?.weather_code??d.current_weather?.weathercode??2,winds=q.wind_speed||q.windspeed||[],wind=winds[i]??d.current_weather?.windspeed??0;return {code,icon:wmoIcon(code),high:q.temperature_2m_max?.[i],low:q.temperature_2m_min?.[i],precip:q.precipitation_probability_max?.[i]??0,wind};}
 function repeatCount(p,e){const r=e.repeat||{};return r.group?Math.max(1,Math.min(14,Number(p.shown_days)||Number(r.count)||4)):Math.max(1,Number(r.count)||1);}
 function groupMetrics(es){const g={};es.forEach(e=>{const id=e.repeat&&e.repeat.group;if(!id)return;const r=e.repeat,x=Number(e.x)||0,y=Number(e.y)||0,w=Number(e.width)||120,h=Number(e.height)||80,m=g[id]||(g[id]={minX:x,minY:y,maxX:x+w,maxY:y+h,gapX:Number(r.gap_x)||0,gapY:Number(r.gap_y)||0,mode:r.mode||'rows'});m.minX=Math.min(m.minX,x);m.minY=Math.min(m.minY,y);m.maxX=Math.max(m.maxX,x+w);m.maxY=Math.max(m.maxY,y+h);});return g;}
-function templateEl(e,p,i,g,dw,dh){const q=Object.assign({},e.props||{}),r=e.repeat||{},m=r.group&&g[r.group];if(i){const n=Number(q.day_offset??q.weather_day_offset)||0;q.day_offset=n+i;q.weather_day_offset=n+i;}let x=Number(e.x)||0,y=Number(e.y)||0,w=Number(e.width)||120,h=Number(e.height)||80;if(m&&i){if((m.mode||'rows')==='columns')x+=i*(m.maxX-m.minX+m.gapX);else y+=i*(m.maxY-m.minY+m.gapY);}const a=q.align||'center',j=a==='left'?'flex-start':a==='right'?'flex-end':'center';let st=`position:absolute;box-sizing:border-box;left:${x/dw*100}%;top:${y/dh*100}%;width:${w/dw*100}%;height:${h/dh*100}%;display:flex;align-items:center;justify-content:${j};text-align:${a};overflow:hidden;z-index:${Number(e.z)||0};color:${q.color||'#fff'};font-size:${Number(q.font_size)||24}px;`;let inner='';if(e.type==='rectangle')st+=`background:${q.color||'#1e293b'};opacity:${Number(q.opacity??100)/100};border-radius:${Number(q.radius)||0}px;`;else if(e.type==='image'){const fit=['contain','cover','fill','scale-down','none'].includes(q.fit)?q.fit:'contain';inner=q.url?`<img src="${esc(q.url)}" alt="${esc(q.alt||'')}" style="width:100%;height:100%;object-fit:${fit};">`:'';}else if(e.type==='text')inner=esc(q.text||'Text');else if(['variable_icon','variable_text','variable','date'].includes(e.type)){const k=q.variable_key||'',wx=weatherFor(p,Math.max(0,Math.min(6,Number(q.day_offset??q.weather_day_offset)||0)));if(k==='weather_icon'||e.type==='variable_icon'||q.display_mode==='weather_icon')inner=wmoIconHtml(wx.code,p);else if(k==='weather_description')inner=esc('Weather');else if(k==='high_temp')inner=esc('High '+(wx.high??'—'));else if(k==='low_temp')inner=esc('Low '+(wx.low??'—'));else if(k==='wind_speed')inner=esc('Wind '+Math.round(wx.wind)+' mph');else{const d=new Date();d.setDate(d.getDate()+(Number(q.day_offset??q.weather_day_offset)||0));inner=esc(k==='day_name'?d.toLocaleDateString(undefined,{weekday:'long'}):d.toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'}));}}else inner=esc(q.label||e.type||'');return `<div style="${st}">${inner}</div>`;}
+function templateEl(e,p,i,g,dw,dh){const q=Object.assign({},e.props||{}),r=e.repeat||{},m=r.group&&g[r.group];if(i){const n=Number(q.day_offset??q.weather_day_offset)||0;q.day_offset=n+i;q.weather_day_offset=n+i;}let x=Number(e.x)||0,y=Number(e.y)||0,w=Number(e.width)||120,h=Number(e.height)||80;if(m&&i){if((m.mode||'rows')==='columns')x+=i*(m.maxX-m.minX+m.gapX);else y+=i*(m.maxY-m.minY+m.gapY);}const a=q.align||'center',j=a==='left'?'flex-start':a==='right'?'flex-end':'center';let st=`position:absolute;box-sizing:border-box;left:${x/dw*100}%;top:${y/dh*100}%;width:${w/dw*100}%;height:${h/dh*100}%;display:flex;align-items:center;justify-content:${j};text-align:${a};overflow:hidden;z-index:${Number(e.z)||0};color:${q.color||'#fff'};font-size:${Number(q.font_size)||24}px;`;let inner='';if(e.type==='rectangle')st+=`background:${q.color||'#1e293b'};opacity:${Number(q.opacity??100)/100};border-radius:${Number(q.radius)||0}px;`;else if(e.type==='text')inner=esc(q.text||'Text');else if(['variable_icon','variable_text','variable','date'].includes(e.type)){const k=q.variable_key||'',wx=weatherFor(p,Math.max(0,Math.min(6,Number(q.day_offset??q.weather_day_offset)||0)));if(k==='weather_icon'||e.type==='variable_icon'||q.display_mode==='weather_icon')inner=wmoIconHtml(wx.code,p);else if(k==='weather_description')inner=esc('Weather');else if(k==='high_temp')inner=esc('High '+(wx.high??'—'));else if(k==='low_temp')inner=esc('Low '+(wx.low??'—'));else if(k==='wind_speed')inner=esc('Wind '+Math.round(wx.wind)+' mph');else{const d=new Date();d.setDate(d.getDate()+(Number(q.day_offset??q.weather_day_offset)||0));inner=esc(k==='day_name'?d.toLocaleDateString(undefined,{weekday:'long'}):d.toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'}));}}else inner=esc(q.label||e.type||'');return `<div style="${st}">${inner}</div>`;}
 function templateHtml(w){const p=props(w),es=Array.isArray(p.template_elements)?p.template_elements:[];if(!es.length)return '';const g=groupMetrics(es);let dw=Number(p.template_width)||760,dh=Number(p.template_height)||427.5;es.forEach(e=>{dw=Math.max(dw,(Number(e.x)||0)+(Number(e.width)||120));dh=Math.max(dh,(Number(e.y)||0)+(Number(e.height)||80));});return `<div style="position:relative;width:100%;height:100%;overflow:hidden;">${es.slice().sort((a,b)=>(Number(a.z)||0)-(Number(b.z)||0)).map(e=>Array.from({length:repeatCount(p,e)},(_,i)=>templateEl(e,p,i,g,dw,dh)).join('')).join('')}</div>`;}
 async function loadWeather(p){const lat=Number(p.lat||0),lon=Number(p.lon||0);if(!lat||!lon)return;try{const r=await fetch(`/api/weather/forecast?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`,{cache:'no-store'});if(r.ok)p._weather_data=await r.json();}catch(_e){}}
 function countdownFontSize(p){return Math.max(8,Math.min(160,Number(p.font_size||p.fontSize||48)||48))*2;}
-function countdownText(target,now,p){const diff=Math.max(0,target-now);const d=Math.floor(diff/86400000),h=Math.floor(diff%86400000/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000);return Number.isFinite(target)&&target>0?(d?d+'d '+h+'h':h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s'):(p.expiry_text||'Choose a date and time');}
-function countdownMarkup(p){const mode=p.countdown_mode||'date',value=Math.max(1,Number(p.duration_value||1)),unit=p.duration_unit||'minutes',mult={seconds:1000,minutes:60000,hours:3600000,days:86400000}[unit]||60000,started=Date.now(),target=mode==='duration'?started+value*mult:new Date(p.targetDate||'').getTime();return `<div data-countdown-widget="1" data-countdown-mode="${esc(mode)}" data-countdown-target="${esc(p.targetDate||'')}" data-countdown-duration-value="${esc(value)}" data-countdown-duration-unit="${esc(unit)}" data-countdown-started-at="${mode==='duration'?started:''}" data-countdown-expiry-text="${esc(p.expiry_text||'')}" class="countdown-value" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;padding:1rem;color:${p.color||'#fff'};font-size:${countdownFontSize(p)}px;font-weight:800;line-height:1;text-align:center;overflow:hidden;white-space:nowrap;">${esc(Number.isFinite(target)&&target>0?countdownText(target,started,p):(p.expiry_text||'Choose a date and time'))}</div>`;}
 async function renderWidget(w){const p=props(w),t=normWidgetType(w);if(t==='weather')await loadWeather(p);let inner='';
  if(t==='weather'&&Array.isArray(p.template_elements)&&p.template_elements.length) inner=templateHtml(w);
  else if(t==='text') inner=`<div style="width:100%;height:100%;display:flex;align-items:${p.valign||'center'};justify-content:${p.align==='left'?'flex-start':p.align==='right'?'flex-end':'center'};padding:1rem;color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||24)*2}px;text-align:${p.align||'center'};">${esc(p.text||'Text')}</div>`;
- else if(t==='countdown') inner=countdownMarkup(p);
+ else if(t==='countdown') { const target=p.countdown_mode==='duration' ? Date.now() + Math.max(1,Number(p.duration_value||1))*({seconds:1000,minutes:60000,hours:3600000,days:86400000}[p.duration_unit||'minutes']||60000) : new Date(p.targetDate||'').getTime(); const diff=Math.max(0,target-Date.now()); const d=Math.floor(diff/86400000),h=Math.floor(diff%86400000/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000); const text=Number.isFinite(target)&&target>0?(d?d+'d '+h+'h':h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s'):(p.expiry_text||'Choose a date and time'); inner=`<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;padding:1rem;color:${p.color||'#fff'};font-size:${countdownFontSize(p)}px;font-weight:800;line-height:1;text-align:center;overflow:hidden;white-space:nowrap;">${esc(text)}</div>`; }
  else if(t==='image') inner=`<img src="${esc(p.url||p.src||'')}" style="width:100%;height:100%;object-fit:${p.fit||'cover'};">`;
- else if(t==='video') { const list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url||p.src?[{url:p.url||p.src}]:[]); const url=list[0]&&list[0].url||''; const fit=p.fit||'cover'; inner=`<video data-video-widget-id="${esc(w.id||'')}" src="${esc(url)}" autoplay ${p.loop!==false&&list.length===1?'loop ':''} playsinline preload="auto" ${p.mute||p.muted?'muted':''} style="width:100%;height:100%;object-fit:${fit};background:#000;"></video>`; }
  else if(t==='clock') inner=`<div class="clock" data-clock style="color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||48)*2}px"></div>`;
  else if(t==='datetime'||t==='date') inner=`<div class="date" data-date style="color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||36)*2}px"></div>`;
  else if(t==='rectangle') inner=`<div style="width:100%;height:100%;background:${p.color||'#e94560'};border-radius:${p.radius||0}px;"></div>`;
@@ -3851,12 +3615,9 @@ async function renderWidget(w){const p=props(w),t=normWidgetType(w);if(t==='weat
  else inner=`<div style="width:100%;height:100%;display:grid;place-items:center;border:1px dashed #334155;color:#94a3b8;">${esc(t||'widget')}</div>`;
  return `<div class="widget" style="${styleFor(w)}">${inner}</div>`;}
 function tickClocks(){const now=new Date();document.querySelectorAll('[data-clock]').forEach(e=>e.textContent=now.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}));document.querySelectorAll('[data-date]').forEach(e=>e.textContent=now.toLocaleDateString());}
-function tickCountdowns(){const now=Date.now(),units={seconds:1000,minutes:60000,hours:3600000,days:86400000};document.querySelectorAll('[data-countdown-widget]').forEach(node=>{const mode=node.dataset.countdownMode||'date',duration=Math.max(1,Number(node.dataset.countdownDurationValue||1))*(units[node.dataset.countdownDurationUnit||'minutes']||60000);let target;if(mode==='duration'){if(!node.dataset.countdownStartedAt)node.dataset.countdownStartedAt=String(now);target=Number(node.dataset.countdownStartedAt)+duration;}else target=new Date(node.dataset.countdownTarget||'').getTime();const value=node.querySelector('.countdown-value')||node;if(!Number.isFinite(target)||target<=0)return;value.textContent=target<=now?(node.dataset.countdownExpiryText||''):countdownText(target,now,{});});}
-const cachedVideoStates={};
-function initCachedVideoWidgets(widgets){(widgets||[]).forEach(w=>{if(normWidgetType(w)!=='video')return;const p=props(w),list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url||p.src?[{url:p.url||p.src}]:[]);if(!list.length)return;const node=Array.from(document.querySelectorAll('[data-video-widget-id]')).find(n=>n.getAttribute('data-video-widget-id')===String(w.id));if(!node)return;const loop=p.loop!==false,key=list.map(x=>x.url).join('|')+'|'+(loop?'1':'0')+'|'+(p.shuffle?'1':'0'),old=cachedVideoStates[w.id];if(old&&old.node===node&&old.key===key)return;if(old){old.node.pause();old.node.onended=null;old.node.onerror=null;}const state={node,list:list.slice(),index:0,loop,key,failed:{}};cachedVideoStates[w.id]=state;function play(){const item=state.list[state.index];if(!item||!item.url)return;state.node.loop=state.list.length===1&&state.loop;state.node.src=item.url;state.node.load();const attempt=state.node.play();if(attempt&&typeof attempt.catch==='function')attempt.catch(()=>{});}function advance(){state.index++;if(state.index>=state.list.length){if(!state.loop)return;state.index=0;state.failed={};}play();}function failed(){const item=state.list[state.index];if(item&&item.url)state.failed[item.url]=true;advance();}state.node.onended=advance;state.node.onerror=failed;play();});}
 function applyOrientation(value){const v=String(value||'normal');document.body.dataset.orientation=['normal','flipped','rotated_left','rotated_right'].includes(v)?v:'normal';}
-async function loadLayout(){try{const r=await fetch('/assigned-layout.json?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('no assigned layout');const txt=await r.text();try{const c=await fetch('/api/client-config.json?ts='+Date.now(),{cache:'no-store'});if(c.ok)applyOrientation((await c.json()).orientation);}catch(_e){}if(txt===currentHash)return;currentHash=txt;const layout=JSON.parse(txt);const ws=(layout.widgets||[]).slice().sort((a,b)=>(a.z||0)-(b.z||0));const rendered=await Promise.all(ws.map(renderWidget));document.getElementById('player').innerHTML=rendered.join('')||'<div class="fallback"><div><strong>Empty Layout</strong></div></div>';initCachedVideoWidgets(ws);tickClocks();tickCountdowns();}catch(e){if(!currentHash)document.getElementById('player').innerHTML='<div class="fallback"><div><strong>Waiting for cached assigned layout</strong><span>'+esc(e.message)+'</span></div></div>';}}
-setInterval(tickClocks,1000);setInterval(tickCountdowns,1000);setInterval(loadLayout,5000);setInterval(()=>{currentHash='';loadLayout().catch(()=>{});},15*60*1000);loadLayout();
+async function loadLayout(){try{const r=await fetch('/assigned-layout.json?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('no assigned layout');const txt=await r.text();try{const c=await fetch('/api/client-config.json?ts='+Date.now(),{cache:'no-store'});if(c.ok)applyOrientation((await c.json()).orientation);}catch(_e){}if(txt===currentHash)return;currentHash=txt;const layout=JSON.parse(txt);const ws=(layout.widgets||[]).slice().sort((a,b)=>(a.z||0)-(b.z||0));const rendered=await Promise.all(ws.map(renderWidget));document.getElementById('player').innerHTML=rendered.join('')||'<div class="fallback"><div><strong>Empty Layout</strong></div></div>';tickClocks();}catch(e){if(!currentHash)document.getElementById('player').innerHTML='<div class="fallback"><div><strong>Waiting for cached assigned layout</strong><span>'+esc(e.message)+'</span></div></div>';}}
+setInterval(tickClocks,1000);setInterval(loadLayout,5000);setInterval(()=>{currentHash='';loadLayout().catch(()=>{});},15*60*1000);loadLayout();
 
 // === Cursor auto-hide (3.5s default, configurable via /api/cursor-config.json) ===
 let __cursorIdle = Date.now();
@@ -3923,17 +3684,10 @@ def _connector_for_display_index(display_index: int) -> str | None:
     """Return the connector name (e.g. 'DP-2') for a given display_index.
 
     Sources (tried in order):
-      1. /api/clients/<cid>/displays response is cached by the heartbeat
-         but only carries display_index/assigned_layout_id/layout, not
-         the per-display connector mapping. Skip.
-      2. The display-governance script writes the full mapping to
-         ~/.local/share/screentra-client/config.json under
-         last_detected_displays[].connector — preferred because it's
-         already populated by the installer before any heartbeat runs.
-      3. /sys/class/drm (live kernel enumeration, fallback if config.json
-         is missing — sorts by name, same convention as the launcher).
-    Returns None if nothing matches so the caller can fall back to the
-    numeric index.
+      1. The display-governance mapping in config.json.
+      2. /sys/class/drm (live kernel enumeration, fallback if config.json
+         is missing or stale).
+    Returns None when no physical connector matches.
     """
     try:
         gov_path = Path.home() / '.local/share/screentra-client/config.json'
@@ -3942,7 +3696,7 @@ def _connector_for_display_index(display_index: int) -> str | None:
             for d in (cfg.get('last_detected_displays') or []):
                 if int(d.get('display_index', -1)) == int(display_index):
                     con = d.get('connector')
-                    if con:
+                    if con and con != 'virtual-0':
                         return con
     except Exception:
         pass
@@ -3993,8 +3747,9 @@ def _server_reachable(server_url: str, timeout: float) -> bool:
         if u.scheme == 'https':
             # Try the explicit RIPLEY_CA_CERT first, then the bundled
             # ~/.local/share/screentra-client/screentra-cast-signage-ca.crt.
-            # Never disable certificate verification. If the local CA is not
-            # present, this probe fails closed instead of accepting a MITM.
+            # Only fall back to system trust, and only as a last resort fall
+            # back to _create_unverified_context when the operator has
+            # explicitly opted in via RIPLEY_INSECURE_SSL=1.
             ca_candidates = []
             env_ca = os.environ.get('RIPLEY_CA_CERT')
             if env_ca:
@@ -4008,7 +3763,13 @@ def _server_reachable(server_url: str, timeout: float) -> bool:
                     except Exception:
                         ctx = None
             if ctx is None:
-                return False
+                if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
+                    ctx = _ssl._create_unverified_context()
+                else:
+                    # No CA available and operator hasn't opted in — fail
+                    # closed (return False). Better to show the cached
+                    # fallback page than to silently MITM the probe.
+                    return False
         req = _ur.Request((u.scheme + '://' + (host if not u.port else f'{host}:{port}') + path), method='GET')
         with _ur.urlopen(req, timeout=timeout, context=ctx) as r:
             return 200 <= r.status < 500
@@ -4017,20 +3778,11 @@ def _server_reachable(server_url: str, timeout: float) -> bool:
 
 
 def _live_player_redirect_html(server_url: str, display_index: int, connector: str | None = None, client_id: str | None = None) -> str:
-    """Return a tiny HTML page that redirects the kiosk to the server player.
-
-    Server's player.js matches `?display=` against /api/displays[].connector
-    (e.g. "DP-2"), not against the local display_index. If the heartbeat
-    has cached the connector for this index (the normal case), prefer it.
-    Fall back to the numeric index for legacy code paths that may still use it.
-
-    `client_id` is appended when available so the player page can fetch THIS
-    box's display list from /api/clients/<cid>/displays rather than the
-    server's /api/displays (which only sees outputs reachable from the
-    server process, not from a remote player box).
-    """
+    """Return a redirect to the live server for a physical connector."""
+    if not connector or connector == 'virtual-0':
+        raise ValueError('physical display connector is required')
     safe_server = server_url.replace('"', '%22')
-    target = f'{safe_server.rstrip("/")}/player.html?display={urllib.parse.quote(connector or str(display_index))}'
+    target = f'{safe_server.rstrip("/")}/player.html?display={urllib.parse.quote(connector)}'
     if client_id:
         target += f'&client_id={urllib.parse.quote(client_id, safe="")}'
     return (
@@ -4245,7 +3997,8 @@ class Handler(BaseHTTPRequestHandler):
             live_url = _live_player_url()
             if live_url and _server_reachable(live_url, LIVE_PROBE_TIMEOUT_SECS):
                 connector = _connector_for_display_index(display_index)
-                return self.send_text(200, _live_player_redirect_html(live_url, display_index, connector, _client_id_from_env() or _client_id_from_cache()), 'text/html; charset=utf-8')
+                if connector:
+                    return self.send_text(200, _live_player_redirect_html(live_url, display_index, connector, _client_id_from_env() or _client_id_from_cache()), 'text/html; charset=utf-8')
 
             # No live server reachable (offline mode). Render the offline
             # cached layout from the renderer script's PLAYER_HTML constant.
@@ -4693,8 +4446,8 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
     """Return a list of detected DRM connector displays.
 
     Each entry: { display_index, connector, label, width, height, refresh_rate, enabled, connected }
-    Falls back to a single virtual display when /sys/class/drm is missing or empty
-    (e.g. macOS dev boxes, headless servers).
+    Returns an empty list when no physical DRM connector is present. Virtual
+    displays are not supported.
     """
     drm_root = Path('/sys/class/drm')
     displays: List[Dict[str, Any]] = []
@@ -4744,20 +4497,8 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
                 'last_error': None,
             })
 
-    # Fallback: virtual single display for headless / dev boxes
-    if not displays:
-        displays.append({
-            'display_index': 0,
-            'connector': 'virtual-0',
-            'label': 'Virtual Display',
-            'width': 1920,
-            'height': 1080,
-            'refresh_rate': 60.0,
-            'enabled': True,
-            'connected': True,
-            'last_error': None,
-        })
-
+    # No physical connector means no supported display. Never synthesize a
+    # virtual output: the player is a physical-display-only appliance.
     return displays
 
 PY_DETECT_FILE
@@ -4799,7 +4540,7 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
     # Number of connected+enabled DRM connectors the installer found. The
     # renderer / kiosk-launcher uses this as the upper bound. Re-detected on
     # every run; never mutated by the actor.
-    "installer_detected_max_displays": 1,
+    "installer_detected_max_displays": 0,
     # Optional operator-set cap (per-box). None means every connected physical
     # display is eligible, including displays with no touch/input device.
     "max_displays": None,
@@ -4817,7 +4558,7 @@ def detect_count(max_scan: int = 16) -> int:
     an operator can re-enable DP-4 after touchscreen-only mode turned it off.
     """
     displays = _det.detect_displays(max_displays=max_scan)
-    return sum(1 for d in displays if d.get("connected", d.get("enabled")) and d.get("connector") != "virtual-0")
+    return sum(1 for d in displays if d.get("connected", d.get("enabled")))
 
 
 def detect_full(max_scan: int = 16) -> List[Dict[str, Any]]:
@@ -4861,14 +4602,14 @@ def write_config(config_path: Path, *, installer_detected_max_displays: int,
 
 def compute_active_max(config: Dict[str, Any]) -> int:
     """The value the renderer / kiosk-launcher should actually use."""
-    installer = int(config.get("installer_detected_max_displays") or 1)
+    installer = max(int(config.get("installer_detected_max_displays") or 0), 0)
     override = config.get("max_displays")
     if override is None:
-        return max(installer, 1)
+        return installer
     try:
-        override_i = max(int(override), 1)
+        override_i = max(int(override), 0)
     except (TypeError, ValueError):
-        return max(installer, 1)
+        return installer
     # Operator cap cannot exceed what the hardware actually has.
     return min(installer, override_i)
 
@@ -4883,7 +4624,7 @@ def main() -> int:
     args = ap.parse_args()
 
     displays = detect_full(max_scan=args.max_scan)
-    connected_count = sum(1 for d in displays if d.get("connected", d.get("enabled")) and d.get("connector") != "virtual-0")
+    connected_count = sum(1 for d in displays if d.get("connected", d.get("enabled")))
 
     config_path = Path(args.config_dir) / "config.json"
     existing = load_config(config_path)
@@ -5395,7 +5136,7 @@ def tls_context(cache_dir: Path | None = None):
             except Exception as e:
                 print(f'warning: failed to load Screentra Cast CA {cafile}: {e}', flush=True)
     if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
-        return ssl.create_default_context()
+        return ssl._create_unverified_context()
     return None
 
 def urlopen_ripley(req, timeout=10, cache_dir: Path | None = None):
@@ -5480,19 +5221,62 @@ def fetch_all_display_configs(server: str, client_id: str, cache_dir: Path) -> b
 
 
 def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | None) -> tuple[bool, str, dict]:
-    """Request the root-owned updater without executing any supplied code."""
-    request_file = Path('/var/lib/screentra-cast/update/request')
-    requested_at = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z'
-    request_file.parent.mkdir(parents=True, exist_ok=True)
-    temporary = request_file.with_name(f'.{request_file.name}.{os.getpid()}.tmp')
-    temporary.write_text(json.dumps({'requested_at': requested_at}))
-    os.chmod(temporary, 0o660)
-    os.replace(temporary, request_file)
-    return True, 'verified root client updater requested', {
-        'request_file': str(request_file),
-        'server_verification': 'pending',
-        'requested_at': requested_at,
-    }
+    """Download and run the server-served player installer, preserving enrollment identity."""
+    payload = payload or {}
+    install_dir = Path(os.environ.get('RIPLEY_CLIENT_DIR') or str(cache_dir.parent))
+    server = (payload.get('server_url') or server or '').rstrip('/')
+    if not server:
+        return False, 'server URL is not configured', {}
+    installer_url = payload.get('installer_url') or (server + '/install/player-client.sh')
+    configured = urllib.parse.urlsplit(server)
+    requested = urllib.parse.urlsplit(installer_url)
+    if (requested.scheme, requested.netloc) != (configured.scheme, configured.netloc):
+        installer_url = server + '/install/player-client.sh'
+    env = os.environ.copy()
+    env['RIPLEY_SERVER_URL'] = server
+    if client_id:
+        env['RIPLEY_CLIENT_ID'] = client_id
+    env['RIPLEY_CLIENT_DIR'] = str(install_dir)
+    env['RIPLEY_CA_CERT'] = str(install_dir / 'screentra-cast-signage-ca.crt')
+    env.setdefault('RIPLEY_CLIENT_NAME', os.environ.get('RIPLEY_CLIENT_NAME') or os.uname().nodename)
+    env.setdefault('RIPLEY_CLIENT_ROLE', os.environ.get('RIPLEY_CLIENT_ROLE') or 'player')
+    details = {'installer_url': installer_url, 'install_dir': str(install_dir), 'client_id': client_id or None}
+    if payload.get('dry_run'):
+        details['dry_run'] = True
+        return True, f'would download and run {installer_url}', details
+    with tempfile.NamedTemporaryFile(prefix='ripley-player-update-', suffix='.sh', delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        # Use the same TLS verification as the rest of the actor (Screentra Cast CA
+        # bundle or system trust), never `ssl._create_unverified_context`.
+        # The installer script is downloaded from the same server as the
+        # heartbeat, and a MITM that can rewrite the heartbeat can also
+        # rewrite the installer.
+        ctx_ssl = tls_context(cache_dir)
+        kw = {'timeout': 30}
+        if ctx_ssl is not None:
+            kw['context'] = ctx_ssl
+        with urllib.request.urlopen(installer_url, **kw) as r:
+            data = r.read()
+        tmp_path.write_bytes(data)
+        tmp_path.chmod(0o755)
+        p = subprocess.run(['/bin/bash', str(tmp_path)], env=env, capture_output=True, text=True, timeout=int(payload.get('timeout_seconds') or 180))
+        out = (p.stdout or '').strip()
+        err = (p.stderr or '').strip()
+        details['returncode'] = p.returncode
+        details['stdout_tail'] = out[-2000:]
+        details['stderr_tail'] = err[-2000:]
+        if p.returncode != 0:
+            return False, f'installer exited {p.returncode}: {(err or out)[-500:]}', details
+        return True, 'client installer updated/reinstalled successfully', details
+    except Exception as e:
+        details['error'] = str(e)
+        return False, f'client update failed: {e}', details
+    finally:
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
 
 
 def execute(action: str, payload: dict | None, ctx: dict) -> dict:
@@ -5781,24 +5565,6 @@ done || true
 SH_STATUS
 chmod +x "$STATUS"
 
-UPDATE_REQUEST_HELPER="$BIN_DIR/screentra-client-update-request"
-cat > "$UPDATE_REQUEST_HELPER" <<EOF_UPDATE_REQUEST
-#!/usr/bin/env python3
-import json, os, tempfile
-from datetime import datetime, timezone
-from pathlib import Path
-request = Path("$UPDATE_REQUEST_FILE")
-request.parent.mkdir(parents=True, exist_ok=True)
-with tempfile.NamedTemporaryFile("w", dir=request.parent, prefix=".request.", delete=False) as stream:
-    json.dump({"requested_at": datetime.now(timezone.utc).isoformat()}, stream)
-    stream.write("\n")
-    temporary = Path(stream.name)
-os.chmod(temporary, 0o660)
-os.replace(temporary, request)
-print("verified root client updater requested")
-EOF_UPDATE_REQUEST
-chmod 0755 "$UPDATE_REQUEST_HELPER"
-
 cat > "$KIOSK_LAUNCHER" <<'SH_KIOSK'
 #!/bin/bash
 # screentra-kiosk.sh — Sway compositor plus one cached renderer/browser per display.
@@ -5857,7 +5623,7 @@ fi
 # Produce index|connector|port rows for active connected displays. The local
 # admin display-count cap is respected; a missing cap means all connected
 # outputs. During boot, DRM connectors can take several seconds to appear, so
-# retry governance/config reads before falling back to a virtual display.
+# retry governance/config reads before refusing to start without a physical display.
 read_display_spec() {
     python3 - "$CONFIG_JSON" "$BASE_PORT" <<'PY'
 import json, sys
@@ -5880,15 +5646,13 @@ for d in displays[:cap]:
     idx = int(d.get('display_index', 0))
     connector = str(d['connector'])
     print(f'{idx}|{connector}|{base + idx}')
-if not displays:
-    print(f'0|virtual-0|{base}')
 PY
 }
 
 DISPLAY_SPEC=""
 for attempt in $(seq 1 20); do
     DISPLAY_SPEC="$(read_display_spec)"
-    if [ -n "$DISPLAY_SPEC" ] && [[ "$DISPLAY_SPEC" != *'|virtual-0|'* ]]; then
+    if [ -n "$DISPLAY_SPEC" ]; then
         break
     fi
     if [ "$attempt" -lt 20 ]; then
@@ -5918,14 +5682,11 @@ fi
 # Wayland app_id and is moved to its physical output by connector name.
 {
     printf 'seat * {\n    hide_cursor 3000\n}\n'
-    printf 'output "Virtual-1" {\n    mode 1280x800\n}\n'
     printf 'output * {\n    transform %s\n}\n' "$SWAY_TRANSFORM"
     while IFS='|' read -r idx connector port; do
         [ -n "$idx" ] || continue
-        if [ "$connector" != "virtual-0" ]; then
-            printf 'for_window [app_id="screentra-cast-display-%s"] move container to output %s\n' "$idx" "$connector"
-            printf 'for_window [title="^Screentra Cast Display %s"] move container to output %s\n' "$idx" "$connector"
-        fi
+        printf 'for_window [app_id="screentra-cast-display-%s"] move container to output %s\n' "$idx" "$connector"
+        printf 'for_window [title="^Screentra Cast Display %s"] move container to output %s\n' "$idx" "$connector"
         printf 'for_window [app_id="screentra-cast-display-%s"] fullscreen enable\n' "$idx"
         printf 'for_window [app_id="screentra-cast-display-%s"] border none\n' "$idx"
         printf 'for_window [title="^Screentra Cast Display %s"] fullscreen enable\n' "$idx"
@@ -6010,7 +5771,7 @@ while IFS='|' read -r idx connector port; do
     if [ "$LIVE_READY" -eq 1 ]; then
         SERVER_URL="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text().strip())' "$CLIENT_DIR/server" 2>/dev/null || true)"
         CLIENT_ID="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text().strip())' "$CLIENT_DIR/client-id" 2>/dev/null || true)"
-        if [ -n "$SERVER_URL" ] && [ -n "$CLIENT_ID" ] && [ "$connector" != "virtual-0" ]; then
+        if [ -n "$SERVER_URL" ] && [ -n "$CLIENT_ID" ]; then
             BROWSER_URL="${SERVER_URL%/}/player.html?display=${connector}&client_id=${CLIENT_ID}"
         fi
     fi
@@ -6045,7 +5806,7 @@ while IFS='|' read -r idx connector port; do
         [ -n "$CHROMIUM_PID" ] && break
         sleep 0.25
     done
-    if [ -n "$CHROMIUM_PID" ] && [ "$connector" != "virtual-0" ]; then
+    if [ -n "$CHROMIUM_PID" ]; then
         ROUTED=0
         for attempt in $(seq 1 20); do
             SWAYSOCK_PATH=""
@@ -6098,7 +5859,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart="$HEARTBEAT" --server "$SERVER_URL" --interval "$INTERVAL" --client-id "$CLIENT_ID" --client-auth-token-file "$CLIENT_AUTH_TOKEN_FILE" --name "$CLIENT_NAME" --role "$ROLE" --version "$VERSION"
+ExecStart="$HEARTBEAT" --server "$SERVER_URL" --interval "$INTERVAL" --client-id "$CLIENT_ID" --name "$CLIENT_NAME" --role "$ROLE" --version "$VERSION"
 ExecStartPost=-systemctl --user start $ACTOR_SERVICE_NAME
 Restart=always
 RestartSec=5
@@ -6188,6 +5949,7 @@ Environment=RIPLEY_PENDING_FILE=$INSTALL_DIR/cache/pending-command.json
 Environment=RIPLEY_RESULT_FILE=$INSTALL_DIR/cache/command-result.json
 Environment=SCREENTRA_SERVER_URL=$SERVER_URL
 Environment=RIPLEY_CA_CERT=$INSTALL_DIR/screentra-cast-signage-ca.crt
+Environment=RIPLEY_CLIENT_AUTH_TOKEN_FILE=$INSTALL_DIR/client-auth-token
 Environment=RIPLEY_CLIENT_ID=$CLIENT_ID
 Environment=RIPLEY_CLIENT_CACHE_DIR=$INSTALL_DIR/cache
 ExecStart="$ACTOR" --pending-file "$INSTALL_DIR/cache/pending-command.json" --result-file "$INSTALL_DIR/cache/command-result.json" --server "$SERVER_URL" --client-id "$CLIENT_ID" --cache-dir "$INSTALL_DIR/cache"
@@ -6218,7 +5980,7 @@ Environment=HOME=$BOARD_HOME
 Environment=RIPLEY_CLIENT_DIR=$INSTALL_DIR
 Environment=RIPLEY_CA_CERT=$INSTALL_DIR/screentra-cast-signage-ca.crt
 Environment=PYTHONUNBUFFERED=1
-ExecStart=$HEARTBEAT --server "$SERVER_URL" --interval "$INTERVAL" --client-id "$CLIENT_ID" --client-auth-token-file "$CLIENT_AUTH_TOKEN_FILE" --name "$CLIENT_NAME" --role "$ROLE" --version "$VERSION"
+ExecStart=$HEARTBEAT --server "$SERVER_URL" --interval "$INTERVAL" --client-id "$CLIENT_ID" --name "$CLIENT_NAME" --role "$ROLE" --version "$VERSION"
 Restart=always
 RestartSec=5
 
@@ -6247,6 +6009,7 @@ Environment=RIPLEY_SERVER_URL=$SERVER_URL
 Environment=RIPLEY_CLIENT_ID=$CLIENT_ID
 Environment=RIPLEY_CLIENT_CACHE_DIR=$INSTALL_DIR/cache
 Environment=RIPLEY_CA_CERT=$INSTALL_DIR/screentra-cast-signage-ca.crt
+Environment=RIPLEY_CLIENT_AUTH_TOKEN_FILE=$INSTALL_DIR/client-auth-token
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$ACTOR --pending-file $INSTALL_DIR/cache/pending-command.json --result-file $INSTALL_DIR/cache/command-result.json --server "$SERVER_URL" --client-id "$CLIENT_ID" --cache-dir $INSTALL_DIR/cache --watch
 Restart=always
@@ -6257,8 +6020,6 @@ WantedBy=multi-user.target
 EOF_SYSTEM_ACTOR
 
 SYSTEM_ADMIN_UNIT="/etc/systemd/system/screentra-client-admin.service"
-install_privileged_update_service
-
 run_privileged tee "$SYSTEM_ADMIN_UNIT" >/dev/null <<EOF_SYSTEM_ADMIN
 [Unit]
 Description=Screentra Cast Player Local Admin Dashboard
@@ -6304,7 +6065,7 @@ if command -v systemctl >/dev/null 2>&1; then
   # Debian/minimal install does not report a false "no display session" blocker.
   if ( command -v apt-get >/dev/null 2>&1 || command -v apt >/dev/null 2>&1 ); then
     NEED=()
-    command -v  >/dev/null 2>&1 || NEED+=("")
+    command -v sway >/dev/null 2>&1 || NEED+=("sway")
     command -v wlr-randr >/dev/null 2>&1 || NEED+=("wlr-randr")
     command -v bluetoothctl >/dev/null 2>&1 || NEED+=("bluez")
     command -v wpctl >/dev/null 2>&1 || NEED+=("pipewire" "wireplumber" "libspa-0.2-bluetooth")
@@ -6382,15 +6143,7 @@ fi
 # leave the complete appliance tree owned by the runtime user.
 run_privileged chown -R "${SCREENTRA_BOARD_USER:-board}:${SCREENTRA_BOARD_USER:-board}" "$INSTALL_DIR"
 
-# Record the exact signed installer that was successfully applied. The root
-# updater sends this digest to the server before downloading anything else.
-if command -v sha256sum >/dev/null 2>&1; then
-    UPDATE_DIGEST="$(sha256sum "$0" | cut -d' ' -f1)"
-    printf '%s\n' "$UPDATE_DIGEST" | run_privileged tee "$UPDATE_DIGEST_FILE" >/dev/null
-    run_privileged chmod 0644 "$UPDATE_DIGEST_FILE"
-fi
-
-"$HEARTBEAT" --once --server "$SERVER_URL" --client-id "$CLIENT_ID" --client-auth-token-file "$CLIENT_AUTH_TOKEN_FILE" --name "$CLIENT_NAME" --role "$ROLE" --version "$VERSION"
+"$HEARTBEAT" --once --server "$SERVER_URL" --client-id "$CLIENT_ID" --name "$CLIENT_NAME" --role "$ROLE" --version "$VERSION"
 
 echo "Screentra player client installed."
 echo "Server: $SERVER_URL"

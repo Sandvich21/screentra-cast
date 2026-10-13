@@ -866,6 +866,15 @@ if [ ! -f "$CLIENT_ID_FILE" ]; then
   fi
 fi
 CLIENT_ID="$(cat "$CLIENT_ID_FILE")"
+CLIENT_AUTH_TOKEN_FILE="$INSTALL_DIR/client-auth-token"
+if [ ! -s "$CLIENT_AUTH_TOKEN_FILE" ]; then
+  umask 077
+  python3 - <<'PY_TOKEN' > "$CLIENT_AUTH_TOKEN_FILE"
+import secrets
+print(secrets.token_urlsafe(48))
+PY_TOKEN
+fi
+chmod 0600 "$CLIENT_AUTH_TOKEN_FILE"
 
 cat > "$HEARTBEAT" <<'PY'
 #!/usr/bin/env python3
@@ -1114,14 +1123,35 @@ def urlopen_ripley(req, timeout=10):
     return urllib.request.urlopen(req, **kw)
 
 
+def client_auth_token():
+    """Read the per-client token without ever printing or logging it."""
+    token = os.environ.get('RIPLEY_CLIENT_AUTH_TOKEN', '').strip()
+    if token:
+        return token
+    path = os.environ.get(
+        'RIPLEY_CLIENT_AUTH_TOKEN_FILE',
+        str(Path.home() / '.local/share/screentra-client/client-auth-token'),
+    )
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return ''
+
+
+def client_auth_headers():
+    token = client_auth_token()
+    return {'X-SCREENTRA-CLIENT-TOKEN': token} if token else {}
+
+
 def poll_command(server, client_id):
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command'
     try:
-        with urlopen_ripley(url, timeout=5) as r:
+        req = urllib.request.Request(url, headers=client_auth_headers())
+        with urlopen_ripley(req, timeout=5) as r:
             data = r.read().decode()
             return json.loads(data)
     except urllib.error.HTTPError as e:
-        if e.code == 404:
+        if e.code in (401, 404, 429):
             return None
         raise
     except Exception:
@@ -1131,7 +1161,7 @@ def poll_command(server, client_id):
 def ack_command(server, client_id):
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command'
     try:
-        req = urllib.request.Request(url, method='DELETE')
+        req = urllib.request.Request(url, headers=client_auth_headers(), method='DELETE')
         with urlopen_ripley(req, timeout=5) as r:
             return r.read().decode()
     except Exception as e:
@@ -1170,7 +1200,8 @@ def read_command_result(cache_dir):
 def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='assigned-layout-display-{index}.json'):
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/displays/' + str(display_index) + '/config'
     try:
-        with urlopen_ripley(url, timeout=10) as r:
+        req = urllib.request.Request(url, headers=client_auth_headers())
+        with urlopen_ripley(req, timeout=10) as r:
             data = json.loads(r.read().decode())
         # Preserve theme (set by heartbeat from local config, sent to server)
         # so it survives across config sync cycles.
@@ -1218,7 +1249,8 @@ def fetch_admin_users(server, client_id, cache_dir):
     """
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/admin-users'
     try:
-        with urlopen_ripley(url, timeout=10) as r:
+        req = urllib.request.Request(url, headers=client_auth_headers())
+        with urlopen_ripley(req, timeout=10) as r:
             data = json.loads(r.read().decode())
         users = data.get('users') or []
         if users:
@@ -1238,10 +1270,14 @@ def fetch_admin_users(server, client_id, cache_dir):
 
 def post(server, data):
     url = server.rstrip('/') + '/api/clients/register'
+    payload = dict(data)
+    token = client_auth_token()
+    if token:
+        payload.setdefault('client_auth_token', token)
     req = urllib.request.Request(
         url,
-        data=json.dumps(data).encode(),
-        headers={'Content-Type': 'application/json'},
+        data=json.dumps(payload).encode(),
+        headers={'Content-Type': 'application/json', **client_auth_headers()},
         method='POST',
     )
     with urlopen_ripley(req, timeout=10) as r:
@@ -5913,6 +5949,7 @@ Environment=RIPLEY_PENDING_FILE=$INSTALL_DIR/cache/pending-command.json
 Environment=RIPLEY_RESULT_FILE=$INSTALL_DIR/cache/command-result.json
 Environment=SCREENTRA_SERVER_URL=$SERVER_URL
 Environment=RIPLEY_CA_CERT=$INSTALL_DIR/screentra-cast-signage-ca.crt
+Environment=RIPLEY_CLIENT_AUTH_TOKEN_FILE=$INSTALL_DIR/client-auth-token
 Environment=RIPLEY_CLIENT_ID=$CLIENT_ID
 Environment=RIPLEY_CLIENT_CACHE_DIR=$INSTALL_DIR/cache
 ExecStart="$ACTOR" --pending-file "$INSTALL_DIR/cache/pending-command.json" --result-file "$INSTALL_DIR/cache/command-result.json" --server "$SERVER_URL" --client-id "$CLIENT_ID" --cache-dir "$INSTALL_DIR/cache"
@@ -5972,6 +6009,7 @@ Environment=RIPLEY_SERVER_URL=$SERVER_URL
 Environment=RIPLEY_CLIENT_ID=$CLIENT_ID
 Environment=RIPLEY_CLIENT_CACHE_DIR=$INSTALL_DIR/cache
 Environment=RIPLEY_CA_CERT=$INSTALL_DIR/screentra-cast-signage-ca.crt
+Environment=RIPLEY_CLIENT_AUTH_TOKEN_FILE=$INSTALL_DIR/client-auth-token
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$ACTOR --pending-file $INSTALL_DIR/cache/pending-command.json --result-file $INSTALL_DIR/cache/command-result.json --server "$SERVER_URL" --client-id "$CLIENT_ID" --cache-dir $INSTALL_DIR/cache --watch
 Restart=always
@@ -6027,7 +6065,7 @@ if command -v systemctl >/dev/null 2>&1; then
   # Debian/minimal install does not report a false "no display session" blocker.
   if ( command -v apt-get >/dev/null 2>&1 || command -v apt >/dev/null 2>&1 ); then
     NEED=()
-    command -v  >/dev/null 2>&1 || NEED+=("")
+    command -v sway >/dev/null 2>&1 || NEED+=("sway")
     command -v wlr-randr >/dev/null 2>&1 || NEED+=("wlr-randr")
     command -v bluetoothctl >/dev/null 2>&1 || NEED+=("bluez")
     command -v wpctl >/dev/null 2>&1 || NEED+=("pipewire" "wireplumber" "libspa-0.2-bluetooth")
@@ -6105,7 +6143,7 @@ fi
 # leave the complete appliance tree owned by the runtime user.
 run_privileged chown -R "${SCREENTRA_BOARD_USER:-board}:${SCREENTRA_BOARD_USER:-board}" "$INSTALL_DIR"
 
-"$HEARTBEAT" --once --server "$SERVER_URL" --client-id "$CLIENT_ID" --client-auth-token-file "$CLIENT_AUTH_TOKEN_FILE" --name "$CLIENT_NAME" --role "$ROLE" --version "$VERSION"
+"$HEARTBEAT" --once --server "$SERVER_URL" --client-id "$CLIENT_ID" --name "$CLIENT_NAME" --role "$ROLE" --version "$VERSION"
 
 echo "Screentra player client installed."
 echo "Server: $SERVER_URL"

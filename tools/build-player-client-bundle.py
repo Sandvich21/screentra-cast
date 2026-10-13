@@ -45,7 +45,9 @@ def ensure_generated_installer(repo: Path) -> Path:
     generated = repo / "static/install/player-client.sh"
     template = repo / "install/player-client.sh"
     builder = repo / "scripts/build-installer.py"
-    if not generated.exists() and template.exists() and builder.exists():
+    if template.exists() and builder.exists():
+        # Always regenerate the embedded installer. A stale generated file can
+        # otherwise be selected over newer installer source changes.
         subprocess.run(["python3", str(builder)], cwd=repo, check=True)
     if not generated.is_file():
         raise SystemExit(f"generated player installer missing: {generated}")
