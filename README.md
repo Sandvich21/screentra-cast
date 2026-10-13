@@ -18,10 +18,14 @@ updates.
 
 ## Install a new server
 
-For a new server device, use a supported Debian 13 amd64 installation with
-network access and `sudo`. The GitHub Release contains the compiled server,
-static files, and client installers. The appliance ISO is still marked WIP and
-is not part of this release until independent boot validation is complete.
+For a new server device, use a supported Debian 13 amd64 installation or an
+Ubuntu Server amd64 installation with `apt`, `systemd`, network access, and
+`sudo`. The installer is designed for both Debian and Ubuntu Server; Debian 13
+has been validated, while Ubuntu Server compatibility should be verified on the
+chosen Ubuntu release before production rollout. The GitHub Release contains
+the compiled server, static files, and client installers. The appliance ISO is
+still marked WIP and is not part of this release until independent boot
+validation is complete.
 
 1. Open the [Screentra Cast Releases](https://github.com/Sandvich21/screentra-cast/releases)
    page and note the release version.
