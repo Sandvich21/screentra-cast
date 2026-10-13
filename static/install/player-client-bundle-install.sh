@@ -46,7 +46,7 @@ if [ ! -f "$UPDATE_PUBLIC_KEY" ]; then
     echo "Provision the operator-approved key before running a client bootstrap." >&2
     exit 1
 fi
-openssl pkeyutl -verify -pubin -inkey "$UPDATE_PUBLIC_KEY" -sigfile "$INSTALL_SIG" -in "$INSTALL_SH" >/dev/null
+openssl pkeyutl -verify -rawin -pubin -inkey "$UPDATE_PUBLIC_KEY" -sigfile "$INSTALL_SIG" -in "$INSTALL_SH" >/dev/null
 export RIPLEY_SERVER_URL="$SERVER_URL"
 export SCREENTRA_CAST_UPDATE_PUBLIC_KEY_SOURCE="$WORK_DIR/ripley-player-client-bundle/payload/install/screentra-cast-client-update.pub"
 exec "$INSTALL_SH" "$@"

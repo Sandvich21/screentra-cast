@@ -68,7 +68,7 @@ def sign_installer(installer: Path, signature: Path, public_key: Path) -> None:
     signature.parent.mkdir(parents=True, exist_ok=True)
     public_key.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["openssl", "pkeyutl", "-sign", "-inkey", str(signing_key),
+        ["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(signing_key),
          "-in", str(installer), "-out", str(signature)],
         check=True,
         stdout=subprocess.DEVNULL,

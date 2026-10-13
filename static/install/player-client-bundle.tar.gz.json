@@ -1,7 +1,7 @@
 {
   "ok": true,
-  "path": "/home/tech/ripley-kiosk/static/install/player-client-bundle.tar.gz",
+  "path": "/home/tech/screentra-cast/static/install/player-client-bundle.tar.gz",
   "url": "/install/player-client-bundle.tar.gz",
-  "size_bytes": 83494,
-  "sha256": "bd4f83680436b55c8d783871910cc1c5f1091d985ccd22d8cf32cafea0fce3c9"
+  "size_bytes": 86251,
+  "sha256": "69c3c426607ec70c835e4750a2f8c789f49343610c9f31f68b10cdd71688c99b"
 }

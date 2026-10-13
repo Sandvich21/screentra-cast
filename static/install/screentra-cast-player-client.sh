@@ -7592,7 +7592,7 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
         signature_path.write_bytes(signature)
         verify = subprocess.run(
             [
-                'openssl', 'pkeyutl', '-verify', '-pubin',
+                'openssl', 'pkeyutl', '-verify', '-rawin', '-pubin',
                 '-inkey', str(public_key), '-sigfile', str(signature_path),
                 '-in', str(tmp_path),
             ],

@@ -505,7 +505,7 @@ fn sign_update_manifest(manifest: &Path, signature: &Path) -> Result<(), String>
         ));
     }
     let status = Command::new("openssl")
-        .args(["pkeyutl", "-sign", "-inkey"])
+        .args(["pkeyutl", "-sign", "-rawin", "-inkey"])
         .arg(&key)
         .args(["-in"])
         .arg(manifest)
@@ -534,7 +534,7 @@ fn verify_update_manifest_signature(
         ));
     }
     let status = Command::new("openssl")
-        .args(["pkeyutl", "-verify", "-pubin", "-inkey"])
+        .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
         .arg(public_key)
         .args(["-sigfile"])
         .arg(signature)
