@@ -20,7 +20,8 @@ updates.
 
 For a new server device, use a supported Debian 13 amd64 installation with
 network access and `sudo`. The GitHub Release contains the compiled server,
-static files, client installers, and appliance ISO.
+static files, and client installers. The appliance ISO is still marked WIP and
+is not part of this release until independent boot validation is complete.
 
 1. Open the [Screentra Cast Releases](https://github.com/Sandvich21/screentra-cast/releases)
    page and note the release version.
