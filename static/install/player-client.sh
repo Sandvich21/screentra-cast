@@ -4503,6 +4503,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -4580,8 +4581,16 @@ def write_config(config_path: Path, *, installer_detected_max_displays: int,
         "last_detected_displays": last_detected_displays,
     })
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = config_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cfg, indent=2))
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        dir=config_path.parent,
+        prefix=f".{config_path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as stream:
+        json.dump(cfg, stream, indent=2)
+        tmp = Path(stream.name)
+    os.chmod(tmp, 0o600)
     os.replace(tmp, config_path)
 
 
