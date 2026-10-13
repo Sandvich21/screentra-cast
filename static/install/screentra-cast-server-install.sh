@@ -50,11 +50,15 @@ SERVER_SCHEME="${SERVER_SCHEME:-https}"
 RELEASE_BASE_URL="${SCREENTRA_CAST_RELEASE_BASE_URL:-}"
 if [ -n "$RELEASE_BASE_URL" ]; then
     RELEASE_BASE_URL="${RELEASE_BASE_URL%/}"
-    SERVER_URL="$RELEASE_BASE_URL/screentra-cast-server-amd64"
+    RELEASE_BINARY_NAME="screentra-cast-server-amd64"
+    SERVER_URL="$RELEASE_BASE_URL/$RELEASE_BINARY_NAME"
     STATIC_URL="$RELEASE_BASE_URL/screentra-cast-static.tar.gz"
+    CHECKSUMS_URL="$RELEASE_BASE_URL/SHA256SUMS"
 else
+    RELEASE_BINARY_NAME="screentra-cast-server"
     SERVER_URL="${SERVER_SCHEME}://${SERVER_HOST}:3000/download/screentra-cast"
     STATIC_URL="${SERVER_SCHEME}://${SERVER_HOST}:3000/download/screentra-cast-static.tar.gz"
+    CHECKSUMS_URL=""
 fi
 
 log() { printf '[screentra-cast-installer] %s\n' "$*"; }
@@ -105,6 +109,16 @@ except Exception as e:
     print('Download error: ' + str(e), file=sys.stderr)
     sys.exit(1)
 " "$url" "$dest"
+}
+
+verify_release_asset() {
+    local asset=$1
+    [ -n "$RELEASE_BASE_URL" ] || return 0
+    if ! (cd "$TMP" && sha256sum -c "$CHECKSUMS_FILE" --ignore-missing 2>/dev/null | grep -Fq "$asset: OK"); then
+        log "FATAL: SHA-256 verification failed for $asset"
+        exit 1
+    fi
+    log "SHA-256 verified: $asset"
 }
 
 # ── PostgreSQL provisioning ───────────────────────────────────────────────────
@@ -304,12 +318,24 @@ log "Directories created."
 # ── Download binary ───────────────────────────────────────────────────────────
 log "Downloading screentra-cast-server..."
 mkdir -p "$TMP"
-if ! _dl "$SERVER_URL" "$TMP/screentra-cast-server" 2>&1; then
+CHECKSUMS_FILE="$TMP/SHA256SUMS"
+if [ -n "$RELEASE_BASE_URL" ]; then
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        log "FATAL: sha256sum is required for GitHub Release installation."
+        exit 1
+    fi
+    if ! _dl "$CHECKSUMS_URL" "$CHECKSUMS_FILE" 2>&1; then
+        log "FATAL: Failed to download release checksums from $CHECKSUMS_URL"
+        exit 1
+    fi
+fi
+if ! _dl "$SERVER_URL" "$TMP/$RELEASE_BINARY_NAME" 2>&1; then
     log "ERROR: Failed to download binary from $SERVER_URL"
     log "Make sure the configured source is reachable (release: ${RELEASE_BASE_URL:-no})"
     exit 1
 fi
-mv "$TMP/screentra-cast-server" "$BIN"
+verify_release_asset "$RELEASE_BINARY_NAME"
+mv "$TMP/$RELEASE_BINARY_NAME" "$BIN"
 chown "$BOARD_USER:$BOARD_USER" "$BIN"
 chmod +x "$BIN"
 log "Binary installed: $BIN"
@@ -318,9 +344,14 @@ log "Binary installed: $BIN"
 static_ok=false
 log "Downloading static tarball..."
 if _dl "$STATIC_URL" "$TMP/screentra-cast-static.tar.gz" 2>&1; then
+    verify_release_asset "screentra-cast-static.tar.gz"
     static_ok=true
     log "Static tarball downloaded."
 else
+    if [ -n "$RELEASE_BASE_URL" ]; then
+        log "FATAL: Failed to download or verify the release static tarball."
+        exit 1
+    fi
     log "WARNING: Failed to download static tarball (server may not have it yet)."
 fi
 
@@ -357,10 +388,15 @@ fi
 mkdir -p "$BOARD_INSTALL_DIR/static/install"
 log "Downloading client installers tarball..."
 if _dl "$INSTALLERS_URL" "$TMP/screentra-cast-installers.tar.gz" 2>&1; then
+    verify_release_asset "screentra-cast-installers.tar.gz"
     cp "$TMP/screentra-cast-installers.tar.gz" "$BOARD_INSTALL_DIR/static/install/"
     chown "$BOARD_USER:$BOARD_USER" "$BOARD_INSTALL_DIR/static/install/screentra-cast-installers.tar.gz"
     log "Client installers tarball saved to static/install/."
 else
+    if [ -n "$RELEASE_BASE_URL" ]; then
+        log "FATAL: Failed to download or verify the release client installers tarball."
+        exit 1
+    fi
     log "WARNING: Could not download client installers tarball (server may still be starting)."
 fi
 
