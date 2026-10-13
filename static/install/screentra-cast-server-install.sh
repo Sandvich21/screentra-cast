@@ -113,8 +113,10 @@ except Exception as e:
 
 verify_release_asset() {
     local asset=$1
+    local verification_output
     [ -n "$RELEASE_BASE_URL" ] || return 0
-    if ! (cd "$TMP" && sha256sum -c "$CHECKSUMS_FILE" --ignore-missing 2>/dev/null | grep -Fq "$asset: OK"); then
+    verification_output="$(cd "$TMP" && sha256sum -c "$CHECKSUMS_FILE" --ignore-missing 2>/dev/null || true)"
+    if ! grep -Fqx "$asset: OK" <<< "$verification_output"; then
         log "FATAL: SHA-256 verification failed for $asset"
         exit 1
     fi

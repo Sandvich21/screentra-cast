@@ -41,7 +41,7 @@ validation is complete.
 
    ```bash
    sudo env \\
-     SCREENTRA_CAST_RELEASE_BASE_URL=https://github.com/Sandvich21/screentra-cast/releases/download/v0.1.2 \\
+     SCREENTRA_CAST_RELEASE_BASE_URL=https://github.com/Sandvich21/screentra-cast/releases/download/v0.1.3 \\
      SCREENTRA_CAST_SERVER_HOST=<server-ip-or-dns> \\
      SCREENTRA_CAST_LOCAL_HOSTNAME=<server-ip-or-dns> \\
      bash /tmp/screentra-cast-server-install.sh
