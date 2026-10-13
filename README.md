@@ -7,98 +7,159 @@ of screens. The platform supports reusable widgets, media, weather, news,
 traffic, calendars, scheduling, remote client management, and signed client
 updates.
 
+**Physical displays only:** virtual-display deployments are not supported.
+
+## Current support status
+
+- **Validated server platform:** Debian 13 amd64
+- **Expected server platform:** Ubuntu Server amd64 with `apt` and `systemd`;
+  validate the selected Ubuntu release before production use
+- **Current server release:** [`v0.1.3`](https://github.com/Sandvich21/screentra-cast/releases/tag/v0.1.3)
+- **Appliance ISO:** does not work as of now. It is amd64/UEFI work in
+  progress and is not included in releases until independent physical boot and
+  installation validation is complete
+
 ## Repository layout
 
 - `src/` — Rust server
-- `static/` — dashboard, player, previews, installer artifacts, and shared assets
-- `player-client/` — canonical player-client scripts and installer source
-- `iso/` — appliance ISO build materials (WIP needs worked on also only amd64)
-- `tools/` — bundle/build utilities
+- `static/` — dashboard, previews, player pages, installers, and shared assets
+- `player-client/` — canonical Linux player-client scripts and installer source
+- `iso/` — appliance ISO build materials; see [`iso/README.md`](iso/README.md)
+- `tools/` — bundle and migration utilities
 - `tests/` — integration and contract tests
 
 ## Install a new server
 
-For a new server device, use a supported Debian 13 amd64 installation or an
-Ubuntu Server amd64 installation with `apt`, `systemd`, network access, and
-`sudo`. The installer is designed for both Debian and Ubuntu Server; Debian 13
-has been validated, while Ubuntu Server compatibility should be verified on the
-chosen Ubuntu release before production rollout. The GitHub Release contains
-the compiled server, static files, and client installers. The appliance ISO is
-still marked WIP and is not part of this release until independent boot
-validation is complete.
+Use a fresh Debian 13 amd64 server, or an Ubuntu Server amd64 system with
+`apt`, `systemd`, network access, `curl`, and `sudo`. The installer creates the
+PostgreSQL database, dedicated `board` service account, server-local TLS
+certificates, and `screentra-cast-server.service`.
 
-1. Open the [Screentra Cast Releases](https://github.com/Sandvich21/screentra-cast/releases)
-   page and note the release version.
-2. Download the server installer from this repository:
+The release installer verifies the SHA-256 checksums for the server binary,
+static archive, and installer bundle before installing them.
 
-   ```bash
-   curl -fsSLo /tmp/screentra-cast-server-install.sh \\
-     https://raw.githubusercontent.com/Sandvich21/screentra-cast/main/static/install/screentra-cast-server-install.sh
-   chmod 0755 /tmp/screentra-cast-server-install.sh
-   ```
+```bash
+RELEASE=v0.1.3
+BASE="https://github.com/Sandvich21/screentra-cast/releases/download/$RELEASE"
 
-3. Run it as root, selecting the matching release and the new server's address:
+curl -fsSLo /tmp/screentra-cast-server-install.sh \
+  "$BASE/screentra-cast-server-install.sh"
+chmod 0755 /tmp/screentra-cast-server-install.sh
 
-   ```bash
-   sudo env \\
-     SCREENTRA_CAST_RELEASE_BASE_URL=https://github.com/Sandvich21/screentra-cast/releases/download/v0.1.3 \\
-     SCREENTRA_CAST_SERVER_HOST=<server-ip-or-dns> \\
-     SCREENTRA_CAST_LOCAL_HOSTNAME=<server-ip-or-dns> \\
-     bash /tmp/screentra-cast-server-install.sh
-   ```
+sudo env \
+  SCREENTRA_CAST_RELEASE_BASE_URL="$BASE" \
+  SCREENTRA_CAST_SERVER_HOST=<server-ip-or-dns> \
+  SCREENTRA_CAST_LOCAL_HOSTNAME=<server-ip-or-dns> \
+  bash /tmp/screentra-cast-server-install.sh
+```
 
-The installer installs PostgreSQL, creates the `board` service account, creates
-server-local TLS certificates, installs the `screentra-cast-server.service`,
-and starts the server. It does not create a default administrator password.
-Open the displayed HTTPS dashboard URL and create the first administrator.
-Keep the generated CA private to this server; only the published CA certificate
-is distributed to clients.
+After installation, open the displayed HTTPS dashboard URL and create the
+first administrator. The installer does **not** create a default administrator
+password. Keep the generated CA private to the server; distribute only the
+published CA certificate to clients that need to trust it.
 
-The release assets are for amd64 servers. The installer does not copy runtime
-state, databases, uploads, backups, certificates, or private keys from another
-server.
+The installer creates a clean server and does not copy databases, layouts,
+client assignments, runtime uploads, backups, certificates, or private keys
+from another server. Migrate those items separately when replacing an
+existing server. Uploaded media belongs in the server's runtime `uploads/`
+directory (normally `/home/board/server/uploads`), not only in
+`static/uploads/`.
 
 ## Install a physical display client
 
-After the server is running, install the player client on a supported Debian
-physical-display device using the signed installer supplied by the server or
-release. The client must be adopted in the dashboard before assigning a layout.
+After the server is running:
 
-## Build and test
+1. Install the signed player-client installer supplied by the server or release
+   on a supported Debian physical-display device.
+2. Adopt the client in the dashboard.
+3. Assign a layout to the physical display.
+4. Verify the client's heartbeat and physical output before production use.
+
+Client identity, cached layouts, credentials, and runtime uploads are created
+on the client or server during installation and are not stored in this source
+repository.
+
+## Build and test from source
+
+The following packages are sufficient for a Debian 13 amd64 build host:
 
 ```bash
-cargo check --release
-cargo test --release
-python3 -B -m py_compile tools/*.py player-client/scripts/*.py iso/tests/*.py
+sudo apt-get update
+sudo apt-get install -y \
+  git build-essential cmake pkg-config libssl-dev libsqlite3-dev libpq-dev \
+  nodejs npm python3
 ```
 
-The player-client bundle builder can be run only on a deployment workstation
-with the client-update signing key provisioned outside this repository:
+Use a current stable Rust toolchain. Debian's packaged Rust version may be too
+old for the versions locked in `Cargo.lock`:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+  | sh -s -- -y --profile minimal --default-toolchain stable
+. "$HOME/.cargo/env"
+```
+
+Clone the repository and run the build/test checks:
+
+```bash
+git clone https://github.com/Sandvich21/screentra-cast.git
+cd screentra-cast
+
+cargo build --release
+cargo test --release
+python3 -B -m py_compile tools/*.py player-client/scripts/*.py iso/tests/*.py
+
+while IFS= read -r file; do node --check "$file"; done < <(git ls-files '*.js')
+while IFS= read -r file; do bash -n "$file"; done < <(git ls-files '*.sh')
+```
+
+The release server binary is produced at:
+
+```text
+target/release/screentra-cast
+```
+
+The player-client bundle builder requires the client-update signing key to be
+provisioned outside this repository:
 
 ```bash
 SCREENTRA_CAST_PLAYER_SOURCE=player-client \
   python3 tools/build-player-client-bundle.py
 ```
 
-The player-client installer is signed separately for deployment. Signing keys and
-server-local TLS/CA material are not part of this repository.
+Do not commit signing keys, server-local CA material, databases, credentials,
+client identity, or runtime uploads.
 
-## GitHub upload scope
+## Build the appliance ISO
 
-This source snapshot intentionally excludes runtime and machine-local data:
+The appliance ISO does not work as of now. It is currently amd64/UEFI only and
+is not a supported release or installation path. Its prerequisites and
+validation requirements are documented in
+[`iso/README.md`](iso/README.md). Do not describe an ISO as production-ready
+until it has passed independent physical boot, installation, SSH, enrollment,
+and native Wayland/DRM checks.
 
-- build output (`target/`)
-- user uploads and downloaded release output (`static/uploads/`, `static/download/`)
-- local certificates and private keys (`certs/`)
-- databases, caches, logs, and Hermes state
+## GitHub source and release scope
 
-Release binaries, ISO images, and the large static download archive are
-excluded from this source snapshot and should be published as GitHub Release
-assets. The small installer bundles under `static/install/` remain because the
-server serves them directly and their contents are source-controlled deployment
-inputs.
+The source repository intentionally excludes machine-local and runtime state,
+including:
 
-Current source snapshot commits:
+- `target/` and other build output
+- databases, caches, logs, backups, and Hermes state
+- runtime uploads and downloaded release output
+- local certificates, private keys, and signing material
 
-- `be1fa30` — complete Screentra branding rename
-- `7238dfc` — fix signed client installer token handoff
+Large binaries, static release archives, installers, and future validated ISO
+artifacts belong in GitHub Releases rather than the source tree. Release assets
+are versioned software artifacts, not a backup of a running server's content.
+
+For an existing server replacement, preserve the original credentials,
+client identities, TLS trust, database content, layouts, schedules, and runtime
+media through a separate backed-up migration procedure.
+
+## Project status
+
+The `main` branch contains the current Screentra Cast source and the published
+`v0.1.3` server installation path. Debian 13 amd64 is the validated platform;
+Ubuntu Server amd64 and the appliance ISO require additional independent
+validation before production rollout.
