@@ -12,7 +12,7 @@ updates.
 - `src/` — Rust server
 - `static/` — dashboard, player, previews, installer artifacts, and shared assets
 - `player-client/` — canonical player-client scripts and installer source
-- `iso/` — appliance ISO build materials
+- `iso/` — appliance ISO build materials (WIP needs worked on also only amd64)
 - `tools/` — bundle/build utilities
 - `tests/` — integration and contract tests
 
