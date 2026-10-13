@@ -15,8 +15,9 @@ updates.
 - **Expected server platform:** Ubuntu Server amd64 with `apt` and `systemd`;
   validate the selected Ubuntu release before production use
 - **Current server release:** [`v0.1.3`](https://github.com/Sandvich21/screentra-cast/releases/tag/v0.1.3)
-- **Appliance ISO:** amd64 UEFI work in progress; not included in releases until
-  independent physical boot and installation validation is complete
+- **Appliance ISO:** does not work as of now. It is amd64/UEFI work in
+  progress and is not included in releases until independent physical boot and
+  installation validation is complete
 
 ## Repository layout
 
@@ -131,8 +132,9 @@ client identity, or runtime uploads.
 
 ## Build the appliance ISO
 
-The ISO is currently amd64/UEFI only and is not a supported release path. Its
-prerequisites and validation requirements are documented in
+The appliance ISO does not work as of now. It is currently amd64/UEFI only and
+is not a supported release or installation path. Its prerequisites and
+validation requirements are documented in
 [`iso/README.md`](iso/README.md). Do not describe an ISO as production-ready
 until it has passed independent physical boot, installation, SSH, enrollment,
 and native Wayland/DRM checks.
