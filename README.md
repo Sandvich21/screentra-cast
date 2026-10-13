@@ -16,6 +16,49 @@ updates.
 - `tools/` — bundle/build utilities
 - `tests/` — integration and contract tests
 
+## Install a new server
+
+For a new server device, use a supported Debian 13 amd64 installation with
+network access and `sudo`. The GitHub Release contains the compiled server,
+static files, client installers, and appliance ISO.
+
+1. Open the [Screentra Cast Releases](https://github.com/Sandvich21/screentra-cast/releases)
+   page and note the release version.
+2. Download the server installer from this repository:
+
+   ```bash
+   curl -fsSLo /tmp/screentra-cast-server-install.sh \\
+     https://raw.githubusercontent.com/Sandvich21/screentra-cast/main/static/install/screentra-cast-server-install.sh
+   chmod 0755 /tmp/screentra-cast-server-install.sh
+   ```
+
+3. Run it as root, selecting the matching release and the new server's address:
+
+   ```bash
+   sudo env \\
+     SCREENTRA_CAST_RELEASE_BASE_URL=https://github.com/Sandvich21/screentra-cast/releases/download/v0.1.0 \\
+     SCREENTRA_CAST_SERVER_HOST=<server-ip-or-dns> \\
+     SCREENTRA_CAST_LOCAL_HOSTNAME=<server-ip-or-dns> \\
+     bash /tmp/screentra-cast-server-install.sh
+   ```
+
+The installer installs PostgreSQL, creates the `board` service account, creates
+server-local TLS certificates, installs the `screentra-cast-server.service`,
+and starts the server. It does not create a default administrator password.
+Open the displayed HTTPS dashboard URL and create the first administrator.
+Keep the generated CA private to this server; only the published CA certificate
+is distributed to clients.
+
+The release assets are for amd64 servers. The installer does not copy runtime
+state, databases, uploads, backups, certificates, or private keys from another
+server.
+
+## Install a physical display client
+
+After the server is running, install the player client on a supported Debian
+physical-display device using the signed installer supplied by the server or
+release. The client must be adopted in the dashboard before assigning a layout.
+
 ## Build and test
 
 ```bash

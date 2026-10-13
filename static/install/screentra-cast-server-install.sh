@@ -39,14 +39,23 @@ LOG_FILE="$LOG_DIR/screentra-cast.log"
 SERVICE_NAME="screentra-cast-server.service"
 TMP="$BOARD_HOME/tmp"
 
-# Installer URLs — where to download the binary and static tarball from.
-# Override SERVER_HOST if your source server runs elsewhere. Use SERVER_SCHEME=http
-# only for a trusted local feed; HTTPS requires SCREENTRA_CAST_CA_CERT (or
-# RIPLEY_CA_CERT) to point at the source server's public CA certificate.
+# Installer URLs — use a GitHub Release for new installations, or an existing
+# Screentra Cast server as a local source when RELEASE_BASE_URL is unset.
+# SERVER_HOST remains the legacy source-server setting. Set
+# SCREENTRA_CAST_SERVER_HOST to the new target's address so its certificate and
+# server URL are generated for the device being installed.
 SERVER_HOST="${SERVER_HOST:-11.1.1.26}"
+TARGET_HOST="${SCREENTRA_CAST_SERVER_HOST:-${SCREENTRA_CAST_TARGET_HOST:-$SERVER_HOST}}"
 SERVER_SCHEME="${SERVER_SCHEME:-https}"
-SERVER_URL="${SERVER_SCHEME}://${SERVER_HOST}:3000/download/screentra-cast"
-STATIC_URL="${SERVER_SCHEME}://${SERVER_HOST}:3000/download/screentra-cast-static.tar.gz"
+RELEASE_BASE_URL="${SCREENTRA_CAST_RELEASE_BASE_URL:-}"
+if [ -n "$RELEASE_BASE_URL" ]; then
+    RELEASE_BASE_URL="${RELEASE_BASE_URL%/}"
+    SERVER_URL="$RELEASE_BASE_URL/screentra-cast-server-amd64"
+    STATIC_URL="$RELEASE_BASE_URL/screentra-cast-static.tar.gz"
+else
+    SERVER_URL="${SERVER_SCHEME}://${SERVER_HOST}:3000/download/screentra-cast"
+    STATIC_URL="${SERVER_SCHEME}://${SERVER_HOST}:3000/download/screentra-cast-static.tar.gz"
+fi
 
 log() { printf '[screentra-cast-installer] %s\n' "$*"; }
 
@@ -82,9 +91,7 @@ import os, sys, urllib.request, ssl
 url, dest = sys.argv[1], sys.argv[2]
 if url.startswith('https://'):
     cafile = os.environ.get('SCREENTRA_CAST_CA_CERT')
-    if not cafile:
-        raise SystemExit('HTTPS source requires SCREENTRA_CAST_CA_CERT or RIPLEY_CA_CERT')
-    ctx = ssl.create_default_context(cafile=cafile)
+    ctx = ssl.create_default_context(cafile=cafile) if cafile else ssl.create_default_context()
 else:
     ctx = None
 try:
@@ -182,10 +189,10 @@ provision_local_tls() {
 
         {
             printf '%s\n' '[v3_server]' 'basicConstraints=critical,CA:FALSE' 'keyUsage=critical,digitalSignature,keyEncipherment' 'extendedKeyUsage=serverAuth' "subjectAltName=DNS:$LOCAL_HOSTNAME,DNS:signage-server,DNS:localhost,IP:127.0.0.1"
-            if [[ "$SERVER_HOST" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                printf 'subjectAltName=DNS:%s,DNS:%s,DNS:signage-server,DNS:localhost,IP:127.0.0.1,IP:%s\n' "$LOCAL_HOSTNAME" "$SERVER_HOST" "$SERVER_HOST"
+            if [[ "$TARGET_HOST" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                printf 'subjectAltName=DNS:%s,DNS:%s,DNS:signage-server,DNS:localhost,IP:127.0.0.1,IP:%s\n' "$LOCAL_HOSTNAME" "$TARGET_HOST" "$TARGET_HOST"
             else
-                printf 'subjectAltName=DNS:%s,DNS:%s,DNS:signage-server,DNS:localhost,IP:127.0.0.1\n' "$LOCAL_HOSTNAME" "$SERVER_HOST"
+                printf 'subjectAltName=DNS:%s,DNS:%s,DNS:signage-server,DNS:localhost,IP:127.0.0.1\n' "$LOCAL_HOSTNAME" "$TARGET_HOST"
             fi
         } > "$ext_file"
         # Keep exactly one subjectAltName directive in the OpenSSL extension file.
@@ -299,7 +306,7 @@ log "Downloading screentra-cast-server..."
 mkdir -p "$TMP"
 if ! _dl "$SERVER_URL" "$TMP/screentra-cast-server" 2>&1; then
     log "ERROR: Failed to download binary from $SERVER_URL"
-    log "Make sure the Screentra Cast server is running on $SERVER_HOST"
+    log "Make sure the configured source is reachable (release: ${RELEASE_BASE_URL:-no})"
     exit 1
 fi
 mv "$TMP/screentra-cast-server" "$BIN"
@@ -342,7 +349,11 @@ fi
 # ── Download client installers tarball into static ────────────────────────────
 # This makes the tarball available at /install/screentra-cast-installers.tar.gz
 # so other devices on the network can pull it after the server is running.
-INSTALLERS_URL="http://${SERVER_HOST}:3000/install/screentra-cast-installers.tar.gz"
+if [ -n "$RELEASE_BASE_URL" ]; then
+    INSTALLERS_URL="$RELEASE_BASE_URL/screentra-cast-installers.tar.gz"
+else
+    INSTALLERS_URL="${SERVER_SCHEME}://${SERVER_HOST}:3000/install/screentra-cast-installers.tar.gz"
+fi
 mkdir -p "$BOARD_INSTALL_DIR/static/install"
 log "Downloading client installers tarball..."
 if _dl "$INSTALLERS_URL" "$TMP/screentra-cast-installers.tar.gz" 2>&1; then
@@ -386,7 +397,7 @@ fi
 env_lines[SIGNAGE_LISTEN_ADDR]="$BOARD_LISTEN_ADDR"
 env_lines[SIGNAGE_DATA_DIR]="$BOARD_DATA_DIR"
 if [ "$FRESH_INSTALL" = "true" ]; then
-    env_lines[SCREENTRA_CAST_SERVER_URL]="https://${SERVER_HOST}:3000"
+    env_lines[SCREENTRA_CAST_SERVER_URL]="https://${TARGET_HOST}:3000"
     env_lines[SIGNAGE_TLS]="1"
     env_lines[SIGNAGE_SECONDARY_TLS]="1"
     env_lines[SIGNAGE_TLS_CERT]="$CERT_DIR/signage-server.crt"
