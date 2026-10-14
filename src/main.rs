@@ -4,6 +4,7 @@ mod backup_api;
 mod db;
 mod display;
 mod fonts;
+mod github_update;
 mod middleware;
 mod models;
 mod news;
@@ -42,6 +43,25 @@ async fn main() {
         );
         return;
     }
+
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(index) = args.iter().position(|arg| arg == "--build-update-bundle") {
+        let destination = args.get(index + 1).cloned().unwrap_or_else(|| {
+            eprintln!("--build-update-bundle requires an output path");
+            std::process::exit(2);
+        });
+        match crate::version::export_update_bundle(std::path::Path::new(&destination)) {
+            Ok(manifest) => {
+                println!("{}", serde_json::to_string_pretty(&manifest).unwrap_or_default());
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
 
     if std::env::args().any(|arg| arg == "--postgres-schema") {
         match crate::postgres::apply_initial_schema().await {
@@ -591,6 +611,14 @@ async fn main() {
     let maintenance_auth = runtime_state.auth_repository();
     tokio::spawn(async move {
         crate::run_maintenance_loop(maintenance_repository, maintenance_auth).await;
+    });
+
+    // Background task: opt-in GitHub release updater. It is disabled by
+    // default and only applies signed stable release bundles when enabled in
+    // the System page.
+    let update_repository = runtime_state.client_repository();
+    tokio::spawn(async move {
+        crate::github_update::run_auto_update_loop(update_repository).await;
     });
 
     // Background task: pre-cache Google Font previews. One weight

@@ -1359,6 +1359,22 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             "/api/version/update/last-failure",
             get(update_last_failure_handler),
         )
+        .route(
+            "/api/version/update/github",
+            get(github_update_status_handler),
+        )
+        .route(
+            "/api/version/update/github/check",
+            post(github_update_check_handler),
+        )
+        .route(
+            "/api/version/update/github/settings",
+            post(github_update_settings_handler),
+        )
+        .route(
+            "/api/version/update/apply",
+            post(apply_github_update_handler),
+        )
         .route("/api/audit", get(list_audit_events_handler))
         .route("/api/version/update/preview", get(update_preview_handler))
         .route(
@@ -4714,6 +4730,88 @@ async fn update_last_failure_handler() -> AxumJson<UpdateLastFailure> {
             backup_binary: None,
             backup_static: None,
         }),
+    }
+}
+
+#[derive(Deserialize)]
+struct GithubUpdateSettingsPayload {
+    auto_update: bool,
+}
+
+async fn github_update_status_handler() -> AxumJson<crate::github_update::UpdateStatus> {
+    AxumJson(crate::github_update::read_status())
+}
+
+async fn github_update_check_handler() -> Result<AxumJson<crate::github_update::UpdateStatus>, (StatusCode, String)> {
+    crate::github_update::check_latest()
+        .await
+        .map(AxumJson)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error))
+}
+
+async fn github_update_settings_handler(
+    AxumJson(payload): AxumJson<GithubUpdateSettingsPayload>,
+) -> Result<AxumJson<crate::github_update::UpdateStatus>, (StatusCode, String)> {
+    crate::github_update::save_settings(&crate::github_update::UpdateSettings {
+        auto_update: payload.auto_update,
+    })
+    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(AxumJson(crate::github_update::read_status()))
+}
+
+async fn apply_github_update_handler(
+    State(state): State<RuntimeState>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+) -> Result<AxumJson<crate::version::UpdateResult>, (StatusCode, String)> {
+    let result = match crate::github_update::apply_latest().await {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            return Err((
+                StatusCode::CONFLICT,
+                "No newer stable GitHub release is available".to_string(),
+            ));
+        }
+        Err(error) => {
+            let _ = state
+                .client_repository()
+                .record_audit_event(
+                    Some(&principal.username),
+                    Some(&principal.role),
+                    "server_update_import",
+                    Some("github-latest"),
+                    "failure",
+                    Some("signed GitHub release rejected or failed"),
+                    &Utc::now().to_rfc3339(),
+                )
+                .await;
+            return Err((StatusCode::BAD_GATEWAY, error));
+        }
+    };
+    let (configured_service, _) = crate::version::configured_service();
+    let _ = state
+        .client_repository()
+        .record_audit_event(
+            Some(&principal.username),
+            Some(&principal.role),
+            "server_update_import",
+            Some("github-latest"),
+            "success",
+            Some("signed GitHub release applied; restarting service"),
+            &Utc::now().to_rfc3339(),
+        )
+        .await;
+    match tokio::task::spawn_blocking(crate::version::restart_configured_service).await {
+        Ok(Ok(())) => Ok(AxumJson(result)),
+        Ok(Err(error)) => {
+            let message = format!("update applied but {configured_service} restart failed: {error}");
+            let _ = crate::github_update::mark_error(&message);
+            Err((StatusCode::INTERNAL_SERVER_ERROR, message))
+        }
+        Err(error) => {
+            let message = format!("update applied but restart task failed: {error}");
+            let _ = crate::github_update::mark_error(&message);
+            Err((StatusCode::INTERNAL_SERVER_ERROR, message))
+        }
     }
 }
 

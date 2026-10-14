@@ -153,6 +153,33 @@ Large binaries, static release archives, installers, and future validated ISO
 artifacts belong in GitHub Releases rather than the source tree. Release assets
 are versioned software artifacts, not a backup of a running server's content.
 
+## Server release updater
+
+The System page can check the latest stable release from GitHub and apply the
+signed `screentra-cast-server-update.tar.gz` asset. The updater preserves
+runtime state, validates the detached manifest signature, swaps the binary and
+static tree atomically, preserves the deployment-local CA, and restarts the
+configured service. A failed static/CA step rolls back automatically.
+
+Provision the release verification public key on each server at:
+
+```text
+/etc/screentra-cast/server-update-signing.pub
+```
+
+The private signing key must remain outside the repository and outside the
+running server. The release workflow expects it in the GitHub Actions secret
+`SCREENTRA_CAST_SERVER_UPDATE_SIGNING_KEY`. The checkbox on the System page is
+off by default; enabling it opts the server into periodic stable-release checks
+and automatic installation/restart.
+
+Optional deployment overrides are:
+
+```text
+SCREENTRA_CAST_GITHUB_REPO=owner/repository
+SCREENTRA_CAST_UPDATE_ASSET=screentra-cast-server-update.tar.gz
+```
+
 For an existing server replacement, preserve the original credentials,
 client identities, TLS trust, database content, layouts, schedules, and runtime
 media through a separate backed-up migration procedure.

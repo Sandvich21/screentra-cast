@@ -1148,6 +1148,78 @@ const App = {
             console.warn('Could not load version info:', e);
         }
 
+        // GitHub release updater
+        const githubDetails = document.getElementById('github-update-details');
+        const githubStatus = document.getElementById('github-update-status');
+        const githubCheckBtn = document.getElementById('btn-github-update-check');
+        const githubApplyBtn = document.getElementById('btn-github-update-apply');
+        const githubAuto = document.getElementById('github-auto-update');
+        const renderGithubUpdate = (u) => {
+            if (!u) return;
+            if (githubAuto) githubAuto.checked = !!u.auto_update;
+            const latest = u.latest_version || u.latest_tag || 'not checked';
+            const state = u.state || 'unknown';
+            if (githubDetails) {
+                const lines = [
+                    `Current: ${u.current_version || 'unknown'}${u.current_commit && u.current_commit !== 'unknown' ? ' (' + u.current_commit + ')' : ''}`,
+                    `Latest stable: ${latest}`,
+                    u.latest_name ? `Release: ${u.latest_name}` : '',
+                    u.asset_name ? `Artifact: ${u.asset_name}` : '',
+                    u.checked_at ? `Last checked: ${u.checked_at}` : '',
+                    u.latest_notes ? `\n${u.latest_notes}` : '',
+                ].filter(Boolean);
+                githubDetails.textContent = lines.join('\n');
+            }
+            if (githubApplyBtn) githubApplyBtn.disabled = state !== 'available';
+            if (githubStatus) {
+                githubStatus.textContent = u.error ? '✕ ' + u.error : (state === 'available' ? 'Update available' : state === 'current' ? 'Already current' : '');
+            }
+        };
+        const loadGithubUpdate = async () => {
+            try { renderGithubUpdate(await API.getGithubUpdateStatus()); }
+            catch (e) { if (githubStatus) githubStatus.textContent = '✕ ' + e.message; }
+        };
+        if (githubCheckBtn && !githubCheckBtn.dataset.wired) {
+            githubCheckBtn.dataset.wired = '1';
+            githubCheckBtn.onclick = async () => {
+                githubCheckBtn.disabled = true;
+                if (githubStatus) githubStatus.textContent = 'Checking GitHub releases…';
+                try { renderGithubUpdate(await API.checkGithubUpdate()); }
+                catch (e) { if (githubStatus) githubStatus.textContent = '✕ ' + e.message; }
+                finally { githubCheckBtn.disabled = false; }
+            };
+        }
+        if (githubApplyBtn && !githubApplyBtn.dataset.wired) {
+            githubApplyBtn.dataset.wired = '1';
+            githubApplyBtn.onclick = async () => {
+                if (!(await App.confirm('Update server software?', 'The signed stable GitHub release will replace the server binary and frontend, preserve application data, and restart the service.'))) return;
+                githubApplyBtn.disabled = true;
+                if (githubStatus) githubStatus.textContent = 'Downloading and verifying update…';
+                try {
+                    const result = await API.applyGithubUpdate();
+                    const commit = result.manifest && result.manifest.git_commit ? result.manifest.git_commit : 'unknown';
+                    try { localStorage.setItem('ripley-pending-update-commit', commit); } catch (e) {}
+                    if (githubStatus) githubStatus.textContent = '✓ Update applied. Service restarting…';
+                    setTimeout(() => window.location.reload(), 4000);
+                } catch (e) {
+                    if (githubStatus) githubStatus.textContent = '✕ ' + e.message;
+                    await loadGithubUpdate();
+                }
+            };
+        }
+        if (githubAuto && !githubAuto.dataset.wired) {
+            githubAuto.dataset.wired = '1';
+            githubAuto.onchange = async () => {
+                const desired = githubAuto.checked;
+                githubAuto.disabled = true;
+                if (githubStatus) githubStatus.textContent = desired ? 'Enabling automatic updates…' : 'Disabling automatic updates…';
+                try { renderGithubUpdate(await API.setGithubAutoUpdate(desired)); }
+                catch (e) { githubAuto.checked = !desired; if (githubStatus) githubStatus.textContent = '✕ ' + e.message; }
+                finally { githubAuto.disabled = false; }
+            };
+        }
+        await loadGithubUpdate();
+
         // Wire Export button — download the bundle
         const exportBtn = document.getElementById('btn-version-export');
         if (exportBtn && !exportBtn.dataset.wired) {

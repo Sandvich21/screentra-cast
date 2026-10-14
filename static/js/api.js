@@ -5,7 +5,7 @@ function _stepUpScopeForRequest(input, init) {
     const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
     const url = typeof input === 'string' ? input : (input && input.url) || '';
     const path = new URL(url, window.location.href).pathname;
-    if (path === '/api/version/update/export' || path === '/api/version/update/import') return 'server-update';
+    if (path === '/api/version/update/export' || path === '/api/version/update/import' || path === '/api/version/update/apply' || path === '/api/version/update/github/settings') return 'server-update';
     if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
 
     }
@@ -731,6 +731,39 @@ window.API = {
         if (!res.ok) {
             const text = await res.text().catch(() => '');
             throw new Error('Update import failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
+        }
+        return res.json();
+    },
+    async getGithubUpdateStatus() {
+        const res = await fetch('/api/version/update/github');
+        if (!res.ok) throw new Error('Failed to get GitHub update status');
+        return res.json();
+    },
+    async checkGithubUpdate() {
+        const res = await fetch('/api/version/update/github/check', { method: 'POST' });
+        if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            throw new Error('Update check failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
+        }
+        return res.json();
+    },
+    async setGithubAutoUpdate(autoUpdate) {
+        const res = await fetch('/api/version/update/github/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ auto_update: !!autoUpdate }),
+        });
+        if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            throw new Error('Auto-update setting failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
+        }
+        return res.json();
+    },
+    async applyGithubUpdate() {
+        const res = await fetch('/api/version/update/apply', { method: 'POST' });
+        if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            throw new Error('GitHub update failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
         return res.json();
     },

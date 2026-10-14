@@ -1,0 +1,63 @@
+name: Build signed server update
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  server-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the published release
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        env:
+          SIGNAGE_GIT_COMMIT: ${{ github.sha }}
+          SIGNAGE_BUILD_TIME: ${{ github.event.release.published_at }}
+        run: cargo build --release
+
+      - name: Provision signing key
+        env:
+          SERVER_UPDATE_SIGNING_KEY: ${{ secrets.SCREENTRA_CAST_SERVER_UPDATE_SIGNING_KEY }}
+        run: |
+          test -n "$SERVER_UPDATE_SIGNING_KEY" || {
+            echo 'SCREENTRA_CAST_SERVER_UPDATE_SIGNING_KEY is not configured' >&2
+            exit 1
+          }
+          umask 077
+          printf '%s\n' "$SERVER_UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/server-update-signing.key"
+
+      - name: Build and verify signed update bundle
+        env:
+          SCREENTRA_CAST_UPDATE_SIGNING_KEY: ${{ runner.temp }}/server-update-signing.key
+        run: |
+          cargo run --release -- --build-update-bundle "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" > "$RUNNER_TEMP/update-manifest.json"
+          test -s "$RUNNER_TEMP/screentra-cast-server-update.tar.gz"
+          tar -tzf "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" | grep -E '/(manifest.json|manifest.sig|signage|static/index.html)$'
+          tar -tzf "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" | grep -q '/static/install/screentra-cast-signage-ca.crt' && {
+            echo 'server-local CA was included in the update bundle' >&2
+            exit 1
+          } || true
+
+          mkdir -p "$RUNNER_TEMP/verify"
+          tar -xzf "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" -C "$RUNNER_TEMP/verify"
+          KEY="$RUNNER_TEMP/server-update-signing.key"
+          openssl pkey -in "$KEY" -pubout -out "$RUNNER_TEMP/server-update-signing.pub"
+          BUNDLE_ROOT=$(find "$RUNNER_TEMP/verify" -mindepth 1 -maxdepth 1 -type d -print -quit)
+          openssl pkeyutl -verify -rawin -pubin -inkey "$RUNNER_TEMP/server-update-signing.pub" \
+            -sigfile "$BUNDLE_ROOT/manifest.sig" -in "$BUNDLE_ROOT/manifest.json"
+          sha256sum "$RUNNER_TEMP/screentra-cast-server-update.tar.gz"
+
+      - name: Upload signed update asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" --clobber

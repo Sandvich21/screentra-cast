@@ -221,7 +221,12 @@ fn required_capability(path: &str, method: &str) -> &'static str {
     if path == "/api/audit" {
         return "view_audit";
     }
-    if path == "/api/version/update/export" || path == "/api/version/update/import" {
+    if path == "/api/version/update/export"
+        || path == "/api/version/update/import"
+        || path == "/api/version/update/apply"
+        || path == "/api/version/update/github/settings"
+        || path == "/api/version/export"
+    {
         return "server_update";
     }
     if path.starts_with("/api/version/update/")
@@ -373,7 +378,10 @@ fn role_has_capability(role: &str, capability: &str) -> bool {
     }
 }
 fn required_step_up_scope(path: &str, _method: &str) -> Option<String> {
-    if path == "/api/version/update/export" || path == "/api/version/update/import" {
+    if path == "/api/version/update/export"
+        || path == "/api/version/update/import"
+        || path == "/api/version/update/apply"
+        || path == "/api/version/update/github/settings" {
         return Some("server-update".to_string());
     }
     // Client commands and display assignments are already protected by the
@@ -520,6 +528,10 @@ mod authorization_tests {
     #[test]
     fn step_up_scopes_cover_high_impact_operations() {
         assert_eq!(required_step_up_scope("/api/version/update/import", "POST"), Some("server-update".to_string()));
+        assert_eq!(required_step_up_scope("/api/version/update/apply", "POST"), Some("server-update".to_string()));
+        assert_eq!(required_step_up_scope("/api/version/update/github/settings", "POST"), Some("server-update".to_string()));
+        assert_eq!(required_capability("/api/version/update/apply", "POST"), "server_update");
+        assert_eq!(required_capability("/api/version/update/github", "GET"), "server_admin");
         assert_eq!(required_step_up_scope("/api/clients/one/nudge", "POST"), None);
         assert_eq!(required_step_up_scope("/api/clients/one/displays/0/layout", "POST"), None);
         assert_eq!(required_step_up_scope("/api/layouts/one/publish", "POST"), None);
