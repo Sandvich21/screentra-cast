@@ -3,6 +3,7 @@ mod auth;
 mod backup_api;
 mod db;
 mod display;
+mod discovery;
 mod fonts;
 mod github_update;
 mod middleware;
@@ -675,6 +676,25 @@ async fn main() {
         },
         _ => panic!("SIGNAGE_TLS_CERT and SIGNAGE_TLS_KEY must be set together"),
     };
+
+    let discovery_name = std::env::var("SCREENTRA_CAST_SERVER_NAME")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|value| value.trim().to_string()))
+        .unwrap_or_else(|_| "Screentra Cast".to_string());
+    let discovery_ca = crate::discovery::load_published_ca(tls_cert_path.as_deref());
+    let discovery_port = addr.port();
+    let discovery_tls = !tls_disabled;
+    tokio::spawn(async move {
+        if let Err(error) = crate::discovery::run_server(
+            discovery_port,
+            discovery_tls,
+            discovery_name,
+            discovery_ca,
+        )
+        .await
+        {
+            log::warn!("LAN discovery listener stopped: {error}");
+        }
+    });
 
     // Use provided cert files if both are set, otherwise generate a
     // self-signed cert at startup. Connections are still encrypted; only

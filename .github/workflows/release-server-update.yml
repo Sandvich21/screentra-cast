@@ -57,7 +57,47 @@ jobs:
             -sigfile "$BUNDLE_ROOT/manifest.sig" -in "$BUNDLE_ROOT/manifest.json"
           sha256sum "$RUNNER_TEMP/screentra-cast-server-update.tar.gz"
 
-      - name: Upload signed update asset
+      - name: Provision client signing key
+        env:
+          CLIENT_UPDATE_SIGNING_KEY: ${{ secrets.SCREENTRA_CAST_CLIENT_UPDATE_SIGNING_KEY }}
+        run: |
+          test -n "$CLIENT_UPDATE_SIGNING_KEY" || {
+            echo 'SCREENTRA_CAST_CLIENT_UPDATE_SIGNING_KEY is not configured' >&2
+            exit 1
+          }
+          umask 077
+          printf '%s\n' "$CLIENT_UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/client-update-signing.key"
+
+      - name: Build and verify signed player client bundle
+        env:
+          SCREENTRA_CAST_CLIENT_UPDATE_SIGNING_KEY: ${{ runner.temp }}/client-update-signing.key
+        run: |
+          set -euo pipefail
+          python3 tools/build-player-client-bundle.py \
+            --repo . \
+            --out "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz"
+          tar -tzf "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz" \
+            | grep -E '/(manifest.json|README.txt|payload/install/player-client.sh|payload/install/player-client.sh.sig|payload/install/screentra-cast-client-update.pub)$'
+          openssl pkeyutl -sign -rawin \
+            -inkey "$RUNNER_TEMP/client-update-signing.key" \
+            -in "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz" \
+            -out "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz.sig"
+          openssl pkey -in "$RUNNER_TEMP/client-update-signing.key" -pubout \
+            -out "$RUNNER_TEMP/client-update-signing.pub"
+          openssl pkeyutl -verify -rawin -pubin \
+            -inkey "$RUNNER_TEMP/client-update-signing.pub" \
+            -sigfile "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz.sig" \
+            -in "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz"
+          sha256sum "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz" \
+            > "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz.sha256"
+
+      - name: Upload signed release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" --clobber
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" \
+            "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz" \
+            "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz.sig" \
+            "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz.sha256" \
+            --clobber

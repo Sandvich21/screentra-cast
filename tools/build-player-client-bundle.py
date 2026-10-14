@@ -82,16 +82,15 @@ def sign_installer(installer: Path, signature: Path, public_key: Path) -> None:
         stderr=subprocess.PIPE,
         text=True,
     )
-    if not public_key.exists():
-        temporary = public_key.with_suffix(public_key.suffix + ".tmp")
-        subprocess.run(
-            ["openssl", "pkey", "-in", str(signing_key), "-pubout", "-out", str(temporary)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        temporary.replace(public_key)
+    temporary = public_key.with_suffix(public_key.suffix + ".tmp")
+    subprocess.run(
+        ["openssl", "pkey", "-in", str(signing_key), "-pubout", "-out", str(temporary)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    temporary.replace(public_key)
 
 
 def build(repo: Path, install_dir: Path, output: Path) -> dict[str, object]:
@@ -100,7 +99,16 @@ def build(repo: Path, install_dir: Path, output: Path) -> dict[str, object]:
         installer = ensure_generated_installer(source_repo)
         source_label = str(source_repo)
         version_file = source_repo / "VERSION"
-        version = version_file.read_text(encoding="utf-8").strip() if version_file.exists() else "0.1.0"
+        if version_file.exists():
+            version = version_file.read_text(encoding="utf-8").strip()
+        else:
+            cargo_toml = source_repo / "Cargo.toml"
+            version = "0.1.0"
+            if cargo_toml.exists():
+                for line in cargo_toml.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("version = \"") and line.endswith("\""):
+                        version = line[len("version = \""):-1]
+                        break
         extra_files = []
         uninstall = source_repo / "install/player-uninstall.sh"
         if uninstall.is_file():

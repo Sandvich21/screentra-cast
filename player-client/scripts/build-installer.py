@@ -8,6 +8,7 @@ import sys
 PLAYER_ROOT = Path(__file__).resolve().parents[1]
 SECTIONS = {
     "PY_PREFLIGHT":           PLAYER_ROOT / "scripts/screentra-player-preflight.py",
+    "PY_DISCOVERY":           PLAYER_ROOT / "scripts/screentra-discover.py",
     "PY":                     PLAYER_ROOT / "scripts/screentra-player-heartbeat.py",
     "PY_RENDERER":            PLAYER_ROOT / "scripts/screentra-player-renderer.py",
     "PY_GPU_HEALTH":          PLAYER_ROOT / "scripts/screentra-gpu-health.py",

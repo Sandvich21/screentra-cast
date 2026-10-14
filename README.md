@@ -180,13 +180,42 @@ SCREENTRA_CAST_GITHUB_REPO=owner/repository
 SCREENTRA_CAST_UPDATE_ASSET=screentra-cast-server-update.tar.gz
 ```
 
-For an existing server replacement, preserve the original credentials,
-client identities, TLS trust, database content, layouts, schedules, and runtime
+## Player client installation and LAN adoption
+
+The player client release bundle is intended for users who do not have Rust,
+Python source dependencies, or a checkout of this repository. The GitHub Release
+workflow publishes a signed bundle containing the generated installer, its
+signature, the pinned client-update public key, and a manifest. The bundle does
+not contain client identity, credentials, layouts, uploads, or runtime state.
+
+When the installer is run without `SCREENTRA_SERVER_URL`, it sends a bounded LAN
+broadcast discovery request. A Screentra Cast server replies only with its HTTPS
+URL and published CA certificate. The installer validates the CA hash, asks the
+user to confirm the discovered server (or select one when several are present),
+and stores the CA before making HTTPS requests. Remote HTTP discovery is
+rejected.
+
+The first heartbeat registers the new client as a pending candidate. An
+administrator adopts it from **Connected Clients**. Repeating the installer on
+additional displays follows the same flow; no server address needs to be typed.
+For unattended or routed-network installs, the explicit override remains:
+
+```bash
+SCREENTRA_SERVER_URL=https://server.example:3000 \
+  sudo bash payload/install/player-client.sh
+```
+
+The release workflow signs client installers with the separate GitHub Actions
+secret `SCREENTRA_CAST_CLIENT_UPDATE_SIGNING_KEY`; it must match the pinned
+client public key already provisioned on existing clients.
+
+For an existing server replacement, preserve the original credentials, client
+identities, TLS trust, database content, layouts, schedules, and runtime
 media through a separate backed-up migration procedure.
 
 ## Project status
 
 The `main` branch contains the current Screentra Cast source and the published
-`v0.1.3` server installation path. Debian 13 amd64 is the validated platform;
+`v0.1.4` server installation path. Debian 13 amd64 is the validated platform;
 Ubuntu Server amd64 and the appliance ISO require additional independent
 validation before production rollout.

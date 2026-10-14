@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SERVER_URL="${SCREENTRA_SERVER_URL:-${RIPLEY_SERVER_URL:-}}"
+DISCOVERED_CA_B64=""
+DISCOVERED_SERVER_NAME=""
 INSTALL_DIR="${SCREENTRA_CLIENT_DIR:-/home/${SCREENTRA_BOARD_USER:-board}/.local/share/screentra-client}"
 BIN_DIR="$HOME/.local/bin"
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
@@ -21,6 +23,25 @@ RENDER_SERVICE="$SYSTEMD_USER_DIR/screentra-client-renderer@.service"
 ADMIN_SERVICE="$SYSTEMD_USER_DIR/screentra-client-admin.service"
 KIOSK_SERVICE="$SYSTEMD_USER_DIR/screentra-kiosk-browser@.service"
 SYSTEMD_KIOSK_UNIT="/etc/systemd/system/screentra-cast-kiosk@.service"
+INSTALLER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+discover_server() {
+    local result
+    if ! result="$(python3 - <<'PY_DISCOVERY'
+PY_DISCOVERY
+)"; then
+        return 1
+    fi
+    local values=()
+    mapfile -t values <<<"$result"
+    if [ -z "${values[0]:-}" ] || [ -z "${values[1]:-}" ]; then
+        return 1
+    fi
+    SERVER_URL="${values[0]}"
+    DISCOVERED_CA_B64="${values[1]}"
+    DISCOVERED_SERVER_NAME="${values[2]:-Screentra Cast}"
+    return 0
+}
 
 is_ssh_session() {
     if [ -n "${SSH_CONNECTION:-}" ]; then return 0; fi
@@ -60,6 +81,11 @@ fi
 printf "%s\n" "$VERSION" > "$INSTALL_DIR/VERSION"
 if [ -z "$SERVER_URL" ] && [ -f "$INSTALL_DIR/server" ]; then
     SERVER_URL="$(cat "$INSTALL_DIR/server" 2>/dev/null || true)"
+fi
+if [ -z "$SERVER_URL" ]; then
+    if discover_server; then
+        echo "Using discovered Screentra Cast server: $DISCOVERED_SERVER_NAME ($SERVER_URL)"
+    fi
 fi
 if [ -z "$SERVER_URL" ]; then
     if [ -t 0 ] && [ -t 1 ]; then
@@ -129,6 +155,25 @@ run_privileged() {
         if [ -t 0 ]; then sudo "$@"; else sudo -n "$@"; fi
     else
         return 1
+    fi
+}
+
+install_client_update_public_key() {
+    local source="${SCREENTRA_CLIENT_UPDATE_PUBLIC_KEY_SOURCE:-$INSTALLER_DIR/screentra-cast-client-update.pub}"
+    local target="/etc/screentra-cast/client-update-signing.pub"
+    if [ -s "$source" ] && grep -q 'BEGIN PUBLIC KEY' "$source"; then
+        if [ -s "$target" ] && ! cmp -s "$source" "$target"; then
+            echo "ERROR: bundled client-update public key does not match the existing pinned key at $target." >&2
+            return 1
+        fi
+        if [ ! -s "$target" ]; then
+            run_privileged install -D -o root -g root -m 0644 "$source" "$target"
+            echo "Installed pinned client-update public key at $target."
+        else
+            echo "Verified existing pinned client-update public key at $target."
+        fi
+    elif [ ! -s "$target" ]; then
+        echo "WARNING: client-update public key is missing; client self-updates will remain disabled." >&2
     fi
 }
 
@@ -795,6 +840,15 @@ ensure_user_groups
 ensure_seat_daemon
 create_board_user
 
+if [ -n "$DISCOVERED_CA_B64" ]; then
+    discovered_ca_tmp="$(mktemp "$INSTALL_DIR/.discovered-ca.XXXXXX")"
+    if printf '%s' "$DISCOVERED_CA_B64" | base64 --decode > "$discovered_ca_tmp" 2>/dev/null \
+        && grep -q 'BEGIN CERTIFICATE' "$discovered_ca_tmp"; then
+        install -m 0644 "$discovered_ca_tmp" "$INSTALL_DIR/screentra-cast-signage-ca.crt"
+        echo "Saved discovered Screentra Cast CA trust anchor."
+    fi
+    rm -f "$discovered_ca_tmp"
+fi
 install_screentra_ca_trust
 write_os_marker
 export RIPLEY_CLIENT_DIR="$INSTALL_DIR"
@@ -1062,6 +1116,7 @@ print(secrets.token_urlsafe(48))
 PY_TOKEN
 fi
 chmod 0600 "$CLIENT_AUTH_TOKEN_FILE"
+install_client_update_public_key
 install_root_verified_updater
 
 cat > "$HEARTBEAT" <<'PY'
