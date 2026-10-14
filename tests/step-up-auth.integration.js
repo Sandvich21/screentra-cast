@@ -35,7 +35,7 @@ assert(clientApi.includes('credentials: init.credentials || \'same-origin\''), '
 assert(!clientAuth.includes('ensureClientControl'), 'client-control preflight must be removed');
 assert(!app.includes('API.ensureClientControl'), 'client-card publish must not preflight client authorization');
 assert(middleware.includes('Client commands and display assignments'), 'client commands must not require step-up authentication');
-assert(index.includes('/js/api.js?v=20261003233500'), 'api.js cache-busting marker missing');
-assert(index.includes('/js/auth.js?v=20261003004000'), 'auth.js cache-busting marker missing');
-assert(index.includes('/js/app.js?v=20261004012317'), 'app.js cache-busting marker missing');
+assert(/\/js\/api\.js\?v=[^"']+/.test(index), 'api.js cache-busting marker missing');
+assert(/\/js\/auth\.js\?v=[^"']+/.test(index), 'auth.js cache-busting marker missing');
+assert(/\/js\/app\.js\?v=[^"']+/.test(index), 'app.js cache-busting marker missing');
 console.log('step-up auth integration contract: ok');

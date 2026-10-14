@@ -56,7 +56,11 @@ function update() {
     }
   } catch (e) { /* malformed URL — keep default */ }
   el.style.fontSize = fontSize + 'px';
-  el.style.setProperty('color', color, 'important');
+  if (el.style && typeof el.style.setProperty === 'function') {
+    el.style.setProperty('color', color, 'important');
+  } else {
+    el.style.color = color;
+  }
   if (fontFamily) {
     el.style.fontFamily = fontFamily;
   } else {

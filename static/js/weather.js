@@ -201,7 +201,10 @@
 
         function showError(msg) {
             const app = document.getElementById('app');
-            app.innerHTML = `<div class="error">${msg}</div>`;
+            app.replaceChildren(Object.assign(document.createElement('div'), {
+                className: 'error',
+                textContent: String(msg || 'Weather unavailable'),
+            }));
         }
 
         function render() {

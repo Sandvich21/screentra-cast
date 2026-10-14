@@ -108,6 +108,29 @@ const playlistVideoHtml = context.buildWidgetHTML({
 });
 assert.match(playlistVideoHtml, /data-video-widget-id="playlist-video-1"/);
 assert.match(playlistVideoHtml, /autoplay playsinline preload="auto" loop /);
+const youtubeHtml = context.buildWidgetHTML({
+  id: 'youtube-1',
+  widget_type: 'video',
+  x: 0,
+  y: 0,
+  w: 100,
+  h: 100,
+  z: 1,
+  props: { url: 'https://youtu.be/dQw4w9WgXcQ', muted: true },
+});
+assert.match(youtubeHtml, /<iframe[^>]+\/youtube\.html\?url=/);
+assert.doesNotMatch(youtubeHtml, /<video[^>]+youtu/);
+const youtubePlaylistHtml = context.buildWidgetHTML({
+  id: 'youtube-playlist-1',
+  widget_type: 'video',
+  x: 0,
+  y: 0,
+  w: 100,
+  h: 100,
+  z: 1,
+  props: { playlist: [{ url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' }] },
+});
+assert.match(youtubePlaylistHtml, /<iframe[^>]+\/youtube\.html\?url=/);
 
 const rotatedHtml = context.buildWidgetHTML({
   id: 'rotated-1',

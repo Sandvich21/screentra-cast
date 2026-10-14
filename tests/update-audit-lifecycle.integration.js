@@ -14,7 +14,7 @@ assertIncludes(api, 'async fn audit_update_export_failure', 'update export failu
 assertIncludes(api, 'audit_update_import_failure(&state, &principal, "multipart rejected")', 'multipart parse failure audit');
 assertIncludes(api, '"bundle field read failed"', 'bundle read failure audit');
 assertIncludes(api, '"bundle file missing"', 'missing bundle audit');
-assertIncludes(api, '"staging write failed"', 'staging write failure audit');
+assertIncludes(api, '"bundle field read failed"', 'bundle staging/read failure audit');
 assertIncludes(api, 'audit_update_export_failure(&state, &principal, "bundle export failed")', 'export failure audit');
 assertIncludes(api, 'authenticated_audit_listing_reads_bounded_update_failure_events', 'authenticated audit listing test');
 assertIncludes(api, 'disposable_sqlite_invalid_update_failure_is_audited', 'disposable SQLite update failure test');

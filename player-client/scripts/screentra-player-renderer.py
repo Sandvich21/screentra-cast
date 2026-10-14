@@ -22,6 +22,42 @@ import tarfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+MAX_REQUEST_BODY_BYTES = 1 << 20
+MAX_JSON_FILE_BYTES = 1 << 20
+
+
+def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    temporary.write_text(text, encoding='utf-8')
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+
+
+def _read_json_file(path: Path, default):
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
+            return default
+        return json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return default
+
+
+def _request_body(handler) -> str:
+    raw_length = handler.headers.get('Content-Length')
+    if raw_length is None:
+        length = 0
+    else:
+        try:
+            length = int(raw_length)
+        except (TypeError, ValueError):
+            raise ValueError('invalid Content-Length')
+    if length < 0:
+        raise ValueError('invalid Content-Length')
+    if length > MAX_REQUEST_BODY_BYTES:
+        raise OverflowError('request body too large')
+    return handler.rfile.read(length).decode('utf-8') if length else '{}'
+
 
 # === no-layout & touchscreen endpoints =====================================
 import urllib.request as _ur
@@ -195,7 +231,7 @@ def _nl_status():
     last_seen = connection = last_layout = None
     if last_path.exists():
         try:
-            last = json.loads(last_path.read_text())
+            last = _read_json_file(last_path, {})
             last_seen = last.get('at')
             connection = last.get('connection', 'offline')
             last_layout = last.get('assigned_layout_id')
@@ -205,7 +241,7 @@ def _nl_status():
     label = connector = resolution = None
     if disp_path.exists():
         try:
-            d = json.loads(disp_path.read_text())
+            d = _read_json_file(disp_path, {})
             label = d.get('label') or d.get('connector')
             connector = d.get('connector')
             w = d.get('width'); h = d.get('height')
@@ -217,7 +253,7 @@ def _nl_status():
     selected = None
     if touch_pref.exists():
         try:
-            selected = json.loads(touch_pref.read_text()).get('path')
+            selected = _read_json_file(touch_pref, {}).get('path')
         except Exception:
             pass
     devs = _nl_detect_touch_devices()
@@ -233,7 +269,7 @@ def _nl_status():
         layout_status_file = Handler.cache_dir / 'assigned-layout.json'
     if layout_status_file.exists():
         try:
-            last_layout = json.loads(layout_status_file.read_text()).get('id')
+            last_layout = _read_json_file(layout_status_file, {}).get('id')
         except Exception:
             pass
     else:
@@ -280,7 +316,7 @@ def _load_display_governance() -> dict:
     try:
         path = _client_config_path()
         if path.exists():
-            data = json.loads(path.read_text())
+            data = _read_json_file(path, {})
             if isinstance(data, dict):
                 cfg.update({k: data.get(k) for k in cfg if k in data})
     except Exception as e:
@@ -303,7 +339,7 @@ def _load_client_config() -> dict:
     path = _client_config_path()
     try:
         if path.exists():
-            data = json.loads(path.read_text())
+            data = _read_json_file(path, {})
             if isinstance(data, dict):
                 return data
     except Exception:
@@ -313,9 +349,7 @@ def _load_client_config() -> dict:
 def _write_client_config(cfg: dict) -> None:
     path = _client_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix('.json.tmp')
-    tmp.write_text(json.dumps(cfg, indent=2))
-    tmp.replace(path)
+    _atomic_write_text(path, json.dumps(cfg, indent=2))
 
 def _write_display_count(max_displays) -> dict:
     cfg = _load_client_config()
@@ -327,7 +361,7 @@ def _write_display_count(max_displays) -> dict:
     _write_client_config(cfg)
     pending = Handler.cache_dir / 'pending-command.json'
     pending.parent.mkdir(parents=True, exist_ok=True)
-    pending.write_text(json.dumps({'action':'set_display_count','payload':{'max_displays': override},'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
+    _atomic_write_text(pending, json.dumps({'action':'set_display_count','payload':{'max_displays': override},'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
     _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service'], timeout=6)
     actor = _safe_run(['systemctl', '--user', 'start', 'ripley-player-actor.service'], timeout=6)
     gov = _load_display_governance()
@@ -371,7 +405,7 @@ def _current_touch_binding() -> dict:
     legacy = Handler.cache_dir / 'touch-device.json'
     if not binding and legacy.exists():
         try:
-            path = json.loads(legacy.read_text()).get('path')
+            path = _read_json_file(legacy, {}).get('path')
             if path:
                 binding = {'device_path': path, 'device_name': _resolve_touch_name(path), 'target_display_indexes': [0], 'target_connectors': _display_connectors_for_indexes([0]), 'allow_joined_displays': False}
         except Exception:
@@ -412,10 +446,10 @@ def _write_touch_binding(payload: dict) -> dict:
     cfg['touch_binding'] = binding
     _write_client_config(cfg)
     if dev_path:
-        (Handler.cache_dir / 'touch-device.json').write_text(json.dumps({'path': dev_path, 'name': dev_name}, indent=2))
+        _atomic_write_text(Handler.cache_dir / 'touch-device.json', json.dumps({'path': dev_path, 'name': dev_name}, indent=2))
     pending = Handler.cache_dir / 'pending-command.json'
     pending.parent.mkdir(parents=True, exist_ok=True)
-    pending.write_text(json.dumps({'action':'set_touch_binding','payload': binding,'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
+    _atomic_write_text(pending, json.dumps({'action':'set_touch_binding','payload': binding,'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
     _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service'], timeout=6)
     actor = _safe_run(['systemctl', '--user', 'start', 'ripley-player-actor.service'], timeout=6)
     return {'ok': True, 'touch_binding': binding, 'actor_start': actor}
@@ -786,7 +820,10 @@ def _admin_status() -> dict:
             svc['active'] = 'disabled'
             svc['active_ok'] = True
             svc['note'] = 'secondary kiosk output intentionally disabled while touchscreen-only mode is active'
-    return {'status': base, 'time': _iso_now(), 'uptime_seconds': time.monotonic(), 'auth': _auth_source(), 'metrics': _system_metrics(), 'display_governance': _load_display_governance(), 'services': services, 'processes': {'chromium': chromium.get('stdout', ''), 'labwc': labwc.get('stdout', '')}, 'outputs': _wlr_outputs(), 'touch': {'devices': _nl_detect_touch_devices(), 'binding': _current_touch_binding(), 'calibration': json.loads((cache/'touch-calibration.json').read_text()) if (cache/'touch-calibration.json').exists() else []}, 'ca': _cert_info(), 'command_state': {'pending_command': json.loads(pending.read_text()) if pending.exists() else None, 'last_result': json.loads(result.read_text()) if result.exists() else None}}
+    calibration = _read_json_file(cache / 'touch-calibration.json', [])
+    pending_state = _read_json_file(pending, None)
+    result_state = _read_json_file(result, None)
+    return {'status': base, 'time': _iso_now(), 'uptime_seconds': time.monotonic(), 'auth': _auth_source(), 'metrics': _system_metrics(), 'display_governance': _load_display_governance(), 'services': services, 'processes': {'chromium': chromium.get('stdout', ''), 'labwc': labwc.get('stdout', '')}, 'outputs': _wlr_outputs(), 'touch': {'devices': _nl_detect_touch_devices(), 'binding': _current_touch_binding(), 'calibration': calibration}, 'ca': _cert_info(), 'command_state': {'pending_command': pending_state, 'last_result': result_state}}
 
 
 # === local admin auth =========================================================
@@ -830,7 +867,7 @@ def _load_admin_users() -> list[dict]:
     path = _synced_users_path()
     if path.exists():
         try:
-            data = json.loads(path.read_text())
+            data = _read_json_file(path, {})
             users = data.get('users') if isinstance(data, dict) else data
             if isinstance(users, list):
                 return [u for u in users if isinstance(u, dict) and u.get('username') and (u.get('password_hash') or u.get('password'))]
@@ -841,10 +878,10 @@ def _load_admin_users() -> list[dict]:
 def _auth_source() -> dict:
     users = _load_admin_users()
     if users:
-        try: synced_at = json.loads(_synced_users_path().read_text()).get('synced_at')
+        try: synced_at = _read_json_file(_synced_users_path(), {}).get('synced_at')
         except Exception: synced_at = None
         return {'source': 'synced_server_users', 'fallback_default': False, 'user_count': len(users), 'synced_at': synced_at}
-    return {'source': 'fallback_default', 'fallback_default': True, 'user_count': 1, 'warning': 'Using default local admin/admin because server users have not synced yet.'}
+    return {'source': 'unprovisioned', 'fallback_default': False, 'user_count': 0, 'warning': 'No local admin users are provisioned; sync an operator account from the managed server.'}
 
 def _check_login(username: str, password: str) -> tuple[bool, dict]:
     users = _load_admin_users()
@@ -857,8 +894,7 @@ def _check_login(username: str, password: str) -> tuple[bool, dict]:
                 if u.get('password') and hmac.compare_digest(str(u.get('password')), password):
                     return True, {'username': username, 'source': 'synced_server_users'}
         return False, {'error': 'invalid username or password', **_auth_source()}
-    ok = hmac.compare_digest(username, 'admin') and hmac.compare_digest(password, 'admin')
-    return (ok, {'username': 'admin', **_auth_source()}) if ok else (False, {'error': 'invalid username or password', **_auth_source()})
+    return False, {'error': 'local admin authentication is not provisioned', **_auth_source()}
 
 def _make_session(username: str, source: str) -> str:
     exp = int(time.time()) + 12 * 3600
@@ -890,7 +926,7 @@ def _session_user(cookie_header: str) -> dict | None:
 
 def _admin_login_html() -> str:
     src = _auth_source()
-    warn = 'Default local fallback admin/admin is active until server users sync.' if src.get('fallback_default') else 'Using synced server users.'
+    warn = 'No local admin account is provisioned yet; sync an operator account from the managed server.' if not src.get('user_count') else 'Using synced server users.'
     return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Screentra Cast Admin Sign In</title><style>body{margin:0;background:#07111f;color:#e5eefc;font-family:system-ui,-apple-system,Segoe UI,sans-serif;display:grid;place-items:center;min-height:100vh}.card{width:min(430px,92vw);background:#0f172a;border:1px solid #243247;border-radius:18px;padding:24px;box-shadow:0 20px 70px rgba(0,0,0,.4)}h1{margin:0 0 8px}.muted{color:#91a4bf}.warn{border:1px solid rgba(245,158,11,.45);background:rgba(245,158,11,.08);border-radius:12px;padding:10px;margin:14px 0;color:#facc15}label{display:block;margin-top:12px;color:#91a4bf;font-size:12px;text-transform:uppercase;letter-spacing:.08em}input{width:100%;margin-top:6px;padding:12px;border-radius:10px;border:1px solid #243247;background:#07111f;color:#e5eefc;font-size:16px}button{width:100%;margin-top:16px;padding:12px;border:0;border-radius:999px;background:#38bdf8;color:#03131f;font-weight:900;font-size:15px}.err{color:#fca5a5;min-height:20px;margin-top:10px}</style></head><body><form class="card" id="f"><h1>Screentra Cast Admin</h1><div class="muted">Sign in to manage this local player.</div><div class="warn">'+warn+'</div><label>Username</label><input id="u" autocomplete="username" value="admin"><label>Password</label><input id="p" type="password" autocomplete="current-password" autofocus><button>Sign in</button><div class="err" id="e"></div></form><script>document.getElementById("f").addEventListener("submit",async ev=>{ev.preventDefault();e.textContent="Signing in…";try{const r=await fetch("/api/admin/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:u.value,password:p.value})});const j=await r.json();if(r.ok&&j.ok){location.href="/"}else{e.textContent=j.error||"Login failed"}}catch(x){e.textContent=String(x)}});</script></body></html>'
 
 def _admin_auth_payload(handler) -> dict:
@@ -898,13 +934,18 @@ def _admin_auth_payload(handler) -> dict:
     return {'authenticated': bool(user), 'user': user, **_auth_source()}
 
 def _admin_requires_auth(path: str) -> bool:
-    if os.environ.get('RIPLEY_ADMIN_DEFAULT', '').lower() not in ('1', 'true', 'yes'):
+    if os.environ.get('RIPLEY_ADMIN_MODE', '').lower() not in ('1', 'true', 'yes'):
         return False
     if path in ('/api/admin/auth/login', '/api/admin/auth/status', '/login', '/login.html'):
         return False
     if path.startswith('/api/admin') or path in ('/', '/admin.html'):
         return True
     return False
+
+def _mutation_requires_auth(path: str) -> bool:
+    if path in ('/api/admin/auth/login', '/api/admin/auth/logout', '/api/admin/auth/status'):
+        return False
+    return path in ('/api/touchscreen/select', '/api/touch-calibration.json', '/api/client-config.json') or path.startswith('/api/admin/')
 
 ADMIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Screentra Cast Player Admin</title><style>
 :root{--bg:#07111f;--panel:#0f172a;--panel2:#111c31;--line:#26364f;--text:#e5eefc;--muted:#91a4bf;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--accent:#38bdf8;--violet:#a78bfa}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,rgba(56,189,248,.14),transparent 34rem),linear-gradient(160deg,#07111f,#020617);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1380px;margin:0 auto;padding:24px}.top{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;margin-bottom:18px}.title h1{margin:0;font-size:30px;letter-spacing:-.03em}.title p{margin:6px 0 0;color:var(--muted)}.pill{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;border:1px solid var(--line);font-weight:900;font-size:12px;text-transform:uppercase;letter-spacing:.08em}.ok{color:var(--ok);border-color:rgba(34,197,94,.5)}.ready{color:#7dd3fc;border-color:rgba(125,211,252,.62);background:rgba(14,116,144,.12)}.disabled{color:#cbd5e1;border-color:rgba(203,213,225,.38);background:rgba(148,163,184,.10)}.warn{color:var(--warn);border-color:rgba(245,158,11,.5)}.err{color:var(--err);border-color:rgba(239,68,68,.5)}.muted{color:var(--muted)}.small{color:var(--muted);font-size:12px}.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:14px 0 18px}.metric{background:linear-gradient(180deg,rgba(17,28,49,.96),rgba(15,23,42,.9));border:1px solid var(--line);border-radius:18px;padding:16px;box-shadow:0 14px 44px rgba(0,0,0,.24)}.metric .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}.metric .value{font-size:28px;font-weight:950;margin-top:7px;letter-spacing:-.04em}.metric .sub{color:var(--muted);margin-top:4px;min-height:20px}.bar{height:8px;background:#07111f;border-radius:999px;overflow:hidden;border:1px solid rgba(148,163,184,.18);margin-top:12px}.fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--violet));width:0%}.sections{display:grid;gap:12px}.section,.panelcard{background:rgba(15,23,42,.9);border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:0 12px 38px rgba(0,0,0,.22)}.panelcard{padding:16px 18px 18px}.panelcard h2{margin:0 0 12px;font-size:16px}.fixed-panels{margin:14px 0 12px}details.section>summary{list-style:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 18px;font-weight:950;font-size:16px}details.section>summary::-webkit-details-marker{display:none}.chev{color:var(--muted);font-size:18px;transition:transform .16s ease}details[open] .chev{transform:rotate(90deg)}.body{border-top:1px solid var(--line);padding:16px 18px 18px;background:rgba(2,6,23,.16)}.kv{display:grid;grid-template-columns:170px 1fr;gap:8px 12px}.k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.06em}.v{word-break:break-word}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center}button,select,a.btn{background:#17243a;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:9px 11px;font-weight:800;text-decoration:none;cursor:pointer}button:hover,a.btn:hover,select:hover{border-color:var(--accent)}button.danger{background:rgba(127,29,29,.72);border-color:rgba(239,68,68,.65);color:#fecaca}.split{display:grid;grid-template-columns:1fr 1fr;gap:14px}.service{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(148,163,184,.12);padding:10px 0}.service:last-child{border-bottom:0}pre{margin:0;white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto;background:#050b14;border:1px solid #182338;border-radius:10px;padding:12px;color:#cbd5e1}.logbar{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}.statusline{margin-top:10px;color:var(--muted)}label{display:inline-flex;gap:7px;align-items:center;color:var(--muted)}input[type=checkbox]{accent-color:var(--accent)}@media(max-width:1000px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.split{grid-template-columns:1fr}}@media(max-width:640px){.wrap{padding:14px}.top{display:block}.cards{grid-template-columns:1fr}.kv{grid-template-columns:1fr}.actions{align-items:stretch}.actions>*{width:100%;justify-content:center}}
@@ -967,11 +1008,16 @@ function templateEl(e,p,i,g,dw,dh){const q=Object.assign({},e.props||{}),r=e.rep
 function templateHtml(w){const p=props(w),es=Array.isArray(p.template_elements)?p.template_elements:[];if(!es.length)return '';const g=groupMetrics(es);let dw=Number(p.template_width)||760,dh=Number(p.template_height)||427.5;es.forEach(e=>{dw=Math.max(dw,(Number(e.x)||0)+(Number(e.width)||120));dh=Math.max(dh,(Number(e.y)||0)+(Number(e.height)||80));});return `<div style="position:relative;width:100%;height:100%;overflow:hidden;">${es.slice().sort((a,b)=>(Number(a.z)||0)-(Number(b.z)||0)).map(e=>Array.from({length:repeatCount(p,e)},(_,i)=>templateEl(e,p,i,g,dw,dh)).join('')).join('')}</div>`;}
 async function loadWeather(p){const lat=Number(p.lat||0),lon=Number(p.lon||0);if(!lat||!lon)return;try{const r=await fetch(`/api/weather/forecast?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`,{cache:'no-store'});if(r.ok)p._weather_data=await r.json();}catch(_e){}}
 function countdownFontSize(p){return Math.max(8,Math.min(160,Number(p.font_size||p.fontSize||48)||48))*2;}
+function countdownText(node,now){const get=(name)=>node.getAttribute?node.getAttribute(name):(node.dataset||{})[name.slice(5).split('-').map((part,i)=>i?part[0].toUpperCase()+part.slice(1):part).join('')]||'',mode=get('data-countdown-mode')||'date',unit=get('data-countdown-duration-unit')||'minutes',value=Math.max(1,Number(get('data-countdown-duration-value'))||1),started=Number(get('data-countdown-started-at'))||now,target=mode==='duration'?started+value*({seconds:1000,minutes:60000,hours:3600000,days:86400000}[unit]||60000):new Date(get('data-countdown-target-date')||'').getTime(),diff=Math.max(0,target-now),expiry=get('data-countdown-expiry-text')||'Time\u2019s up!';if(!Number.isFinite(target)||target<=0)return get('data-countdown-invalid-text')||'Choose a date and time';if(diff<=0)return expiry;const d=Math.floor(diff/86400000),h=Math.floor(diff%86400000/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000);return d?d+'d '+h+'h':h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s';}
+function tickCountdowns(){const now=Date.now();document.querySelectorAll('[data-countdown-widget]').forEach(node=>{const value=node.querySelector('.countdown-value');if(value)value.textContent=countdownText(node,now);});}
+function initCachedVideoWidgets(widgets){const nodes=document.querySelectorAll('[data-video-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-video-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget),list=p&&Array.isArray(p.playlist)?p.playlist:[];if(!list.length)return;let index=0;const advance=()=>{index=(index+1)%list.length;node.src=String(list[index].url||'');if(typeof node.load==='function')node.load();const result=typeof node.play==='function'?node.play():null;if(result&&typeof result.catch==='function')result.catch(()=>{});};node.src=String(list[0].url||'');node.loop=list.length===1&&p.loop!==false;node.onended=list.length>1?advance:null;node.onerror=list.length>1?advance:null;});}
 async function renderWidget(w){const p=props(w),t=normWidgetType(w);if(t==='weather')await loadWeather(p);let inner='';
  if(t==='weather'&&Array.isArray(p.template_elements)&&p.template_elements.length) inner=templateHtml(w);
  else if(t==='text') inner=`<div style="width:100%;height:100%;display:flex;align-items:${p.valign||'center'};justify-content:${p.align==='left'?'flex-start':p.align==='right'?'flex-end':'center'};padding:1rem;color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||24)*2}px;text-align:${p.align||'center'};">${esc(p.text||'Text')}</div>`;
  else if(t==='countdown') { const target=p.countdown_mode==='duration' ? Date.now() + Math.max(1,Number(p.duration_value||1))*({seconds:1000,minutes:60000,hours:3600000,days:86400000}[p.duration_unit||'minutes']||60000) : new Date(p.targetDate||'').getTime(); const diff=Math.max(0,target-Date.now()); const d=Math.floor(diff/86400000),h=Math.floor(diff%86400000/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000); const text=Number.isFinite(target)&&target>0?(d?d+'d '+h+'h':h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s'):(p.expiry_text||'Choose a date and time'); inner=`<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;padding:1rem;color:${p.color||'#fff'};font-size:${countdownFontSize(p)}px;font-weight:800;line-height:1;text-align:center;overflow:hidden;white-space:nowrap;">${esc(text)}</div>`; }
+ else if(t==='video') { const list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url?[{url:p.url}]:[]),u=String((list[0]||{}).url||''); const fit=['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'; inner=`<video data-video-widget-id="${esc(w.id||'')}" src="${esc(u)}" autoplay playsinline preload="auto" ${p.loop !== false && list.length === 1 ? 'loop' : ''} ${p.muted||p.mute?'muted':''} style="width:100%;height:100%;object-fit:${fit};background:#000;"></video>`;}
  else if(t==='image') inner=`<img src="${esc(p.url||p.src||'')}" style="width:100%;height:100%;object-fit:${p.fit||'cover'};">`;
+ else if(t==='video') { const list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url?[{url:p.url}]:[]), u=String((list[0]||{}).url||''); if(isYouTubeUrl(u)){ inner=`<iframe src="${esc(youtubeEmbedUrl(u,Object.assign({},p,{muted:true})))}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:0;background:#000;"></iframe>`; } else { const fit=['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'; inner=`<video src="${esc(u)}" autoplay playsinline preload="auto" ${p.loop !== false && list.length === 1 ? 'loop' : ''} ${p.muted||p.mute?'muted':''} style="width:100%;height:100%;object-fit:${fit};background:#000;"></video>`; } }
  else if(t==='clock') inner=`<div class="clock" data-clock style="color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||48)*2}px"></div>`;
  else if(t==='datetime'||t==='date') inner=`<div class="date" data-date style="color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||36)*2}px"></div>`;
  else if(t==='rectangle') inner=`<div style="width:100%;height:100%;background:${p.color||'#e94560'};border-radius:${p.radius||0}px;"></div>`;
@@ -979,10 +1025,11 @@ async function renderWidget(w){const p=props(w),t=normWidgetType(w);if(t==='weat
  else if(t==='weather') inner=`<div style="width:100%;height:100%;display:grid;place-items:center;color:${p.color||'#fff'};font-size:4rem;">${esc(p.location||'Weather')}</div>`;
  else if(t==='calendar') inner=`<div style="width:100%;height:100%;display:grid;place-items:center;color:${p.color||'#fff'};font-size:4rem;">${esc(p.label||'Calendar')}</div>`;
  else inner=`<div style="width:100%;height:100%;display:grid;place-items:center;border:1px dashed #334155;color:#94a3b8;">${esc(t||'widget')}</div>`;
+ if(t==='countdown'){const mode=p.countdown_mode==='duration'?'duration':'date',started=Date.now(),durationValue=Math.max(1,Number(p.duration_value||1)),durationUnit=p.duration_unit||'minutes',target=p.targetDate||'',fake={getAttribute:(name)=>({'data-countdown-mode':mode,'data-countdown-duration-value':durationValue,'data-countdown-duration-unit':durationUnit,'data-countdown-started-at':started,'data-countdown-target-date':target,'data-countdown-expiry-text':p.expiry_text||'Time\u2019s up!','data-countdown-invalid-text':'Choose a date and time'}[name]||'')},text=countdownText(fake,started);inner=`<div data-countdown-widget data-countdown-mode="${esc(mode)}" data-countdown-duration-value="${durationValue}" data-countdown-duration-unit="${esc(durationUnit)}" data-countdown-started-at="${started}" data-countdown-target-date="${esc(target)}" data-countdown-expiry-text="${esc(p.expiry_text||'Time\u2019s up!')}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;"><div class="countdown-value">${esc(text)}</div></div>`;}
  return `<div class="widget" style="${styleFor(w)}">${inner}</div>`;}
-function tickClocks(){const now=new Date();document.querySelectorAll('[data-clock]').forEach(e=>e.textContent=now.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}));document.querySelectorAll('[data-date]').forEach(e=>e.textContent=now.toLocaleDateString());}
+function tickClocks(){const now=new Date();document.querySelectorAll('[data-clock]').forEach(e=>e.textContent=now.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}));document.querySelectorAll('[data-date]').forEach(e=>e.textContent=now.toLocaleDateString());tickCountdowns();}
 function applyOrientation(value){const v=String(value||'normal');document.body.dataset.orientation=['normal','flipped','rotated_left','rotated_right'].includes(v)?v:'normal';}
-async function loadLayout(){try{const r=await fetch('/assigned-layout.json?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('no assigned layout');const txt=await r.text();try{const c=await fetch('/api/client-config.json?ts='+Date.now(),{cache:'no-store'});if(c.ok)applyOrientation((await c.json()).orientation);}catch(_e){}if(txt===currentHash)return;currentHash=txt;const layout=JSON.parse(txt);const ws=(layout.widgets||[]).slice().sort((a,b)=>(a.z||0)-(b.z||0));const rendered=await Promise.all(ws.map(renderWidget));document.getElementById('player').innerHTML=rendered.join('')||'<div class="fallback"><div><strong>Empty Layout</strong></div></div>';tickClocks();}catch(e){if(!currentHash)document.getElementById('player').innerHTML='<div class="fallback"><div><strong>Waiting for cached assigned layout</strong><span>'+esc(e.message)+'</span></div></div>';}}
+async function loadLayout(){try{const r=await fetch('/assigned-layout.json?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('no assigned layout');const txt=await r.text();try{const c=await fetch('/api/client-config.json?ts='+Date.now(),{cache:'no-store'});if(c.ok)applyOrientation((await c.json()).orientation);}catch(_e){}if(txt===currentHash)return;currentHash=txt;const layout=JSON.parse(txt);const ws=(layout.widgets||[]).slice().sort((a,b)=>(a.z||0)-(b.z||0));const rendered=await Promise.all(ws.map(renderWidget));document.getElementById('player').innerHTML=rendered.join('')||'<div class="fallback"><div><strong>Empty Layout</strong></div></div>';tickClocks();initCachedVideoWidgets(ws);}catch(e){if(!currentHash)document.getElementById('player').innerHTML='<div class="fallback"><div><strong>Waiting for cached assigned layout</strong><span>'+esc(e.message)+'</span></div></div>';}}
 setInterval(tickClocks,1000);setInterval(loadLayout,5000);setInterval(()=>{currentHash='';loadLayout().catch(()=>{});},15*60*1000);loadLayout();
 
 // === Cursor auto-hide (3.5s default, configurable via /api/cursor-config.json) ===
@@ -1058,7 +1105,7 @@ def _connector_for_display_index(display_index: int) -> str | None:
     try:
         gov_path = Path.home() / '.local/share/screentra-client/config.json'
         if gov_path.exists():
-            cfg = json.loads(gov_path.read_text())
+            cfg = _read_json_file(gov_path, {})
             for d in (cfg.get('last_detected_displays') or []):
                 if int(d.get('display_index', -1)) == int(display_index):
                     con = d.get('connector')
@@ -1158,9 +1205,15 @@ class Handler(BaseHTTPRequestHandler):
     cache_dir = Path.home() / '.local/share/screentra-client/cache'
 
     def do_POST(self):
-        length = int(self.headers.get('Content-Length') or 0)
-        body = self.rfile.read(length).decode('utf-8') if length else '{}'
         path = unquote(self.path.split('?', 1)[0])
+        try:
+            body = _request_body(self)
+        except OverflowError:
+            return self.send_text(413, json.dumps({'error': 'request body too large'}), 'application/json')
+        except ValueError as exc:
+            return self.send_text(400, json.dumps({'error': str(exc)}), 'application/json')
+        if _mutation_requires_auth(path) and not _session_user(self.headers.get('Cookie', '')):
+            return self.send_text(401, json.dumps({'error': 'auth required', **_auth_source()}), 'application/json')
         if path == '/api/admin/auth/login':
             try:
                 payload = json.loads(body) if body and body.strip() else {}
@@ -1194,11 +1247,11 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(body)
                 selected = payload.get('path')
                 Handler.cache_dir.mkdir(parents=True, exist_ok=True)
-                (Handler.cache_dir / 'touch-device.json').write_text(json.dumps({'path': selected}))
+                _atomic_write_text(Handler.cache_dir / 'touch-device.json', json.dumps({'path': selected}))
                 # Tell the actor to restart the kiosk so the choice takes effect
                 try:
                     pending = Handler.cache_dir.parent / 'pending-command.json'
-                    pending.write_text(json.dumps({
+                    _atomic_write_text(pending, json.dumps({
                         'action': 'restart_kiosk_display',
                         'args': {'display_index': int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0')), 'reason': 'touch-device-change'},
                         'queued_at': datetime.utcnow().isoformat() + 'Z',
@@ -1221,14 +1274,14 @@ class Handler(BaseHTTPRequestHandler):
                 history = []
                 if calib_path.exists():
                     try:
-                        history = json.loads(calib_path.read_text())
+                        history = _read_json_file(calib_path, [])
                         if not isinstance(history, list):
                             history = [history]
                     except Exception:
                         history = []
                 history.append(data)
                 history = history[-5:]   # rolling window of last 5 runs
-                calib_path.write_text(json.dumps(history, indent=2))
+                _atomic_write_text(calib_path, json.dumps(history, indent=2))
                 return self.send_text(200, json.dumps({'ok': True, 'history_size': len(history)}), 'application/json')
             except Exception as e:
                 return self.send_text(400, json.dumps({'error': str(e)}), 'application/json')
@@ -1266,7 +1319,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/client-config.json':
             cfg_path = Handler.cache_dir / 'client-config.json'
             try:
-                data = json.loads(cfg_path.read_text())
+                data = _read_json_file(cfg_path, {})
                 return self.send_text(200, json.dumps(data), 'application/json')
             except Exception:
                 return self.send_text(404, json.dumps({'error': 'no config yet'}), 'application/json')
@@ -1280,14 +1333,14 @@ class Handler(BaseHTTPRequestHandler):
             cfg_path = Handler.cache_dir / 'client-config.json'
             try:
                 try:
-                    data = json.loads(cfg_path.read_text())
+                    data = _read_json_file(cfg_path, {})
                 except Exception:
                     data = {}
                 for k in ['theme']:
                     if k in payload:
                         data[k] = payload[k]
                 cfg_path.parent.mkdir(parents=True, exist_ok=True)
-                cfg_path.write_text(json.dumps(data, indent=2))
+                _atomic_write_text(cfg_path, json.dumps(data, indent=2))
                 return self.send_text(200, json.dumps({'ok': True}), 'application/json')
             except Exception as e:
                 return self.send_text(500, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
@@ -1312,13 +1365,13 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith('/api/'):
                 return self.send_text(401, json.dumps({'error': 'auth required', **_auth_source()}), 'application/json')
             return self.send_text(200, _admin_login_html(), 'text/html; charset=utf-8')
-        if os.environ.get('RIPLEY_ADMIN_DEFAULT', '').lower() in ('1', 'true', 'yes') and path in ('/', '/admin.html'):
+        if os.environ.get('RIPLEY_ADMIN_MODE', '').lower() in ('1', 'true', 'yes') and path in ('/', '/admin.html'):
             return self.send_text(200, ADMIN_HTML, 'text/html; charset=utf-8')
         # GET /api/client-config.json — current cached heartbeat config (layout + theme)
         if path == '/api/client-config.json':
             cfg_path = Handler.cache_dir / 'client-config.json'
             try:
-                data = json.loads(cfg_path.read_text())
+                data = _read_json_file(cfg_path, {})
                 return self.send_text(200, json.dumps(data), 'application/json')
             except Exception:
                 return self.send_text(404, json.dumps({'error': 'no config yet'}), 'application/json')
@@ -1439,7 +1492,7 @@ class Handler(BaseHTTPRequestHandler):
             _tp = Handler.cache_dir / 'touch-device.json'
             if _tp.exists():
                 try:
-                    sel = json.loads(_tp.read_text()).get('path')
+                    sel = _read_json_file(_tp, {}).get('path')
                 except Exception:
                     pass
             return self.send_text(200, json.dumps({'devices': devs, 'selected': sel}), 'application/json')
@@ -1454,7 +1507,7 @@ class Handler(BaseHTTPRequestHandler):
             calib_path = Handler.cache_dir / 'touch-calibration.json'
             if not calib_path.exists():
                 return self.send_text(404, json.dumps({'error': 'no calibration yet'}), 'application/json')
-            return self.send_text(200, calib_path.read_text(), 'application/json')
+            return self.send_text(200, json.dumps(_read_json_file(calib_path, [])), 'application/json')
         if path == '/health':
             return self.send_text(200, 'ok')
         if path == '/assigned-layout.json':
@@ -1464,12 +1517,12 @@ class Handler(BaseHTTPRequestHandler):
                 target = self.cache_dir / 'assigned-layout.json'
             if not target.exists():
                 return self.send_text(404, '{}', 'application/json')
-            return self.send_text(200, target.read_text(), 'application/json')
+            return self.send_text(200, json.dumps(_read_json_file(target, {})), 'application/json')
         if path == '/client-config.json':
             target = self.cache_dir / path.lstrip('/')
             if not target.exists():
                 return self.send_text(404, '{}', 'application/json')
-            return self.send_text(200, target.read_text(), 'application/json')
+            return self.send_text(200, json.dumps(_read_json_file(target, {})), 'application/json')
         # Optional cached asset serving under cache/assets
         safe = Path(path.lstrip('/'))
         target = (self.cache_dir / safe).resolve()

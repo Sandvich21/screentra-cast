@@ -13,6 +13,7 @@
 // new binary fails to start, it auto-rolls back to the previous one.
 
 use crate::db::Database;
+use crate::safe_archive;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,7 +23,7 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
+use uuid::Uuid;
 fn signage_data_dir() -> String {
     std::env::var("SIGNAGE_DATA_DIR").unwrap_or_else(|_| "/home/board/data".to_string())
 }
@@ -78,6 +79,68 @@ pub fn collect_version_info() -> VersionInfo {
         static_dir: static_dir_path().to_string_lossy().to_string(),
         backups_dir: format!("{}/backups", install_dir_for_static()),
         uploads_dir: format!("{}/uploads", local_share),
+    }
+}
+
+pub fn configured_service() -> (String, &'static str) {
+    if let Ok(name) = std::env::var("SIGNAGE_SERVICE_NAME") {
+        let name = name.trim();
+        let kind = match std::env::var("SIGNAGE_SERVICE_KIND").ok().as_deref() {
+            Some("user") => "user",
+            Some("system") | None => "system",
+            _ => "",
+        };
+        let allowed = [
+            ("screentra-cast-server.service", "system"),
+            ("signage.service", "system"),
+            ("screentra-cast-server.service", "user"),
+            ("signage-server.service", "user"),
+        ];
+        if allowed.iter().any(|(candidate, candidate_kind)| {
+            *candidate == name && *candidate_kind == kind
+        }) {
+            return (name.to_string(), kind);
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        for name in ["screentra-cast-server.service", "signage-server.service"] {
+            if Path::new(&format!("{home}/.config/systemd/user/{name}")).exists() {
+                return (name.to_string(), "user");
+            }
+        }
+    }
+    for name in ["screentra-cast-server.service", "signage.service"] {
+        if ["/etc/systemd/system", "/lib/systemd/system"]
+            .iter()
+            .any(|dir| Path::new(&format!("{dir}/{name}")).exists())
+        {
+            return (name.to_string(), "system");
+        }
+    }
+    ("screentra-cast-server.service".to_string(), "system")
+}
+
+pub fn restart_configured_service() -> Result<(), String> {
+    let (service, kind) = configured_service();
+    let mut command = if kind == "user" {
+        let mut command = Command::new("systemctl");
+        command.arg("--user");
+        command
+    } else {
+        let mut command = Command::new("sudo");
+        command.arg("-n").arg("systemctl");
+        command
+    };
+    let status = command
+        .arg("restart")
+        .arg(&service)
+        .status()
+        .map_err(|error| format!("restart {service}: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("restart {service} exited with {:?}", status.code()))
     }
 }
 
@@ -154,7 +217,7 @@ pub fn export_state_bundle(dest: &Path) -> Result<(), String> {
 
     // Create a temp staging directory (in the install dir to avoid /tmp being a tmpfs).
     let stage = std::path::PathBuf::from(install_dir_for_static())
-        .join(format!(".signage-export-{}", Utc::now().timestamp()));
+        .join(format!(".signage-export-{}", Uuid::new_v4()));
     fs::create_dir_all(&stage).map_err(|e| format!("create staging dir: {}", e))?;
 
     // 1. Copy the database
@@ -231,28 +294,12 @@ pub fn import_state_bundle(src: &Path) -> Result<(), String> {
 
     // Create a temp extraction directory
     let stage = std::path::PathBuf::from(install_dir_for_static())
-        .join(format!(".signage-import-{}", Utc::now().timestamp()));
+        .join(format!(".signage-import-{}", Uuid::new_v4()));
     fs::create_dir_all(&stage).map_err(|e| format!("create staging dir: {}", e))?;
 
-    // 1. Extract the tarball
-    // SECURITY: tar -xzf honors member paths verbatim — a tarball entry like
-    // `../../etc/cron.d/x` or an absolute path would write outside `stage` as
-    // the service user. Use `--no-absolute-names` to strip leading `/` and
-    // `--no-absolute-paths` as belt-and-suspenders, then `--strip-components`
-    // so a deliberately-nested entry can't escape the stage either.
-    let tar_status = Command::new("tar")
-        .arg("-xzf")
-        .arg(src)
-        .arg("--no-absolute-names")
-        .arg("--no-same-owner")
-        .arg("--no-same-permissions")
-        .arg("-C")
-        .arg(&stage)
-        .status();
-    match tar_status {
-        Ok(s) if s.success() => {}
-        Ok(s) => return Err(format!("tar exited with {:?}", s.code())),
-        Err(e) => return Err(format!("failed to run tar: {}", e)),
+    if let Err(error) = safe_archive::extract_tar_gz(src, &stage, 0) {
+        let _ = fs::remove_dir_all(&stage);
+        return Err(format!("safe archive extraction failed: {error}"));
     }
 
     // 2. Find the actual extracted subdirectory (tar -C creates a subdir matching the original name)
@@ -568,7 +615,7 @@ pub fn export_update_bundle(dest: &Path) -> Result<UpdateManifest, String> {
 
     // Stage to a temp dir
     let stage = PathBuf::from(&install_dir)
-        .join(format!(".signage-update-export-{}", Utc::now().timestamp()));
+        .join(format!(".signage-update-export-{}", Uuid::new_v4()));
     fs::create_dir_all(&stage).map_err(|e| format!("create staging dir: {}", e))?;
 
     // 1. Copy the binary
@@ -678,32 +725,9 @@ fn validate_archive_entry_type(kind: char) -> Result<(), String> {
 }
 
 fn validate_update_archive(src: &Path) -> Result<(), String> {
-    let listing = Command::new("tar")
-        .args(["-tzf"])
-        .arg(src)
-        .output()
-        .map_err(|e| format!("inspect update archive: {e}"))?;
-    if !listing.status.success() {
-        return Err("could not list update archive members".to_string());
-    }
-    for name in String::from_utf8_lossy(&listing.stdout).lines() {
-        validate_archive_member_name(name)?;
-    }
-
-    let verbose = Command::new("tar")
-        .args(["-tvzf"])
-        .arg(src)
-        .output()
-        .map_err(|e| format!("inspect update archive entry types: {e}"))?;
-    if !verbose.status.success() {
-        return Err("could not inspect update archive entry types".to_string());
-    }
-    for line in String::from_utf8_lossy(&verbose.stdout).lines() {
-        if let Some(kind) = line.chars().next() {
-            validate_archive_entry_type(kind)?;
-        }
-    }
-    Ok(())
+    safe_archive::inspect_tar_gz(src)
+        .map(|_| ())
+        .map_err(|error| format!("unsafe archive: {error}"))
 }
 
 /// Apply an update bundle to this instance. The flow:
@@ -734,25 +758,11 @@ pub fn import_update_bundle(src: &Path, force_skip_rollback: bool) -> Result<Upd
     // here are not world-readable. Fallback to a known-safe /var/tmp
     // location only if the install dir parent resolves to / (root filesystem).
     let stage = PathBuf::from(&install_dir)
-        .join(format!(".signage-update-import-{}", Utc::now().timestamp()));
-    let stage_parent = stage.parent().unwrap_or(Path::new("/var/tmp/ripley-signage")).to_path_buf();
+                .join(format!(".signage-update-import-{}", Uuid::new_v4()));
     validate_update_archive(src)?;
-    fs::create_dir_all(&stage).map_err(|e| format!("create staging dir: {}", e))?;
-
-    let tar_status = Command::new("tar")
-        .arg("-xzf")
-        .arg(src)
-        .arg("--no-absolute-names")
-        .arg("--no-same-owner")
-        .arg("--no-same-permissions")
-        .arg("--keep-directory-symlink")
-        .arg("-C")
-        .arg(&stage)
-        .status();
-    match tar_status {
-        Ok(s) if s.success() => {}
-        Ok(s) => return Err(format!("tar exited with {:?}", s.code())),
-        Err(e) => return Err(format!("failed to run tar: {}", e)),
+    if let Err(error) = safe_archive::extract_tar_gz(src, &stage, 0) {
+        let _ = fs::remove_dir_all(&stage);
+        return Err(format!("safe archive extraction failed: {error}"));
     }
 
     // 2. Locate the extracted subdir
@@ -843,7 +853,9 @@ pub fn import_update_bundle(src: &Path, force_skip_rollback: bool) -> Result<Upd
     // 7. Back up the current binary. (static backup is created on demand by
     // swap_static_atomic, which moves the existing static dir aside as
     // .rollback.<ts>; that path doubles as our rollback handle.)
-    let ts = Utc::now().timestamp();
+    let ts = Utc::now()
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| Utc::now().timestamp_micros());
     let backup_binary_path = format!("{}.bak.{}", exe.to_string_lossy(), ts);
     let _ = fs::copy(&exe, &backup_binary_path);
 
@@ -956,7 +968,6 @@ pub fn import_update_bundle(src: &Path, force_skip_rollback: bool) -> Result<Upd
 
     // 11. Cleanup staging
     let _ = fs::remove_dir_all(&stage);
-    let _ = stage_parent; // silence unused
 
     // Success — clear any prior failure marker. Keep .bak files for one
     // more success cycle so an admin can still rollback to "the one before

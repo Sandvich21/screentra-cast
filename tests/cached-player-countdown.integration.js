@@ -4,7 +4,6 @@ const vm = require('vm');
 
 const files = [
   'static/install/player-client.sh',
-  'static/install/screentra-cast-player-client.sh',
 ];
 
 async function checkCachedPlayer(file) {

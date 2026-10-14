@@ -4,7 +4,7 @@
     var url = p.get('url') || '';
     var m = url.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/) ||
             url.match(/[?&]v=([a-zA-Z0-9_-]{11})/) ||
-            url.match(/youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/);
+            url.match(/youtube\.com\/(?:embed|shorts)\/([a-zA-Z0-9_-]{11})/);
     var vid = m ? m[1] : null;
 
     // Read the configured priority from the query string (default: YOUTUBE = 50).

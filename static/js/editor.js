@@ -213,9 +213,12 @@ const Editor = {
                         try {
                             const clients = await API.getClients();
                             const online = clients.filter(c => c.status === 'online');
-                            clientSel.innerHTML = '<option value="">— Select a device —</option>' +
-                                online.map(c => `<option value="${c.id}">${c.name || c.id} (${c.status})</option>`).join('');
-                            if (online.length === 0) clientSel.innerHTML = '<option value="">No online devices</option>';
+                            clientSel.replaceChildren(new Option('— Select a device —', ''));
+                            for (const client of online) {
+                                const option = new Option(`${client.name || client.id} (${client.status})`, client.id);
+                                clientSel.appendChild(option);
+                            }
+                            if (online.length === 0) clientSel.replaceChildren(new Option('No online devices', ''));
                         } catch(e) { clientSel.innerHTML = '<option value="">Failed to load</option>'; }
                     })();
                     clientSel.onchange = async () => {
@@ -228,13 +231,14 @@ const Editor = {
                         if (!clientId) { if (hint) hint.textContent = 'Choose a device first'; return; }
                         try {
                             const displays = await API.getClientDisplays(clientId);
-                            displaySel.innerHTML = '<option value="">— Select a display —</option>' +
-                                displays.map((d, i) => {
-                                    const active = d.status === 'active' || d.status === 'online' || d.assigned_layout_id;
-                                    const dot = active ? '<span style="color:#3fb950;font-weight:bold;">●</span>' : '<span style="color:#f85149;font-weight:bold;">●</span>';
-                                    const label = d.label || d.name || `Display ${i}`;
-                                    return `<option value="${i}" data-active="${active}">${dot} ${label} — ${d.status || 'unknown'}</option>`;
-                                }).join('');
+                            displaySel.replaceChildren(new Option('— Select a display —', ''));
+                            displays.forEach((d, i) => {
+                                const active = d.status === 'active' || d.status === 'online' || d.assigned_layout_id;
+                                const label = d.label || d.name || `Display ${i}`;
+                                const option = new Option(`${active ? '●' : '●'} ${label} — ${d.status || 'unknown'}`, String(i));
+                                option.dataset.active = String(!!active);
+                                displaySel.appendChild(option);
+                            });
                             displaySel.disabled = false;
                             if (hint) { hint.textContent = `${displays.length} display(s) found`; hint.style.color = displays.length ? '#3fb950' : '#f85149'; }
                         } catch(e) { if (hint) { hint.textContent = 'Failed to load'; hint.style.color = '#f85149'; } }
@@ -866,12 +870,12 @@ const Editor = {
         <option value="normal" ${mode === 'normal' ? 'selected' : ''}>Widgets</option>
         <option value="interactive" ${mode === 'interactive' ? 'selected' : ''}>Interactive Widgets</option>
       </select>
-      <p class="interactive-palette-note">${note}</p>
+      <p class="interactive-palette-note">${this.esc(note)}</p>
       <div class="palette-items">
         ${widgets.map(w => `
-          <div class="interactive-palette-item" data-type="${w.type}">
-            <span class="palette-icon">${w.icon}</span>
-            <span class="palette-label">${w.label}</span>
+          <div class="interactive-palette-item" data-type="${this.esc(w.type)}">
+            <span class="palette-icon">${this.esc(w.icon)}</span>
+            <span class="palette-label">${this.esc(w.label)}</span>
           </div>`).join('')}
       </div>
     `;
@@ -1056,7 +1060,12 @@ const Editor = {
     const sel = w.id === this.selectedWidgetId ? 'selected' : '';
     const label = this.getWidgetLabel ? this.getWidgetLabel(w.type) : w.type;
     const rotation = Math.max(-180, Math.min(180, Number.isFinite(Number(w.props?.rotation)) ? Number(w.props.rotation) : 0));
-    return `<div class="interactive-widget ${sel}" data-id="${this.esc(w.id)}" data-type="layout" style="left:${w.x}%;top:${w.y}%;width:${w.w}%;height:${w.h}%;z-index:${Math.max(0, Number(w.z ?? 0))};transform:rotate(${rotation}deg);transform-origin:center center">
+    const x = Math.max(0, Math.min(100, Number(w.x) || 0));
+    const y = Math.max(0, Math.min(100, Number(w.y) || 0));
+    const width = Math.max(0.1, Math.min(100, Number(w.w) || 1));
+    const height = Math.max(0.1, Math.min(100, Number(w.h) || 1));
+    const z = Math.max(0, Math.min(100000, Number(w.z) || 0));
+    return `<div class="interactive-widget ${this.esc(sel)}" data-id="${this.esc(w.id)}" data-type="layout" style="left:${x}%;top:${y}%;width:${width}%;height:${height}%;z-index:${z};transform:rotate(${rotation}deg);transform-origin:center center">
       <div class="interactive-widget-content">${this.layoutWidgetInner(w)}</div>
       <div class="rotation-handle" title="Drag to rotate" aria-label="Drag to rotate">↻</div>
       <div class="interactive-widget-label"><span class="interactive-widget-label-text">${this.esc(label)}</span><span class="interactive-widget-label-arrow interactive-widget-label-arrow-ne"></span><span class="interactive-widget-label-arrow interactive-widget-label-arrow-sw"></span></div>
@@ -1487,7 +1496,7 @@ const Editor = {
     // Normal (display) widgets
     if (w.type === 'text') {
       const fontFamily = this.esc(p.font_family || p.fontFamily || 'sans-serif');
-      return `<div style="font-size:${this.editorFontCss(p.font_size || p.fontSize || 16)};color:${p.color || '#fff'};font-family:${fontFamily};padding:4px;">${this.esc(p.content || '')}</div>`;
+      return `<div style="font-size:${this.editorFontCss(p.font_size || p.fontSize || 16)};color:${this.esc(p.color || '#fff')};font-family:${fontFamily};padding:4px;">${this.esc(p.content || '')}</div>`;
     }
     if (w.type === 'image') {
       const fit = ['cover', 'contain', 'fill', 'none', 'scale-down'].includes(p.fit) ? p.fit : 'cover';

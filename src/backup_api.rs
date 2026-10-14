@@ -1,5 +1,7 @@
 use crate::db::Database;
 use crate::models::Backup;
+use crate::safe_archive;
+use crate::version::configured_service;
 use axum::{
     extract::{FromRef, Multipart, Path, Query, State},
     http::{Response, StatusCode},
@@ -8,8 +10,11 @@ use axum::{
 use chrono::Utc;
 use std::fs;
 use std::path::Path as StdPath;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use uuid::Uuid;
+
+const MAX_BACKUP_UPLOAD_BYTES: u64 = 1 << 30;
 
 #[derive(Clone)]
 pub enum BackupMetadataRepository {
@@ -209,43 +214,8 @@ struct RestoreResult {
     restored_at: String,
 }
 
-async fn tar_top_level_entries(tarball: &str) -> Result<Vec<String>, String> {
-    let output = Command::new("tar")
-        .args(["-tzf", tarball])
-        .output()
-        .await
-        .map_err(|e| format!("failed to spawn tar: {}", e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("tar -tzf failed: {}", stderr));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // tar prints paths as `./app/src/...`. Split on `/` and skip the leading
-    // `.` so we get `app` as the top-level entry. Also strip a trailing
-    // slash on dir entries.
-    let mut entries: Vec<String> = stdout
-        .lines()
-        .filter_map(|l| {
-            let parts: Vec<&str> = l.split('/').collect();
-            if parts.is_empty() {
-                return None;
-            }
-            // Skip the leading "." entry: take parts[1] if path starts with "./"
-            let top = if parts[0] == "." && parts.len() > 1 {
-                parts[1]
-            } else {
-                parts[0]
-            };
-            if top.is_empty() || top == "." {
-                None
-            } else {
-                Some(top.trim_end_matches('/').to_string())
-            }
-        })
-        .collect();
-    entries.sort();
-    entries.dedup();
-    Ok(entries)
+fn tar_top_level_entries(tarball: &str) -> Result<Vec<String>, String> {
+    safe_archive::inspect_tar_gz(StdPath::new(tarball))
 }
 
 async fn sha256_file(path: &str) -> Result<String, String> {
@@ -259,27 +229,6 @@ async fn sha256_file(path: &str) -> Result<String, String> {
     }
     let s = String::from_utf8_lossy(&output.stdout);
     Ok(s.split_whitespace().next().unwrap_or("").to_string())
-}
-
-fn detect_signage_service() -> (String, &'static str) {
-    // Check user services first (current installer flavor).
-    if let Ok(home) = std::env::var("HOME") {
-        let user_unit = format!("{}/.config/systemd/user/signage-server.service", home);
-        if StdPath::new(&user_unit).exists() {
-            return ("signage-server.service".to_string(), "user");
-        }
-    }
-    // Legacy system services.
-    for sys_unit in &[
-        "/etc/systemd/system/signage.service",
-        "/lib/systemd/system/signage.service",
-    ] {
-        if StdPath::new(sys_unit).exists() {
-            return ("signage.service".to_string(), "system");
-        }
-    }
-    // Default fallback: current installer flavor.
-    ("signage-server.service".to_string(), "user")
 }
 
 async fn systemctl_action(action: &str, service: &str, kind: &str) -> Result<(), String> {
@@ -303,11 +252,8 @@ async fn systemctl_action(action: &str, service: &str, kind: &str) -> Result<(),
         .await
         .map_err(|e| format!("failed to spawn systemctl: {}", e))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!(
-            "systemctl {} {} failed: {}",
-            action, service, stderr
-        ));
+        eprintln!("systemctl action failed: action={action} service={service}");
+        return Err("service action failed".to_string());
     }
     Ok(())
 }
@@ -337,10 +283,9 @@ pub async fn restore_backup(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "/opt/digital-signage".to_string());
     let data_dir = signage_data_dir();
-    let (service_name, service_kind) = detect_signage_service();
+    let (service_name, service_kind) = configured_service();
 
     let top = tar_top_level_entries(&backup_file_path)
-        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -420,64 +365,24 @@ pub async fn restore_backup(
         ts
     );
     if let Err(e) = fs::create_dir_all(&staging_root) {
+        log::error!("create backup restore staging failed: {e}");
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("create staging: {}", e),
+            "Internal server error".to_string(),
         ));
     }
 
-    let extract_status = {
-            // SECURITY: check top-level archive members for path-traversal
-            // patterns before extraction. This catches obvious attacks
-            // (../  or absolute paths at the top level). However, nested
-            // paths like  "subdir/../../etc/passwd"  do NOT appear in the
-            // top-level listing and are NOT caught here.
-            //
-            // The real enforcement is  tar --strip-components=1 -C <staging_root>:
-            // strip-components discards the first path segment so any entry
-            // that would escape staging_root via  ../  resolves to a path
-            // inside staging_root, and --no-absolute-names (set on the
-            // export side) prevents absolute paths entirely. This pre-check
-            // is a convenience guard that rejects the obvious cases early
-            // with a clear 400, but the extraction flags are the authoritative
-            // defense.
-            let entries = tar_top_level_entries(&backup_file_path).await.map_err(|e| (
-                StatusCode::BAD_REQUEST,
-                format!("invalid tarball contents: {}", e),
-            ))?;
-            for entry in &entries {
-                if entry.contains("..") || entry.starts_with('/') {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        format!("tarball contains unsafe path: {}", entry),
-                    ));
-                }
-            }
-            Command::new("tar")
-                .args([
-                    "--strip-components=1",
-                    "-xzf",
-                    &backup_file_path,
-                    "--no-absolute-names",
-                    "--no-same-owner",
-                    "--no-same-permissions",
-                    "-C",
-                    &staging_root,
-                ])
-                .status()
-                .await
-        }
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("spawn tar: {}", e),
-            )
-        })?;
-    if !extract_status.success() {
+    let extract_result = safe_archive::extract_tar_gz(
+        StdPath::new(&backup_file_path),
+        StdPath::new(&staging_root),
+        1,
+    );
+    if let Err(error) = extract_result {
+        log::warn!("backup restore archive rejected: {error}");
         let _ = fs::remove_dir_all(&staging_root);
         return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "tar extract failed".to_string(),
+            StatusCode::BAD_REQUEST,
+            "Invalid backup archive".to_string(),
         ));
     }
 
@@ -485,33 +390,37 @@ pub async fn restore_backup(
     let pre_restore_app = format!("{}.pre-restore-{}", install_dir, ts);
     let pre_restore_data = format!("{}.pre-restore-{}", data_dir, ts);
     if let Err(e) = fs::rename(&install_dir, &pre_restore_app) {
+        log::error!("backup restore install rename failed: {e}");
         let _ = fs::remove_dir_all(&staging_root);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("rename install: {}", e),
+            "Internal server error".to_string(),
         ));
     }
     if let Err(e) = fs::rename(&data_dir, &pre_restore_data) {
+        log::error!("backup restore data rename failed: {e}");
         // Roll back the install rename.
         let _ = fs::rename(&pre_restore_app, &install_dir);
         let _ = fs::remove_dir_all(&staging_root);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("rename data: {}", e),
+            "Internal server error".to_string(),
         ));
     }
 
     if let Err(e) = fs::rename(format!("{}/app", staging_root), &install_dir) {
+        log::error!("backup restore app placement failed: {e}");
         // Rollback both renames + remove staging.
         let _ = fs::rename(&pre_restore_app, &install_dir);
         let _ = fs::rename(&pre_restore_data, &data_dir);
         let _ = fs::remove_dir_all(&staging_root);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("place app/: {}", e),
+            "Internal server error".to_string(),
         ));
     }
     if let Err(e) = fs::rename(format!("{}/data", staging_root), &data_dir) {
+        log::error!("backup restore data placement failed: {e}");
         // Rollback app placement, install rename, data rename.
         let _ = fs::remove_dir_all(&install_dir);
         let _ = fs::rename(&pre_restore_app, &install_dir);
@@ -519,7 +428,7 @@ pub async fn restore_backup(
         let _ = fs::remove_dir_all(&staging_root);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("place data/: {}", e),
+            "Internal server error".to_string(),
         ));
     }
 
@@ -605,53 +514,66 @@ pub async fn upload_backup(
             .unwrap_or(&filename)
             .to_string();
         if safe_name.is_empty() || safe_name.contains("..") {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("invalid filename: {}", filename),
-            ));
+            return Err((StatusCode::BAD_REQUEST, "Invalid backup filename".to_string()));
         }
         let full_path = format!("{}/{}", backup_dir, safe_name);
 
-        let data = field
-            .bytes()
+        // Stream to a private temporary file rather than buffering an entire
+        // multipart backup in memory. The limit is enforced while reading.
+        let probe_path = format!("{}/.upload-{}", backup_dir, Uuid::new_v4());
+        let mut probe_file = tokio::fs::File::create(&probe_path)
             .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+        let mut size = 0_u64;
+        let mut field = field;
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid multipart upload".to_string()))?
+        {
+            size = size.saturating_add(chunk.len() as u64);
+            if size > MAX_BACKUP_UPLOAD_BYTES {
+                drop(probe_file);
+                let _ = tokio::fs::remove_file(&probe_path).await;
+                return Err((StatusCode::PAYLOAD_TOO_LARGE, "Backup upload is too large".to_string()));
+            }
+            probe_file
+                .write_all(&chunk)
+                .await
+                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+        }
+        probe_file
+            .flush()
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+        drop(probe_file);
 
         // Verify it parses as a tarball with `app/` and/or `data/` at top
         // before saving. Reject anything else.
-        let probe_path = format!("{}.probe", full_path);
-        fs::write(&probe_path, &data)
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
-        let top = match tar_top_level_entries(&probe_path).await {
+        let top = match tar_top_level_entries(&probe_path) {
             Ok(t) => t,
             Err(e) => {
                 let _ = fs::remove_file(&probe_path);
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!("uploaded file is not a valid tarball: {}", e),
-                ));
+                eprintln!("uploaded backup is not a valid tarball: {e}");
+                return Err((StatusCode::BAD_REQUEST, "Uploaded file is not a valid backup".to_string()));
             }
         };
-        let _ = fs::remove_file(&probe_path);
         if !top.iter().any(|e| e == "app") && !top.iter().any(|e| e == "data") {
+            let _ = fs::remove_file(&probe_path);
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!(
-                    "tarball must contain `app/` or `data/` at top level (got: {:?})",
-                    top
-                ),
+                "Uploaded backup has no app or data payload".to_string(),
             ));
         }
 
-        // Move the probe aside (we already removed it) — write the real file.
-        fs::write(&full_path, &data)
+        fs::rename(&probe_path, &full_path)
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
 
         // Register in DB so the operator can pick this backup for restore
         // via PUT /api/backups/{id}?confirm=true. NO auto-restore.
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        let size = data.len() as i64;
+        let size = size as i64;
         let name = format!("Uploaded {}", &now[..16]);
         let _backup = Backup {
             id: id.clone(),
@@ -688,11 +610,12 @@ pub async fn download_backup(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Invalid encoding".to_string(),
         ))?;
-    let metadata = fs::metadata(path).map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    let metadata = fs::metadata(path)
+        .map_err(|_| (StatusCode::NOT_FOUND, "Backup not found".to_string()))?;
 
     let file = tokio::fs::File::open(path)
         .await
-        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+        .map_err(|_| (StatusCode::NOT_FOUND, "Backup not found".to_string()))?;
     let stream = tokio_util::io::ReaderStream::new(file);
 
     let body = axum::body::Body::from_stream(stream);

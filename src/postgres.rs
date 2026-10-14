@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 const DATABASE_URL_ENV: &str = "SIGNAGE_DATABASE_URL";
 const INITIAL_SCHEMA: &str = include_str!("../migrations/postgres/0001_initial.sql");
+const RUNTIME_COLUMNS_MIGRATION: &str = include_str!("../migrations/postgres/0002_runtime_columns.sql");
 
 pub fn configured_database_url() -> Result<String, String> {
     database_url_from(std::env::var(DATABASE_URL_ENV).ok())
@@ -903,6 +904,15 @@ impl PostgresStore {
         let cooldown_secs = crate::rate_limit::CLIENT_COMMAND_BURST_COOLDOWN_SECS as f64;
         let payload_param = payload.map(str::to_owned);
         let requested_by_param = requested_by.map(str::to_owned);
+        if self
+            .client
+            .query_opt("SELECT 1 FROM client_commands WHERE client_id=$1", &[&client_id])
+            .await
+            .map_err(|error| format!("check pending client command: {error}"))?
+            .is_some()
+        {
+            return Err("command_pending".to_string());
+        }
         let rows = self
             .client
             .execute(
@@ -941,11 +951,8 @@ impl PostgresStore {
                 )
                 INSERT INTO client_commands (client_id, action, payload, requested_at, requested_by)
                 SELECT $1, $2, $3, $4, $5 FROM eligible
-                ON CONFLICT (client_id) DO UPDATE
-                SET action=EXCLUDED.action,
-                    payload=EXCLUDED.payload,
-                    requested_at=EXCLUDED.requested_at,
-                    requested_by=EXCLUDED.requested_by"#,
+                WHERE NOT EXISTS (SELECT 1 FROM client_commands WHERE client_id=$1)
+                ON CONFLICT (client_id) DO NOTHING"#,
                 &[
                     &client_id,
                     &action,
@@ -977,6 +984,15 @@ impl PostgresStore {
                 format!("queue client command: {error}")
             })?;
         if rows == 0 {
+            if self
+                .client
+                .query_opt("SELECT 1 FROM client_commands WHERE client_id=$1", &[&client_id])
+                .await
+                .map_err(|error| format!("check queued client command: {error}"))?
+                .is_some()
+            {
+                return Err("command_pending".to_string());
+            }
             return Err(format!("cooldown:{cooldown_secs}"));
         }
         Ok(())
@@ -1060,15 +1076,18 @@ impl PostgresStore {
         if command.1 != "restart" || command.2.as_deref() != Some("{\"scope\":\"kiosk\"}") || command.4.as_deref() != Some("probe") {
             return Err("client command round-trip mismatch".into());
         }
-        self.queue_client_command(&id, "audio_set_volume", None, "2026-01-01T00:01:00Z", None).await?;
-        let replaced = self.get_client_command(&id).await?.ok_or("replaced command missing")?;
-        if replaced.1 != "audio_set_volume" || replaced.2.is_some() {
-            return Err("client command replacement mismatch".into());
+        let pending = self.queue_client_command(&id, "audio_set_volume", None, "2026-01-01T00:01:00Z", None).await;
+        if !matches!(pending, Err(ref error) if error == "command_pending") {
+            return Err("pending client command was not preserved".into());
+        }
+        let retained = self.get_client_command(&id).await?.ok_or("retained command missing")?;
+        if retained.1 != "restart" || retained.2.as_deref() != Some("{\"scope\":\"kiosk\"}") {
+            return Err("pending client command changed unexpectedly".into());
         }
         if self.delete_client_command_if_requested_at(&id, "wrong-time").await? != 0 {
             return Err("conditional command delete removed the wrong row".into());
         }
-        if self.delete_client_command_if_requested_at(&id, "2026-01-01T00:01:00Z").await? != 1 {
+        if self.delete_client_command_if_requested_at(&id, "2026-01-01T00:00:00Z").await? != 1 {
             return Err("conditional command delete affected the wrong number of rows".into());
         }
         self.queue_client_command(&id, "restart", None, "2026-01-01T00:02:00Z", None).await?;
@@ -1269,6 +1288,13 @@ impl PostgresStore {
             .transaction()
             .await
             .map_err(|error| format!("begin initial admin transaction: {error}"))?;
+        transaction
+            .query_one(
+                "SELECT pg_advisory_xact_lock(hashtextextended('screentra.initial_admin', 0))",
+                &[],
+            )
+            .await
+            .map_err(|error| format!("lock initial admin setup: {error}"))?;
         let existing: i64 = transaction
             .query_one(
                 "SELECT count(*) FROM users WHERE role='admin' AND active=true",
@@ -1459,10 +1485,11 @@ impl PostgresStore {
             return Err("day_of_week must be between 0 and 6".into());
         }
         let day_bit = 1i32 << day_of_week;
+        let previous_day_bit = 1i32 << ((day_of_week + 6) % 7);
         self.client
             .query(
-                "SELECT id,display,layout_id,day_of_week,start_time,end_time,created_at,layout_set_id,action,target_client,power_state,updated_at,display_name,control_method,display_index FROM schedules WHERE (day_of_week=-1 OR (day_of_week & $1) <> 0) AND start_time <= $2 AND end_time >= $2 ORDER BY start_time,id",
-                &[&day_bit, &current_time],
+                "SELECT id,display,layout_id,day_of_week,start_time,end_time,created_at,layout_set_id,action,target_client,power_state,updated_at,display_name,control_method,display_index FROM schedules WHERE (start_time <= end_time AND (day_of_week=-1 OR (day_of_week & $1) <> 0) AND start_time <= $3 AND end_time >= $3) OR (start_time > end_time AND (((day_of_week=-1 OR (day_of_week & $1) <> 0) AND start_time <= $3) OR ((day_of_week=-1 OR (day_of_week & $2) <> 0) AND end_time >= $3))) ORDER BY start_time,id",
+                &[&day_bit, &previous_day_bit, &current_time],
             )
             .await
             .map(|rows| rows.iter().map(Self::schedule_from_row).collect())
@@ -1763,18 +1790,38 @@ impl PostgresStore {
             )
             .await
             .map_err(|error| format!("get layout sets for layouts: {error}"))?;
-        let mut result = std::collections::HashMap::new();
+        let mut sets = std::collections::HashMap::<String, LayoutSetWithItems>::new();
         for row in rows {
             let set_id: String = row.get(0);
             let layout_id: String = row.get(6);
-            result.entry(layout_id.clone()).or_insert_with(|| LayoutSetWithItems {
-                id: set_id.clone(), name: row.get(1), shuffle: row.get(2), dwell_secs: row.get::<_, i32>(3) as u32,
-                items: Vec::new(), created_at: row.get(4), updated_at: row.get(5),
-            }).items.push(LayoutSetEntry {
-                id: format!("{set_id}-{layout_id}"), layout_set_id: set_id, layout_id,
+            let entry = LayoutSetEntry {
+                id: format!("{set_id}-{layout_id}"),
+                layout_set_id: set_id.clone(),
+                layout_id,
                 position: row.get::<_, i32>(7) as u32,
-                interval_secs: row.get::<_, Option<i32>>(8).map(|value| value as u32), transition: None,
-            });
+                interval_secs: row.get::<_, Option<i32>>(8).map(|value| value as u32),
+                transition: None,
+            };
+            sets.entry(set_id.clone()).or_insert_with(|| LayoutSetWithItems {
+                id: set_id,
+                name: row.get(1),
+                shuffle: row.get(2),
+                dwell_secs: row.get::<_, i32>(3) as u32,
+                items: Vec::new(),
+                created_at: row.get(4),
+                updated_at: row.get(5),
+            }).items.push(entry);
+        }
+        let requested: std::collections::HashSet<&str> =
+            layout_ids.iter().map(String::as_str).collect();
+        let mut result = std::collections::HashMap::new();
+        for set in sets.values_mut() {
+            set.items.sort_by_key(|entry| entry.position);
+            for entry in &set.items {
+                if requested.contains(entry.layout_id.as_str()) {
+                    result.entry(entry.layout_id.clone()).or_insert_with(|| set.clone());
+                }
+            }
         }
         Ok(result)
     }
@@ -2186,9 +2233,9 @@ impl PostgresStore {
         &self,
         client_id: &str,
         display_index: i64,
-    ) -> Result<(Option<String>, Option<String>, Option<i64>, Option<i64>, Option<f64>, bool, String, String), String> {
+    ) -> Result<Option<(Option<String>, Option<String>, Option<i64>, Option<i64>, Option<f64>, bool, String, String)>, String> {
         let display_index = display_index as i32;
-        self.client
+        Ok(self.client
             .query_opt(
                 "SELECT connector, label, width, height, refresh_rate, enabled, orientation, control_method FROM client_displays WHERE client_id=$1 AND display_index=$2",
                 &[&client_id, &display_index],
@@ -2206,8 +2253,7 @@ impl PostgresStore {
                     row.get(6),
                     row.get(7),
                 )
-            })
-            .ok_or_else(|| "Display not found".to_string())
+            }))
     }
 
     pub async fn set_display_control_method(
@@ -2272,14 +2318,14 @@ impl PostgresStore {
             client_auth_token_hash: None,
         };
         self.register_client(&client, &[ClientDisplayRegistration { display_index: 0, connector: Some("HDMI-A-1".into()), label: Some("Probe".into()), width: Some(1920), height: Some(1080), refresh_rate: Some(60.0), enabled: Some(true), last_error: None }]).await?;
-        let control = self.get_display_control(&id, 0).await?;
+        let control = self.get_display_control(&id, 0).await?.ok_or("display control probe row missing")?;
         if control.0.as_deref() != Some("HDMI-A-1") || control.5 != true || control.6 != "normal" || control.7 != "auto" {
             return Err("display control initial state mismatch".into());
         }
         if self.set_display_control_method(&id, 0, "ddc").await? != 1 || self.set_display_orientation(&id, 0, "portrait").await? != 1 {
             return Err("display control update affected the wrong number of rows".into());
         }
-        let updated = self.get_display_control(&id, 0).await?;
+        let updated = self.get_display_control(&id, 0).await?.ok_or("updated display control probe row missing")?;
         if updated.6 != "portrait" || updated.7 != "ddc" {
             return Err("display control update round-trip mismatch".into());
         }
@@ -2525,7 +2571,7 @@ impl PostgresStore {
         let rows = self
             .client
             .query(
-                "SELECT username, display_name, role, password_hash FROM users WHERE active=true AND role IN ('admin','layout-manager') ORDER BY role ASC, username ASC",
+                "SELECT username, display_name, role FROM users WHERE active=true AND role IN ('admin','layout-manager') ORDER BY role ASC, username ASC",
                 &[],
             )
             .await
@@ -2536,7 +2582,6 @@ impl PostgresStore {
                 username: row.get(0),
                 display_name: row.get(1),
                 role: row.get(2),
-                password_hash: row.get(3),
             })
             .collect();
         Ok(Some((enrolled, users)))
@@ -2821,11 +2866,45 @@ impl PostgresStore {
 }
 
 pub async fn apply_initial_schema() -> Result<(), String> {
-    let client = connect().await?;
+    let mut client = connect().await?;
     client
-        .batch_execute(INITIAL_SCHEMA)
+        .batch_execute("CREATE TABLE IF NOT EXISTS schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())")
         .await
-        .map_err(|error| format!("PostgreSQL schema migration failed: {error}"))
+        .map_err(|error| format!("PostgreSQL migration ledger failed: {error}"))?;
+    let transaction = client
+        .transaction()
+        .await
+        .map_err(|error| format!("begin PostgreSQL migrations: {error}"))?;
+    transaction
+        .query_one("SELECT pg_advisory_xact_lock(hashtextextended('screentra.schema_migrations', 0))", &[])
+        .await
+        .map_err(|error| format!("lock PostgreSQL migrations: {error}"))?;
+    for (version, sql) in [
+        ("0001_initial", INITIAL_SCHEMA),
+        ("0002_runtime_columns", RUNTIME_COLUMNS_MIGRATION),
+    ] {
+        let applied = transaction
+            .query_opt("SELECT 1 FROM schema_migrations WHERE version=$1", &[&version])
+            .await
+            .map_err(|error| format!("read migration {version}: {error}"))?
+            .is_some();
+        if applied {
+            continue;
+        }
+        transaction
+            .batch_execute(sql)
+            .await
+            .map_err(|error| format!("PostgreSQL migration {version} failed: {error}"))?;
+        transaction
+            .execute("INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING", &[&version])
+            .await
+            .map_err(|error| format!("record migration {version}: {error}"))?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| format!("commit PostgreSQL migrations: {error}"))?;
+    Ok(())
 }
 
 #[cfg(test)]

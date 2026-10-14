@@ -30,7 +30,7 @@ expect(postgresSchema.includes('CREATE TABLE IF NOT EXISTS client_command_cooldo
 expect(db.includes('let tx = conn.transaction()'), 'SQLite queue must reserve cooldown and command in one transaction');
 expect(db.includes('client_command_cooldowns WHERE client_id = ?1 AND action = ?2'), 'SQLite cooldown must be scoped by client and action');
 expect(postgres.includes('WITH eligible AS'), 'PostgreSQL queue must reserve cooldown atomically');
-expect(postgres.includes('client_command_cooldowns.last_requested_at'), 'PostgreSQL cooldown must compare persisted timestamps');
+expect(postgres.includes('client_command_cooldowns.burst_started_at::timestamptz'), 'PostgreSQL cooldown must compare persisted timestamps');
 expect(api.includes('"client_command_cooldown"'), 'cooldown rejection must be audited separately');
 expect(api.includes('"command cooldown active"'), 'cooldown audit detail must be fixed and bounded');
 expect(api.includes('StatusCode::TOO_MANY_REQUESTS'), 'cooldown HTTP responses must be 429');

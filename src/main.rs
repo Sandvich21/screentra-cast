@@ -12,6 +12,7 @@ mod observability;
 mod postgres;
 mod rate_limit;
 mod schedule;
+mod safe_archive;
 mod screenshot;
 mod system;
 mod traffic;
@@ -61,7 +62,6 @@ async fn main() {
         }
         return;
     }
-
 
     if std::env::args().any(|arg| arg == "--postgres-schema") {
         match crate::postgres::apply_initial_schema().await {

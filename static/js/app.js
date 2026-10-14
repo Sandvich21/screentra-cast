@@ -370,20 +370,23 @@ const App = {
             return;
         }
         container.innerHTML = displays.map(d => {
+            const status = String(d.status || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '-');
+            const connector = esc(d.connector || '');
+            const label = esc(d.label || '');
             const hasOverride = d.override_width !== null && d.override_width !== undefined;
             const resText = d.current_mode ? d.current_mode.width + 'x' + d.current_mode.height : '—';
             return `
-            <div class="display-card ${d.status}" data-connector="${d.connector}">
-                <div class="display-badge ${d.status}">${d.status}</div>
-                <div class="connector">${d.connector}</div>
-                <div class="label">${d.label}</div>
+            <div class="display-card ${status}" data-connector="${connector}">
+                <div class="display-badge ${status}">${esc(d.status || 'unknown')}</div>
+                <div class="connector">${connector}</div>
+                <div class="label">${label}</div>
                 <div class="resolution">${resText}</div>
                 ${hasOverride ? `<div class="override-badge">Size overridden: ${d.override_width}x${d.override_height}</div>` : ''}
                 <div class="mode-list">
                     ${d.enabled ? 'Enabled' : 'Disabled'} ·
                     ${d.modes.slice(0, 3).map(m => m.width + 'x' + m.height).join(', ')}
                 </div>
-                ${d.status === 'connected' ? `<button class="btn btn-secondary btn-sm display-override-btn" data-connector="${d.connector}" data-width="${d.current_mode ? d.current_mode.width : 1920}" data-height="${d.current_mode ? d.current_mode.height : 1080}">📏 Set Size Override</button>` : ''}
+                ${d.status === 'connected' ? `<button class="btn btn-secondary btn-sm display-override-btn" data-connector="${connector}" data-width="${d.current_mode ? d.current_mode.width : 1920}" data-height="${d.current_mode ? d.current_mode.height : 1080}">📏 Set Size Override</button>` : ''}
             </div>
             `;
         }).join('');
@@ -506,11 +509,11 @@ const App = {
             const assignment = state.assignments.find(a => a.display === d.connector);
             const currentLayoutId = assignment?.layout_id || '';
             const options = '<option value=\"\">— None —</option>' +
-                layouts.map(l => `<option value=\"${l.id}\" ${l.id === currentLayoutId ? 'selected' : ''}>${l.name}</option>`).join('');
+                layouts.map(l => `<option value=\"${esc(l.id)}\" ${l.id === currentLayoutId ? 'selected' : ''}>${esc(l.name)}</option>`).join('');
             return `
                 <div class="assignment-row">
-                    <span class="display-name">${d.connector}</span>
-                    <select class="select" data-display="${d.connector}">${options}</select>
+                    <span class="display-name">${esc(d.connector)}</span>
+                    <select class="select" data-display="${esc(d.connector)}">${options}</select>
                 </div>
             `;
         }).join('');
@@ -631,7 +634,7 @@ const App = {
         // The dot is appended to the "System Status" h2 in index.html.
         const isRunning = (s.service_status || '').toLowerCase() === 'running';
         const statusDotColor = isRunning ? 'var(--success, #2ecc71)' : 'var(--danger, #e74c3c)';
-        const statusDotHtml = `<span id="service-status-dot" title="Service ${s.service_status}" style="display:inline-block;width:14px;height:14px;border-radius:50%;background:${statusDotColor};margin-left:0.5rem;vertical-align:middle;box-shadow:0 0 6px ${statusDotColor};"></span>`;
+        const statusDotHtml = `<span id="service-status-dot" title="Service ${esc(s.service_status || 'unknown')}" style="display:inline-block;width:14px;height:14px;border-radius:50%;background:${statusDotColor};margin-left:0.5rem;vertical-align:middle;box-shadow:0 0 6px ${statusDotColor};"></span>`;
         const systemStatusHeader = document.getElementById('system-status-header');
         if (systemStatusHeader) {
             // Remove any previous dot first so the dot is always current.
@@ -646,8 +649,8 @@ const App = {
         container.innerHTML = `
             <div class="sys-card">
                 <h3>Hostname</h3>
-                <div class="value">${s.hostname}</div>
-                <div class="sub">${s.os_name} ${s.os_version}</div>
+                <div class="value">${esc(s.hostname || '')}</div>
+                <div class="sub">${esc(s.os_name || '')} ${esc(s.os_version || '')}</div>
             </div>
             <div class="sys-card">
                 <h3>Uptime</h3>
@@ -656,7 +659,7 @@ const App = {
             <div class="sys-card">
                 <h3>CPU</h3>
                 <div class="value">${s.cpu_usage.toFixed(1)}%</div>
-                <div class="sub">${s.cpu_count} cores · ${cpuTempStr}</div>
+                <div class="sub">${esc(String(s.cpu_count ?? ''))} cores · ${cpuTempStr}</div>
                 ${bar(s.cpu_usage)}
             </div>
             <div class="sys-card">
@@ -721,7 +724,8 @@ const App = {
                 ? `<button id="${id}-c" style="padding:7px 16px;border:1px solid var(--border,#30363d);border-radius:6px;background:transparent;color:var(--text,#e6edf3);cursor:pointer;font-size:14px;">Cancel</button>`
                 : '';
             const okLabel = opts.okLabel || 'Confirm';
-            ov.innerHTML = `<div style="background:var(--bg-card,#161b22);border:1px solid var(--border,#30363d);border-radius:10px;padding:18px 22px;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.5);"><div id="${id}-t" style="font-size:15px;font-weight:600;color:var(--text,#e6edf3);margin-bottom:6px;"></div><div id="${id}-b" style="font-size:13px;color:var(--text-muted,#8b949e);margin-bottom:18px;line-height:1.5;"></div><div style="display:flex;gap:8px;justify-content:flex-end;">${cancelBtn}<button id="${id}-o" style="padding:7px 16px;border:none;border-radius:6px;background:var(--accent,#e94560);color:#fff;cursor:pointer;font-size:14px;font-weight:500;">${okLabel}</button></div></div>`;
+            const safeOkLabel = String(okLabel).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+            ov.innerHTML = `<div style="background:var(--bg-card,#161b22);border:1px solid var(--border,#30363d);border-radius:10px;padding:18px 22px;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.5);"><div id="${id}-t" style="font-size:15px;font-weight:600;color:var(--text,#e6edf3);margin-bottom:6px;"></div><div id="${id}-b" style="font-size:13px;color:var(--text-muted,#8b949e);margin-bottom:18px;line-height:1.5;"></div><div style="display:flex;gap:8px;justify-content:flex-end;">${cancelBtn}<button id="${id}-o" style="padding:7px 16px;border:none;border-radius:6px;background:var(--accent,#e94560);color:#fff;cursor:pointer;font-size:14px;font-weight:500;">${safeOkLabel}</button></div></div>`;
             document.body.appendChild(ov);
             document.getElementById(id+'-t').textContent = title;
             const be = document.getElementById(id+'-b'); if(be) be.textContent = body || '';
@@ -787,13 +791,13 @@ const App = {
             container.innerHTML = backups.map(b => `
                 <div class="sys-card" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem; padding:0.75rem 1rem;">
                     <div style="display:flex; flex-direction:column; gap:0.25rem;">
-                        <div style="font-weight:bold">${b.name}</div>
-                        <div style="font-size:0.8rem; color:var(--text-dim)">${new Date(b.created_at).toLocaleString()} · ${b.size_bytes ? (b.size_bytes / 1024 / 1024).toFixed(2) + ' MB' : 'Unknown size'}</div>
+                        <div style="font-weight:bold">${esc(b.name)}</div>
+                        <div style="font-size:0.8rem; color:var(--text-dim)">${esc(new Date(b.created_at).toLocaleString())} · ${b.size_bytes ? (b.size_bytes / 1024 / 1024).toFixed(2) + ' MB' : 'Unknown size'}</div>
                     </div>
                     <div style="display:flex; gap:0.5rem;">
-                        <button class="btn btn-secondary btn-sm restore-btn" data-id="${b.id}">Restore</button>
-                        <button class="btn btn-secondary btn-sm download-btn" data-id="${b.id}">Download</button>
-                        <button class="btn btn-danger btn-sm delete-btn" data-id="${b.id}">Delete</button>
+                        <button class="btn btn-secondary btn-sm restore-btn" data-id="${esc(b.id)}">Restore</button>
+                        <button class="btn btn-secondary btn-sm download-btn" data-id="${esc(b.id)}">Download</button>
+                        <button class="btn btn-danger btn-sm delete-btn" data-id="${esc(b.id)}">Delete</button>
                     </div>
                 </div>
             `).join('');
@@ -1664,10 +1668,10 @@ const App = {
                             trashList.innerHTML = '<p style="margin:0.5rem 0;color:var(--text-muted)">Trash is empty.</p>';
                         } else {
                             trashList.innerHTML = entries.map(e => `
-                                <div style="display:flex;align-items:center;justify-content:space-between;padding:0.3rem 0;border-bottom:1px solid var(--border)" data-trash-id="${e.id}">
+                                <div style="display:flex;align-items:center;justify-content:space-between;padding:0.3rem 0;border-bottom:1px solid var(--border)" data-trash-id="${esc(e.id)}">
                                     <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:0.5rem">
-                                        <strong>${e.category}</strong>: ${e.name}
-                                        <span style="color:var(--text-muted);font-size:0.8em"> — ${(e.size_bytes/1024).toFixed(1)} KB · ${e.deleted_at}</span>
+                                        <strong>${esc(e.category)}</strong>: ${esc(e.name)}
+                                        <span style="color:var(--text-muted);font-size:0.8em"> — ${(e.size_bytes/1024).toFixed(1)} KB · ${esc(e.deleted_at)}</span>
                                     </span>
                                     <button class="btn btn-small btn-secondary btn-trash-restore" style="flex-shrink:0">↩ Restore</button>
                                 </div>
@@ -1689,7 +1693,7 @@ const App = {
                         trashList.style.display = 'block';
                         openTrashBtn.textContent = 'Close Trash';
                     } catch(err) {
-                        trashList.innerHTML = '<p style="color:red">Failed to load trash: ' + err.message + '</p>';
+                        trashList.innerHTML = '<p style="color:red">Failed to load trash: ' + esc(err.message) + '</p>';
                         trashList.style.display = 'block';
                     }
                 } else {
@@ -1918,17 +1922,17 @@ const App = {
                 card.innerHTML = `
                     <div style="display:flex; flex-direction:column; gap:0.2rem;">
                         <div style="font-weight:bold; font-size:1rem;">
-                            ${s.action === 'power_on' ? '🔆' : s.action === 'display_sleep' ? '😴' : '⏻'} ${dayLabel(s.day_of_week)}, ${s.start_time} – ${s.end_time}
+                            ${s.action === 'power_on' ? '🔆' : s.action === 'display_sleep' ? '😴' : '⏻'} ${esc(dayLabel(s.day_of_week))}, ${esc(s.start_time)} – ${esc(s.end_time)}
                         </div>
                         <div style="font-size:0.85rem; color:var(--text-dim);">
-                            Client: <strong>${s.target_client || '—'}</strong> &nbsp;|&nbsp;
-                            Display <strong>${displayIdx}</strong> &nbsp;|&nbsp;
-                            <strong>${s.action === 'power_on' ? 'Power On' : s.action === 'display_sleep' ? 'Display Sleep' : 'Power Off'}</strong> via <strong>${method}</strong>
+                            Client: <strong>${esc(s.target_client || '—')}</strong> &nbsp;|&nbsp;
+                            Display <strong>${esc(String(displayIdx))}</strong> &nbsp;|&nbsp;
+                            <strong>${s.action === 'power_on' ? 'Power On' : s.action === 'display_sleep' ? 'Display Sleep' : 'Power Off'}</strong> via <strong>${esc(method)}</strong>
                         </div>
                     </div>
                     <div style="display:flex; gap:0.5rem;">
-                        <button class="btn btn-secondary btn-sm edit-schedule-btn" data-id="${s.id}" data-action="${s.action}">Edit</button>
-                        <button class="btn btn-danger btn-sm delete-schedule-btn" data-id="${s.id}">Delete</button>
+                        <button class="btn btn-secondary btn-sm edit-schedule-btn" data-id="${esc(s.id)}" data-action="${esc(s.action)}">Edit</button>
+                        <button class="btn btn-danger btn-sm delete-schedule-btn" data-id="${esc(s.id)}">Delete</button>
                     </div>`;
                 container.appendChild(card);
             });
@@ -1953,19 +1957,19 @@ const App = {
                 card.innerHTML = `
                     <div style="display:flex; flex-direction:column; gap:0.2rem;">
                         <div style="font-weight:bold; font-size:1rem;">
-                            ⏰ ${dayLabel(s.day_of_week)}, ${s.start_time} – ${s.end_time}
+                            ⏰ ${esc(dayLabel(s.day_of_week))}, ${esc(s.start_time)} – ${esc(s.end_time)}
                         </div>
                         <div style="font-size:0.85rem; color:var(--text-dim);">
-                            <strong>Client:</strong> ${clientLabel}
+                            <strong>Client:</strong> ${esc(clientLabel)}
                             &nbsp;|&nbsp;
-                            <strong>Display:</strong> ${displayLabel} ${display ? '(' + display.label + ')' : ''}
+                            <strong>Display:</strong> ${esc(displayLabel)} ${display ? '(' + esc(display.label) + ')' : ''}
                             &nbsp;|&nbsp;
-                            <strong>Layout:</strong> ${layout ? layout.name : s.layout_id}
+                            <strong>Layout:</strong> ${esc(layout ? layout.name : s.layout_id)}
                         </div>
                     </div>
                     <div style="display:flex; gap:0.5rem;">
-                        <button class="btn btn-secondary btn-sm edit-schedule-btn" data-id="${s.id}" data-action="layout">Edit</button>
-                        <button class="btn btn-danger btn-sm delete-schedule-btn" data-id="${s.id}">Delete</button>
+                        <button class="btn btn-secondary btn-sm edit-schedule-btn" data-id="${esc(s.id)}" data-action="layout">Edit</button>
+                        <button class="btn btn-danger btn-sm delete-schedule-btn" data-id="${esc(s.id)}">Delete</button>
                     </div>`;
                 container.appendChild(card);
             });
@@ -2045,7 +2049,7 @@ const App = {
                 const clients = await API.getClients();
                 const online = clients.filter(c => c.status === 'online');
                 clientSel.innerHTML = '<option value="">— Select a device —</option>' +
-                    online.map(c => `<option value="${c.id}">${c.name || c.id} (${c.status})</option>`).join('');
+                    online.map(c => `<option value="${esc(c.id)}">${esc(c.name || c.id)} (${esc(c.status)})</option>`).join('');
                 if (online.length === 0) clientSel.innerHTML = '<option value="">No online devices</option>';
             } catch(e) { clientSel.innerHTML = '<option value="">Failed to load devices</option>'; }
         })();
@@ -2062,9 +2066,9 @@ const App = {
                 displaySel.innerHTML = '<option value="">— Select a display —</option>' +
                     displays.map((d, i) => {
                         const active = d.status === 'active' || d.status === 'online' || d.assigned_layout_id;
-                        const dot = active ? '<span style="color:#3fb950;font-weight:bold;">●</span>' : '<span style="color:#f85149;font-weight:bold;">●</span>';
+                        const dot = active ? '●' : '○';
                         const label = d.label || d.name || `Display ${i}`;
-                        return `<option value="${i}" data-active="${active}">${dot} ${label} — ${d.status || 'unknown'}</option>`;
+                        return `<option value="${i}" data-active="${active}" data-connector="${esc(d.connector || '')}">${dot} ${esc(label)} — ${esc(d.status || 'unknown')}</option>`;
                     }).join('');
                 displaySel.disabled = false;
                 displayHint.textContent = `${displays.length} display(s) found`;
@@ -2110,7 +2114,7 @@ const App = {
         const existing = scheduleId ? allSchedules.find(s => s.id === scheduleId) : null;
 
         const layoutOptions = layouts.map(l =>
-            `<option value="${l.id}" ${existing && existing.layout_id === l.id ? 'selected' : ''}>${l.name}</option>`
+            `<option value="${esc(l.id)}" ${existing && existing.layout_id === l.id ? 'selected' : ''}>${esc(l.name)}</option>`
         ).join('');
 
         // Task selector is a placeholder for now — empty select, will be populated later
@@ -2350,7 +2354,7 @@ ${targetSection}
             clientSel.innerHTML = '<option value="">— Select a client device —</option>' +
                 sortedClients.map(c => {
                     const status = c.status || 'unknown';
-                    return `<option value="${c.id}" ${c.id === existingClientId ? 'selected' : ''}>${c.name || c.id} (${status})</option>`;
+                    return `<option value="${esc(c.id)}" ${c.id === existingClientId ? 'selected' : ''}>${esc(c.name || c.id)} (${esc(status)})</option>`;
                 }).join('');
 
             async function loadDisplaysForLayoutClient(clientId, selectedIndex) {
@@ -2371,7 +2375,7 @@ ${targetSection}
                             const index = d.display_index !== undefined && d.display_index !== null ? d.display_index : i;
                             const label = d.connector || d.label || ('Display ' + index);
                             const status = d.status ? ` (${d.status})` : '';
-                            return `<option value="${index}" data-connector="${label}" ${String(index) === selected ? 'selected' : ''}>${label}${status}</option>`;
+                            return `<option value="${esc(String(index))}" data-connector="${esc(label)}" ${String(index) === selected ? 'selected' : ''}>${esc(label)}${esc(status)}</option>`;
                         }).join('');
                     displaySel.disabled = false;
                     displayHint.textContent = clientDisplays.length ? `${clientDisplays.length} display(s) found` : 'No displays registered on this client';
@@ -2405,7 +2409,7 @@ ${targetSection}
             const existingClientId = existing ? (existing.target_client || '') : '';
             clientSel.innerHTML = '<option value="">— Select a client —</option>' +
                 connectedClients.map(c =>
-                    `<option value="${c.id}" ${c.id === existingClientId ? 'selected' : ''}>${c.name || c.id} (${c.status || 'unknown'})</option>`
+                    `<option value="${esc(c.id)}" ${c.id === existingClientId ? 'selected' : ''}>${esc(c.name || c.id)} (${esc(c.status || 'unknown')})</option>`
                 ).join('');
 
             async function loadDisplaysForClient(clientId, selectedIdx) {
@@ -2421,7 +2425,7 @@ ${targetSection}
                     const idx = selectedIdx !== undefined ? String(selectedIdx) : '0';
                     displaySel.innerHTML = '<option value="">— Select a display —</option>' +
                         displays.map((d, i) =>
-                            `<option value="${i}" ${String(i) === idx ? 'selected' : ''}>${d.connector || d.label || ('Display ' + i)}</option>`
+                            `<option value="${i}" ${String(i) === idx ? 'selected' : ''}>${esc(d.connector || d.label || ('Display ' + i))}</option>`
                         ).join('');
                     displaySel.disabled = false;
                     hint.textContent = displays.length ? `${displays.length} display(s) found` : 'No displays detected on this client';
@@ -2629,7 +2633,7 @@ ${targetSection}
         try {
           const obj = JSON.parse(s.payload_json || '{}');
           if (obj !== null && typeof obj === 'object' && !Array.isArray(obj)) {
-            payloadPretty = Object.entries(obj).map(([k,v]) => `${k}: ${esc(Array.isArray(v) ? v.join(', ') : String(v))}`).join(' · ');
+            payloadPretty = Object.entries(obj).map(([k,v]) => `${esc(k)}: ${esc(Array.isArray(v) ? v.join(', ') : String(v))}`).join(' · ');
           } else {
             payloadPretty = esc(Array.isArray(obj) ? obj.join(', ') : String(obj));
           }
@@ -2640,8 +2644,8 @@ ${targetSection}
         const collectedAt = s.collected_at ? esc(new Date(s.collected_at).toLocaleString()) : '—';
         const syncedAt = s.google_synced_at ? esc(new Date(s.google_synced_at).toLocaleString()) : '—';
         const widgetLabel = s.widget_label ? esc(s.widget_label) : '';
-        return `<tr data-id="${s.id}">
-          <td><input type="checkbox" class="interactive-data-row-check" data-id="${s.id}" ${checked}></td>
+        return `<tr data-id="${esc(s.id)}">
+          <td><input type="checkbox" class="interactive-data-row-check" data-id="${esc(s.id)}" ${checked}></td>
           <td>${collectedAt}</td>
           <td>${esc(s.client_id || '—')}</td>
           <td>${esc(s.interactive_layout_name || s.interactive_layout_id || '—')}</td>
@@ -2649,7 +2653,7 @@ ${targetSection}
           <td class="interactive-data-value-cell">${payloadPretty}</td>
           <td>${statusBadge}${syncMsgCell}</td>
           <td>${syncedAt}</td>
-          <td><button class="btn btn-secondary btn-sm interactive-data-sync-one" data-id="${s.id}">☁ Sync</button> <button class="btn btn-ghost btn-sm interactive-data-delete-one" data-id="${s.id}">🗑</button></td>
+          <td><button class="btn btn-secondary btn-sm interactive-data-sync-one" data-id="${esc(s.id)}">☁ Sync</button> <button class="btn btn-ghost btn-sm interactive-data-delete-one" data-id="${esc(s.id)}">🗑</button></td>
         </tr>`;
       }).join('');
       tbody.innerHTML = rows;
@@ -6274,10 +6278,10 @@ ${_cmds.oneLiner}`;
     if (!r.ok) throw new Error(await r.text());
     return r.json();
   };
-  API.sendDisplayCommand = async function(id, idx, action){
+  API.sendDisplayCommand = async function(id, idx, action, payload={}){
     const r = await fetch(`/api/clients/${encodeURIComponent(id)}/displays/${idx}/command`, {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({action, payload:{display_index:idx}, requested_by:'web-ui'}),
+      body: JSON.stringify({action, payload:{display_index:idx, ...payload}, requested_by:'web-ui'}),
     });
     if (!r.ok) throw new Error(await r.text());
     return r.json();
@@ -6334,10 +6338,10 @@ ${_cmds.oneLiner}`;
     };
   }
   if (!API.sendDisplayCommand) {
-    API.sendDisplayCommand = async function(id, idx, action){
+    API.sendDisplayCommand = async function(id, idx, action, payload={}){
       const r = await fetch(`/api/clients/${encodeURIComponent(id)}/displays/${idx}/command`, {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({action, payload:{display_index:idx}, requested_by:'web-ui'}),
+        body: JSON.stringify({action, payload:{display_index:idx, ...payload}, requested_by:'web-ui'}),
       });
       if (!r.ok) throw new Error(await r.text());
       return r.json();
@@ -6359,7 +6363,7 @@ ${_cmds.oneLiner}`;
   }
   function statusClass(d){
     const s = d.status || 'unknown';
-    return String(s).toLowerCase().replace(/\s+/g,'-');
+    return String(s).toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40) || 'unknown';
   }
   function tileHtml(d, compact=false){
     const assigned = !!d.assigned_layout_id;
@@ -6369,12 +6373,82 @@ ${_cmds.oneLiner}`;
       : `<div class="client-display-tile-empty"><strong>No layout</strong><span>Waiting for publish</span></div>`;
     return `<article class="client-display-tile ${compact?'compact':''} status-${esc(statusClass(d))}" data-display-index="${esc(d.display_index)}">
       <div class="client-display-tile-preview">${preview}</div>
+      <div class="client-display-live-controls"><button class="btn btn-ghost btn-sm client-display-live-button" type="button">Live View</button><span class="client-display-live-status"></span></div>
       <div class="client-display-tile-meta">
         <div class="client-display-tile-title"><span>${esc(d.display_index)}</span><b>${esc(title)}</b></div>
         <div class="client-display-tile-sub">:${esc(d.port)} · ${esc(modeText(d))}</div>
         <div class="client-display-tile-row"><span class="client-display-status client-display-status-${esc(statusClass(d))}">${esc(d.status || 'unknown')}</span><em>${esc(layoutName(d.assigned_layout_id))}</em></div>
       </div>
     </article>`;
+  }
+  function wireLiveView(container, client){
+    container.querySelectorAll('.client-display-live-button').forEach(button => {
+      if (button.dataset.liveWired === '1') return;
+      button.dataset.liveWired = '1';
+      const tile = button.closest('.client-display-tile');
+      const preview = tile?.querySelector('.client-display-tile-preview');
+      const status = tile?.querySelector('.client-display-live-status');
+      const displayIndex = Number(tile?.dataset.displayIndex);
+      if (!preview || !Number.isInteger(displayIndex)) return;
+      const fallback = preview.innerHTML;
+      let timer = null;
+      let stopped = false;
+      let liveObjectUrl = null;
+      const setStatus = (text, kind='') => { if (status) { status.textContent = text; status.dataset.state = kind; } };
+      const clearFrame = () => {
+        if (liveObjectUrl) { URL.revokeObjectURL(liveObjectUrl); liveObjectUrl = null; }
+      };
+      const restore = () => {
+        if (timer) { clearInterval(timer); timer = null; }
+        clearFrame();
+        preview.innerHTML = fallback;
+        button.textContent = 'Live View';
+        button.disabled = false;
+        setStatus('');
+      };
+      const fetchFrame = async () => {
+        if (stopped) return;
+        try {
+          const url = `/clients/${encodeURIComponent(client.id)}/screenshot?display=${displayIndex}&t=${Date.now()}`;
+          const response = await fetch(url, {cache:'no-store', credentials:'same-origin'});
+          if (response.status === 204) { setStatus('Waiting for client capture…'); return; }
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const blob = await response.blob();
+          clearFrame();
+          liveObjectUrl = URL.createObjectURL(blob);
+          let image = preview.querySelector('.client-display-live-frame');
+          if (!image) { preview.innerHTML = ''; image = document.createElement('img'); image.className = 'client-display-live-frame'; preview.appendChild(image); }
+          image.src = liveObjectUrl;
+          image.alt = `Live display ${displayIndex}`;
+          setStatus(`Live · ${new Date().toLocaleTimeString()}`, 'live');
+        } catch (error) {
+          setStatus(`Live view unavailable: ${error.message}`, 'error');
+        }
+      };
+      button.onclick = async () => {
+        if (timer) {
+          stopped = true;
+          try { await API.sendDisplayCommand(client.id, displayIndex, 'stop_display_preview', {display_index: displayIndex}); } catch (_) {}
+          restore();
+          return;
+        }
+        stopped = false;
+        button.disabled = true;
+        button.textContent = 'Starting…';
+        setStatus('Requesting live capture…');
+        try {
+          await API.sendDisplayCommand(client.id, displayIndex, 'start_display_preview', {display_index: displayIndex, interval_seconds: 1, duration_seconds: 120});
+          button.disabled = false;
+          button.textContent = 'Stop Live View';
+          timer = setInterval(fetchFrame, 1000);
+          await fetchFrame();
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = 'Live View';
+          setStatus(`Live view request failed: ${error.message}`, 'error');
+        }
+      };
+    });
   }
   function layoutOptionsHtml(selectedId){
     const layouts = (App.state && App.state.layouts) || App._clientLayouts || [];
@@ -6394,7 +6468,18 @@ ${_cmds.oneLiner}`;
       await ensureLayouts();
       const displays = await API.getClientDisplays(client.id);
       if (!displays.length) { root.innerHTML = '<span class="client-card-display-loading">No displays reported</span>'; return; }
-      root.innerHTML = displays.slice(0, 4).map(d => tileHtml(d, true)).join('') + (displays.length>4?`<span class="client-card-display-more">+${displays.length-4}</span>`:'');
+      const active = displays.filter(d => ['online', 'connected'].includes(String(d.status || '').toLowerCase()));
+      const inactive = displays.filter(d => !['online', 'connected'].includes(String(d.status || '').toLowerCase()));
+      const activeVisible = active.slice(0, 4);
+      const activeOverflow = active.length > activeVisible.length
+        ? `<span class="client-card-display-more">+${active.length - activeVisible.length} active display${active.length - activeVisible.length === 1 ? '' : 's'}</span>`
+        : '';
+      const inactiveHtml = inactive.length
+        ? `<details class="client-card-disconnected-displays"><summary>${inactive.length} disconnected display${inactive.length === 1 ? '' : 's'}</summary><div class="client-card-disconnected-list">${inactive.map(d => tileHtml(d, true)).join('')}</div></details>`
+        : '';
+      root.classList.toggle('client-card-display-focus', active.length === 1 && inactive.length > 0);
+      root.innerHTML = activeVisible.map(d => tileHtml(d, true)).join('') + activeOverflow + inactiveHtml;
+      wireLiveView(root, client);
     } catch(e) {
       root.innerHTML = `<span class="client-card-display-loading">Display load failed</span>`;
     }
@@ -6443,6 +6528,7 @@ ${_cmds.oneLiner}`;
         <div class="client-display-tile-action-status"></div>
       </div>`;
       }).join('');
+      wireLiveView(grid, client);
       grid.querySelectorAll('.client-display-tile-assign').forEach(btn => {
         btn.onclick = async () => {
           const wrap = btn.closest('.client-display-tile-wrap');
@@ -6501,8 +6587,16 @@ ${_cmds.oneLiner}`;
   const prevRender = App.renderConnectedClients;
   if (prevRender) {
     App.renderConnectedClients = function(clients){
-      // Keep Connected Client cards compact on the page; display previews remain in the click-through detail modal.
-      return prevRender.call(this, clients);
+      const result = prevRender.call(this, clients);
+      // The compact client cards are the primary dashboard surface. Populate
+      // their display tiles here so Live View is available without opening the
+      // detail modal; the modal keeps the same controls as a secondary path.
+      const byId = new Map((clients || []).map(client => [String(client.id), client]));
+      document.querySelectorAll('.client-card.enrolled:not(.virtual-client-card)').forEach(card => {
+        const client = byId.get(String(card.dataset.clientId));
+        if (client) renderCardTiles(card, client);
+      });
+      return result;
     };
   }
   const prevDetail = App.openClientDetail;

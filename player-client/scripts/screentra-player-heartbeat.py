@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from urllib.parse import urlparse
 import importlib.util
 import sys as _sys
 _display_detect_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'screentra-display-detect.py')
@@ -23,6 +24,17 @@ _spec.loader.exec_module(_mod)
 detect_displays = _mod.detect_displays
 
 from pathlib import Path
+
+MAX_JSON_FILE_BYTES = 1 << 20
+
+
+def _read_json_file(path: Path, default):
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
+            return default
+        return json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return default
 
 
 def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
@@ -48,7 +60,7 @@ def _display_governance_count(which):
                    str(Path.home() / '.local/share/screentra-client'))) / 'config.json'
         if not cfg_path.exists():
             return None if which == 'override' else 0
-        cfg = json.loads(cfg_path.read_text())
+        cfg = _read_json_file(cfg_path, {})
     except Exception:
         return None if which == 'override' else 0
     if which == 'installer':
@@ -66,7 +78,7 @@ def _read_theme():
                    str(Path.home() / '.local/share/screentra-client/cache'))) / 'client-config.json'
         if not cfg_path.exists():
             return None
-        cfg = json.loads(cfg_path.read_text())
+        cfg = _read_json_file(cfg_path, {})
         theme = cfg.get('theme')
         return theme if theme in ('midnight', 'light', 'classic') else None
     except Exception:
@@ -79,7 +91,7 @@ def _touch_binding():
                    str(Path.home() / '.local/share/screentra-client'))) / 'config.json'
         if not cfg_path.exists():
             return None
-        cfg = json.loads(cfg_path.read_text())
+        cfg = _read_json_file(cfg_path, {})
         binding = cfg.get('touch_binding')
         return binding if isinstance(binding, dict) else None
     except Exception:
@@ -174,7 +186,7 @@ def payload(args):
     try:
         cached_cfg = Path(args.cache_dir, 'client-config.json')
         if cached_cfg.exists():
-            cached = json.loads(cached_cfg.read_text())
+            cached = _read_json_file(cached_cfg, {})
             active_layout_id = active_layout_id or cached.get('assigned_layout_id')
             value = cached.get('active_layout_revision')
             active_layout_revision = int(value) if value is not None else None
@@ -184,7 +196,7 @@ def payload(args):
         try:
             display_index = int(display.get('display_index', 0))
             display_cfg_path = Path(args.cache_dir, 'client-config.json' if display_index == 0 else f'display-config-{display_index}.json')
-            display_cfg = json.loads(display_cfg_path.read_text()) if display_cfg_path.exists() else {}
+            display_cfg = _read_json_file(display_cfg_path, {})
             display['active_layout_id'] = display_cfg.get('assigned_layout_id') or active_layout_id
             value = display_cfg.get('active_layout_revision')
             display['active_layout_revision'] = int(value) if value is not None else active_layout_revision
@@ -227,17 +239,27 @@ def payload(args):
 def tls_context():
     """Use the Screentra Cast CA bundle directly when present, independent of OS trust."""
     cafile = os.environ.get('RIPLEY_CA_CERT') or str(Path.home() / '.local/share/screentra-client/screentra-cast-signage-ca.crt')
-    if cafile and Path(cafile).exists():
-        try:
-            return ssl.create_default_context(cafile=cafile)
-        except Exception as e:
-            print(f'warning: failed to load Screentra Cast CA {cafile}: {e}', flush=True)
-    return None
+    if not cafile or not Path(cafile).is_file():
+        raise RuntimeError('Screentra Cast CA certificate is unavailable')
+    try:
+        return ssl.create_default_context(cafile=cafile)
+    except Exception as e:
+        raise RuntimeError('Screentra Cast CA certificate is invalid') from e
+
+
+def validate_server_url(server):
+    parsed = urlparse((server or '').strip())
+    if parsed.scheme not in ('https', 'http') or not parsed.hostname:
+        raise ValueError('server URL must include an https:// origin')
+    if parsed.scheme == 'http' and parsed.hostname not in ('127.0.0.1', 'localhost', '::1'):
+        raise ValueError('non-loopback server URLs must use HTTPS')
+    return parsed
 
 def urlopen_ripley(req, timeout=10):
     kw = {'timeout': timeout}
-    ctx = tls_context()
-    if ctx is not None:
+    parsed = validate_server_url(req.full_url)
+    if parsed.scheme == 'https':
+        ctx = tls_context()
         kw['context'] = ctx
     return urllib.request.urlopen(req, **kw)
 
@@ -257,15 +279,14 @@ def client_auth_token():
         return ''
 
 
-def client_auth_headers():
-    token = client_auth_token()
+def client_auth_headers(token=None):
+    token = client_auth_token() if token is None else str(token).strip()
     return {'X-SCREENTRA-CLIENT-TOKEN': token} if token else {}
 
-
-def poll_command(server, client_id):
+def poll_command(server, client_id, client_token):
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command'
     try:
-        req = urllib.request.Request(url, headers=client_auth_headers())
+        req = urllib.request.Request(url, headers=client_auth_headers(client_token))
         with urlopen_ripley(req, timeout=5) as r:
             data = r.read().decode()
             return json.loads(data)
@@ -278,9 +299,9 @@ def poll_command(server, client_id):
 
 
 def ack_command(server, client_id):
-    url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command'
+    url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command/ack'
     try:
-        req = urllib.request.Request(url, headers=client_auth_headers(), method='DELETE')
+        req = urllib.request.Request(url, headers=client_auth_headers(), method='POST')
         with urlopen_ripley(req, timeout=5) as r:
             return r.read().decode()
     except Exception as e:
@@ -308,7 +329,7 @@ def read_command_result(cache_dir):
     if not result_path.exists():
         return None, None
     try:
-        return json.loads(result_path.read_text()), result_path
+        return _read_json_file(result_path, None), result_path
     except Exception as e:
         print(f'bad command-result.json: {e}', flush=True)
         try: result_path.unlink()
@@ -326,22 +347,22 @@ def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='
         # so it survives across config sync cycles.
         prev_path = Path(cache_dir, 'client-config.json')
         try:
-            prev = json.loads(prev_path.read_text())
+            prev = _read_json_file(prev_path, {})
             if prev.get('theme'):
                 data['theme'] = prev['theme']
         except Exception:
             pass
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
         if display_index == 0:
-            Path(cache_dir, 'client-config.json').write_text(json.dumps(data, indent=2))
+            _atomic_write_text(Path(cache_dir, 'client-config.json'), json.dumps(data, indent=2))
         else:
-            Path(cache_dir, f'display-config-{display_index}.json').write_text(json.dumps(data, indent=2))
+            _atomic_write_text(Path(cache_dir, f'display-config-{display_index}.json'), json.dumps(data, indent=2))
         target = config_pattern.format(index=display_index)
         if data.get('layout') is not None:
             # backwards-compat: also write the canonical index=0 name
-            Path(cache_dir, target).write_text(json.dumps(data['layout'], indent=2))
+            _atomic_write_text(Path(cache_dir, target), json.dumps(data['layout'], indent=2))
             if display_index == 0:
-                Path(cache_dir, 'assigned-layout.json').write_text(json.dumps(data['layout'], indent=2))
+                _atomic_write_text(Path(cache_dir, 'assigned-layout.json'), json.dumps(data['layout'], indent=2))
         else:
             for stale in [Path(cache_dir, target), Path(cache_dir, 'assigned-layout.json') if display_index == 0 else None]:
                 if stale is None: continue
@@ -362,9 +383,8 @@ def fetch_all_displays(server, client_id, cache_dir, display_count, config_patte
 def fetch_admin_users(server, client_id, cache_dir):
     """Sync server users for the local admin login.
 
-    The local admin page falls back to admin/admin only until this cache exists.
-    Once server users are cached, fallback is disabled and password hashes from
-    the server are authoritative.
+    Server users are cached for authenticated local administration; without
+    that cache the local admin login remains unprovisioned.
     """
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/admin-users'
     try:
@@ -375,11 +395,7 @@ def fetch_admin_users(server, client_id, cache_dir):
         if users:
             target = Path(cache_dir).parent / 'admin-users.json'
             target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_suffix('.json.tmp')
-            tmp.write_text(json.dumps(data, indent=2))
-            try: os.chmod(tmp, 0o600)
-            except Exception: pass
-            tmp.replace(target)
+            _atomic_write_text(target, json.dumps(data, indent=2))
             print(f'admin users synced: {len(users)}', flush=True)
             return data
         return None
@@ -434,6 +450,12 @@ def main():
     ap.add_argument('--display-config-pattern', default=os.environ.get('RIPLEY_DISPLAY_CONFIG_PATTERN', 'assigned-layout-display-{index}.json'))
 
     args = ap.parse_args()
+    try:
+        parsed_server = validate_server_url(args.server)
+        if parsed_server.scheme == 'https':
+            tls_context()
+    except Exception as error:
+        ap.error(str(error))
 
     while True:
         # Refresh configuration before building the registration payload so the
@@ -453,12 +475,12 @@ def main():
                 if server_theme in ('midnight', 'light', 'classic'):
                     theme_path = Path(args.cache_dir) / 'client-config.json'
                     try:
-                        cached = json.loads(theme_path.read_text()) if theme_path.exists() else {}
+                        cached = _read_json_file(theme_path, {})
                     except Exception:
                         cached = {}
                     cached['theme'] = server_theme
                     theme_path.parent.mkdir(parents=True, exist_ok=True)
-                    theme_path.write_text(json.dumps(cached, indent=2))
+                    _atomic_write_text(theme_path, json.dumps(cached, indent=2))
             except Exception:
                 pass
         except Exception as e:
@@ -474,7 +496,7 @@ def main():
                 pass
         previous_orientation = 'normal'
         try:
-            previous_orientation = json.loads((Path(args.cache_dir) / 'client-config.json').read_text()).get('orientation', 'normal')
+            previous_orientation = _read_json_file(Path(args.cache_dir) / 'client-config.json', {}).get('orientation', 'normal')
         except Exception:
             pass
         # Track previous layout assignment to detect changes.
@@ -505,7 +527,7 @@ def main():
         fetch_all_displays(args.server, data['client_id'], args.cache_dir, len(data.get('displays') or []), args.display_config_pattern)
         fetch_admin_users(args.server, data['client_id'], args.cache_dir)
         assigned = cfg.get('assigned_layout_id') if cfg else None
-        cmd = poll_command(args.server, data['client_id'])
+        cmd = poll_command(args.server, data['client_id'], client_auth_token())
         if cmd:
             write_pending_command(cmd, args.cache_dir)
             ack = ack_command(args.server, data['client_id'])

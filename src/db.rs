@@ -6,7 +6,7 @@ use crate::models::{
 };
 use crate::schedule::ScheduleEntry;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::sync::Mutex;
+use std::{sync::Mutex, time::Duration};
 
 
 /// Rebuild the `schedules` table so that `layout_id` is nullable.
@@ -20,34 +20,48 @@ use std::sync::Mutex;
 /// block, so we also re-create them here). The function is a no-op if
 /// the column is already nullable.
 fn rebuild_schedules_layout_id_nullable(conn: &Connection) -> Result<(), Box<dyn std::error::Error>> {
-    // Check if the `schedules` table exists and `layout_id` is NOT NULL.
-    // If neither, this migration is a no-op.
-    let notnull: i64 = conn
+    let mut columns = std::collections::HashSet::new();
+    let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('schedules')")?;
+    for row in stmt.query_map([], |row| row.get::<_, String>(0))? {
+        columns.insert(row?);
+    }
+    if columns.is_empty() {
+        return Ok(());
+    }
+
+    let required = [
+        "layout_id",
+        "updated_at",
+        "layout_set_id",
+        "action",
+        "target_client",
+        "power_state",
+        "display_name",
+        "control_method",
+        "display_index",
+    ];
+    let layout_id_notnull: i64 = conn
         .query_row(
             "SELECT COALESCE((SELECT [notnull] FROM pragma_table_info('schedules') WHERE name='layout_id'), 0)",
             [],
             |row| row.get(0),
         )
         .unwrap_or(0);
-    let has_enabled: i64 = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('schedules') WHERE name='enabled')",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    if notnull == 0 && has_enabled == 0 {
-        // Schedule table is already in the target shape — no-op.
+    if layout_id_notnull == 0 && required.iter().all(|name| columns.contains(*name)) {
         return Ok(());
     }
-    conn.execute_batch(
+
+    let expr = |name: &str, fallback: &str| {
+        if columns.contains(name) {
+            name.to_string()
+        } else {
+            fallback.to_string()
+        }
+    };
+    let sql = format!(
         r#"
-        -- Drop any orphan from a previous failed migration attempt.
-        -- Without this, CREATE TABLE IF NOT EXISTS below is a no-op
-        -- and the rebuild would use the old (stale) schema with the
-        -- old number of columns.
         DROP TABLE IF EXISTS schedules_new;
-        CREATE TABLE IF NOT EXISTS schedules_new (
+        CREATE TABLE schedules_new (
             id              TEXT PRIMARY KEY,
             display         TEXT NOT NULL,
             layout_id       TEXT,
@@ -61,23 +75,39 @@ fn rebuild_schedules_layout_id_nullable(conn: &Connection) -> Result<(), Box<dyn
             target_client   TEXT,
             power_state     TEXT,
             display_name    TEXT,
+            control_method  TEXT NOT NULL DEFAULT 'auto',
+            display_index   INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY(layout_id) REFERENCES layouts(id) ON DELETE SET NULL
         );
-        -- Insert from the old table, mapping any extra legacy columns
-        -- (e.g. `enabled`) via COALESCE so the rebuild is robust to
-        -- schema drift. The new column order above is the source of
-        -- truth; the SELECT supplies the values.
         INSERT INTO schedules_new
-            (id, display, layout_id, day_of_week, start_time, end_time, created_at, updated_at, layout_set_id, action, target_client, power_state, display_name)
-        SELECT
-            id, display, layout_id, day_of_week, start_time, end_time, created_at, updated_at, layout_set_id, action, target_client, power_state, display_name
+            (id, display, layout_id, day_of_week, start_time, end_time, created_at, updated_at,
+             layout_set_id, action, target_client, power_state, display_name, control_method, display_index)
+        SELECT {id}, {display}, {layout_id}, {day_of_week}, {start_time}, {end_time}, {created_at},
+               {updated_at}, {layout_set_id}, {action}, {target_client}, {power_state}, {display_name},
+               {control_method}, {display_index}
         FROM schedules;
         DROP TABLE schedules;
         ALTER TABLE schedules_new RENAME TO schedules;
         CREATE INDEX IF NOT EXISTS idx_schedules_display ON schedules(display);
         CREATE INDEX IF NOT EXISTS idx_schedules_layout_set_id ON schedules(layout_set_id);
         "#,
-    )?;
+        id = expr("id", "lower(hex(randomblob(16)))"),
+        display = expr("display", "''"),
+        layout_id = expr("layout_id", "NULL"),
+        day_of_week = expr("day_of_week", "0"),
+        start_time = expr("start_time", "'00:00'"),
+        end_time = expr("end_time", "'00:00'"),
+        created_at = expr("created_at", "CURRENT_TIMESTAMP"),
+        updated_at = expr("updated_at", "NULL"),
+        layout_set_id = expr("layout_set_id", "NULL"),
+        action = expr("action", "'switch_layout'"),
+        target_client = expr("target_client", "NULL"),
+        power_state = expr("power_state", "NULL"),
+        display_name = expr("display_name", "NULL"),
+        control_method = expr("control_method", "'auto'"),
+        display_index = expr("display_index", "0"),
+    );
+    conn.execute_batch(&sql)?;
     Ok(())
 }
 
@@ -161,7 +191,6 @@ pub struct ClientAdminUser {
     pub username: String,
     pub display_name: String,
     pub role: String,
-    pub password_hash: String,
 }
 
 #[derive(Debug, Clone)]
@@ -578,7 +607,7 @@ impl Database {
         &self,
         client_id: &str,
         display_index: i64,
-    ) -> Result<(Option<String>, Option<String>, Option<i64>, Option<i64>, Option<f64>, bool, String, String), String> {
+    ) -> Result<Option<(Option<String>, Option<String>, Option<i64>, Option<i64>, Option<f64>, bool, String, String)>, String> {
         let conn = self.conn()?;
         conn.query_row(
             "SELECT connector, label, width, height, refresh_rate, enabled, orientation, control_method FROM client_displays WHERE client_id = ?1 AND display_index = ?2",
@@ -596,7 +625,8 @@ impl Database {
                 ))
             },
         )
-        .map_err(|_| "Display not found".to_string())
+        .optional()
+        .map_err(|e| e.to_string())
     }
 
     pub fn set_display_control_method(
@@ -652,14 +682,23 @@ impl Database {
     ) -> Result<(), String> {
         let mut conn = self.conn()?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let pending: Option<String> = tx
+            .query_row(
+                "SELECT action FROM client_commands WHERE client_id = ?1",
+                [client_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if pending.is_some() {
+            return Err("command_pending".to_string());
+        }
         let burst_limit = crate::rate_limit::CLIENT_COMMAND_BURST_LIMIT;
         let cooldown_secs = crate::rate_limit::CLIENT_COMMAND_BURST_COOLDOWN_SECS;
         let now = chrono::Utc::now();
         let previous: Option<(Option<String>, i64, Option<String>)> = tx
             .query_row(
-                "SELECT burst_started_at, burst_count, cooldown_until
-                 FROM client_command_cooldowns
-                 WHERE client_id = ?1 AND action = ?2",
+                "SELECT burst_started_at, burst_count, cooldown_until FROM client_command_cooldowns WHERE client_id = ?1 AND action = ?2",
                 params![client_id, action],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -1265,7 +1304,7 @@ impl Database {
             return Ok(None);
         };
         let mut stmt = conn
-            .prepare("SELECT username, display_name, role, password_hash FROM users WHERE active=1 AND role IN ('admin','layout-manager') ORDER BY role ASC, username ASC")
+            .prepare("SELECT username, display_name, role FROM users WHERE active=1 AND role IN ('admin','layout-manager') ORDER BY role ASC, username ASC")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
@@ -1273,7 +1312,6 @@ impl Database {
                     username: row.get(0)?,
                     display_name: row.get(1)?,
                     role: row.get(2)?,
-                    password_hash: row.get(3)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -1387,6 +1425,10 @@ impl Database {
     }
     pub fn open(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let conn = Connection::open(path)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        // Enforce relational integrity on every connection and use WAL for
+        // concurrent heartbeat reads while an admin write is in progress.
+        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         // Phase 5: kiosk → interactive rename. This MUST run before the
         // schema's `CREATE TABLE IF NOT EXISTS interactive_submissions`
         // (below) so that an old DB with a `kiosk_submissions` table can
@@ -3126,11 +3168,12 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         //   -1 (DAY_EVERY) matches all days
         //   otherwise check (mask & (1 << day)) != 0
         let day_bit = 1i32 << day_of_week;
+        let previous_day_bit = 1i32 << ((day_of_week + 6) % 7);
         let mut stmt = conn
-            .prepare("SELECT id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, display_name, control_method, display_index FROM schedules WHERE (day_of_week = -1 OR (day_of_week & ?1) != 0) AND start_time <= ?2 AND end_time >= ?2")
+            .prepare("SELECT id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, display_name, control_method, display_index FROM schedules WHERE (start_time <= end_time AND (day_of_week = -1 OR (day_of_week & ?1) != 0) AND start_time <= ?3 AND end_time >= ?3) OR (start_time > end_time AND (((day_of_week = -1 OR (day_of_week & ?1) != 0) AND start_time <= ?3) OR ((day_of_week = -1 OR (day_of_week & ?2) != 0) AND end_time >= ?3)))")
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map([day_bit.to_string(), current_time.to_string()], |row| {
+            .query_map([day_bit.to_string(), previous_day_bit.to_string(), current_time.to_string()], |row| {
                 Ok(ScheduleEntry {
                     id: row.get(0)?,
                     display: row.get(1)?,
@@ -3706,8 +3749,9 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
     }
 
     pub fn create_layout_set(&self, set: &LayoutSetWithItems) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
             "INSERT INTO layout_sets (id, name, shuffle, dwell_secs, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 set.id,
@@ -3720,51 +3764,50 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         )
         .map_err(|e| e.to_string())?;
         for (i, item) in set.items.iter().enumerate() {
-            conn.execute(
+            tx.execute(
                 "INSERT INTO layout_set_entries (id, layout_set_id, layout_id, order_index, interval_secs) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![item.id, set.id, item.layout_id, i as u32, item.interval_secs],
+                rusqlite::params![item.id, set.id, item.layout_id, i as u32, item.interval_secs.or(Some(30))],
             )
             .map_err(|e| e.to_string())?;
         }
-        Ok(())
+        tx.commit().map_err(|e| e.to_string())
     }
 
     pub fn update_layout_set(&self, set: &LayoutSetWithItems) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
             "UPDATE layout_sets SET name = ?2, shuffle = ?3, dwell_secs = ?4, updated_at = ?5 WHERE id = ?1",
             rusqlite::params![set.id, set.name, set.shuffle as i32, set.dwell_secs, set.updated_at],
         )
         .map_err(|e| e.to_string())?;
 
-        // Replace entries
-        let set_id: &str = &set.id;
-        conn.execute(
+        tx.execute(
             "DELETE FROM layout_set_entries WHERE layout_set_id = ?1",
-            [set_id],
+            [&set.id],
         )
         .map_err(|e| e.to_string())?;
         for (i, item) in set.items.iter().enumerate() {
-            conn.execute(
+            tx.execute(
                 "INSERT INTO layout_set_entries (id, layout_set_id, layout_id, order_index, interval_secs) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![item.id, set_id, item.layout_id, i as u32, item.interval_secs],
+                rusqlite::params![item.id, set.id, item.layout_id, i as u32, item.interval_secs.or(Some(30))],
             )
             .map_err(|e| e.to_string())?;
         }
-        Ok(())
+        tx.commit().map_err(|e| e.to_string())
     }
 
     pub fn delete_layout_set(&self, id: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let id_ref: &str = id;
-        conn.execute(
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
             "DELETE FROM layout_set_entries WHERE layout_set_id = ?1",
-            [id_ref],
+            [id],
         )
         .map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM layout_sets WHERE id = ?1", [id_ref])
+        tx.execute("DELETE FROM layout_sets WHERE id = ?1", [id])
             .map_err(|e| e.to_string())?;
-        Ok(())
+        tx.commit().map_err(|e| e.to_string())
     }
 
     /// Fetch all layout sets whose id appears in the given layout_ids (via layout_set_entries).
@@ -3847,9 +3890,22 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         for (set_id, entries) in set_entries {
             if let Some(set) = sets_map.get_mut(&set_id) {
                 set.items = entries;
+                set.items.sort_by_key(|entry| entry.position);
             }
         }
-        Ok(sets_map)
+        let requested: std::collections::HashSet<&str> =
+            layout_ids.iter().map(String::as_str).collect();
+        let mut result = std::collections::HashMap::new();
+        for set in sets_map.values() {
+            for entry in &set.items {
+                if requested.contains(entry.layout_id.as_str()) {
+                    result
+                        .entry(entry.layout_id.clone())
+                        .or_insert_with(|| set.clone());
+                }
+            }
+        }
+        Ok(result)
     }
 
     pub fn add_layout_set_entry(
@@ -3864,7 +3920,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         let lid_ref: &str = &entry.layout_id;
         conn.execute(
             "INSERT INTO layout_set_entries (id, layout_set_id, layout_id, order_index, interval_secs) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id_ref, lsid_ref, lid_ref, entry.position, entry.interval_secs],
+            params![id_ref, lsid_ref, lid_ref, entry.position, entry.interval_secs.or(Some(30))],
         )
         .map_err(|e| e.to_string())?;
         conn.execute(
@@ -4679,6 +4735,11 @@ mod tests {
                 Some("test"),
             )
             .unwrap_or_else(|error| panic!("command {index} should queue: {error}"));
+            // A client can have only one pending command. Remove the probe
+            // command before queuing the next burst member so this test
+            // exercises the cooldown counter rather than overwrite handling.
+            db.clear_client_command("client-1")
+                .expect("clear probe command");
         }
         let blocked = db.queue_client_command("client-1", "restart_client", None, &now, Some("test"));
         assert!(blocked.is_err());

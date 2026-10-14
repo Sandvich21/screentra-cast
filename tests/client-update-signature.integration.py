@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = (ROOT / "static/install/player-client.sh").read_text(encoding="utf-8")
 BUNDLE_BUILDER = (ROOT / "tools/build-player-client-bundle.py").read_text(encoding="utf-8")
 
-assert "UPDATE_PUBLIC_KEY_PATH" in INSTALLER
+assert "PUBLIC_KEY_FILE" in INSTALLER
 assert "player-client.sh.sig" in INSTALLER
 assert "pkeyutl" in INSTALLER
 assert "-verify" in INSTALLER

@@ -3,15 +3,48 @@ var rendered = {};
 
 function ripleyTextShadowStyle(p) {
   if (!p || !p.text_shadow_enabled) return '';
-  return 'text-shadow:' + (Number(p.text_shadow_x == null ? 2 : p.text_shadow_x)||0) + 'px ' + (Number(p.text_shadow_y == null ? 2 : p.text_shadow_y)||0) + 'px ' + (Number(p.text_shadow_blur == null ? 4 : p.text_shadow_blur)||0) + 'px ' + (p.text_shadow_color || '#000000') + ';';
+  return 'text-shadow:' + (Number(p.text_shadow_x == null ? 2 : p.text_shadow_x)||0) + 'px ' + (Number(p.text_shadow_y == null ? 2 : p.text_shadow_y)||0) + 'px ' + (Number(p.text_shadow_blur == null ? 4 : p.text_shadow_blur)||0) + 'px ' + ripleyCssColor(p.text_shadow_color, '#000000') + ';';
 }
 function ripleyTextOutlineStyle(p) {
   if (!p || !p.text_outline_enabled) return '';
-  return '-webkit-text-stroke:' + (Number(p.text_outline_width == null ? 1 : p.text_outline_width)||0) + 'px ' + (p.text_outline_color || '#000000') + ';';
+  return '-webkit-text-stroke:' + (Number(p.text_outline_width == null ? 1 : p.text_outline_width)||0) + 'px ' + ripleyCssColor(p.text_outline_color, '#000000') + ';';
 }
 
 function ripleyTplEsc(v) {
   return String(v == null ? '' : v).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; });
+}
+function ripleyCssColor(value, fallback) {
+  var s = String(value == null ? '' : value).trim();
+  if (/^#[0-9a-f]{3,8}$/i.test(s) || /^(?:rgb|hsl)a?\([0-9.% ,+-]+\)$/i.test(s)) return s;
+  return fallback;
+}
+function ripleyCssAlign(value, fallback) {
+  var s = String(value == null ? '' : value).trim().toLowerCase();
+  return ['left', 'center', 'right', 'justify'].indexOf(s) >= 0 ? s : fallback;
+}
+function ripleyCssFontFamily(value) {
+  var s = String(value == null ? '' : value).trim();
+  return /^[A-Za-z0-9 _,'"-]{1,160}$/.test(s) ? s : '';
+}
+function ripleySafeUrl(value) {
+  var s = String(value == null ? '' : value).trim();
+  if (/^(?:https?:|blob:|\/(?!\/))/i.test(s) && !/^(?:javascript|data|vbscript):/i.test(s)) return s;
+  return '';
+}
+function ripleyNumber(value, fallback, min, max) {
+  var n = Number(value);
+  if (!Number.isFinite(n)) n = fallback;
+  if (min != null) n = Math.max(min, n);
+  if (max != null) n = Math.min(max, n);
+  return n;
+}
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+  document.addEventListener('error', function(event) {
+    var image = event.target;
+    if (!image || image.nodeName !== 'IMG' || !image.hasAttribute('data-ripley-fallback')) return;
+    image.style.display = 'none';
+    if (image.nextElementSibling) image.nextElementSibling.style.display = 'flex';
+  }, true);
 }
 // Layout font sizes are authored against the editor's 960px landscape canvas
 // (540px for portrait). Geometry is percentage-based, so text and other
@@ -234,7 +267,7 @@ function ripleyTrafficMapImageHtml(event) {
   var label = [event.road || 'Traffic event', event.direction || '', event.description || ''].filter(Boolean).join(' · ');
   var src = '/api/traffic/map.png?lat=' + encodeURIComponent(lat.toFixed(6)) + '&lon=' + encodeURIComponent(lon.toFixed(6)) + '&category=' + encodeURIComponent(category);
   return '<span style="display:block;position:relative;width:100%;height:100%;overflow:hidden;background:#0f172a;">' +
-    '<img src="' + ripleyTplEsc(src) + '" alt="' + ripleyTplEsc(label) + '" loading="eager" style="display:block;width:100%;height:100%;object-fit:cover;" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'flex\';">' +
+    '<img data-ripley-fallback="1" src="' + ripleyTplEsc(src) + '" alt="' + ripleyTplEsc(label) + '" loading="eager" style="display:block;width:100%;height:100%;object-fit:cover;">' +
     '<span aria-hidden="true" style="display:none;align-items:center;justify-content:center;width:100%;height:100%;font-size:42%;background:linear-gradient(135deg,#243447,#0f172a);color:#f8fafc;">🗺️</span>' +
     '</span>';
 }
@@ -816,7 +849,8 @@ function buildWidgetHTML(w) {
   if (!Number.isFinite(rotation)) rotation = 0;
   rotation = Math.max(-180, Math.min(180, rotation));
   var imageWrapStyle = w.widget_type === 'image' ? 'border-radius:' + ripleyCornerRadiusCss(p) + ';clip-path:' + ripleyCornerRadiusClipCss(p) + ';-webkit-clip-path:' + ripleyCornerRadiusClipCss(p) + ';' : '';
-  var styleStr = 'position:absolute;left:' + (x*100) + '%;top:' + (y*100) + '%;width:' + (width*100) + '%;height:' + (height*100) + '%;z-index:' + Math.max(0, Number(w.z) || 0) + ';overflow:hidden;transform:rotate(' + rotation + 'deg);transform-origin:center center;' + (p.font_family || p.fontFamily ? 'font-family:' + ripleyTplEsc(p.font_family || p.fontFamily) + ';' : '') + imageWrapStyle + ((w.widget_type === 'countdown' && p.hide_on_layout) || w.widget_type === 'sound' ? 'display:none;' : '') + (interactive ? 'display:flex;align-items:center;justify-content:center;' : '');
+  var fontFamily = ripleyCssFontFamily(p.font_family || p.fontFamily);
+  var styleStr = 'position:absolute;left:' + (x*100) + '%;top:' + (y*100) + '%;width:' + (width*100) + '%;height:' + (height*100) + '%;z-index:' + Math.max(0, Number(w.z) || 0) + ';overflow:hidden;transform:rotate(' + rotation + 'deg);transform-origin:center center;' + (fontFamily ? 'font-family:' + ripleyTplEsc(fontFamily) + ';' : '') + imageWrapStyle + ((w.widget_type === 'countdown' && p.hide_on_layout) || w.widget_type === 'sound' ? 'display:none;' : '') + (interactive ? 'display:flex;align-items:center;justify-content:center;' : '');
   var countdownFontSize = w.widget_type === 'countdown' ? ripleyCountdownFontSize(p.font_size) : 0;
   var runtimeAttrs = w.widget_type === 'countdown' ? ' data-countdown-widget="1" data-countdown-widget-id="' + ripleyTplEsc(w.id || '') + '" data-countdown-mode="' + ripleyTplEsc(p.countdown_mode || 'date') + '" data-countdown-target="' + ripleyTplEsc(p.targetDate || '') + '" data-countdown-duration-value="' + ripleyTplEsc(String(Math.max(1, Number(p.duration_value || 1)))) + '" data-countdown-duration-unit="' + ripleyTplEsc(p.duration_unit || 'minutes') + '" data-countdown-font-size="' + ripleyTplEsc(String(countdownFontSize)) + '" data-countdown-expiry-text="' + ripleyTplEsc(p.expiry_text || '') + '" data-countdown-action="' + ripleyTplEsc(p.expiry_action || 'none') + '" data-countdown-target-layout="' + ripleyTplEsc(p.expiry_target_layout || '') + '"' : '';
   var html = '<div' + wrapClass + wrapAttrs + runtimeAttrs + ' style="' + styleStr + '">';
@@ -838,26 +872,25 @@ function buildWidgetHTML(w) {
     }
   } else if (Array.isArray(p.template_elements) && p.template_elements.length) {
     html += ripleyTemplateElementsHTML(Object.assign({ _widget_type: w.widget_type }, p));
+  } else if (w.widget_type === 'video' && (Array.isArray(p.playlist) && p.playlist.length ? /(?:youtube\.com|youtu\.be)/i.test(String(p.playlist[0].url || '')) : /(?:youtube\.com|youtu\.be)/i.test(String(p.url || '')))) {
+    // YouTube URLs must use the iframe player. A YouTube watch/short URL is
+    // an HTML page, not a media file that the <video> element can decode.
+    var youtubeUrl = Array.isArray(p.playlist) && p.playlist.length ? p.playlist[0].url : p.url;
+    var youtubeFit = ['cover', 'contain', 'fill', 'none', 'scale-down'].indexOf(p.fit) >= 0 ? p.fit : 'cover';
+    html += '<iframe src="/youtube.html?url=' + encodeURIComponent(youtubeUrl) + '&priority=' + ripleyNumber(p.priority, 50, 0, 100) + '&mute=' + ((p.muted || p.mute) ? '1' : '0') + '&fit=' + encodeURIComponent(youtubeFit) + '&v=' + Date.now() + '" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;background:#000;overflow:hidden;"></iframe>';
   } else if (w.widget_type === 'video' && Array.isArray(p.playlist) && p.playlist.length) {
     var videoFit = ['cover', 'contain', 'fill', 'none', 'scale-down'].indexOf(p.fit) >= 0 ? p.fit : 'cover';
-    html += '<video data-video-widget-id="' + ripleyTplEsc(w.id) + '" src="' + ripleyTplEsc(p.playlist[0].url) + '" autoplay playsinline preload="auto" ' + (p.loop !== false && p.playlist.length === 1 ? 'loop ' : '') + (p.muted || p.mute ? 'muted' : '') + ' style="width:100%;height:100%;object-fit:' + videoFit + ';background:#000;"></video>';
-  } else if (w.widget_type === 'video' && p.url && p.url.indexOf('youtube') >= 0) {
-    // Render the YouTube widget as an iframe so it has its own JS context for the IFrame API.
-    // The youtube.html document handles its own SoundManager registration.
-    // The mute prop lets lower-priority sources (e.g. music) keep playing.
-    // 2026-08-11: youtube.html now scales its #player to 178% and overflows hidden,
-    // so the YouTube embed's 16:9 letterbox falls outside the visible viewport.
-    html += '<iframe src="/youtube.html?url=' + encodeURIComponent(p.url) + '&priority=' + (p.priority || 50) + '&mute=' + (p.mute ? '1' : '0') + '&fit=' + encodeURIComponent(p.fit || 'cover') + '&v=' + Date.now() + '" style="width:100%;height:100%;border:none;background:#000;overflow:hidden;"></iframe>';
+    html += '<video data-video-widget-id="' + ripleyTplEsc(w.id) + '" src="' + ripleyTplEsc(ripleySafeUrl(p.playlist[0].url)) + '" autoplay playsinline preload="auto" ' + (p.loop !== false && p.playlist.length === 1 ? 'loop ' : '') + (p.muted || p.mute ? 'muted' : '') + ' style="width:100%;height:100%;object-fit:' + videoFit + ';background:#000;"></video>';
   } else if (w.widget_type === 'video' && p.url) {
     // Direct video file. The mute prop sets the <video> muted attribute, so a lower-priority
     // music widget can take over the audio output. Honor fit prop (cover/contain/stretch).
-    var fit = p.fit || 'cover';
-    html += '<video src="' + p.url + '" autoplay ' + (p.loop !== false ? 'loop ' : '') + (p.muted || p.mute ? 'muted' : '') + ' style="width:100%;height:100%;object-fit:' + fit + ';"></video>';
+    var fit = ['cover', 'contain', 'fill', 'none', 'scale-down'].indexOf(p.fit) >= 0 ? p.fit : 'cover';
+    html += '<video src="' + ripleyTplEsc(ripleySafeUrl(p.url)) + '" autoplay ' + (p.loop !== false ? 'loop ' : '') + (p.muted || p.mute ? 'muted' : '') + ' style="width:100%;height:100%;object-fit:' + fit + ';"></video>';
   } else if (w.widget_type === 'music' || w.widget_type === 'sound') {
     // Audio widgets are intentionally invisible on the layout.
     // The audio element is created in the script block below and registered with
     // SoundManager. We render a zero-height marker so the layout doesn't break.
-    html += '<div data-music-widget-id="' + w.id + '" style="position:absolute;width:0;height:0;overflow:hidden;pointer-events:none;" aria-hidden="true"></div>';
+    html += '<div data-music-widget-id="' + ripleyTplEsc(w.id) + '" style="position:absolute;width:0;height:0;overflow:hidden;pointer-events:none;" aria-hidden="true"></div>';
   } else if (w.widget_type === 'news') {
     // News Ticker. Two render paths:
     //
@@ -898,7 +931,8 @@ function buildWidgetHTML(w) {
       } else {
         items = '<span style="padding:0 2rem;color:#888;">📰 ' + (np.feedUrl ? 'Loading news…' : 'No feed URL set') + '</span>';
       }
-      html += '<div class="ripley-news-ticker" style="background:var(--bg-elev,#161b22);color:var(--text,#e6edf3);font-size:1.1em;' + (np.font_family || np.fontFamily ? 'font-family:' + ripleyTplEsc(np.font_family || np.fontFamily) + ';' : '') + '"><div style="display:inline-block;padding-left:100%;animation:ripleyNewsMarquee ' + dur + ' linear infinite;">' + items + '</div></div>';
+      var newsFontFamily = ripleyCssFontFamily(np.font_family || np.fontFamily);
+      html += '<div class="ripley-news-ticker" style="background:var(--bg-elev,#161b22);color:var(--text,#e6edf3);font-size:1.1em;' + (newsFontFamily ? 'font-family:' + ripleyTplEsc(newsFontFamily) + ';' : '') + '"><div style="display:inline-block;padding-left:100%;animation:ripleyNewsMarquee ' + dur + ' linear infinite;">' + items + '</div></div>';
     }
   } else if (w.widget_type === 'clock') {
     var clkFF = w.props && (w.props.font_family || w.props.fontFamily) ? '&font_family=' + encodeURIComponent(w.props.font_family || w.props.fontFamily) : '';
@@ -909,20 +943,20 @@ function buildWidgetHTML(w) {
     var clkVersion = '&v=20261009101500-clock-color-preview';
     html += '<iframe src="/clock.html?format=' + encodeURIComponent((w.props && w.props.format) || 'HH:mm') + clkFS + clkFF + clkColorParam + clkVersion + '" style="width:100%;height:100%;border:none;background:transparent;" allowTransparency="true"></iframe>';
   } else if (w.widget_type === 'text') {
-    var ffEsc = ripleyTplEsc(p.font_family || p.fontFamily || '');
+    var ffEsc = ripleyTplEsc(ripleyCssFontFamily(p.font_family || p.fontFamily || ''));
     var ffStyle = ffEsc ? 'font-family:' + ffEsc + ';' : '';
     var textContent = p.content != null ? p.content : (p.text != null ? p.text : '');
-    html += '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:' + (p.color || '#fff') + ';font-size:' + ripleyResponsiveFontCss(Number(p.font_size || 24)) + ';' + ffStyle + 'text-align:' + (p.align || 'center') + ';' + ripleyTextShadowStyle(p) + ripleyTextOutlineStyle(p) + '">' + ripleyTplEsc(textContent) + '</div>';
+    html += '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:' + ripleyCssColor(p.color, '#fff') + ';font-size:' + ripleyResponsiveFontCss(Number(p.font_size || 24)) + ';' + ffStyle + 'text-align:' + ripleyCssAlign(p.align, 'center') + ';' + ripleyTextShadowStyle(p) + ripleyTextOutlineStyle(p) + '">' + ripleyTplEsc(textContent) + '</div>';
   } else if (w.widget_type === 'datetime') {
-    var dtFFEsc = ripleyTplEsc(p.font_family || p.fontFamily || '');
+    var dtFFEsc = ripleyTplEsc(ripleyCssFontFamily(p.font_family || p.fontFamily || ''));
     var dtFFStyle = dtFFEsc ? 'font-family:' + dtFFEsc + ';' : '';
     var dtFmt = p.format || 'dddd, MMMM D';
     var dtText = formatDateLikeMoment(new Date(), dtFmt);
-    html += '<div data-ripley-datetime="1" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:' + (p.color || '#fff') + ';font-size:' + ripleyResponsiveFontCss(Number(p.font_size || 36)) + ';' + dtFFStyle + 'text-align:center;">' + dtText + '</div>';
+    html += '<div data-ripley-datetime="1" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:' + ripleyCssColor(p.color, '#fff') + ';font-size:' + ripleyResponsiveFontCss(Number(p.font_size || 36)) + ';' + dtFFStyle + 'text-align:center;">' + ripleyTplEsc(dtText) + '</div>';
   } else if (w.widget_type === 'countdown') {
-    var cdFFEsc = ripleyTplEsc(p.font_family || p.fontFamily || '');
+    var cdFFEsc = ripleyTplEsc(ripleyCssFontFamily(p.font_family || p.fontFamily || ''));
     var cdFFStyle = cdFFEsc ? 'font-family:' + cdFFEsc + ';' : '';
-    var cdColor = p.color || '#fff';
+    var cdColor = ripleyCssColor(p.color, '#fff');
     var cdMode = p.countdown_mode || 'date';
     var cdDurationUnit = p.duration_unit || 'minutes';
     var cdDurationMs = Math.max(1, Number(p.duration_value || 1)) * ({seconds:1000, minutes:60000, hours:3600000, days:86400000}[cdDurationUnit] || 60000);
@@ -947,7 +981,7 @@ function buildWidgetHTML(w) {
       else if (cdM > 0) cdText = cdM + 'm ' + cdS + 's';
       else cdText = cdS + 's';
     }
-    html += '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:' + cdColor + ';' + cdFFStyle + 'text-align:center;overflow:hidden;"><div class="countdown-value" style="font-size:' + ripleyResponsiveFontCss(ripleyCountdownFontSize(p.font_size)) + ';font-weight:800;line-height:1;white-space:nowrap;">' + cdText + '</div></div>';
+    html += '<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:' + cdColor + ';' + cdFFStyle + 'text-align:center;overflow:hidden;"><div class="countdown-value" style="font-size:' + ripleyResponsiveFontCss(ripleyCountdownFontSize(p.font_size)) + ';font-weight:800;line-height:1;white-space:nowrap;">' + ripleyTplEsc(cdText) + '</div></div>';
   } else if (w.widget_type === 'rectangle') {
     var opVal = Math.max(0, Math.min(100, Number((p && p.opacity == null ? 100 : p.opacity)))) / 100;
     var shapeMode = p.shape_mode || 'rectangle';
@@ -960,7 +994,7 @@ function buildWidgetHTML(w) {
     var clip = ripleyShapeClipPath(shapeMode);
     var lineStyle = shapeMode === 'line' ? 'height:' + (Number(p.line_thickness == null ? 6 : p.line_thickness) || 6) + 'px;' : '';
     var clipStyle = clip ? 'clip-path:' + clip + ';-webkit-clip-path:' + clip + ';' : '';
-    html += '<div style="width:100%;height:100%;background:' + (p.color || '#e94560') + ';border-radius:' + radiusCss + ';opacity:' + opVal + ';' + lineStyle + clipStyle + '"></div>';
+    html += '<div style="width:100%;height:100%;background:' + ripleyCssColor(p.color, '#e94560') + ';border-radius:' + radiusCss + ';opacity:' + opVal + ';' + lineStyle + clipStyle + '"></div>';
   } else if (w.widget_type === 'image') {
     var imageFit = ['cover', 'contain', 'fill', 'none', 'scale-down'].indexOf(p.fit) >= 0 ? p.fit : 'cover';
     var imagePlaylist = Array.isArray(p.playlist) && p.playlist.length ? p.playlist : (p.url ? [{url:p.url}] : []);
@@ -968,7 +1002,7 @@ function buildWidgetHTML(w) {
     var imageRadius = ripleyCornerRadiusCss(p);
     var imageClip = ripleyCornerRadiusClipCss(p);
     if (imageSrc) {
-      html += '<img data-image-widget-id="' + ripleyTplEsc(w.id) + '" src="' + ripleyTplEsc(imageSrc) + '" alt="' + ripleyTplEsc(p.alt || '') + '" style="width:100%;height:100%;object-fit:' + imageFit + ';border-radius:' + imageRadius + ';clip-path:' + imageClip + ';-webkit-clip-path:' + imageClip + ';">';
+      html += '<img data-image-widget-id="' + ripleyTplEsc(w.id) + '" src="' + ripleyTplEsc(ripleySafeUrl(imageSrc)) + '" alt="' + ripleyTplEsc(p.alt || '') + '" style="width:100%;height:100%;object-fit:' + imageFit + ';border-radius:' + imageRadius + ';clip-path:' + imageClip + ';-webkit-clip-path:' + imageClip + ';">';
     } else {
       html += '<div data-image-widget-id="' + ripleyTplEsc(w.id) + '" aria-hidden="true" style="width:100%;height:100%;"></div>';
     }
@@ -988,11 +1022,11 @@ function buildWidgetHTML(w) {
     }).join('');
     html += '<div style="width:100%;height:100%;box-sizing:border-box;overflow:hidden;padding:.6rem;color:#fff;background:rgba(30,41,59,.55);font-family:system-ui,sans-serif;"><div style="font-weight:700;">🚧 ' + ripleyTplEsc(p.area_label || 'Traffic') + '</div>' + trafficDefaultHtml + '<div style="font-size:.85em;margin-top:.4rem;">' + (trafficRows || (p.hide_if_empty !== false ? '' : '<div>No active traffic events</div>')) + '</div></div>';
   } else if (w.widget_type === 'calendar') {
-    var calSrc = '/calendar.html?ics=' + encodeURIComponent(p.ics_url || p.ical_url || p.ical || p.calendar_url || '') + '&template=' + encodeURIComponent(p.template || 'list') + '&color=' + encodeURIComponent(p.color || '#ffffff') + '&accent=' + encodeURIComponent(p.accent_color || '#e94560') + '&maxevents=' + (p.max_events || 5) + '&time_format=' + encodeURIComponent(p.time_format === '24' ? '24' : '12') + '&incweather=' + (p.include_weather === 'true' ? 'true' : 'false') + '&lat=' + (p.lat || 0) + '&lon=' + (p.lon || 0) + (p.font_family || p.fontFamily ? '&font_family=' + encodeURIComponent(p.font_family || p.fontFamily) : '');
+    var calSrc = '/calendar.html?ics=' + encodeURIComponent(p.ics_url || p.ical_url || p.ical || p.calendar_url || '') + '&template=' + encodeURIComponent(p.template || 'list') + '&color=' + encodeURIComponent(p.color || '#ffffff') + '&accent=' + encodeURIComponent(p.accent_color || '#e94560') + '&maxevents=' + ripleyNumber(p.max_events, 5, 1, 50) + '&time_format=' + encodeURIComponent(p.time_format === '24' ? '24' : '12') + '&incweather=' + (p.include_weather === 'true' ? 'true' : 'false') + '&lat=' + ripleyNumber(p.lat, 0, -90, 90) + '&lon=' + ripleyNumber(p.lon, 0, -180, 180) + (p.font_family || p.fontFamily ? '&font_family=' + encodeURIComponent(p.font_family || p.fontFamily) : '');
     html += '<iframe src="' + calSrc + '" style="width:100%;height:100%;border:none;background:transparent;" allowTransparency="true"></iframe>';
   } else if (w.widget_type === 'weather') {
     var weatherLocation = p.weather_location || p.location || '';
-    var wSrc = '/weather.html?lat=' + (p.lat || 0) + '&lon=' + (p.lon || 0) + '&template=' + encodeURIComponent(p.template || '3day') + '&color=' + encodeURIComponent(p.color || '#ffffff') + '&accent=' + encodeURIComponent(p.accent || p.accent_color || '#4a90d9') + '&location=' + encodeURIComponent(weatherLocation) + '&unit=' + encodeURIComponent(p.unit || 'F') + '&morning_split=' + (p.weather_morning_icon === 'split' ? 'true' : 'false') + (p.font_family || p.fontFamily ? '&font_family=' + encodeURIComponent(p.font_family || p.fontFamily) : '');
+    var wSrc = '/weather.html?lat=' + ripleyNumber(p.lat, 0, -90, 90) + '&lon=' + ripleyNumber(p.lon, 0, -180, 180) + '&template=' + encodeURIComponent(p.template || '3day') + '&color=' + encodeURIComponent(p.color || '#ffffff') + '&accent=' + encodeURIComponent(p.accent || p.accent_color || '#4a90d9') + '&location=' + encodeURIComponent(weatherLocation) + '&unit=' + encodeURIComponent(p.unit || 'F') + '&morning_split=' + (p.weather_morning_icon === 'split' ? 'true' : 'false') + (p.font_family || p.fontFamily ? '&font_family=' + encodeURIComponent(p.font_family || p.fontFamily) : '');
     if (p.bg_color) wSrc += '&bg_color=' + encodeURIComponent(p.bg_color);
     if (p.bg_opacity !== undefined) wSrc += '&bg_opacity=' + encodeURIComponent(p.bg_opacity);
     if (p.text_outline_color) wSrc += '&text_outline_color=' + encodeURIComponent(p.text_outline_color);
@@ -1007,12 +1041,11 @@ function buildWidgetHTML(w) {
         var delayMs = (p.slide_duration || 5) * 1000;
         embedUrl = match[1] + '/embed?rm=minimal&loop=true&start=true&delayms=' + delayMs;
       } else {
-        var delayMs2 = (p.slide_duration || 5) * 1000;
-        embedUrl = embedUrl.replace(/\/edit.*$/, '/embed?rm=minimal&loop=true&start=true&delayms=' + delayMs2);
+        embedUrl = '';
       }
-      html += '<iframe src="' + embedUrl + '" style="width:100%;height:100%;border:none;" allow="fullscreen"></iframe>';
+      html += '<iframe src="' + ripleyTplEsc(ripleySafeUrl(embedUrl)) + '" style="width:100%;height:100%;border:none;" allow="fullscreen"></iframe>';
     } else {
-      html += '<iframe src="' + (p.url || '') + '" style="width:100%;height:100%;border:none;"></iframe>';
+      html += '<iframe src="' + ripleyTplEsc(ripleySafeUrl(p.url)) + '" style="width:100%;height:100%;border:none;"></iframe>';
     }
   }
   html += '</div>';

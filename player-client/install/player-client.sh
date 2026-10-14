@@ -116,6 +116,12 @@ SSH_HINT
     fi
 fi
 
+SERVER_URL="${SERVER_URL%/}"
+if [[ "$SERVER_URL" != https://* && ! "$SERVER_URL" =~ ^http://(127\.0\.0\.1|localhost|::1)(:[0-9]+)?(/.*)?$ ]]; then
+    echo "ERROR: remote player installs require an https:// server URL." >&2
+    exit 1
+fi
+
 run_privileged() {
     if [ "$(id -u)" = "0" ]; then
         "$@"
@@ -129,9 +135,13 @@ run_privileged() {
 
 install_screentra_cast_service() {
     echo "Installing screentra-cast-kiosk@.service..."
-    # Write the unit file to a temp staging path first (then install to real path)
-    local unit_src="/tmp/screentra-cast-kiosk@.service.staging"
-    cat > "$unit_src" <<'EOF_UNIT'
+    # Stage in a root-owned temporary directory; never use a predictable /tmp
+    # pathname for a file that will be installed by root.
+    local stage_dir
+    stage_dir="$(run_privileged mktemp -d /run/screentra-cast-installer.XXXXXX)"
+    run_privileged chmod 0700 "$stage_dir"
+    local unit_src="$stage_dir/screentra-cast-kiosk@.service"
+    run_privileged tee "$unit_src" > /dev/null <<'EOF_UNIT'
 [Unit]
 Description=Screentra Cast Kiosk Display %i
 After=network-online.target
@@ -147,8 +157,10 @@ ExecStart=/usr/local/bin/screentra-kiosk.sh
 Restart=always
 RestartSec=5
 Environment=HOME=/home/board
-Environment=WLR_RENDERER=pixman
-Environment=SCREENTRA_USE_SOFTWARE_RENDER=1
+# AMD amdgpu APUs need the GLES2 renderer for reliable DRM scan-out.
+# Pixman can start Sway but repeatedly fails to import the Chromium buffer,
+# leaving the physical output black.
+Environment=WLR_RENDERER=gles2
 Environment=SCREENTRA_DISPLAY_INDEX=%i
 Environment=SCREENTRA_RENDER_BASE_PORT=3900
 Environment=SCREENTRA_RENDERER_URL=http://127.0.0.1:3900/
@@ -165,8 +177,191 @@ EOF_UNIT
     if ! run_privileged systemctl enable --now screentra-cast-kiosk@0.service; then
         echo "WARNING: could not start screentra-cast-kiosk@0.service from this session; it remains enabled for the next physical seat login."
     fi
-    run_privileged rm -f "$unit_src"
+    run_privileged rm -rf -- "$stage_dir"
     echo "screentra-cast-kiosk@.service installed and enabled."
+}
+# Install a root-owned update verifier. The unprivileged actor may only create
+# a bounded request marker; it cannot choose the server, URL, signature key, or
+# executable that root will run.
+install_root_verified_updater() {
+    local board_user="${SCREENTRA_BOARD_USER:-board}"
+    local update_dir="/var/lib/screentra-cast/update"
+    local request_file="$update_dir/request"
+    local UPDATE_REQUEST_FILE="$request_file"
+    local result_file="$update_dir/result.json"
+    local UPDATER_SCRIPT="/usr/local/libexec/screentra-cast-client-updater.py"
+    local updater_env="/etc/screentra-cast/client-update.env"
+    local updater_unit="/etc/systemd/system/screentra-client-updater.service"
+    local updater_path="/etc/systemd/system/screentra-client-updater.path"
+    local digest_file="/etc/screentra-cast/client-update.sha256"
+    run_privileged install -d -o root -g "$board_user" -m 0730 /var/lib/screentra-cast "$update_dir"
+    run_privileged install -d -o root -g root -m 0755 /usr/local/libexec /etc/screentra-cast
+    run_privileged touch "$result_file"
+    run_privileged chown root:"$board_user" "$result_file"
+    run_privileged chmod 0660 "$result_file"
+    run_privileged tee "$updater_env" >/dev/null <<EOF_UPDATE_ENV
+SERVER_URL=$SERVER_URL
+CLIENT_ID=$CLIENT_ID
+INSTALL_DIR=$INSTALL_DIR
+CA_FILE=$INSTALL_DIR/screentra-cast-signage-ca.crt
+AUTH_TOKEN_FILE=$CLIENT_AUTH_TOKEN_FILE
+PUBLIC_KEY_FILE=/etc/screentra-cast/client-update-signing.pub
+DIGEST_FILE=$digest_file
+REQUEST_FILE=$request_file
+RESULT_FILE=$result_file
+EOF_UPDATE_ENV
+    run_privileged chmod 0600 "$updater_env"
+    run_privileged tee "$UPDATER_SCRIPT" >/dev/null <<'PY_UPDATER'
+#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import pathlib
+import ssl
+import subprocess
+import tempfile
+import time
+import urllib.parse
+import urllib.request
+
+MAX_MANIFEST = 64 * 1024
+MAX_INSTALLER = 16 * 1024 * 1024
+MAX_SIGNATURE = 16 * 1024
+EXPECTED_ARTIFACT_PATH = '/install/player-client.sh'
+EXPECTED_SIGNATURE_PATH = '/install/player-client.sh.sig'
+
+
+def same_origin(server: str, candidate: str) -> bool:
+    base = urllib.parse.urlparse(server)
+    parsed = urllib.parse.urlparse(candidate)
+    return (parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80)) == (
+        base.scheme, base.hostname, base.port or (443 if base.scheme == 'https' else 80)
+    )
+
+
+def bounded_read(response, limit: int) -> bytes:
+    data = response.read(limit + 1)
+    if len(data) > limit:
+        raise RuntimeError('update response exceeded its size limit')
+    return data
+
+
+def write_result(result_file: pathlib.Path, result: dict) -> None:
+    temporary = result_file.with_name('.result.tmp')
+    temporary.write_text(json.dumps(result, separators=(',', ':'))[:8192] + '\n', encoding='utf-8')
+    temporary.chmod(0o660)
+    os.replace(temporary, result_file)
+
+
+def main() -> int:
+    server = os.environ['SERVER_URL'].rstrip('/')
+    client_id = os.environ['CLIENT_ID']
+    install_dir = pathlib.Path(os.environ['INSTALL_DIR'])
+    ca_file = pathlib.Path(os.environ['CA_FILE'])
+    auth_token_file = pathlib.Path(os.environ['AUTH_TOKEN_FILE'])
+    public_key_file = pathlib.Path(os.environ['PUBLIC_KEY_FILE'])
+    digest_file = pathlib.Path(os.environ['DIGEST_FILE'])
+    request_file = pathlib.Path(os.environ['REQUEST_FILE'])
+    result_file = pathlib.Path(os.environ['RESULT_FILE'])
+    if not server.startswith('https://'):
+        raise RuntimeError('remote update requires HTTPS')
+    if not ca_file.is_file() or not public_key_file.is_file() or not auth_token_file.is_file():
+        raise RuntimeError('trusted update material is missing')
+    if not request_file.is_file():
+        raise RuntimeError('update request marker is missing')
+    marker = json.loads(request_file.read_text(encoding='utf-8')[:4096])
+    if not isinstance(marker, dict) or set(marker) - {'requested_at', 'client_id', 'reason'}:
+        raise RuntimeError('update request marker is invalid')
+    token = auth_token_file.read_text(encoding='utf-8').strip()
+    if not token or len(token) > 512:
+        raise RuntimeError('client token is invalid')
+    current = digest_file.read_text(encoding='ascii').strip() if digest_file.is_file() else ''
+    if current and (len(current) != 64 or any(c not in '0123456789abcdef' for c in current.lower())):
+        current = ''
+    check_url = server + '/api/clients/' + urllib.parse.quote(client_id, safe='') + '/update-check?current_sha256=' + urllib.parse.quote(current, safe='')
+    context = ssl.create_default_context(cafile=str(ca_file))
+    headers = {'X-SCREENTRA-CLIENT-TOKEN': token, 'Accept': 'application/json'}
+    request = urllib.request.Request(check_url, headers=headers)
+    with urllib.request.urlopen(request, context=context, timeout=30) as response:
+        manifest = json.loads(bounded_read(response, MAX_MANIFEST).decode('utf-8'))
+    if not isinstance(manifest, dict) or not manifest.get('update_required'):
+        request_file.unlink(missing_ok=True)
+        write_result(result_file, {'ok': True, 'updated': False, 'checked_at': time.time()})
+        return 0
+    artifact_url = urllib.parse.urljoin(server + '/', str(manifest.get('artifact_url', '')))
+    signature_url = urllib.parse.urljoin(server + '/', str(manifest.get('signature_url', '')))
+    expected_path: str = '/install/player-client.sh'
+    if not same_origin(server, str(manifest.get("artifact_url"))) or urllib.parse.urlparse(artifact_url).path != expected_path:
+        raise RuntimeError('update artifact origin or path is invalid')
+    if not same_origin(server, str(manifest.get('signature_url', ''))) or urllib.parse.urlparse(signature_url).path != EXPECTED_SIGNATURE_PATH:
+        raise RuntimeError('update signature origin or path is invalid')
+    expected_sha = str(manifest.get('sha256', '')).lower()
+    if len(expected_sha) != 64 or any(c not in '0123456789abcdef' for c in expected_sha):
+        raise RuntimeError('update digest is invalid')
+    with tempfile.TemporaryDirectory(prefix='screentra-client-update-', dir='/var/lib/screentra-cast/update') as temp:
+        installer = pathlib.Path(temp) / 'player-client.sh'
+        signature = pathlib.Path(temp) / 'player-client.sh.sig'
+        with urllib.request.urlopen(urllib.request.Request(artifact_url, headers=headers), context=context, timeout=30) as response:
+            installer.write_bytes(bounded_read(response, MAX_INSTALLER))
+        with urllib.request.urlopen(urllib.request.Request(signature_url, headers=headers), context=context, timeout=30) as response:
+            signature.write_bytes(bounded_read(response, MAX_SIGNATURE))
+        actual_sha = hashlib.sha256(installer.read_bytes()).hexdigest()
+        if actual_sha != expected_sha:
+            raise RuntimeError('update digest verification failed')
+        verify = subprocess.run(["openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-inkey", str(public_key_file), "-sigfile", str(signature), "-in", str(installer)], capture_output=True, timeout=20)
+        if verify.returncode != 0:
+            raise RuntimeError('update signature verification failed')
+        installer.chmod(0o700)
+        environment = os.environ.copy()
+        environment.update({'SCREENTRA_SERVER_URL': server, 'RIPLEY_CLIENT_ID': client_id, 'SCREENTRA_CLIENT_DIR': str(install_dir)})
+        completed = subprocess.run(['/bin/bash', str(installer)], env=environment, capture_output=True, text=True, timeout=300)
+        if completed.returncode != 0:
+            raise RuntimeError('verified installer failed')
+        digest_file.parent.mkdir(parents=True, exist_ok=True)
+        digest_file.write_text(actual_sha + '\n', encoding='ascii')
+        digest_file.chmod(0o644)
+    request_file.unlink(missing_ok=True)
+    write_result(result_file, {'ok': True, 'updated': True, 'sha256': expected_sha, 'updated_at': time.time()})
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        try:
+            write_result(pathlib.Path(os.environ['RESULT_FILE']), {'ok': False, 'error': str(exc)[:400]})
+        finally:
+            raise SystemExit(1)
+PY_UPDATER
+    run_privileged chmod 0750 "$UPDATER_SCRIPT"
+    run_privileged chown root:root "$UPDATER_SCRIPT"
+    run_privileged tee "$updater_unit" >/dev/null <<EOF_UPDATER_UNIT
+[Unit]
+Description=Screentra Cast root-verified client updater
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=$updater_env
+ExecStart=$UPDATER_SCRIPT
+EOF_UPDATER_UNIT
+    run_privileged tee "$updater_path" >/dev/null <<EOF_UPDATER_PATH
+[Unit]
+Description=Watch for Screentra Cast client update requests
+
+[Path]
+PathExists=$UPDATE_REQUEST_FILE
+Unit=screentra-client-updater.service
+
+[Install]
+WantedBy=multi-user.target
+EOF_UPDATER_PATH
+    run_privileged chmod 0644 "$updater_unit" "$updater_path"
+    run_privileged systemctl daemon-reload
+    run_privileged systemctl enable --now screentra-client-updater.path
 }
 # ── Create the appliance board user ───────────────────────────────────────────
 # The board user runs the display compositor (sway) and renderer.
@@ -697,8 +892,6 @@ def tls_context():
             return ssl.create_default_context(cafile=cafile)
         except Exception as e:
             return None
-    if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
-        return ssl._create_unverified_context()
     return None
 
 def urlopen_ripley(req, timeout=10):
@@ -869,6 +1062,7 @@ print(secrets.token_urlsafe(48))
 PY_TOKEN
 fi
 chmod 0600 "$CLIENT_AUTH_TOKEN_FILE"
+install_root_verified_updater
 
 cat > "$HEARTBEAT" <<'PY'
 #!/usr/bin/env python3
@@ -897,6 +1091,26 @@ detect_displays = _mod.detect_displays
 
 from pathlib import Path
 
+MAX_JSON_FILE_BYTES = 1 << 20
+
+
+def _read_json_file(path: Path, default):
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
+            return default
+        return json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return default
+
+
+def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
+    """Replace a cache JSON file atomically and keep it owner-readable."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    temporary.write_text(text)
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+
 
 def _display_governance_count(which):
     """Read config.json and return the display-count governance value.
@@ -912,7 +1126,7 @@ def _display_governance_count(which):
                    str(Path.home() / '.local/share/screentra-client'))) / 'config.json'
         if not cfg_path.exists():
             return None if which == 'override' else 0
-        cfg = json.loads(cfg_path.read_text())
+        cfg = _read_json_file(cfg_path, {})
     except Exception:
         return None if which == 'override' else 0
     if which == 'installer':
@@ -923,13 +1137,27 @@ def _display_governance_count(which):
     return int(v) if v is not None else None
 
 
+def _read_theme():
+    """Read theme from localStorage-style client config JSON (set by admin UI)."""
+    try:
+        cfg_path = Path(os.environ.get('RIPLEY_CLIENT_CACHE_DIR',
+                   str(Path.home() / '.local/share/screentra-client/cache'))) / 'client-config.json'
+        if not cfg_path.exists():
+            return None
+        cfg = _read_json_file(cfg_path, {})
+        theme = cfg.get('theme')
+        return theme if theme in ('midnight', 'light', 'classic') else None
+    except Exception:
+        return None
+
+
 def _touch_binding():
     try:
         cfg_path = Path(os.environ.get('RIPLEY_CLIENT_DIR',
                    str(Path.home() / '.local/share/screentra-client'))) / 'config.json'
         if not cfg_path.exists():
             return None
-        cfg = json.loads(cfg_path.read_text())
+        cfg = _read_json_file(cfg_path, {})
         binding = cfg.get('touch_binding')
         return binding if isinstance(binding, dict) else None
     except Exception:
@@ -1019,6 +1247,28 @@ def payload(args):
         last_command_result = result
         last_command_at = result.get('finished_at') or result.get('started_at')
     displays = detect_displays(max_displays=getattr(args, 'max_displays', 4))
+    active_layout_id = args.active_layout_id
+    active_layout_revision = None
+    try:
+        cached_cfg = Path(args.cache_dir, 'client-config.json')
+        if cached_cfg.exists():
+            cached = _read_json_file(cached_cfg, {})
+            active_layout_id = active_layout_id or cached.get('assigned_layout_id')
+            value = cached.get('active_layout_revision')
+            active_layout_revision = int(value) if value is not None else None
+    except Exception:
+        pass
+    for display in displays:
+        try:
+            display_index = int(display.get('display_index', 0))
+            display_cfg_path = Path(args.cache_dir, 'client-config.json' if display_index == 0 else f'display-config-{display_index}.json')
+            display_cfg = _read_json_file(display_cfg_path, {})
+            display['active_layout_id'] = display_cfg.get('assigned_layout_id') or active_layout_id
+            value = display_cfg.get('active_layout_revision')
+            display['active_layout_revision'] = int(value) if value is not None else active_layout_revision
+        except Exception:
+            display['active_layout_id'] = active_layout_id
+            display['active_layout_revision'] = active_layout_revision
     return {
         'client_agent': True,
         'client_installed': True,
@@ -1034,7 +1284,8 @@ def payload(args):
         'memory_total': mem_total,
         'disk_used': disk_used,
         'disk_total': disk_total,
-        'active_layout_id': args.active_layout_id,
+        'active_layout_id': active_layout_id,
+        'active_layout_revision': active_layout_revision,
         'last_command_result': last_command_result,
         'last_command_at': last_command_at,
         'displays': displays,
@@ -1045,6 +1296,7 @@ def payload(args):
         'installer_detected_max_displays': _display_governance_count('installer'),
         'max_displays': _display_governance_count('override'),
         'touch_binding': _touch_binding(),
+        'theme': _read_theme(),
     }
 
 
@@ -1058,8 +1310,6 @@ def tls_context():
             return ssl.create_default_context(cafile=cafile)
         except Exception as e:
             print(f'warning: failed to load Screentra Cast CA {cafile}: {e}', flush=True)
-    if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
-        return ssl._create_unverified_context()
     return None
 
 def urlopen_ripley(req, timeout=10):
@@ -1070,14 +1320,35 @@ def urlopen_ripley(req, timeout=10):
     return urllib.request.urlopen(req, **kw)
 
 
+def client_auth_token():
+    """Read the per-client token without ever printing or logging it."""
+    token = os.environ.get('RIPLEY_CLIENT_AUTH_TOKEN', '').strip()
+    if token:
+        return token
+    path = os.environ.get(
+        'RIPLEY_CLIENT_AUTH_TOKEN_FILE',
+        str(Path.home() / '.local/share/screentra-client/client-auth-token'),
+    )
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return ''
+
+
+def client_auth_headers():
+    token = client_auth_token()
+    return {'X-SCREENTRA-CLIENT-TOKEN': token} if token else {}
+
+
 def poll_command(server, client_id):
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command'
     try:
-        with urlopen_ripley(url, timeout=5) as r:
+        req = urllib.request.Request(url, headers=client_auth_headers())
+        with urlopen_ripley(req, timeout=5) as r:
             data = r.read().decode()
             return json.loads(data)
     except urllib.error.HTTPError as e:
-        if e.code == 404:
+        if e.code in (401, 404, 429):
             return None
         raise
     except Exception:
@@ -1087,7 +1358,7 @@ def poll_command(server, client_id):
 def ack_command(server, client_id):
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command'
     try:
-        req = urllib.request.Request(url, method='DELETE')
+        req = urllib.request.Request(url, headers=client_auth_headers(), method='DELETE')
         with urlopen_ripley(req, timeout=5) as r:
             return r.read().decode()
     except Exception as e:
@@ -1098,7 +1369,7 @@ def ack_command(server, client_id):
 def write_pending_command(command, cache_dir):
     pending_path = Path(cache_dir) / 'pending-command.json'
     pending_path.parent.mkdir(parents=True, exist_ok=True)
-    pending_path.write_text(json.dumps(command, indent=2))
+    _atomic_write_text(pending_path, json.dumps(command, indent=2))
     print(f'pending command written: {command.get("action")}', flush=True)
     try:
         import subprocess, shutil
@@ -1115,7 +1386,7 @@ def read_command_result(cache_dir):
     if not result_path.exists():
         return None, None
     try:
-        return json.loads(result_path.read_text()), result_path
+        return _read_json_file(result_path, None), result_path
     except Exception as e:
         print(f'bad command-result.json: {e}', flush=True)
         try: result_path.unlink()
@@ -1126,16 +1397,29 @@ def read_command_result(cache_dir):
 def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='assigned-layout-display-{index}.json'):
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/displays/' + str(display_index) + '/config'
     try:
-        with urlopen_ripley(url, timeout=10) as r:
+        req = urllib.request.Request(url, headers=client_auth_headers())
+        with urlopen_ripley(req, timeout=10) as r:
             data = json.loads(r.read().decode())
+        # Preserve theme (set by heartbeat from local config, sent to server)
+        # so it survives across config sync cycles.
+        prev_path = Path(cache_dir, 'client-config.json')
+        try:
+            prev = _read_json_file(prev_path, {})
+            if prev.get('theme'):
+                data['theme'] = prev['theme']
+        except Exception:
+            pass
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
-        Path(cache_dir, 'client-config.json').write_text(json.dumps(data, indent=2))
+        if display_index == 0:
+            _atomic_write_text(Path(cache_dir, 'client-config.json'), json.dumps(data, indent=2))
+        else:
+            _atomic_write_text(Path(cache_dir, f'display-config-{display_index}.json'), json.dumps(data, indent=2))
         target = config_pattern.format(index=display_index)
         if data.get('layout') is not None:
             # backwards-compat: also write the canonical index=0 name
-            Path(cache_dir, target).write_text(json.dumps(data['layout'], indent=2))
+            _atomic_write_text(Path(cache_dir, target), json.dumps(data['layout'], indent=2))
             if display_index == 0:
-                Path(cache_dir, 'assigned-layout.json').write_text(json.dumps(data['layout'], indent=2))
+                _atomic_write_text(Path(cache_dir, 'assigned-layout.json'), json.dumps(data['layout'], indent=2))
         else:
             for stale in [Path(cache_dir, target), Path(cache_dir, 'assigned-layout.json') if display_index == 0 else None]:
                 if stale is None: continue
@@ -1156,23 +1440,19 @@ def fetch_all_displays(server, client_id, cache_dir, display_count, config_patte
 def fetch_admin_users(server, client_id, cache_dir):
     """Sync server users for the local admin login.
 
-    The local admin page falls back to admin/admin only until this cache exists.
-    Once server users are cached, fallback is disabled and password hashes from
-    the server are authoritative.
+    Server users are cached for authenticated local administration; without
+    that cache the local admin login remains unprovisioned.
     """
     url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/admin-users'
     try:
-        with urlopen_ripley(url, timeout=10) as r:
+        req = urllib.request.Request(url, headers=client_auth_headers())
+        with urlopen_ripley(req, timeout=10) as r:
             data = json.loads(r.read().decode())
         users = data.get('users') or []
         if users:
             target = Path(cache_dir).parent / 'admin-users.json'
             target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_suffix('.json.tmp')
-            tmp.write_text(json.dumps(data, indent=2))
-            try: os.chmod(tmp, 0o600)
-            except Exception: pass
-            tmp.replace(target)
+            _atomic_write_text(target, json.dumps(data, indent=2))
             print(f'admin users synced: {len(users)}', flush=True)
             return data
         return None
@@ -1182,10 +1462,14 @@ def fetch_admin_users(server, client_id, cache_dir):
 
 def post(server, data):
     url = server.rstrip('/') + '/api/clients/register'
+    payload = dict(data)
+    token = client_auth_token()
+    if token:
+        payload.setdefault('client_auth_token', token)
     req = urllib.request.Request(
         url,
-        data=json.dumps(data).encode(),
-        headers={'Content-Type': 'application/json'},
+        data=json.dumps(payload).encode(),
+        headers={'Content-Type': 'application/json', **client_auth_headers()},
         method='POST',
     )
     with urlopen_ripley(req, timeout=10) as r:
@@ -1225,16 +1509,72 @@ def main():
     args = ap.parse_args()
 
     while True:
+        # Refresh configuration before building the registration payload so the
+        # heartbeat acknowledges the revision the player has just fetched.
+        probe = payload(args)
+        try:
+            fetch_config(args.server, probe['client_id'], args.cache_dir, display_index=0, config_pattern=args.display_config_pattern)
+            fetch_all_displays(args.server, probe['client_id'], args.cache_dir, len(probe.get('displays') or []), args.display_config_pattern)
+        except Exception as e:
+            print(f'pre-heartbeat config refresh failed: {e}', flush=True)
         data = payload(args)
-        status, body = post(args.server, data)
-        if data.get('last_command_result') is not None:
+        try:
+            status, body = post(args.server, data)
+            try:
+                response = json.loads(body)
+                server_theme = response.get('theme')
+                if server_theme in ('midnight', 'light', 'classic'):
+                    theme_path = Path(args.cache_dir) / 'client-config.json'
+                    try:
+                        cached = _read_json_file(theme_path, {})
+                    except Exception:
+                        cached = {}
+                    cached['theme'] = server_theme
+                    theme_path.parent.mkdir(parents=True, exist_ok=True)
+                    _atomic_write_text(theme_path, json.dumps(cached, indent=2))
+            except Exception:
+                pass
+        except Exception as e:
+            # A temporary server outage must not kill the heartbeat service.
+            status, body = 0, ''
+            print(f'heartbeat post failed: {e}', flush=True)
+        if status == 200 and data.get('last_command_result') is not None:
             rp = Path(args.cache_dir) / 'command-result.json'
             try:
                 rp.unlink()
                 print('command-result.json uploaded and cleared', flush=True)
             except Exception:
                 pass
+        previous_orientation = 'normal'
+        try:
+            previous_orientation = _read_json_file(Path(args.cache_dir) / 'client-config.json', {}).get('orientation', 'normal')
+        except Exception:
+            pass
+        # Track previous layout assignment to detect changes.
+        prev_layout_path = Path(args.cache_dir) / 'previous-layout-id.txt'
+        try:
+            previous_layout_id = prev_layout_path.read_text().strip() or None
+        except Exception:
+            previous_layout_id = None
         cfg = fetch_config(args.server, data['client_id'], args.cache_dir, display_index=0, config_pattern=args.display_config_pattern)
+        current_layout_id = (cfg or {}).get('assigned_layout_id')
+        current_orientation = (cfg or {}).get('orientation', previous_orientation)
+        # Restart kiosk on layout assignment change (e.g. after server nudge or editor assign).
+        if cfg and current_layout_id and current_layout_id != previous_layout_id:
+            try:
+                subprocess.run(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'], check=True, timeout=15)
+                print(f'layout changed {previous_layout_id} -> {current_layout_id}; kiosk restarted', flush=True)
+                prev_layout_path.write_text(current_layout_id or '')
+            except Exception as e:
+                print(f'layout-change restart failed: {e}', flush=True)
+        elif cfg and current_layout_id:
+            prev_layout_path.write_text(current_layout_id or '')
+        if cfg and current_orientation != previous_orientation:
+            try:
+                subprocess.run(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'], check=True, timeout=15)
+                print(f'orientation changed {previous_orientation} -> {current_orientation}; kiosk restarted', flush=True)
+            except Exception as e:
+                print(f'orientation restart failed: {e}', flush=True)
         fetch_all_displays(args.server, data['client_id'], args.cache_dir, len(data.get('displays') or []), args.display_config_pattern)
         fetch_admin_users(args.server, data['client_id'], args.cache_dir)
         assigned = cfg.get('assigned_layout_id') if cfg else None
@@ -2511,6 +2851,42 @@ import tarfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+MAX_REQUEST_BODY_BYTES = 1 << 20
+MAX_JSON_FILE_BYTES = 1 << 20
+
+
+def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    temporary.write_text(text, encoding='utf-8')
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+
+
+def _read_json_file(path: Path, default):
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
+            return default
+        return json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return default
+
+
+def _request_body(handler) -> str:
+    raw_length = handler.headers.get('Content-Length')
+    if raw_length is None:
+        length = 0
+    else:
+        try:
+            length = int(raw_length)
+        except (TypeError, ValueError):
+            raise ValueError('invalid Content-Length')
+    if length < 0:
+        raise ValueError('invalid Content-Length')
+    if length > MAX_REQUEST_BODY_BYTES:
+        raise OverflowError('request body too large')
+    return handler.rfile.read(length).decode('utf-8') if length else '{}'
+
 
 # === no-layout & touchscreen endpoints =====================================
 import urllib.request as _ur
@@ -2684,7 +3060,7 @@ def _nl_status():
     last_seen = connection = last_layout = None
     if last_path.exists():
         try:
-            last = json.loads(last_path.read_text())
+            last = _read_json_file(last_path, {})
             last_seen = last.get('at')
             connection = last.get('connection', 'offline')
             last_layout = last.get('assigned_layout_id')
@@ -2694,7 +3070,7 @@ def _nl_status():
     label = connector = resolution = None
     if disp_path.exists():
         try:
-            d = json.loads(disp_path.read_text())
+            d = _read_json_file(disp_path, {})
             label = d.get('label') or d.get('connector')
             connector = d.get('connector')
             w = d.get('width'); h = d.get('height')
@@ -2706,7 +3082,7 @@ def _nl_status():
     selected = None
     if touch_pref.exists():
         try:
-            selected = json.loads(touch_pref.read_text()).get('path')
+            selected = _read_json_file(touch_pref, {}).get('path')
         except Exception:
             pass
     devs = _nl_detect_touch_devices()
@@ -2722,7 +3098,7 @@ def _nl_status():
         layout_status_file = Handler.cache_dir / 'assigned-layout.json'
     if layout_status_file.exists():
         try:
-            last_layout = json.loads(layout_status_file.read_text()).get('id')
+            last_layout = _read_json_file(layout_status_file, {}).get('id')
         except Exception:
             pass
     else:
@@ -2769,7 +3145,7 @@ def _load_display_governance() -> dict:
     try:
         path = _client_config_path()
         if path.exists():
-            data = json.loads(path.read_text())
+            data = _read_json_file(path, {})
             if isinstance(data, dict):
                 cfg.update({k: data.get(k) for k in cfg if k in data})
     except Exception as e:
@@ -2792,7 +3168,7 @@ def _load_client_config() -> dict:
     path = _client_config_path()
     try:
         if path.exists():
-            data = json.loads(path.read_text())
+            data = _read_json_file(path, {})
             if isinstance(data, dict):
                 return data
     except Exception:
@@ -2802,9 +3178,7 @@ def _load_client_config() -> dict:
 def _write_client_config(cfg: dict) -> None:
     path = _client_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix('.json.tmp')
-    tmp.write_text(json.dumps(cfg, indent=2))
-    tmp.replace(path)
+    _atomic_write_text(path, json.dumps(cfg, indent=2))
 
 def _write_display_count(max_displays) -> dict:
     cfg = _load_client_config()
@@ -2816,7 +3190,7 @@ def _write_display_count(max_displays) -> dict:
     _write_client_config(cfg)
     pending = Handler.cache_dir / 'pending-command.json'
     pending.parent.mkdir(parents=True, exist_ok=True)
-    pending.write_text(json.dumps({'action':'set_display_count','payload':{'max_displays': override},'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
+    _atomic_write_text(pending, json.dumps({'action':'set_display_count','payload':{'max_displays': override},'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
     _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service'], timeout=6)
     actor = _safe_run(['systemctl', '--user', 'start', 'ripley-player-actor.service'], timeout=6)
     gov = _load_display_governance()
@@ -2860,7 +3234,7 @@ def _current_touch_binding() -> dict:
     legacy = Handler.cache_dir / 'touch-device.json'
     if not binding and legacy.exists():
         try:
-            path = json.loads(legacy.read_text()).get('path')
+            path = _read_json_file(legacy, {}).get('path')
             if path:
                 binding = {'device_path': path, 'device_name': _resolve_touch_name(path), 'target_display_indexes': [0], 'target_connectors': _display_connectors_for_indexes([0]), 'allow_joined_displays': False}
         except Exception:
@@ -2901,10 +3275,10 @@ def _write_touch_binding(payload: dict) -> dict:
     cfg['touch_binding'] = binding
     _write_client_config(cfg)
     if dev_path:
-        (Handler.cache_dir / 'touch-device.json').write_text(json.dumps({'path': dev_path, 'name': dev_name}, indent=2))
+        _atomic_write_text(Handler.cache_dir / 'touch-device.json', json.dumps({'path': dev_path, 'name': dev_name}, indent=2))
     pending = Handler.cache_dir / 'pending-command.json'
     pending.parent.mkdir(parents=True, exist_ok=True)
-    pending.write_text(json.dumps({'action':'set_touch_binding','payload': binding,'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
+    _atomic_write_text(pending, json.dumps({'action':'set_touch_binding','payload': binding,'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
     _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service'], timeout=6)
     actor = _safe_run(['systemctl', '--user', 'start', 'ripley-player-actor.service'], timeout=6)
     return {'ok': True, 'touch_binding': binding, 'actor_start': actor}
@@ -3034,7 +3408,10 @@ def _refresh_ca_from_server() -> dict:
     if not server_url: return {'ok': False, 'error': 'server URL empty'}
     url = server_url + '/install/screentra-cast-signage-ca.crt'; out = _ca_file()
     try:
-        ctx = ssl._create_unverified_context() if server_url.startswith('https://') else None
+        ca_path = _ca_file()
+        if not ca_path.exists():
+            return {'ok': False, 'error': 'existing CA certificate is required to refresh trust', 'url': url}
+        ctx = _ssl.create_default_context(cafile=str(ca_path))
         data = _ur.urlopen(url, context=ctx, timeout=10).read()
         if len(data) < 200 or b'BEGIN CERTIFICATE' not in data:
             return {'ok': False, 'error': f'downloaded CA did not look like a certificate ({len(data)} bytes)', 'url': url}
@@ -3262,7 +3639,7 @@ def _admin_status() -> dict:
     pending = install / 'pending-command.json'; result = cache / 'command-result.json'
     chromium = _safe_run(['pgrep', '-af', 'chromium.*127.0.0.1:390'], timeout=2)
     labwc = _safe_run(['pgrep', '-af', '^labwc'], timeout=2)
-    services = [_service_state('screentra-client-heartbeat.service'), _service_state('ripley-player-actor.service'), _service_state('screentra-client-renderer@0.service'), _system_service_state('screentra-cast-kiosk-kiosk@0.service'), _system_service_state('screentra-cast-kiosk-kiosk@1.service')]
+    services = [_system_service_state('screentra-client-heartbeat.service'), _system_service_state('screentra-client-actor.service'), _system_service_state('screentra-client-admin.service'), _system_service_state('screentra-cast-kiosk@0.service'), _system_service_state('screentra-cast-kiosk@1.service')]
     for svc in services:
         if svc.get('name') == 'ripley-player-actor.service' and svc.get('active') == 'inactive' and svc.get('enabled') == 'enabled':
             svc['active'] = 'ready'
@@ -3272,7 +3649,10 @@ def _admin_status() -> dict:
             svc['active'] = 'disabled'
             svc['active_ok'] = True
             svc['note'] = 'secondary kiosk output intentionally disabled while touchscreen-only mode is active'
-    return {'status': base, 'time': _iso_now(), 'uptime_seconds': time.monotonic(), 'auth': _auth_source(), 'metrics': _system_metrics(), 'display_governance': _load_display_governance(), 'services': services, 'processes': {'chromium': chromium.get('stdout', ''), 'labwc': labwc.get('stdout', '')}, 'outputs': _wlr_outputs(), 'touch': {'devices': _nl_detect_touch_devices(), 'binding': _current_touch_binding(), 'calibration': json.loads((cache/'touch-calibration.json').read_text()) if (cache/'touch-calibration.json').exists() else []}, 'ca': _cert_info(), 'command_state': {'pending_command': json.loads(pending.read_text()) if pending.exists() else None, 'last_result': json.loads(result.read_text()) if result.exists() else None}}
+    calibration = _read_json_file(cache / 'touch-calibration.json', [])
+    pending_state = _read_json_file(pending, None)
+    result_state = _read_json_file(result, None)
+    return {'status': base, 'time': _iso_now(), 'uptime_seconds': time.monotonic(), 'auth': _auth_source(), 'metrics': _system_metrics(), 'display_governance': _load_display_governance(), 'services': services, 'processes': {'chromium': chromium.get('stdout', ''), 'labwc': labwc.get('stdout', '')}, 'outputs': _wlr_outputs(), 'touch': {'devices': _nl_detect_touch_devices(), 'binding': _current_touch_binding(), 'calibration': calibration}, 'ca': _cert_info(), 'command_state': {'pending_command': pending_state, 'last_result': result_state}}
 
 
 # === local admin auth =========================================================
@@ -3316,7 +3696,7 @@ def _load_admin_users() -> list[dict]:
     path = _synced_users_path()
     if path.exists():
         try:
-            data = json.loads(path.read_text())
+            data = _read_json_file(path, {})
             users = data.get('users') if isinstance(data, dict) else data
             if isinstance(users, list):
                 return [u for u in users if isinstance(u, dict) and u.get('username') and (u.get('password_hash') or u.get('password'))]
@@ -3327,10 +3707,10 @@ def _load_admin_users() -> list[dict]:
 def _auth_source() -> dict:
     users = _load_admin_users()
     if users:
-        try: synced_at = json.loads(_synced_users_path().read_text()).get('synced_at')
+        try: synced_at = _read_json_file(_synced_users_path(), {}).get('synced_at')
         except Exception: synced_at = None
         return {'source': 'synced_server_users', 'fallback_default': False, 'user_count': len(users), 'synced_at': synced_at}
-    return {'source': 'fallback_default', 'fallback_default': True, 'user_count': 1, 'warning': 'Using default local admin/admin because server users have not synced yet.'}
+    return {'source': 'unprovisioned', 'fallback_default': False, 'user_count': 0, 'warning': 'No local admin users are provisioned; sync an operator account from the managed server.'}
 
 def _check_login(username: str, password: str) -> tuple[bool, dict]:
     users = _load_admin_users()
@@ -3343,8 +3723,7 @@ def _check_login(username: str, password: str) -> tuple[bool, dict]:
                 if u.get('password') and hmac.compare_digest(str(u.get('password')), password):
                     return True, {'username': username, 'source': 'synced_server_users'}
         return False, {'error': 'invalid username or password', **_auth_source()}
-    ok = hmac.compare_digest(username, 'admin') and hmac.compare_digest(password, 'admin')
-    return (ok, {'username': 'admin', **_auth_source()}) if ok else (False, {'error': 'invalid username or password', **_auth_source()})
+    return False, {'error': 'local admin authentication is not provisioned', **_auth_source()}
 
 def _make_session(username: str, source: str) -> str:
     exp = int(time.time()) + 12 * 3600
@@ -3376,7 +3755,7 @@ def _session_user(cookie_header: str) -> dict | None:
 
 def _admin_login_html() -> str:
     src = _auth_source()
-    warn = 'Default local fallback admin/admin is active until server users sync.' if src.get('fallback_default') else 'Using synced server users.'
+    warn = 'No local admin account is provisioned yet; sync an operator account from the managed server.' if not src.get('user_count') else 'Using synced server users.'
     return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Screentra Cast Admin Sign In</title><style>body{margin:0;background:#07111f;color:#e5eefc;font-family:system-ui,-apple-system,Segoe UI,sans-serif;display:grid;place-items:center;min-height:100vh}.card{width:min(430px,92vw);background:#0f172a;border:1px solid #243247;border-radius:18px;padding:24px;box-shadow:0 20px 70px rgba(0,0,0,.4)}h1{margin:0 0 8px}.muted{color:#91a4bf}.warn{border:1px solid rgba(245,158,11,.45);background:rgba(245,158,11,.08);border-radius:12px;padding:10px;margin:14px 0;color:#facc15}label{display:block;margin-top:12px;color:#91a4bf;font-size:12px;text-transform:uppercase;letter-spacing:.08em}input{width:100%;margin-top:6px;padding:12px;border-radius:10px;border:1px solid #243247;background:#07111f;color:#e5eefc;font-size:16px}button{width:100%;margin-top:16px;padding:12px;border:0;border-radius:999px;background:#38bdf8;color:#03131f;font-weight:900;font-size:15px}.err{color:#fca5a5;min-height:20px;margin-top:10px}</style></head><body><form class="card" id="f"><h1>Screentra Cast Admin</h1><div class="muted">Sign in to manage this local player.</div><div class="warn">'+warn+'</div><label>Username</label><input id="u" autocomplete="username" value="admin"><label>Password</label><input id="p" type="password" autocomplete="current-password" autofocus><button>Sign in</button><div class="err" id="e"></div></form><script>document.getElementById("f").addEventListener("submit",async ev=>{ev.preventDefault();e.textContent="Signing in…";try{const r=await fetch("/api/admin/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:u.value,password:p.value})});const j=await r.json();if(r.ok&&j.ok){location.href="/"}else{e.textContent=j.error||"Login failed"}}catch(x){e.textContent=String(x)}});</script></body></html>'
 
 def _admin_auth_payload(handler) -> dict:
@@ -3384,13 +3763,18 @@ def _admin_auth_payload(handler) -> dict:
     return {'authenticated': bool(user), 'user': user, **_auth_source()}
 
 def _admin_requires_auth(path: str) -> bool:
-    if os.environ.get('RIPLEY_ADMIN_DEFAULT', '').lower() not in ('1', 'true', 'yes'):
+    if os.environ.get('RIPLEY_ADMIN_MODE', '').lower() not in ('1', 'true', 'yes'):
         return False
     if path in ('/api/admin/auth/login', '/api/admin/auth/status', '/login', '/login.html'):
         return False
     if path.startswith('/api/admin') or path in ('/', '/admin.html'):
         return True
     return False
+
+def _mutation_requires_auth(path: str) -> bool:
+    if path in ('/api/admin/auth/login', '/api/admin/auth/logout', '/api/admin/auth/status'):
+        return False
+    return path in ('/api/touchscreen/select', '/api/touch-calibration.json', '/api/client-config.json') or path.startswith('/api/admin/')
 
 ADMIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Screentra Cast Player Admin</title><style>
 :root{--bg:#07111f;--panel:#0f172a;--panel2:#111c31;--line:#26364f;--text:#e5eefc;--muted:#91a4bf;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--accent:#38bdf8;--violet:#a78bfa}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top left,rgba(56,189,248,.14),transparent 34rem),linear-gradient(160deg,#07111f,#020617);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}.wrap{max-width:1380px;margin:0 auto;padding:24px}.top{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;margin-bottom:18px}.title h1{margin:0;font-size:30px;letter-spacing:-.03em}.title p{margin:6px 0 0;color:var(--muted)}.pill{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;border:1px solid var(--line);font-weight:900;font-size:12px;text-transform:uppercase;letter-spacing:.08em}.ok{color:var(--ok);border-color:rgba(34,197,94,.5)}.ready{color:#7dd3fc;border-color:rgba(125,211,252,.62);background:rgba(14,116,144,.12)}.disabled{color:#cbd5e1;border-color:rgba(203,213,225,.38);background:rgba(148,163,184,.10)}.warn{color:var(--warn);border-color:rgba(245,158,11,.5)}.err{color:var(--err);border-color:rgba(239,68,68,.5)}.muted{color:var(--muted)}.small{color:var(--muted);font-size:12px}.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:14px 0 18px}.metric{background:linear-gradient(180deg,rgba(17,28,49,.96),rgba(15,23,42,.9));border:1px solid var(--line);border-radius:18px;padding:16px;box-shadow:0 14px 44px rgba(0,0,0,.24)}.metric .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}.metric .value{font-size:28px;font-weight:950;margin-top:7px;letter-spacing:-.04em}.metric .sub{color:var(--muted);margin-top:4px;min-height:20px}.bar{height:8px;background:#07111f;border-radius:999px;overflow:hidden;border:1px solid rgba(148,163,184,.18);margin-top:12px}.fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--violet));width:0%}.sections{display:grid;gap:12px}.section,.panelcard{background:rgba(15,23,42,.9);border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:0 12px 38px rgba(0,0,0,.22)}.panelcard{padding:16px 18px 18px}.panelcard h2{margin:0 0 12px;font-size:16px}.fixed-panels{margin:14px 0 12px}details.section>summary{list-style:none;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 18px;font-weight:950;font-size:16px}details.section>summary::-webkit-details-marker{display:none}.chev{color:var(--muted);font-size:18px;transition:transform .16s ease}details[open] .chev{transform:rotate(90deg)}.body{border-top:1px solid var(--line);padding:16px 18px 18px;background:rgba(2,6,23,.16)}.kv{display:grid;grid-template-columns:170px 1fr;gap:8px 12px}.k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.06em}.v{word-break:break-word}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center}button,select,a.btn{background:#17243a;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:9px 11px;font-weight:800;text-decoration:none;cursor:pointer}button:hover,a.btn:hover,select:hover{border-color:var(--accent)}button.danger{background:rgba(127,29,29,.72);border-color:rgba(239,68,68,.65);color:#fecaca}.split{display:grid;grid-template-columns:1fr 1fr;gap:14px}.service{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid rgba(148,163,184,.12);padding:10px 0}.service:last-child{border-bottom:0}pre{margin:0;white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto;background:#050b14;border:1px solid #182338;border-radius:10px;padding:12px;color:#cbd5e1}.logbar{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}.statusline{margin-top:10px;color:var(--muted)}label{display:inline-flex;gap:7px;align-items:center;color:var(--muted)}input[type=checkbox]{accent-color:var(--accent)}@media(max-width:1000px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.split{grid-template-columns:1fr}}@media(max-width:640px){.wrap{padding:14px}.top{display:block}.cards{grid-template-columns:1fr}.kv{grid-template-columns:1fr}.actions{align-items:stretch}.actions>*{width:100%;justify-content:center}}
@@ -3431,7 +3815,7 @@ PLAYER_HTML = r'''<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Screentra Cast Cached Player</title>
 <style>
-*{box-sizing:border-box} html,body,#player{margin:0;width:100vw;height:100vh;background:#000;overflow:hidden;color:#fff;font-family:system-ui,-apple-system,Segoe UI,sans-serif;cursor:none}.widget{position:absolute;overflow:hidden;cursor:none}.fallback{display:grid;place-items:center;height:100vh;text-align:center;color:#94a3b8}.fallback strong{display:block;color:#e2e8f0;font-size:2rem;margin-bottom:.5rem}.clock,.date{display:flex;align-items:center;justify-content:center;width:100%;height:100%}iframe{background:#000;cursor:none}.was-link{display:inline-flex;align-items:center;gap:.45em;border:1px dashed rgba(125,211,252,.65);background:rgba(14,116,144,.16);color:#bae6fd;border-radius:999px;padding:.14em .55em;text-decoration:none}.was-link:after{content:'was link';font-size:.68em;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc}
+*{box-sizing:border-box} html,body,#player{margin:0;width:100vw;height:100vh;background:#000;overflow:hidden;color:#fff;font-family:system-ui,-apple-system,Segoe UI,sans-serif;cursor:none}.widget{position:absolute;overflow:hidden;cursor:none} iframe{background:#000;cursor:none}.fallback{display:grid;place-items:center;height:100vh;text-align:center;color:#94a3b8}.fallback strong{display:block;color:#e2e8f0;font-size:2rem;margin-bottom:.5rem}.clock,.date{display:flex;align-items:center;justify-content:center;width:100%;height:100%}iframe{background:#000;cursor:none}.was-link{display:inline-flex;align-items:center;gap:.45em;border:1px dashed rgba(125,211,252,.65);background:rgba(14,116,144,.16);color:#bae6fd;border-radius:999px;padding:.14em .55em;text-decoration:none}.was-link:after{content:'was link';font-size:.68em;letter-spacing:.08em;text-transform:uppercase;color:#7dd3fc}
 </style>
 </head>
 <body><div id="player"><div class="fallback"><div><strong>Waiting for assigned layout</strong><span>Heartbeat will cache a layout when assigned.</span></div></div></div>
@@ -3443,12 +3827,25 @@ function props(w){return w.props || w.properties || {};}
 function isYouTubeUrl(u){return /(?:youtube\.com|youtu\.be)/i.test(String(u||''));}
 function youtubeId(u){const s=String(u||'');let m=s.match(/[?&]v=([^&]+)/); if(m) return m[1]; m=s.match(/youtu\.be\/([^?&/]+)/); if(m) return m[1]; m=s.match(/youtube\.com\/(?:embed|shorts)\/([^?&/]+)/); return m?m[1]:'';}
 function youtubeEmbedUrl(u,p){const id=youtubeId(u); const params=new URLSearchParams({autoplay:'1',mute:(p.mute||p.muted)?'1':'0',loop:'1',playsinline:'1',rel:'0'}); if(id) params.set('playlist',id); return id ? ('https://www.youtube.com/embed/'+encodeURIComponent(id)+'?'+params.toString()) : String(u||'');}
-function styleFor(w){const x=(Number(w.x)||0)*100,y=(Number(w.y)||0)*100,ww=(Number(w.w)||0.1)*100,hh=(Number(w.h)||0.1)*100,z=Number(w.z)||1;return `left:${x}%;top:${y}%;width:${ww}%;height:${hh}%;z-index:${z};`;}
-function renderWidget(w){const p=props(w),t=normWidgetType(w);let inner='';
- if(t==='text') inner=`<div style="width:100%;height:100%;display:flex;align-items:${p.valign||'center'};justify-content:${p.align==='left'?'flex-start':p.align==='right'?'flex-end':'center'};padding:1rem;color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||24)*2}px;text-align:${p.align||'center'};">${esc(p.text||'Text')}</div>`;
+function styleFor(w){const x=(Number(w.x)||0)*100,y=(Number(w.y)||0)*100,ww=(Number(w.w??w.width)||0.1)*100,hh=(Number(w.h??w.height)||0.1)*100,z=Number(w.z)||1;return `left:${x}%;top:${y}%;width:${ww}%;height:${hh}%;z-index:${z};`;}
+function wmoIcon(code){const m={'0':'☀️','1':'🌤️','2':'⛅','3':'☁️','45':'🌫️','48':'🌫️','51':'🌦️','53':'🌦️','55':'🌦️','61':'🌧️','63':'🌧️','65':'🌧️','71':'❄️','73':'❄️','75':'❄️','80':'🌦️','81':'🌧️','82':'🌧️','95':'⛈️','96':'⛈️','99':'⛈️'};return m[String(code)]||'🌤️';}
+function wmoIconHtml(code,p){const key=String(code),custom=p&&p.custom_icons&&p.custom_icons[key];if(custom)return `<img src="${esc(custom)}" style="width:100%;height:100%;object-fit:contain;">`;const n=Number(code),sun=n<=1,cloud=n>=2,rain=(n>=51&&n<=67)||(n>=80&&n<=82),snow=n>=71&&n<=77,storm=n>=95;let body='';if(sun)body+='<circle cx="28" cy="28" r="13" fill="#facc15"/><g stroke="#facc15" stroke-width="4"> <path d="M28 5v9M28 42v9M5 28h9M42 28h9M12 12l7 7M37 37l7 7M44 12l-7 7M19 37l-7 7"/></g>';if(cloud)body+='<path d="M20 47h27a12 12 0 0 0 0-24 18 18 0 0 0-34 5 10 10 0 0 0 7 19z" fill="#cbd5e1" stroke="#64748b" stroke-width="2"/>';if(rain)body+='<g stroke="#38bdf8" stroke-width="4" stroke-linecap="round"><path d="M22 43l-4 9M34 43l-4 9M46 43l-4 9"/></g>';if(snow)body+='<g stroke="#e0f2fe" stroke-width="3" stroke-linecap="round"><path d="M20 42v14M13 49h14M15 44l10 10M25 44L15 54M37 42v14M30 49h14M32 44l10 10M42 44L32 54"/></g>';if(storm)body+='<path d="M30 32h12L29 57l3-16H21l9-19z" fill="#facc15"/>';if(!body)body='<circle cx="32" cy="32" r="20" fill="#facc15"/>';return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" style="width:100%;height:100%;padding:8px;">${body}</svg>`;}
+function weatherFor(p,i){const d=p._weather_data||{},q=d.daily||{},codes=q.weather_code||q.weathercode||[],code=codes[i]??d.current_weather?.weather_code??d.current_weather?.weathercode??2,winds=q.wind_speed||q.windspeed||[],wind=winds[i]??d.current_weather?.windspeed??0;return {code,icon:wmoIcon(code),high:q.temperature_2m_max?.[i],low:q.temperature_2m_min?.[i],precip:q.precipitation_probability_max?.[i]??0,wind};}
+function repeatCount(p,e){const r=e.repeat||{};return r.group?Math.max(1,Math.min(14,Number(p.shown_days)||Number(r.count)||4)):Math.max(1,Number(r.count)||1);}
+function groupMetrics(es){const g={};es.forEach(e=>{const id=e.repeat&&e.repeat.group;if(!id)return;const r=e.repeat,x=Number(e.x)||0,y=Number(e.y)||0,w=Number(e.width)||120,h=Number(e.height)||80,m=g[id]||(g[id]={minX:x,minY:y,maxX:x+w,maxY:y+h,gapX:Number(r.gap_x)||0,gapY:Number(r.gap_y)||0,mode:r.mode||'rows'});m.minX=Math.min(m.minX,x);m.minY=Math.min(m.minY,y);m.maxX=Math.max(m.maxX,x+w);m.maxY=Math.max(m.maxY,y+h);});return g;}
+function templateEl(e,p,i,g,dw,dh){const q=Object.assign({},e.props||{}),r=e.repeat||{},m=r.group&&g[r.group];if(i){const n=Number(q.day_offset??q.weather_day_offset)||0;q.day_offset=n+i;q.weather_day_offset=n+i;}let x=Number(e.x)||0,y=Number(e.y)||0,w=Number(e.width)||120,h=Number(e.height)||80;if(m&&i){if((m.mode||'rows')==='columns')x+=i*(m.maxX-m.minX+m.gapX);else y+=i*(m.maxY-m.minY+m.gapY);}const a=q.align||'center',j=a==='left'?'flex-start':a==='right'?'flex-end':'center';let st=`position:absolute;box-sizing:border-box;left:${x/dw*100}%;top:${y/dh*100}%;width:${w/dw*100}%;height:${h/dh*100}%;display:flex;align-items:center;justify-content:${j};text-align:${a};overflow:hidden;z-index:${Number(e.z)||0};color:${q.color||'#fff'};font-size:${Number(q.font_size)||24}px;`;let inner='';if(e.type==='rectangle')st+=`background:${q.color||'#1e293b'};opacity:${Number(q.opacity??100)/100};border-radius:${Number(q.radius)||0}px;`;else if(e.type==='text')inner=esc(q.text||'Text');else if(['variable_icon','variable_text','variable','date'].includes(e.type)){const k=q.variable_key||'',wx=weatherFor(p,Math.max(0,Math.min(6,Number(q.day_offset??q.weather_day_offset)||0)));if(k==='weather_icon'||e.type==='variable_icon'||q.display_mode==='weather_icon')inner=wmoIconHtml(wx.code,p);else if(k==='weather_description')inner=esc('Weather');else if(k==='high_temp')inner=esc('High '+(wx.high??'—'));else if(k==='low_temp')inner=esc('Low '+(wx.low??'—'));else if(k==='wind_speed')inner=esc('Wind '+Math.round(wx.wind)+' mph');else{const d=new Date();d.setDate(d.getDate()+(Number(q.day_offset??q.weather_day_offset)||0));inner=esc(k==='day_name'?d.toLocaleDateString(undefined,{weekday:'long'}):d.toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'}));}}else inner=esc(q.label||e.type||'');return `<div style="${st}">${inner}</div>`;}
+function templateHtml(w){const p=props(w),es=Array.isArray(p.template_elements)?p.template_elements:[];if(!es.length)return '';const g=groupMetrics(es);let dw=Number(p.template_width)||760,dh=Number(p.template_height)||427.5;es.forEach(e=>{dw=Math.max(dw,(Number(e.x)||0)+(Number(e.width)||120));dh=Math.max(dh,(Number(e.y)||0)+(Number(e.height)||80));});return `<div style="position:relative;width:100%;height:100%;overflow:hidden;">${es.slice().sort((a,b)=>(Number(a.z)||0)-(Number(b.z)||0)).map(e=>Array.from({length:repeatCount(p,e)},(_,i)=>templateEl(e,p,i,g,dw,dh)).join('')).join('')}</div>`;}
+async function loadWeather(p){const lat=Number(p.lat||0),lon=Number(p.lon||0);if(!lat||!lon)return;try{const r=await fetch(`/api/weather/forecast?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`,{cache:'no-store'});if(r.ok)p._weather_data=await r.json();}catch(_e){}}
+function countdownFontSize(p){return Math.max(8,Math.min(160,Number(p.font_size||p.fontSize||48)||48))*2;}
+function countdownText(node,now){const mode=node.getAttribute('data-countdown-mode')||'date',unit=node.getAttribute('data-countdown-duration-unit')||'minutes',value=Math.max(1,Number(node.getAttribute('data-countdown-duration-value'))||1),started=Number(node.getAttribute('data-countdown-started-at'))||now,target=mode==='duration'?started+value*({seconds:1000,minutes:60000,hours:3600000,days:86400000}[unit]||60000):new Date(node.getAttribute('data-countdown-target-date')||'').getTime(),diff=Math.max(0,target-now),expiry=node.getAttribute('data-countdown-expiry-text')||'Time\u2019s up!';if(!Number.isFinite(target)||target<=0)return node.getAttribute('data-countdown-invalid-text')||'Choose a date and time';if(diff<=0)return expiry;const d=Math.floor(diff/86400000),h=Math.floor(diff%86400000/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000);return d?d+'d '+h+'h':h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s';}
+function tickCountdowns(){const now=Date.now();document.querySelectorAll('[data-countdown-widget]').forEach(node=>{const value=node.querySelector('.countdown-value');if(value)value.textContent=countdownText(node,now);});}
+function initCachedVideoWidgets(widgets){const nodes=document.querySelectorAll('[data-video-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-video-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget),list=p&&Array.isArray(p.playlist)?p.playlist:[];if(!list.length)return;let index=0;const advance=()=>{index=(index+1)%list.length;node.src=String(list[index].url||'');if(typeof node.load==='function')node.load();const result=typeof node.play==='function'?node.play():null;if(result&&typeof result.catch==='function')result.catch(()=>{});};node.src=String(list[0].url||'');node.loop=list.length===1&&p.loop!==false;node.onended=list.length>1?advance:null;node.onerror=list.length>1?advance:null;});}
+async function renderWidget(w){const p=props(w),t=normWidgetType(w);if(t==='weather')await loadWeather(p);let inner='';
+ if(t==='weather'&&Array.isArray(p.template_elements)&&p.template_elements.length) inner=templateHtml(w);
+ else if(t==='text') inner=`<div style="width:100%;height:100%;display:flex;align-items:${p.valign||'center'};justify-content:${p.align==='left'?'flex-start':p.align==='right'?'flex-end':'center'};padding:1rem;color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||24)*2}px;text-align:${p.align||'center'};">${esc(p.text||'Text')}</div>`;
+ else if(t==='countdown') { const target=p.countdown_mode==='duration' ? Date.now() + Math.max(1,Number(p.duration_value||1))*({seconds:1000,minutes:60000,hours:3600000,days:86400000}[p.duration_unit||'minutes']||60000) : new Date(p.targetDate||'').getTime(); const diff=Math.max(0,target-Date.now()); const d=Math.floor(diff/86400000),h=Math.floor(diff%86400000/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000); const text=Number.isFinite(target)&&target>0?(d?d+'d '+h+'h':h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s'):(p.expiry_text||'Choose a date and time'); inner=`<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;padding:1rem;color:${p.color||'#fff'};font-size:${countdownFontSize(p)}px;font-weight:800;line-height:1;text-align:center;overflow:hidden;white-space:nowrap;">${esc(text)}</div>`; }
+ else if(t==='video') { const list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url?[{url:p.url}]:[]),u=String((list[0]||{}).url||''); const fit=['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'; inner=`<video data-video-widget-id="${esc(w.id||'')}" src="${esc(u)}" autoplay playsinline preload="auto" ${p.loop !== false && list.length === 1 ? 'loop' : ''} ${p.muted||p.mute?'muted':''} style="width:100%;height:100%;object-fit:${fit};background:#000;"></video>`;}
  else if(t==='image') inner=`<img src="${esc(p.url||p.src||'')}" style="width:100%;height:100%;object-fit:${p.fit||'cover'};">`;
- else if(t==='video') { const url=p.url||p.src||''; if(isYouTubeUrl(url)) inner=`<iframe src="${esc(youtubeEmbedUrl(url,p))}" style="width:100%;height:100%;border:0;background:#000;" allow="autoplay; encrypted-media; picture-in-picture; fullscreen"></iframe>`; else inner=`<video src="${esc(url)}" autoplay loop playsinline ${p.mute||p.muted?'muted':''} style="width:100%;height:100%;object-fit:${p.fit||'cover'};"></video>`; }
- else if(t==='music') inner=`<audio src="${esc(p.url||p.src||'')}" autoplay loop ${p.mute?'muted':''}></audio>`;
  else if(t==='clock') inner=`<div class="clock" data-clock style="color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||48)*2}px"></div>`;
  else if(t==='datetime'||t==='date') inner=`<div class="date" data-date style="color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||36)*2}px"></div>`;
  else if(t==='rectangle') inner=`<div style="width:100%;height:100%;background:${p.color||'#e94560'};border-radius:${p.radius||0}px;"></div>`;
@@ -3456,11 +3853,12 @@ function renderWidget(w){const p=props(w),t=normWidgetType(w);let inner='';
  else if(t==='weather') inner=`<div style="width:100%;height:100%;display:grid;place-items:center;color:${p.color||'#fff'};font-size:4rem;">${esc(p.location||'Weather')}</div>`;
  else if(t==='calendar') inner=`<div style="width:100%;height:100%;display:grid;place-items:center;color:${p.color||'#fff'};font-size:4rem;">${esc(p.label||'Calendar')}</div>`;
  else inner=`<div style="width:100%;height:100%;display:grid;place-items:center;border:1px dashed #334155;color:#94a3b8;">${esc(t||'widget')}</div>`;
- return `<div class="widget" style="${styleFor(w)}">${inner}</div>`;
-}
-function tickClocks(){document.querySelectorAll('[data-clock]').forEach(e=>e.textContent=new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}));document.querySelectorAll('[data-date]').forEach(e=>e.textContent=new Date().toLocaleDateString([], {weekday:'long', month:'long', day:'numeric'}));}
-async function loadLayout(){try{const r=await fetch('/assigned-layout.json?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('no assigned layout');const txt=await r.text();if(txt===currentHash)return;currentHash=txt;const layout=JSON.parse(txt);const ws=(layout.widgets||[]).slice().sort((a,b)=>(a.z||0)-(b.z||0));document.getElementById('player').innerHTML=ws.map(renderWidget).join('')||'<div class="fallback"><div><strong>Empty Layout</strong></div></div>';tickClocks();}catch(e){if(!currentHash)document.getElementById('player').innerHTML='<div class="fallback"><div><strong>Waiting for cached assigned layout</strong><span>'+esc(e.message)+'</span></div></div>';}}
-setInterval(tickClocks,1000);setInterval(loadLayout,5000);loadLayout();
+ if(t==='countdown'){const mode=p.countdown_mode==='duration'?'duration':'date',started=Date.now(),durationValue=Math.max(1,Number(p.duration_value||1)),durationUnit=p.duration_unit||'minutes',target=p.targetDate||'',fake={getAttribute:(name)=>({'data-countdown-mode':mode,'data-countdown-duration-value':durationValue,'data-countdown-duration-unit':durationUnit,'data-countdown-started-at':started,'data-countdown-target-date':target,'data-countdown-expiry-text':p.expiry_text||'Time\u2019s up!','data-countdown-invalid-text':'Choose a date and time'}[name]||'')},text=countdownText(fake,started);inner=`<div data-countdown-widget data-countdown-mode="${esc(mode)}" data-countdown-duration-value="${durationValue}" data-countdown-duration-unit="${esc(durationUnit)}" data-countdown-started-at="${started}" data-countdown-target-date="${esc(target)}" data-countdown-expiry-text="${esc(p.expiry_text||'Time\u2019s up!')}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;"><div class="countdown-value">${esc(text)}</div></div>`;}
+ return `<div class="widget" style="${styleFor(w)}">${inner}</div>`;}
+function tickClocks(){const now=new Date();document.querySelectorAll('[data-clock]').forEach(e=>e.textContent=now.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}));document.querySelectorAll('[data-date]').forEach(e=>e.textContent=now.toLocaleDateString());tickCountdowns();}
+function applyOrientation(value){const v=String(value||'normal');document.body.dataset.orientation=['normal','flipped','rotated_left','rotated_right'].includes(v)?v:'normal';}
+async function loadLayout(){try{const r=await fetch('/assigned-layout.json?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('no assigned layout');const txt=await r.text();try{const c=await fetch('/api/client-config.json?ts='+Date.now(),{cache:'no-store'});if(c.ok)applyOrientation((await c.json()).orientation);}catch(_e){}if(txt===currentHash)return;currentHash=txt;const layout=JSON.parse(txt);const ws=(layout.widgets||[]).slice().sort((a,b)=>(a.z||0)-(b.z||0));const rendered=await Promise.all(ws.map(renderWidget));document.getElementById('player').innerHTML=rendered.join('')||'<div class="fallback"><div><strong>Empty Layout</strong></div></div>';tickClocks();initCachedVideoWidgets(ws);}catch(e){if(!currentHash)document.getElementById('player').innerHTML='<div class="fallback"><div><strong>Waiting for cached assigned layout</strong><span>'+esc(e.message)+'</span></div></div>';}}
+setInterval(tickClocks,1000);setInterval(loadLayout,5000);setInterval(()=>{currentHash='';loadLayout().catch(()=>{});},15*60*1000);loadLayout();
 
 // === Cursor auto-hide (3.5s default, configurable via /api/cursor-config.json) ===
 let __cursorIdle = Date.now();
@@ -3527,26 +3925,19 @@ def _connector_for_display_index(display_index: int) -> str | None:
     """Return the connector name (e.g. 'DP-2') for a given display_index.
 
     Sources (tried in order):
-      1. /api/clients/<cid>/displays response is cached by the heartbeat
-         but only carries display_index/assigned_layout_id/layout, not
-         the per-display connector mapping. Skip.
-      2. The display-governance script writes the full mapping to
-         ~/.local/share/screentra-client/config.json under
-         last_detected_displays[].connector — preferred because it's
-         already populated by the installer before any heartbeat runs.
-      3. /sys/class/drm (live kernel enumeration, fallback if config.json
-         is missing — sorts by name, same convention as the launcher).
-    Returns None if nothing matches so the caller can fall back to the
-    numeric index.
+      1. The display-governance mapping in config.json.
+      2. /sys/class/drm (live kernel enumeration, fallback if config.json
+         is missing or stale).
+    Returns None when no physical connector matches.
     """
     try:
         gov_path = Path.home() / '.local/share/screentra-client/config.json'
         if gov_path.exists():
-            cfg = json.loads(gov_path.read_text())
+            cfg = _read_json_file(gov_path, {})
             for d in (cfg.get('last_detected_displays') or []):
                 if int(d.get('display_index', -1)) == int(display_index):
                     con = d.get('connector')
-                    if con:
+                    if con and con != 'virtual-0':
                         return con
     except Exception:
         pass
@@ -3595,11 +3986,6 @@ def _server_reachable(server_url: str, timeout: float) -> bool:
             return False
         ctx = None
         if u.scheme == 'https':
-            # Try the explicit RIPLEY_CA_CERT first, then the bundled
-            # ~/.local/share/screentra-client/screentra-cast-signage-ca.crt.
-            # Only fall back to system trust, and only as a last resort fall
-            # back to _create_unverified_context when the operator has
-            # explicitly opted in via RIPLEY_INSECURE_SSL=1.
             ca_candidates = []
             env_ca = os.environ.get('RIPLEY_CA_CERT')
             if env_ca:
@@ -3612,14 +3998,9 @@ def _server_reachable(server_url: str, timeout: float) -> bool:
                         break
                     except Exception:
                         ctx = None
+            # No CA available: fail closed and keep the cached fallback page.
             if ctx is None:
-                if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
-                    ctx = _ssl._create_unverified_context()
-                else:
-                    # No CA available and operator hasn't opted in — fail
-                    # closed (return False). Better to show the cached
-                    # fallback page than to silently MITM the probe.
-                    return False
+                return False
         req = _ur.Request((u.scheme + '://' + (host if not u.port else f'{host}:{port}') + path), method='GET')
         with _ur.urlopen(req, timeout=timeout, context=ctx) as r:
             return 200 <= r.status < 500
@@ -3628,20 +4009,11 @@ def _server_reachable(server_url: str, timeout: float) -> bool:
 
 
 def _live_player_redirect_html(server_url: str, display_index: int, connector: str | None = None, client_id: str | None = None) -> str:
-    """Return a tiny HTML page that redirects the kiosk to the server player.
-
-    Server's player.js matches `?display=` against /api/displays[].connector
-    (e.g. "DP-2"), not against the local display_index. If the heartbeat
-    has cached the connector for this index (the normal case), prefer it.
-    Fall back to the numeric index for legacy code paths that may still use it.
-
-    `client_id` is appended when available so the player page can fetch THIS
-    box's display list from /api/clients/<cid>/displays rather than the
-    server's /api/displays (which only sees outputs reachable from the
-    server process, not from a remote player box).
-    """
+    """Return a redirect to the live server for a physical connector."""
+    if not connector or connector == 'virtual-0':
+        raise ValueError('physical display connector is required')
     safe_server = server_url.replace('"', '%22')
-    target = f'{safe_server.rstrip("/")}/player.html?display={urllib.parse.quote(connector or str(display_index))}'
+    target = f'{safe_server.rstrip("/")}/player.html?display={urllib.parse.quote(connector)}'
     if client_id:
         target += f'&client_id={urllib.parse.quote(client_id, safe="")}'
     return (
@@ -3661,9 +4033,15 @@ class Handler(BaseHTTPRequestHandler):
     cache_dir = Path.home() / '.local/share/screentra-client/cache'
 
     def do_POST(self):
-        length = int(self.headers.get('Content-Length') or 0)
-        body = self.rfile.read(length).decode('utf-8') if length else '{}'
         path = unquote(self.path.split('?', 1)[0])
+        try:
+            body = _request_body(self)
+        except OverflowError:
+            return self.send_text(413, json.dumps({'error': 'request body too large'}), 'application/json')
+        except ValueError as exc:
+            return self.send_text(400, json.dumps({'error': str(exc)}), 'application/json')
+        if _mutation_requires_auth(path) and not _session_user(self.headers.get('Cookie', '')):
+            return self.send_text(401, json.dumps({'error': 'auth required', **_auth_source()}), 'application/json')
         if path == '/api/admin/auth/login':
             try:
                 payload = json.loads(body) if body and body.strip() else {}
@@ -3697,11 +4075,11 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(body)
                 selected = payload.get('path')
                 Handler.cache_dir.mkdir(parents=True, exist_ok=True)
-                (Handler.cache_dir / 'touch-device.json').write_text(json.dumps({'path': selected}))
+                _atomic_write_text(Handler.cache_dir / 'touch-device.json', json.dumps({'path': selected}))
                 # Tell the actor to restart the kiosk so the choice takes effect
                 try:
                     pending = Handler.cache_dir.parent / 'pending-command.json'
-                    pending.write_text(json.dumps({
+                    _atomic_write_text(pending, json.dumps({
                         'action': 'restart_kiosk_display',
                         'args': {'display_index': int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0')), 'reason': 'touch-device-change'},
                         'queued_at': datetime.utcnow().isoformat() + 'Z',
@@ -3724,14 +4102,14 @@ class Handler(BaseHTTPRequestHandler):
                 history = []
                 if calib_path.exists():
                     try:
-                        history = json.loads(calib_path.read_text())
+                        history = _read_json_file(calib_path, [])
                         if not isinstance(history, list):
                             history = [history]
                     except Exception:
                         history = []
                 history.append(data)
                 history = history[-5:]   # rolling window of last 5 runs
-                calib_path.write_text(json.dumps(history, indent=2))
+                _atomic_write_text(calib_path, json.dumps(history, indent=2))
                 return self.send_text(200, json.dumps({'ok': True, 'history_size': len(history)}), 'application/json')
             except Exception as e:
                 return self.send_text(400, json.dumps({'error': str(e)}), 'application/json')
@@ -3765,6 +4143,35 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/admin/services/restart':
             r = _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service', 'ripley-player-actor.service'], timeout=8)
             return self.send_text(200, json.dumps({'ok': r.get('ok'), 'restart': r}), 'application/json')
+        # GET /api/client-config.json — current cached config (heartbeat's view of server state)
+        if path == '/api/client-config.json':
+            cfg_path = Handler.cache_dir / 'client-config.json'
+            try:
+                data = _read_json_file(cfg_path, {})
+                return self.send_text(200, json.dumps(data), 'application/json')
+            except Exception:
+                return self.send_text(404, json.dumps({'error': 'no config yet'}), 'application/json')
+        # POST /api/client-config.json — save theme (or other fields) to local config.
+        # Heartbeat reads this on next cycle and sends it to the server.
+        if method == 'POST' and path == '/api/client-config.json':
+            try:
+                payload = json.loads(body) if body and body.strip() else {}
+            except Exception:
+                return self.send_text(400, json.dumps({'ok': False, 'error': 'invalid json'}), 'application/json')
+            cfg_path = Handler.cache_dir / 'client-config.json'
+            try:
+                try:
+                    data = _read_json_file(cfg_path, {})
+                except Exception:
+                    data = {}
+                for k in ['theme']:
+                    if k in payload:
+                        data[k] = payload[k]
+                cfg_path.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_write_text(cfg_path, json.dumps(data, indent=2))
+                return self.send_text(200, json.dumps({'ok': True}), 'application/json')
+            except Exception as e:
+                return self.send_text(500, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
         return self.send_text(404, json.dumps({'error': 'not found'}), 'application/json')
     def log_message(self, fmt, *args):
         pass
@@ -3786,8 +4193,16 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith('/api/'):
                 return self.send_text(401, json.dumps({'error': 'auth required', **_auth_source()}), 'application/json')
             return self.send_text(200, _admin_login_html(), 'text/html; charset=utf-8')
-        if os.environ.get('RIPLEY_ADMIN_DEFAULT', '').lower() in ('1', 'true', 'yes') and path in ('/', '/admin.html'):
+        if os.environ.get('RIPLEY_ADMIN_MODE', '').lower() in ('1', 'true', 'yes') and path in ('/', '/admin.html'):
             return self.send_text(200, ADMIN_HTML, 'text/html; charset=utf-8')
+        # GET /api/client-config.json — current cached heartbeat config (layout + theme)
+        if path == '/api/client-config.json':
+            cfg_path = Handler.cache_dir / 'client-config.json'
+            try:
+                data = _read_json_file(cfg_path, {})
+                return self.send_text(200, json.dumps(data), 'application/json')
+            except Exception:
+                return self.send_text(404, json.dumps({'error': 'no config yet'}), 'application/json')
         if path in ('/', '/player.html'):
             display_index = int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0'))
             layout_target = Handler.cache_dir / f'assigned-layout-display-{display_index}.json'
@@ -3819,7 +4234,8 @@ class Handler(BaseHTTPRequestHandler):
             live_url = _live_player_url()
             if live_url and _server_reachable(live_url, LIVE_PROBE_TIMEOUT_SECS):
                 connector = _connector_for_display_index(display_index)
-                return self.send_text(200, _live_player_redirect_html(live_url, display_index, connector, _client_id_from_env() or _client_id_from_cache()), 'text/html; charset=utf-8')
+                if connector:
+                    return self.send_text(200, _live_player_redirect_html(live_url, display_index, connector, _client_id_from_env() or _client_id_from_cache()), 'text/html; charset=utf-8')
 
             # No live server reachable (offline mode). Render the offline
             # cached layout from the renderer script's PLAYER_HTML constant.
@@ -3904,7 +4320,7 @@ class Handler(BaseHTTPRequestHandler):
             _tp = Handler.cache_dir / 'touch-device.json'
             if _tp.exists():
                 try:
-                    sel = json.loads(_tp.read_text()).get('path')
+                    sel = _read_json_file(_tp, {}).get('path')
                 except Exception:
                     pass
             return self.send_text(200, json.dumps({'devices': devs, 'selected': sel}), 'application/json')
@@ -3919,7 +4335,7 @@ class Handler(BaseHTTPRequestHandler):
             calib_path = Handler.cache_dir / 'touch-calibration.json'
             if not calib_path.exists():
                 return self.send_text(404, json.dumps({'error': 'no calibration yet'}), 'application/json')
-            return self.send_text(200, calib_path.read_text(), 'application/json')
+            return self.send_text(200, json.dumps(_read_json_file(calib_path, [])), 'application/json')
         if path == '/health':
             return self.send_text(200, 'ok')
         if path == '/assigned-layout.json':
@@ -3929,12 +4345,12 @@ class Handler(BaseHTTPRequestHandler):
                 target = self.cache_dir / 'assigned-layout.json'
             if not target.exists():
                 return self.send_text(404, '{}', 'application/json')
-            return self.send_text(200, target.read_text(), 'application/json')
+            return self.send_text(200, json.dumps(_read_json_file(target, {})), 'application/json')
         if path == '/client-config.json':
             target = self.cache_dir / path.lstrip('/')
             if not target.exists():
                 return self.send_text(404, '{}', 'application/json')
-            return self.send_text(200, target.read_text(), 'application/json')
+            return self.send_text(200, json.dumps(_read_json_file(target, {})), 'application/json')
         # Optional cached asset serving under cache/assets
         safe = Path(path.lstrip('/'))
         target = (self.cache_dir / safe).resolve()
@@ -4229,6 +4645,7 @@ PY_GPU_HEALTH
 chmod +x "$GPU_HEALTH"
 
 cat > "$INSTALL_DIR/screentra-display-detect.py" <<'PY_DETECT_FILE'
+#!/usr/bin/env python3
 """Detect displays on a Linux box by reading /sys/class/drm.
 
 Each connector is a display_index in stable sort order. Returns a list of dicts
@@ -4266,8 +4683,8 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
     """Return a list of detected DRM connector displays.
 
     Each entry: { display_index, connector, label, width, height, refresh_rate, enabled, connected }
-    Falls back to a single virtual display when /sys/class/drm is missing or empty
-    (e.g. macOS dev boxes, headless servers).
+    Returns an empty list when no physical DRM connector is present. Virtual
+    displays are not supported.
     """
     drm_root = Path('/sys/class/drm')
     displays: List[Dict[str, Any]] = []
@@ -4317,20 +4734,8 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
                 'last_error': None,
             })
 
-    # Fallback: virtual single display for headless / dev boxes
-    if not displays:
-        displays.append({
-            'display_index': 0,
-            'connector': 'virtual-0',
-            'label': 'Virtual Display',
-            'width': 1920,
-            'height': 1080,
-            'refresh_rate': 60.0,
-            'enabled': True,
-            'connected': True,
-            'last_error': None,
-        })
-
+    # No physical connector means no supported display. Never synthesize a
+    # virtual output: the player is a physical-display-only appliance.
     return displays
 
 PY_DETECT_FILE
@@ -4350,6 +4755,7 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -4372,10 +4778,9 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
     # Number of connected+enabled DRM connectors the installer found. The
     # renderer / kiosk-launcher uses this as the upper bound. Re-detected on
     # every run; never mutated by the actor.
-    "installer_detected_max_displays": 1,
-    # Operator-set cap (per-box). If unset, the renderer uses
-    # installer_detected_max_displays unchanged. Mutable; the
-    # ripley-player-admin.py UI writes this.
+    "installer_detected_max_displays": 0,
+    # Optional operator-set cap (per-box). None means every connected physical
+    # display is eligible, including displays with no touch/input device.
     "max_displays": None,
     # Cache of the most recent detection for offline debugging. Useful when
     # the user opens /admin and the display count looks wrong after a
@@ -4391,7 +4796,7 @@ def detect_count(max_scan: int = 16) -> int:
     an operator can re-enable DP-4 after touchscreen-only mode turned it off.
     """
     displays = _det.detect_displays(max_displays=max_scan)
-    return sum(1 for d in displays if d.get("connected", d.get("enabled")) and d.get("connector") != "virtual-0")
+    return sum(1 for d in displays if d.get("connected", d.get("enabled")))
 
 
 def detect_full(max_scan: int = 16) -> List[Dict[str, Any]]:
@@ -4428,21 +4833,29 @@ def write_config(config_path: Path, *, installer_detected_max_displays: int,
         "last_detected_displays": last_detected_displays,
     })
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = config_path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cfg, indent=2))
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        dir=config_path.parent,
+        prefix=f".{config_path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as stream:
+        json.dump(cfg, stream, indent=2)
+        tmp = Path(stream.name)
+    os.chmod(tmp, 0o600)
     os.replace(tmp, config_path)
 
 
 def compute_active_max(config: Dict[str, Any]) -> int:
     """The value the renderer / kiosk-launcher should actually use."""
-    installer = int(config.get("installer_detected_max_displays") or 1)
+    installer = max(int(config.get("installer_detected_max_displays") or 0), 0)
     override = config.get("max_displays")
     if override is None:
-        return max(installer, 1)
+        return installer
     try:
-        override_i = max(int(override), 1)
+        override_i = max(int(override), 0)
     except (TypeError, ValueError):
-        return max(installer, 1)
+        return installer
     # Operator cap cannot exceed what the hardware actually has.
     return min(installer, override_i)
 
@@ -4457,16 +4870,14 @@ def main() -> int:
     args = ap.parse_args()
 
     displays = detect_full(max_scan=args.max_scan)
-    connected_count = sum(1 for d in displays if d.get("connected", d.get("enabled")) and d.get("connector") != "virtual-0")
+    connected_count = sum(1 for d in displays if d.get("connected", d.get("enabled")))
 
     config_path = Path(args.config_dir) / "config.json"
     existing = load_config(config_path)
     max_displays_override = existing.get("max_displays")
-    # Safe default: keep touchscreen-only mode unless an operator explicitly
-    # raises the count from local admin/server. This avoids re-enabling DP-4
-    # just because it is physically connected.
-    if max_displays_override is None:
-        max_displays_override = 1
+    # None intentionally means all connected physical displays. Touch binding
+    # is configured independently and must never decide whether a display can
+    # render signage.
 
     if args.print_only:
         print(json.dumps({
@@ -4522,40 +4933,121 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
+MAX_PENDING_BYTES = 1 << 20
+MAX_JSON_FILE_BYTES = 1 << 20
 
-def run(cmd: str) -> tuple[int, str, str]:
+
+def _read_json_file(path: Path, default):
     try:
-        p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=20)
+        if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
+            return default
+        return json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return default
+
+
+def _server_origin(server: str) -> str:
+    parsed = urllib.parse.urlsplit((server or '').strip())
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError('configured server URL must be an HTTP(S) origin without credentials or query parameters')
+    if parsed.scheme == 'http' and parsed.hostname not in {'127.0.0.1', '::1', 'localhost'} and os.environ.get('RIPLEY_ALLOW_INSECURE_HTTP', '').lower() not in ('1', 'true', 'yes'):
+        raise ValueError('non-loopback HTTP server URLs require explicit RIPLEY_ALLOW_INSECURE_HTTP=1')
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip('/'), '', ''))
+
+
+def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
+    """Replace a cache JSON file atomically and keep it owner-readable."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    temporary.write_text(text)
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+
+
+def _run_list(args: list[str], timeout: int = 20, input_data: str | None = None) -> tuple[int, str, str]:
+    try:
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, input=input_data)
         return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
     except Exception as e:
         return 1, "", str(e)
 
 
-def has_systemctl_user() -> bool:
-    if shutil.which("systemctl") is None:
-        return False
-    rc, _, _ = run("systemctl --user status >/dev/null 2>&1")
-    return rc == 0
+def ddcutil_detect(bus: str | None = None) -> tuple[bool, str]:
+    """Run ddcutil detect to refresh display cache. Returns (ok, message)."""
+    args = ['sudo', '-n', 'ddcutil', 'detect']
+    if bus:
+        args.extend(['--bus', bus])
+    rc, out, err = _run_list(args)
+    if rc == 0:
+        return True, out.strip()
+    return False, err.strip() or out.strip()
 
 
-def systemctl_user(action: str, unit: str) -> tuple[bool, str]:
-    rc, out, err = run(f"systemctl --user {action} {unit}")
-    ok = rc == 0
-    return ok, (out or err or f"{action} {unit} rc={rc}").strip()
+def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_layout: bool = False) -> tuple[bool, str]:
+    """Set a DDC/CI VCP value via ddcutil. Returns (ok, message).
+    If has_layout=True and the display is not initially detected (ddcutil_no_bus),
+    runs ddcutil detect once and retries before returning failure."""
+    args = ['sudo', '-n', 'ddcutil', 'setvcp']
+    if bus:
+        args.extend(['--bus', bus])
+    args.extend([vcp_code, str(value)])
+
+    def _do_set():
+        rc, out, err = _run_list(args)
+        if rc == 0:
+            return True, f'DDC: {vcp_code}={value}' + (f' ({out.strip()})' if out.strip() else '')
+        err_msg = err.strip() or out.strip()
+        if 'not found' in err_msg.lower() or 'no such file' in err_msg.lower():
+            return False, f'ddcutil_not_installed: {err_msg}'
+        if 'unable to open' in err_msg.lower() or 'i2c' in err_msg.lower() or 'no bus' in err_msg.lower():
+            return False, 'ddcutil_no_bus', err_msg
+        if 'communication' in err_msg.lower() or 'timeout' in err_msg.lower():
+            return False, f'ddcutil_no_support: {err_msg}'
+        return False, f'DDC failed (rc={rc}): {err_msg}'
+
+    ok, msg_or_tag, *extra = _do_set()
+    if ok:
+        return True, msg_or_tag
+
+    # Retry once if has_layout and display was not found
+    if has_layout and msg_or_tag == 'ddcutil_no_bus':
+        err_msg = extra[0] if extra else ''
+        ddcutil_detect(bus)
+        ok2, msg2 = _do_set()
+        if ok2:
+            return True, f'{msg2} (re-detected)'
+        return False, f'{msg_or_tag}: {err_msg} — retry after re-detection failed: {msg2}'
+
+    return False, msg_or_tag
 
 
-def _bluetooth_devices(text: str) -> list[dict]:
-    devices, seen = [], set()
+def apply_cec_command(cec_cmd: str) -> tuple[bool, str]:
+    """Send a CEC command via cec-client. Returns (ok, message)."""
+    rc, out, err = _run_list(
+        ['sudo', '-n', 'cec-client', '-d', '1', '-s'],
+        input_data=f'{cec_cmd}\n',
+    )
+    if rc == 0:
+        return True, f'CEC: {cec_cmd}' + (f' — {out.strip()}' if out.strip() else '')
+    return False, f'CEC failed (rc={rc}): {err.strip() or out.strip()}'
+
+
+def _bluetoothctl_devices(text: str) -> list[dict]:
+    devices = []
+    seen = set()
     for line in (text or '').splitlines():
-        m = re.match(r'^\s*Device\s+([0-9A-Fa-f:]{17})\s*(.*)$', line)
-        if not m: continue
-        address = m.group(1).upper()
-        if address in seen: continue
+        match = re.match(r'^\s*Device\s+([0-9A-Fa-f:]{17})\s*(.*)$', line)
+        if not match:
+            continue
+        address = match.group(1).upper()
+        if address in seen:
+            continue
         seen.add(address)
-        devices.append({'address': address, 'name': m.group(2).strip() or address})
+        devices.append({'address': address, 'name': match.group(2).strip() or address})
     return devices
 
 
@@ -4564,13 +5056,31 @@ def bluetooth_scan(payload: dict | None) -> tuple[bool, str, dict]:
     duration = max(5, min(int(payload.get('duration_seconds') or 10), 30))
     if shutil.which('bluetoothctl') is None:
         return False, 'bluetoothctl is not installed on this client', {'devices': []}
-    run('bluetoothctl power on')
-    rc, out, err = run(f'timeout {duration + 10}s bluetoothctl --timeout {duration} scan on')
-    _, listed, list_err = run('bluetoothctl devices')
-    devices = _bluetooth_devices(listed or out)
+    _run_list(['bluetoothctl', 'power', 'on'], timeout=10)
+    rc, out, err = _run_list(['bluetoothctl', '--timeout', str(duration), 'scan', 'on'], timeout=duration + 10)
+    _, listed, list_err = _run_list(['bluetoothctl', 'devices'], timeout=10)
+    devices = _bluetoothctl_devices(listed or out)
     if not devices and rc != 0:
         return False, f'Bluetooth scan failed: {err or out or list_err or "unknown error"}', {'devices': []}
     return True, f'Bluetooth scan found {len(devices)} device(s)', {'devices': devices, 'duration_seconds': duration}
+
+
+def _find_bluetooth_sink(address: str, name: str | None) -> str | None:
+    if shutil.which('wpctl') is None:
+        return None
+    _, output, _ = _run_list(['wpctl', 'status'], timeout=10)
+    address_key = re.sub(r'[^0-9a-f]', '', address.lower())
+    name_key = (name or '').strip().lower()
+    for line in (output or '').splitlines():
+        if not re.search(r'bluez_(?:output|sink)', line, re.IGNORECASE):
+            continue
+        normalized = re.sub(r'[^0-9a-f]', '', line.lower())
+        if address_key and address_key not in normalized and name_key not in line.lower():
+            continue
+        match = re.match(r'^\s*[│*]*\s*(\d+)\.\s+', line)
+        if match:
+            return match.group(1)
+    return None
 
 
 def bluetooth_connect(payload: dict | None) -> tuple[bool, str, dict]:
@@ -4581,25 +5091,17 @@ def bluetooth_connect(payload: dict | None) -> tuple[bool, str, dict]:
         return False, 'A valid Bluetooth device address is required', {}
     if shutil.which('bluetoothctl') is None:
         return False, 'bluetoothctl is not installed on this client', {}
-    run('bluetoothctl power on')
-    rc, out, err = run(f'bluetoothctl connect {address}')
+    _run_list(['bluetoothctl', 'power', 'on'], timeout=10)
+    rc, out, err = _run_list(['bluetoothctl', 'connect', address], timeout=30)
     text = '\n'.join(v for v in (out, err) if v)
     connected = rc == 0 and not re.search(r'failed|not available|error', text, re.IGNORECASE)
     details = {'address': address, 'name': name, 'connected': connected, 'bluetooth_output': text[-1200:]}
     if not connected:
         return False, f'Bluetooth connection failed: {text or f"exit code {rc}"}', details
-    run('sleep 1')
-    _, sinks, _ = run('wpctl status')
-    sink_id = None
-    address_key = re.sub(r'[^0-9a-f]', '', address.lower())
-    name_key = name.lower()
-    for line in (sinks or '').splitlines():
-        if not re.search(r'bluez_(?:output|sink)', line, re.IGNORECASE): continue
-        if address_key not in re.sub(r'[^0-9a-f]', '', line.lower()) and name_key not in line.lower(): continue
-        m = re.match(r'^\s*[│*]*\s*(\d+)\.\s+', line)
-        if m: sink_id = m.group(1); break
-    if sink_id:
-        sink_rc, sink_out, sink_err = run(f'wpctl set-default {sink_id}')
+    time.sleep(1)
+    sink_id = _find_bluetooth_sink(address, name)
+    if sink_id and shutil.which('wpctl'):
+        sink_rc, sink_out, sink_err = _run_list(['wpctl', 'set-default', sink_id], timeout=10)
         details['audio_sink_id'] = sink_id
         details['audio_device_selected'] = sink_rc == 0
         if sink_rc == 0:
@@ -4637,7 +5139,7 @@ def _wpctl_sinks(text: str) -> list[dict]:
 def audio_list() -> tuple[bool, str, dict]:
     if shutil.which('wpctl') is None:
         return False, 'wpctl is not installed on this client', {'devices': []}
-    rc, out, err = run('wpctl status')
+    rc, out, err = _run_list(['wpctl', 'status'], timeout=10)
     devices = _wpctl_sinks(out)
     if rc != 0:
         return False, f'Audio device scan failed: {err or out or f"exit code {rc}"}', {'devices': devices}
@@ -4651,7 +5153,7 @@ def audio_set_default(payload: dict | None) -> tuple[bool, str, dict]:
         return False, 'A valid audio output device is required', {}
     if shutil.which('wpctl') is None:
         return False, 'wpctl is not installed on this client', {}
-    rc, out, err = run(f'wpctl set-default {sink_id}')
+    rc, out, err = _run_list(['wpctl', 'set-default', sink_id], timeout=10)
     if rc == 0:
         return True, f'Audio output selected: {sink_id}', {'sink_id': sink_id}
     return False, f'Audio output selection failed: {err or out or f"exit code {rc}"}', {'sink_id': sink_id}
@@ -4668,7 +5170,7 @@ def audio_set_volume(payload: dict | None) -> tuple[bool, str, dict]:
         return False, 'A valid audio output device is required', {}
     if shutil.which('wpctl') is None:
         return False, 'wpctl is not installed on this client', {}
-    rc, out, err = run(f'wpctl set-volume {sink_id} {value}%')
+    rc, out, err = _run_list(['wpctl', 'set-volume', sink_id, f'{value}%'], timeout=10)
     if rc == 0:
         return True, f'Client audio volume set to {value}%', {'sink_id': sink_id, 'volume': value}
     return False, f'Client audio volume failed: {err or out or f"exit code {rc}"}', {'sink_id': sink_id, 'volume': value}
@@ -4677,10 +5179,39 @@ def audio_set_volume(payload: dict | None) -> tuple[bool, str, dict]:
 def restart_client() -> tuple[bool, str, dict]:
     if shutil.which('systemctl') is None:
         return False, 'systemctl is not available on this client', {}
-    rc, out, err = run('sudo -n systemctl reboot')
+    rc, out, err = _run_list(['sudo', '-n', 'systemctl', 'reboot'], timeout=20)
     if rc == 0:
         return True, 'Client reboot requested', {'reboot_requested': True}
     return False, f'Client reboot failed: {err or out or f"exit code {rc}"}', {'reboot_requested': False}
+
+
+def has_systemctl_user() -> bool:
+    if shutil.which("systemctl") is None:
+        return False
+    rc, _, _ = _run_list(["systemctl", "--user", "status"])
+    return rc == 0
+
+
+def systemctl_user(action: str, unit: str) -> tuple[bool, str]:
+    rc, out, err = _run_list(["systemctl", "--user", action, unit])
+    ok = rc == 0
+    return ok, (out or err or f"{action} {unit} rc={rc}").strip()
+
+
+def restart_system_kiosk() -> tuple[bool, str]:
+    """Restart the system kiosk wrapper used by the deployed player.
+
+    Some installations run the renderer and Chromium as children of the
+    system-level kiosk service rather than under a persistent systemd --user
+    manager. In that layout there is no user D-Bus session for the actor, so
+    the user-unit path cannot work. Restarting the kiosk wrapper is the
+    supported fallback and brings the renderer/browser pair back together.
+    """
+    rc, out, err = _run_list(
+        ['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'],
+        timeout=30,
+    )
+    return rc == 0, (out or err or f'restart screentra-cast-kiosk@0.service rc={rc}').strip()
 
 
 def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]:
@@ -4694,7 +5225,7 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
     install_dir = cache_dir.parent
     config_path = install_dir / 'config.json'
     try:
-        cfg = json.loads(config_path.read_text()) if config_path.exists() else {}
+        cfg = _read_json_file(config_path, {})
     except Exception:
         cfg = {}
     installer = max(int(cfg.get('installer_detected_max_displays') or 1), 1)
@@ -4709,11 +5240,11 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
     cfg.setdefault('last_detected_displays', [])
     config_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = config_path.with_suffix('.json.tmp')
-    tmp.write_text(json.dumps(cfg, indent=2)); tmp.replace(config_path)
+    _atomic_write_text(config_path, json.dumps(cfg, indent=2))
 
     details = {'config_path': str(config_path), 'installer_detected_max_displays': installer, 'max_displays': override, 'active_max_displays': active, 'steps': []}
     if has_systemctl_user():
-        run('systemctl --user daemon-reload >/dev/null 2>&1')
+        _run_list(['systemctl', '--user', 'daemon-reload'])
         for i in range(4):
             if i < active:
                 ok1, msg1 = systemctl_user('enable', f'screentra-client-renderer@{i}.service')
@@ -4731,7 +5262,7 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
                 details['steps'].append({'unit': f'display-{i}', 'disabled': True, 'messages': [msg1,msg2,msg3,msg4]})
     # Prevent accidental second DRM-master labwc seats; display 1+ attach to wayland-0.
     for i in range(1,4):
-        run(f'sudo -n systemctl disable --now screentra-cast-kiosk@{i}.service >/dev/null 2>&1; true')
+        _run_list(['sudo', '-n', 'systemctl', 'disable', '--now', f'screentra-cast-kiosk@{i}.service'])
         details['steps'].append({'unit': f'screentra-cast-kiosk@{i}.service', 'disabled_system_seat': True})
 
     # Apply compositor output policy live when wayland-0 is available. Do not
@@ -4762,7 +5293,7 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
                 details['steps'].append({'output': name, 'action': 'off', 'code': cp.returncode, 'stderr': (cp.stderr or '')[-500:]})
     except Exception as e:
         details['steps'].append({'output_policy': 'skipped', 'error': str(e)})
-        rc,out,err = run('sudo -n systemctl restart screentra-cast-kiosk@0.service')
+        rc,out,err = _run_list(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'])
         details['steps'].append({'unit': 'screentra-cast-kiosk@0.service', 'restart_code': rc, 'message': out or err})
 
     ok = has_systemctl_user()
@@ -4808,7 +5339,7 @@ def apply_touch_binding(cache_dir: Path, payload: dict) -> tuple[bool, str, dict
     install_dir = cache_dir.parent
     config_path = install_dir / 'config.json'
     try:
-        cfg = json.loads(config_path.read_text()) if config_path.exists() else {}
+        cfg = _read_json_file(config_path, {})
     except Exception:
         cfg = {}
     dev_path = payload.get('device_path') or payload.get('path')
@@ -4840,13 +5371,13 @@ def apply_touch_binding(cache_dir: Path, payload: dict) -> tuple[bool, str, dict
     cfg['touch_binding'] = binding
     config_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = config_path.with_suffix('.json.tmp')
-    tmp.write_text(json.dumps(cfg, indent=2)); tmp.replace(config_path)
+    _atomic_write_text(config_path, json.dumps(cfg, indent=2))
     if dev_path:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        Path(cache_dir, 'touch-device.json').write_text(json.dumps({'path': dev_path, 'name': dev_name}, indent=2))
+        _atomic_write_text(Path(cache_dir, 'touch-device.json'), json.dumps({'path': dev_path, 'name': dev_name}, indent=2))
     details = {'config_path': str(config_path), 'touch_binding': binding, 'steps': []}
     # Restart labwc so rc.xml <touch> mapping is reloaded, then let browser services return.
-    rc, out, err = run('sudo -n systemctl restart screentra-cast-kiosk@0.service')
+    rc, out, err = _run_list(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'])
     details['steps'].append({'unit': 'screentra-cast-kiosk@0.service', 'restart_code': rc, 'message': out or err})
     if has_systemctl_user():
         systemctl_user('restart', 'screentra-client-heartbeat.service')
@@ -4871,8 +5402,6 @@ def tls_context(cache_dir: Path | None = None):
                 return ssl.create_default_context(cafile=str(cafile))
             except Exception as e:
                 print(f'warning: failed to load Screentra Cast CA {cafile}: {e}', flush=True)
-    if os.environ.get('RIPLEY_INSECURE_SSL', '').lower() in ('1', 'true', 'yes'):
-        return ssl._create_unverified_context()
     return None
 
 def urlopen_ripley(req, timeout=10, cache_dir: Path | None = None):
@@ -4894,12 +5423,25 @@ def fetch_config(server: str, client_id: str, cache_dir: Path, display_index: in
     try:
         with urlopen_ripley(url, timeout=10, cache_dir=cache_dir) as r:
             data = json.loads(r.read().decode())
+        # The server display-config payload does not include local-admin theme.
+        try:
+            previous = _read_json_file(cache_dir / 'client-config.json', {})
+            if previous.get('theme'):
+                data['theme'] = previous['theme']
+        except Exception:
+            pass
         cache_dir.mkdir(parents=True, exist_ok=True)
-        Path(cache_dir, 'client-config.json').write_text(json.dumps(data, indent=2))
+        # Keep the complete response for heartbeat acknowledgement. Secondary
+        # displays retain their own metadata; their layout cache remains layout-only
+        # for the local renderer.
+        if display_index is None or display_index == 0:
+            _atomic_write_text(Path(cache_dir, 'client-config.json'), json.dumps(data, indent=2))
+        else:
+            _atomic_write_text(Path(cache_dir, f'display-config-{display_index}.json'), json.dumps(data, indent=2))
         if data.get('layout') is not None:
-            Path(cache_dir, target).write_text(json.dumps(data['layout'], indent=2))
+            _atomic_write_text(Path(cache_dir, target), json.dumps(data['layout'], indent=2))
             if display_index in (None, 0):
-                Path(cache_dir, 'assigned-layout.json').write_text(json.dumps(data['layout'], indent=2))
+                _atomic_write_text(Path(cache_dir, 'assigned-layout.json'), json.dumps(data['layout'], indent=2))
         else:
             # Clear stale per-display and legacy display-0 layout caches when assignment is cleared.
             stale_files = [Path(cache_dir, target)]
@@ -4947,10 +5489,11 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
     """Download and run the server-served player installer, preserving enrollment identity."""
     payload = payload or {}
     install_dir = Path(os.environ.get('RIPLEY_CLIENT_DIR') or str(cache_dir.parent))
-    server = (payload.get('server_url') or server or '').rstrip('/')
-    if not server:
-        return False, 'server URL is not configured', {}
-    installer_url = payload.get('installer_url') or (server + '/install/player-client.sh')
+    try:
+        server = _server_origin(server)
+    except ValueError as exc:
+        return False, f'client update refused: {exc}', {}
+    installer_url = server + '/install/player-client.sh'
     env = os.environ.copy()
     env['RIPLEY_SERVER_URL'] = server
     if client_id:
@@ -4965,9 +5508,10 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
         return True, f'would download and run {installer_url}', details
     with tempfile.NamedTemporaryFile(prefix='ripley-player-update-', suffix='.sh', delete=False) as tmp:
         tmp_path = Path(tmp.name)
+    signature_path = tmp_path.with_suffix('.sig')
     try:
         # Use the same TLS verification as the rest of the actor (Screentra Cast CA
-        # bundle or system trust), never `ssl._create_unverified_context`.
+        # bundle or system trust; never bypass certificate verification.
         # The installer script is downloaded from the same server as the
         # heartbeat, and a MITM that can rewrite the heartbeat can also
         # rewrite the installer.
@@ -4977,8 +5521,29 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
             kw['context'] = ctx_ssl
         with urllib.request.urlopen(installer_url, **kw) as r:
             data = r.read()
+        signature_url = server + '/install/player-client.sh.sig'
+        with urllib.request.urlopen(signature_url, **kw) as r:
+            signature = r.read()
+        public_key = Path(
+            os.environ.get('SCREENTRA_CAST_UPDATE_PUBLIC_KEY_PATH')
+            or '/etc/screentra-cast/client-update-signing.pub'
+        )
+        if not public_key.is_file():
+            return False, f'client update refused: pinned signing key is missing at {public_key}', details
         tmp_path.write_bytes(data)
         tmp_path.chmod(0o755)
+        signature_path.write_bytes(signature)
+        verify = subprocess.run(
+            [
+                'openssl', 'pkeyutl', '-verify', '-rawin', '-pubin',
+                '-inkey', str(public_key), '-sigfile', str(signature_path),
+                '-in', str(tmp_path),
+            ],
+            capture_output=True, text=True, timeout=20,
+        )
+        details['signature_verified'] = verify.returncode == 0
+        if verify.returncode != 0:
+            return False, 'client update refused: installer signature verification failed', details
         p = subprocess.run(['/bin/bash', str(tmp_path)], env=env, capture_output=True, text=True, timeout=int(payload.get('timeout_seconds') or 180))
         out = (p.stdout or '').strip()
         err = (p.stderr or '').strip()
@@ -4994,6 +5559,10 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
     finally:
         try:
             tmp_path.unlink()
+        except Exception:
+            pass
+        try:
+            signature_path.unlink()
         except Exception:
             pass
 
@@ -5015,32 +5584,69 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
     if action == 'restart_renderer':
         if has_user:
             ok, msg = systemctl_user('restart', unit('screentra-client-renderer'))
-        else:
-            ok, msg = False, 'systemctl --user unavailable'
-        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
+            if ok:
+                return {'action': action, 'display_index': display_index, 'ok': True, 'message': msg, 'started_at': started}
+        ok, msg = restart_system_kiosk()
+        return {'action': action, 'display_index': display_index, 'ok': ok,
+                'message': (f'kiosk service restarted; renderer display {display_index if display_index is not None else 0} refreshed'
+                            if ok else f'renderer restart failed: {msg}'), 'details': {'scope': 'client_kiosk_service', 'systemd_message': msg}, 'started_at': started}
 
     if action == 'restart_kiosk':
         if has_user:
-            ok, msg = systemctl_user('restart', unit('ripley-kiosk-browser'))
-        else:
-            ok, msg = False, 'systemctl --user unavailable'
-        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
+            ok, msg = systemctl_user('restart', unit('screentra-kiosk-browser'))
+            if ok:
+                return {'action': action, 'display_index': display_index, 'ok': True, 'message': msg, 'started_at': started}
+        ok, msg = restart_system_kiosk()
+        return {'action': action, 'display_index': display_index, 'ok': ok,
+                'message': 'kiosk service restarted' if ok else f'kiosk restart failed: {msg}',
+                'details': {'scope': 'client_kiosk_service', 'systemd_message': msg}, 'started_at': started}
 
     # Alias used by the touchscreen selection flow. Forward to the display-scoped
     # kiosk restart unit so the queued action is no longer dropped as unknown.
     if action == 'restart_kiosk_display':
         if has_user:
-            ok, msg = systemctl_user('restart', unit('ripley-kiosk-browser'))
-        else:
-            ok, msg = False, 'systemctl --user unavailable'
-        return {'action': 'restart_kiosk', 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
+            ok, msg = systemctl_user('restart', unit('screentra-kiosk-browser'))
+            if ok:
+                return {'action': 'restart_kiosk', 'display_index': display_index, 'ok': True, 'message': msg, 'started_at': started}
+        ok, msg = restart_system_kiosk()
+        return {'action': 'restart_kiosk', 'display_index': display_index, 'ok': ok,
+                'message': 'kiosk service restarted' if ok else f'kiosk restart failed: {msg}',
+                'details': {'scope': 'client_kiosk_service', 'systemd_message': msg}, 'started_at': started}
 
     if action == 'reload_layout':
+        cache_path = Path(ctx['cache_dir']) / 'client-config.json'
+        try:
+            before_orientation = _read_json_file(cache_path, {}).get('orientation', 'normal')
+        except Exception:
+            before_orientation = 'normal'
         if payload.get('all_displays') or display_index is None:
             ok = fetch_all_display_configs(ctx['server'], ctx['client_id'], Path(ctx['cache_dir']))
-            return {'action': action, 'display_index': display_index, 'all_displays': True, 'ok': ok, 'message': 'all display configs re-fetched' if ok else 'one or more display config fetches failed', 'started_at': started}
+            after_orientation = before_orientation
+            try:
+                after_orientation = _read_json_file(cache_path, {}).get('orientation', 'normal')
+            except Exception:
+                pass
+            restarted = False
+            restart_message = ''
+            if ok and after_orientation != before_orientation:
+                rc, out, err = _run_list(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'])
+                restarted = rc == 0
+                restart_message = out or err
+            return {'action': action, 'display_index': display_index, 'all_displays': True, 'ok': ok and (restarted or after_orientation == before_orientation), 'orientation_changed': after_orientation != before_orientation, 'kiosk_restarted': restarted, 'message': 'all display configs re-fetched' + ('; kiosk restarted for orientation change' if restarted else (': ' + restart_message if restart_message else '')), 'started_at': started}
         ok = fetch_config(ctx['server'], ctx['client_id'], Path(ctx['cache_dir']), display_index=display_index)
-        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': 'config re-fetched' if ok else 'config fetch failed', 'started_at': started}
+        after_orientation = before_orientation
+        try:
+            after_orientation = _read_json_file(cache_path, {}).get('orientation', 'normal')
+        except Exception:
+            pass
+        restarted = False
+        restart_message = ''
+        if ok and after_orientation != before_orientation:
+            restart_index = display_index if display_index is not None else 0
+            rc, out, err = _run_list(['sudo', '-n', 'systemctl', 'restart', f'screentra-cast-kiosk@{restart_index}.service'])
+            restarted = rc == 0
+            restart_message = out or err
+        return {'action': action, 'display_index': display_index, 'ok': ok and (restarted or after_orientation == before_orientation), 'orientation_changed': after_orientation != before_orientation, 'kiosk_restarted': restarted, 'message': 'config re-fetched' + ('; kiosk restarted for orientation change' if restarted else (': ' + restart_message if restart_message else '')), 'started_at': started}
 
     if action == 'refresh_cache':
         if payload.get('all_displays') or display_index is None:
@@ -5085,6 +5691,32 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         ok, msg, details = restart_client()
         return {'action': action, 'ok': ok, 'message': msg, 'details': details, 'started_at': started}
 
+    # ── Display control (DDC/CI + CEC) ────────────────────────────────────────
+    if action == 'ddc_set':
+        # payload: { "vcp": "10", "value": 50 }  brightness
+        # or { "vcp": "D6", "value": 1 }          power on
+        # optional: { "bus": "1" }                specific display bus
+        # optional: { "has_layout": true }        retry detect if display not found
+        vcp = payload.get('vcp', '')
+        value = payload.get('value', 0)
+        bus = payload.get('bus')
+        has_layout = payload.get('has_layout', False)
+        ok, msg = apply_ddc_control(str(vcp), int(value), bus=bus, has_layout=has_layout)
+        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
+
+    if action == 'cec_send':
+        # payload: { "cmd": "pow 0" }   power on OSD addr 0
+        # or { "cmd": "is 1" }          input HDMI-2
+        cmd = payload.get('cmd', '')
+        ok, msg = apply_cec_command(cmd)
+        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
+
+    if action == 'ir_send':
+        # IR control — stub; hardware integration for later
+        return {'action': action, 'display_index': display_index, 'ok': False,
+                'message': 'IR control not yet implemented. Set method to DDC or CEC.',
+                'started_at': started}
+
     return {'action': action, 'display_index': display_index, 'ok': False, 'message': f'unknown action: {action}', 'started_at': started}
 
 
@@ -5101,6 +5733,10 @@ def main() -> int:
 
     if not args.pending_file:
         ap.error('--pending-file (or RIPLEY_PENDING_FILE) is required')
+    try:
+        args.server = _server_origin(args.server)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     pending_path = Path(args.pending_file)
     result_path = Path(args.result_file) if args.result_file else pending_path.with_name('command-result.json')
@@ -5116,10 +5752,12 @@ def main() -> int:
         if not pending_path.exists():
             return False
         try:
-            spec = json.loads(pending_path.read_text())
+            if pending_path.stat().st_size > MAX_PENDING_BYTES:
+                raise ValueError(f'pending command exceeds {MAX_PENDING_BYTES} bytes')
+            spec = json.loads(pending_path.read_text(encoding='utf-8'))
         except Exception as e:
             result = {'action': 'unknown', 'ok': False, 'message': f'bad pending file: {e}', 'started_at': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z'}
-            result_path.write_text(json.dumps(result, indent=2))
+            _atomic_write_text(result_path, json.dumps(result, indent=2))
             try: pending_path.unlink()
             except Exception: pass
             return True
@@ -5128,7 +5766,7 @@ def main() -> int:
         result['finished_at'] = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z'
         result['client_id'] = ctx['client_id'] or None
         result['requested_at'] = spec.get('requested_at')
-        result_path.write_text(json.dumps(result, indent=2))
+        _atomic_write_text(result_path, json.dumps(result, indent=2))
         try: pending_path.unlink()
         except Exception: pass
         print(f'actor: {action} -> ok={result["ok"]} {result["message"]}', flush=True)
@@ -5223,91 +5861,184 @@ chmod +x "$STATUS"
 
 cat > "$KIOSK_LAUNCHER" <<'SH_KIOSK'
 #!/bin/bash
-# screentra-kiosk.sh — Minimal Screentra Cast kiosk launcher
-# systemd service (User=root) runs sway+chromium directly.
-# Renderer and sway run as 'board' user via sudo.
+# screentra-kiosk.sh — Sway compositor plus one cached renderer/browser per display.
+# The compositor is shared because one DRM device cannot be owned by multiple
+# Sway instances. Each physical output gets its own local renderer and browser.
 set -euo pipefail
 
-LOG="${LOG:-/home/board/screentra-kiosk.log}"
-echo "[$(date)] screentra-kiosk.sh starting (PID=$$)" >> "$LOG"
-
-# ── Config ──────────────────────────────────────────────────────────────────
+KIOSK_RUNTIME_DIR="/run/screentra-cast"
+install -d -o root -g root -m 0755 "$KIOSK_RUNTIME_DIR"
+LOG="${LOG:-$KIOSK_RUNTIME_DIR/kiosk.log}"
 BOARD_USER="${SCREENTRA_BOARD_USER:-board}"
-BOARD_HOME=$(getent passwd "$BOARD_USER" | cut -d: -f6)
+BOARD_HOME="$(getent passwd "$BOARD_USER" | cut -d: -f6)"
 : "${BOARD_HOME:=/home/$BOARD_USER}"
-BOARD_UID=$(id -u "$BOARD_USER" 2>/dev/null || echo 1001)
-# Try /run/user/<uid> first (systemd-style), fall back to /run/<user> if immutable
+BOARD_UID="$(id -u "$BOARD_USER" 2>/dev/null || echo 1001)"
 if [ -d "/run/user/${BOARD_UID}" ] && ! chattr -i "/run/user/${BOARD_UID}" 2>/dev/null; then
     XDG_RUNTIME_DIR="/run/user/${BOARD_UID}"
 else
     XDG_RUNTIME_DIR="/run/${BOARD_USER}"
 fi
-RENDERER_PORT="${SCREENTRA_RENDER_BASE_PORT:-3900}"
-URL="${SCREENTRA_RENDERER_URL:-http://127.0.0.1:${RENDERER_PORT}/}"
+BASE_PORT="${SCREENTRA_RENDER_BASE_PORT:-3900}"
+CACHE_DIR="$BOARD_HOME/.local/share/screentra-client/cache"
+CLIENT_DIR="$BOARD_HOME/.local/share/screentra-client"
+CONFIG_JSON="$CLIENT_DIR/config.json"
+SWAY_CONFIG_DIR="$KIOSK_RUNTIME_DIR"
+SWAY_CONFIG="$SWAY_CONFIG_DIR/sway.conf"
 
-echo "[$(date)] Running as root, board=$BOARD_USER home=$BOARD_HOME" >> "$LOG"
-echo "[$(date)] INSTALL_DIR=$BOARD_HOME/.local/share/screentra-client PORT=$RENDERER_PORT" >> "$LOG"
+log() { echo "[$(date)] $*" >> "$LOG"; }
+log "screentra-kiosk.sh starting (PID=$$)"
+log "Running as root, board=$BOARD_USER home=$BOARD_HOME"
 
-# ── Prepare runtime dir ───────────────────────────────────────────────────────
-mkdir -p "$XDG_RUNTIME_DIR"
-chown "$BOARD_USER:$BOARD_USER" "$XDG_RUNTIME_DIR"
+mkdir -p "$XDG_RUNTIME_DIR" "$CACHE_DIR"
+chown "$BOARD_USER:$BOARD_USER" "$XDG_RUNTIME_DIR" "$CACHE_DIR"
 chmod 0700 "$XDG_RUNTIME_DIR"
 
-# ── Kill stale processes ─────────────────────────────────────────────────────
+# Kill stale children from an earlier compositor/browser stack.
 for prog in sway chromium swaybg; do
     pkill -9 -u "$BOARD_USER" "$prog" 2>/dev/null || true
 done
 sleep 1
+# Chromium profiles are runtime state on the board tmpfs. Repeated kiosk
+# restarts must not leave timestamped profiles behind until the tmpfs is full.
+for profile in "$XDG_RUNTIME_DIR"/chromium-*; do
+    [ -e "$profile" ] || continue
+    rm -rf -- "$profile"
+done
 
-# ── Sway config ──────────────────────────────────────────────────────────────
-SWAY_CONFIG_DIR="$BOARD_HOME/.config/sway"
-mkdir -p "$SWAY_CONFIG_DIR"
+# Refresh connector names and modes before building the Sway output rules.
+# AMD/DisplayPort hotplug can change DP-2 into DP-1 (or vice versa); using the
+# stale mapping makes the browser show "No valid display found".
+DISPLAY_GOVERNANCE="$CLIENT_DIR/screentra-display-governance.py"
+if [ -f "$DISPLAY_GOVERNANCE" ]; then
+    log "Refreshing DRM display mapping..."
+    if ! sudo -u "$BOARD_USER" env HOME="$BOARD_HOME" python3 "$DISPLAY_GOVERNANCE" \
+        --config-dir "$CLIENT_DIR" >> "$LOG" 2>&1; then
+        log "WARNING: display mapping refresh failed; retaining prior mapping"
+    fi
+fi
 
-cat > "$SWAY_CONFIG_DIR/config" << 'SWAYCFG'
-seat * {
-    hide_cursor 3000
+# Produce index|connector|port rows for active connected displays. The local
+# admin display-count cap is respected; a missing cap means all connected
+# outputs. During boot, DRM connectors can take several seconds to appear, so
+# retry governance/config reads before refusing to start without a physical display.
+read_display_spec() {
+    python3 - "$CONFIG_JSON" "$BASE_PORT" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+base = int(sys.argv[2])
+try:
+    cfg = json.loads(path.read_text()) if path.exists() else {}
+except Exception:
+    cfg = {}
+displays = [d for d in (cfg.get('last_detected_displays') or [])
+            if d.get('connected') and d.get('enabled', True) and d.get('connector')]
+displays.sort(key=lambda d: int(d.get('display_index', 0)))
+override = cfg.get('max_displays')
+try:
+    cap = max(1, int(override)) if override is not None else len(displays)
+except (TypeError, ValueError):
+    cap = len(displays)
+for d in displays[:cap]:
+    idx = int(d.get('display_index', 0))
+    connector = str(d['connector'])
+    print(f'{idx}|{connector}|{base + idx}')
+PY
 }
-output "Virtual-1" {
-    mode 1280x800
-    background solid 1a1a2e fill
+
+DISPLAY_SPEC=""
+for attempt in $(seq 1 20); do
+    DISPLAY_SPEC="$(read_display_spec)"
+    if [ -n "$DISPLAY_SPEC" ]; then
+        break
+    fi
+    if [ "$attempt" -lt 20 ]; then
+        log "Waiting for physical DRM outputs (attempt $attempt/20)..."
+        sleep 1
+    fi
+done
+if [ -z "$DISPLAY_SPEC" ]; then
+    log "ERROR: no active display mapping; refusing to start an empty compositor"
+    exit 1
+fi
+log "Active displays: $(printf '%s' "$DISPLAY_SPEC" | tr '\n' ' ')"
+
+SWAY_TRANSFORM="normal"
+ORIENTATION_FILE="$CACHE_DIR/client-config.json"
+if [ -f "$ORIENTATION_FILE" ]; then
+    ORIENTATION_VALUE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("orientation","normal"))' "$ORIENTATION_FILE" 2>/dev/null || echo normal)"
+    case "$ORIENTATION_VALUE" in
+        normal) SWAY_TRANSFORM="normal" ;;
+        flipped) SWAY_TRANSFORM="180" ;;
+        rotated_left) SWAY_TRANSFORM="270" ;;
+        rotated_right) SWAY_TRANSFORM="90" ;;
+    esac
+fi
+
+SWAY_CONFIG_TMP="$(mktemp "$SWAY_CONFIG_DIR/.sway-config.XXXXXX")"
+trap 'rm -f -- "$SWAY_CONFIG_TMP"' EXIT INT TERM
+{
+    printf 'seat * {\n    hide_cursor 3000\n}\n'
+    printf 'output * {\n    transform %s\n}\n' "$SWAY_TRANSFORM"
+    while IFS='|' read -r idx connector port; do
+        [ -n "$idx" ] || continue
+        printf 'for_window [app_id="screentra-cast-display-%s"] move container to output %s\n' "$idx" "$connector"
+        printf 'for_window [title="^Screentra Cast Display %s"] move container to output %s\n' "$idx" "$connector"
+        printf 'for_window [app_id="screentra-cast-display-%s"] fullscreen enable\n' "$idx"
+        printf 'for_window [app_id="screentra-cast-display-%s"] border none\n' "$idx"
+        printf 'for_window [title="^Screentra Cast Display %s"] fullscreen enable\n' "$idx"
+        printf 'for_window [title="^Screentra Cast Display %s"] border none\n' "$idx"
+    done <<< "$DISPLAY_SPEC"
+    if [ -n "${SCREENTRA_OUTPUT_MODE:-}" ]; then
+        printf 'output * {\n    mode %s\n}\n' "$SCREENTRA_OUTPUT_MODE"
+    fi
+} > "$SWAY_CONFIG_TMP"
+install -o root -g "$BOARD_USER" -m 0640 "$SWAY_CONFIG_TMP" "$SWAY_CONFIG"
+rm -f -- "$SWAY_CONFIG_TMP"
+SWAY_CONFIG_TMP=""
+log "Sway config written"
+
+RENDERER_PIDS=()
+BROWSER_PIDS=()
+SWAY_PID=""
+cleanup() {
+    trap - EXIT INT TERM
+    for pid in "${BROWSER_PIDS[@]}" "${SWAY_PID}" "${RENDERER_PIDS[@]}"; do
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    done
 }
-SWAYCFG
-chown -R "$BOARD_USER:$BOARD_USER" "$SWAY_CONFIG_DIR"
-echo "[$(date)] Sway config written" >> "$LOG"
+trap cleanup EXIT INT TERM
 
-# ── Cache dir ────────────────────────────────────────────────────────────────
-CACHE_DIR="$BOARD_HOME/.local/share/screentra-client/cache"
-mkdir -p "$CACHE_DIR"
-chown -R "$BOARD_USER:$BOARD_USER" "$CACHE_DIR"
+# Start one renderer per display. RIPLEY_DISPLAY_INDEX is what the renderer
+# uses for its display cache, assignment, connector, and port.
+while IFS='|' read -r idx connector port; do
+    [ -n "$idx" ] || continue
+    log "Starting renderer display $idx ($connector) on :$port..."
+    sudo -u "$BOARD_USER" env \
+        XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" HOME="$BOARD_HOME" \
+        RIPLEY_DISPLAY_INDEX="$idx" RIPLEY_RENDER_PORT="$port" \
+        RIPLEY_RENDER_BASE_PORT="$BASE_PORT" \
+        python3 "$CLIENT_DIR/screentra-client-renderer.py" \
+        --host 127.0.0.1 --port "$port" --cache-dir "$CACHE_DIR" \
+        >> "$LOG" 2>&1 &
+    RENDERER_PIDS+=("$!")
+done <<< "$DISPLAY_SPEC"
 
-# ── Renderer (as board) ─────────────────────────────────────────────────────
-echo "[$(date)] Starting renderer on :$RENDERER_PORT..." >> "$LOG"
+# Sway must be the sole DRM owner. AMD APUs use GLES2 for reliable scan-out;
+# callers can override this with WLR_RENDERER if a different GPU needs it.
+log "Starting sway..."
 sudo -u "$BOARD_USER" env \
-    XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-    HOME="$BOARD_HOME" \
-    python3 "$BOARD_HOME/.local/share/screentra-client/screentra-client-renderer.py" \
-    --host 0.0.0.0 --port "$RENDERER_PORT" \
-    --cache-dir "$CACHE_DIR" \
-    >> "$LOG" 2>&1 &
-RENDERER_PID=$!
-echo "[$(date)] Renderer PID=$RENDERER_PID" >> "$LOG"
-
-# ── Sway compositor (as board) ─────────────────────────────────────────────
-# NO WAYLAND_DISPLAY — sway must run as the compositor, not a client.
-echo "[$(date)] Starting sway..." >> "$LOG"
-sudo -u "$BOARD_USER" env \
-    HOME="$BOARD_HOME" \
-    PATH="$PATH" \
-    XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+    HOME="$BOARD_HOME" PATH="$PATH" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
     env -u WAYLAND_DISPLAY \
-    WLR_RENDERER="${WLR_RENDERER:-pixman}" \
-    sway -d -c "$SWAY_CONFIG_DIR/config" \
+    WLR_BACKENDS="${WLR_BACKENDS:-drm}" \
+    WLR_RENDERER="${WLR_RENDERER:-gles2}" \
+    sway -d -c "$SWAY_CONFIG" \
     >> "$LOG" 2>&1 &
 SWAY_PID=$!
-echo "[$(date)] Sway PID=$SWAY_PID" >> "$LOG"
+log "Sway PID=$SWAY_PID"
 
-# ── Wait for wayland socket ────────────────────────────────────────────────
-echo "[$(date)] Waiting for wayland socket in $XDG_RUNTIME_DIR..." >> "$LOG"
+# Wait for the compositor socket selected by Sway; never hardcode wayland-0.
+log "Waiting for Wayland socket in $XDG_RUNTIME_DIR..."
 WAYLAND_DISPLAY_SOCK=""
 for i in $(seq 1 30); do
     for sock in "$XDG_RUNTIME_DIR"/wayland-*; do
@@ -5316,51 +6047,102 @@ for i in $(seq 1 30); do
     sleep 0.5
 done
 if [ -z "$WAYLAND_DISPLAY_SOCK" ]; then
-    echo "[$(date)] ERROR: no wayland socket found" >> "$LOG"
+    log "ERROR: no Wayland socket found"
     exit 1
 fi
-WAYLAND_DISPLAY=$(basename "$WAYLAND_DISPLAY_SOCK")
-echo "[$(date)] Wayland socket: $WAYLAND_DISPLAY" >> "$LOG"
+WAYLAND_DISPLAY="$(basename "$WAYLAND_DISPLAY_SOCK")"
+log "Wayland socket: $WAYLAND_DISPLAY"
 
-# ── Wait for renderer ──────────────────────────────────────────────────────
-echo "[$(date)] Waiting for renderer..." >> "$LOG"
-for i in $(seq 1 20); do
-    curl -s "http://127.0.0.1:${RENDERER_PORT}/" | grep -q . && break
-    sleep 0.5
-done
+# Start one fullscreen Chromium window per display. Each window has a unique
+# app_id so Sway can place it on the matching physical connector.
+while IFS='|' read -r idx connector port; do
+    [ -n "$idx" ] || continue
+    LIVE_READY=0
+    for i in $(seq 1 40); do
+        if curl -fsS --max-time 2 "http://127.0.0.1:${port}/" | \
+            python3 -c 'import sys; raise SystemExit(0 if "Screentra Cast Live Player" in sys.stdin.read() else 1)'; then
+            LIVE_READY=1
+            break
+        fi
+        sleep 0.5
+    done
+    BROWSER_URL="http://127.0.0.1:${port}/"
+    if [ "$LIVE_READY" -eq 1 ]; then
+        SERVER_URL="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text().strip())' "$CLIENT_DIR/server" 2>/dev/null || true)"
+        CLIENT_ID="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text().strip())' "$CLIENT_DIR/client-id" 2>/dev/null || true)"
+        if [ -n "$SERVER_URL" ] && [ -n "$CLIENT_ID" ]; then
+            BROWSER_URL="${SERVER_URL%/}/player.html?display=${connector}&client_id=${CLIENT_ID}"
+        fi
+    fi
+    CHROMIUM_USER_DATA="${XDG_RUNTIME_DIR}/chromium-display-${idx}"
+    mkdir -p "$CHROMIUM_USER_DATA"
+    chown "$BOARD_USER:$BOARD_USER" "$CHROMIUM_USER_DATA"
+    chmod 700 "$CHROMIUM_USER_DATA"
+    log "Starting Chromium display $idx on $connector (port $port, url $BROWSER_URL)..."
+    sudo -u "$BOARD_USER" env \
+        HOME="$BOARD_HOME" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+        WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
+        chromium \
+        --class="screentra-cast-display-${idx}" \
+        --no-sandbox --ozone-platform=wayland --hide-cursor --ash-hide-cursor \
+        --app="$BROWSER_URL" --kiosk --start-fullscreen \
+        --no-first-run --disable-infobars --disable-session-crashed-bubble \
+        --enable-logging=stderr --v=0 --disable-features=TranslateUI \
+        --autoplay-policy=no-user-gesture-required --check-for-update-interval=31536000 \
+        --disable-dev-shm-usage --disable-crash-reporter --disable-breakpad \
+        --user-data-dir="$CHROMIUM_USER_DATA" \
+        >> "$LOG" 2>&1 &
+    BROWSER_WRAPPER_PID="$!"
+    BROWSER_PIDS+=("$BROWSER_WRAPPER_PID")
 
-# ── Chromium (as root, with swiftshader) ──────────────────────────────────
-RENDER_TIMESTAMP=$(date +%s)
-CHROMIUM_USER_DATA="${XDG_RUNTIME_DIR}/chromium-${RENDER_TIMESTAMP}"
-mkdir -p "$CHROMIUM_USER_DATA"
+    # Chromium app-mode uses a shared Wayland app_id, so app_id-based Sway
+    # rules cannot distinguish the two windows. Route the concrete Chromium
+    # PID after creation; this keeps DP-1 and HDMI-A-1 independent and makes
+    # fullscreen deterministic on every restart.
+    CHROMIUM_PID=""
+    for i in $(seq 1 20); do
+        CHROMIUM_PID="$( (pgrep -P "$BROWSER_WRAPPER_PID" -f '/usr/lib/chromium/chromium' || true) | python3 -c 'import sys; print(next((x.strip() for x in sys.stdin if x.strip()), ""))' )"
+        [ -n "$CHROMIUM_PID" ] && break
+        sleep 0.25
+    done
+    if [ -n "$CHROMIUM_PID" ]; then
+        ROUTED=0
+        for attempt in $(seq 1 20); do
+            SWAYSOCK_PATH=""
+            for sock in "$XDG_RUNTIME_DIR"/sway-ipc.*.sock; do
+                [ -S "$sock" ] || continue
+                if sudo -u "$BOARD_USER" env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" SWAYSOCK="$sock" \
+                    swaymsg -t get_version >/dev/null 2>&1; then
+                    SWAYSOCK_PATH="$sock"
+                    break
+                fi
+            done
+            if [ -n "$SWAYSOCK_PATH" ]; then
+                if sudo -u "$BOARD_USER" env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" SWAYSOCK="$SWAYSOCK_PATH" \
+                    swaymsg "[pid=$CHROMIUM_PID] move container to output $connector" >/dev/null 2>&1; then
+                    log "Routing Chromium PID $CHROMIUM_PID to $connector"
+                    if ! sudo -u "$BOARD_USER" env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" SWAYSOCK="$SWAYSOCK_PATH" \
+                        swaymsg "[pid=$CHROMIUM_PID] fullscreen enable" >/dev/null 2>&1; then
+                        log "WARNING: failed to fullscreen Chromium PID $CHROMIUM_PID"
+                    fi
+                    sudo -u "$BOARD_USER" env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" SWAYSOCK="$SWAYSOCK_PATH" \
+                        swaymsg "[pid=$CHROMIUM_PID] border none" >/dev/null 2>&1 || true
+                    ROUTED=1
+                    break
+                fi
+            fi
+            sleep 0.25
+        done
+        if [ "$ROUTED" -ne 1 ]; then
+            log "WARNING: timed out routing Chromium PID $CHROMIUM_PID to $connector"
+        fi
+    fi
+done <<< "$DISPLAY_SPEC"
 
-echo "[$(date)] Starting chromium as root..." >> "$LOG"
-exec env \
-    XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-    WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
-    WLR_RENDERER="${WLR_RENDERER:-pixman}" \
-    chromium \
-    --no-sandbox \
-    --ozone-platform=wayland \
-    --hide-cursor \
-    --ash-hide-cursor \
-    --kiosk "$URL" \
-    --no-first-run \
-    --disable-infobars \
-    --disable-session-crashed-bubble \
-    --enable-logging=stderr --v=0 \
-    --disable-features=TranslateUI \
-    --autoplay-policy=no-user-gesture-required \
-    --check-for-update-interval=31536000 \
-    --in-process-gpu \
-    --use-gl=angle \
-    --use-angle=swiftshader \
-    --disable-dev-shm-usage \
-    --disable-crash-reporter \
-    --no-zygote \
-    --user-data-dir="$CHROMIUM_USER_DATA" \
-    >> "$LOG" 2>&1
-
+# If Sway exits, let systemd restart the complete stack. This also cleans up
+# both browser windows and all per-display renderer processes.
+wait "$SWAY_PID"
+exit $?
 
 SH_KIOSK
 chmod +x "$KIOSK_LAUNCHER"
@@ -5394,7 +6176,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$RENDERER --host 0.0.0.0 --cache-dir $INSTALL_DIR/cache
+ExecStart=$RENDERER --host 127.0.0.1 --cache-dir $INSTALL_DIR/cache
 Environment=RIPLEY_DISPLAY_INDEX=%i
 Environment=RIPLEY_RENDER_BASE_PORT=3900
 Environment=RIPLEY_CURSOR_HIDE_SECS=__RIPLEY_CURSOR_HIDE_SECS__
@@ -5417,8 +6199,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$RENDERER --host 0.0.0.0 --port 3910 --cache-dir $INSTALL_DIR/cache
-Environment=RIPLEY_ADMIN_DEFAULT=1
+ExecStart=$RENDERER --host 127.0.0.1 --port 3910 --cache-dir $INSTALL_DIR/cache
+Environment=RIPLEY_ADMIN_MODE=1
 Environment=RIPLEY_DISPLAY_INDEX=0
 Environment=RIPLEY_RENDER_BASE_PORT=3900
 Environment=RIPLEY_CURSOR_HIDE_SECS=3.5
@@ -5553,10 +6335,10 @@ Environment=RIPLEY_CLIENT_DIR=$INSTALL_DIR
 Environment=RIPLEY_SERVER_URL=$SERVER_URL
 Environment=RIPLEY_CLIENT_ID=$CLIENT_ID
 Environment=RIPLEY_RENDER_BASE_PORT=3900
-Environment=RIPLEY_ADMIN_DEFAULT=1
+Environment=RIPLEY_ADMIN_MODE=1
 Environment=RIPLEY_DISPLAY_INDEX=0
 Environment=PYTHONUNBUFFERED=1
-ExecStart=$RENDERER --host 0.0.0.0 --port 3910 --cache-dir $INSTALL_DIR/cache
+ExecStart=$RENDERER --host 127.0.0.1 --port 3910 --cache-dir $INSTALL_DIR/cache
 Restart=always
 RestartSec=2
 
@@ -5587,6 +6369,7 @@ if command -v systemctl >/dev/null 2>&1; then
     command -v bluetoothctl >/dev/null 2>&1 || NEED+=("bluez")
     command -v wpctl >/dev/null 2>&1 || NEED+=("pipewire" "wireplumber" "libspa-0.2-bluetooth")
     command -v wlrctl >/dev/null 2>&1 || NEED+=("wlrctl")
+    command -v grim >/dev/null 2>&1 || NEED+=("grim")
     command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1 || command -v google-chrome >/dev/null 2>&1 || NEED+=("chromium")
     if [ "${#NEED[@]}" -gt 0 ]; then
       echo "Installing missing  kiosk deps: ${NEED[*]}"

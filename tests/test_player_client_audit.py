@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+import importlib.util
+import stat
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 'screentra_player_actor_audit')
+
+
+class PlayerClientAuditTests(unittest.TestCase):
+    def test_actor_requests_root_verified_update_and_rejects_insecure_remote_http(self):
+        self.assertEqual(actor._server_origin('https://managed.example:3000/base/'), 'https://managed.example:3000/base')
+        self.assertEqual(actor._server_origin('http://127.0.0.1:3000'), 'http://127.0.0.1:3000')
+        with self.assertRaises(ValueError):
+            actor._server_origin('http://managed.example:3000')
+        with tempfile.TemporaryDirectory() as temp:
+            ok, message, details = actor.update_client(
+                'https://managed.example:3000',
+                'client-id',
+                Path(temp) / 'cache',
+                {'server_url': 'https://attacker.example', 'dry_run': True},
+            )
+        self.assertTrue(ok)
+        self.assertEqual(details['request_path'], '/var/lib/screentra-cast/update/request')
+        self.assertNotIn('attacker.example', message)
+
+    def test_pending_json_reader_is_bounded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'pending-command.json'
+            path.write_bytes(b'{' + b'a' * actor.MAX_PENDING_BYTES + b'}')
+            self.assertEqual(actor._read_json_file(path, {'safe': True}), {'safe': True})
+
+    def test_installer_and_bundle_surfaces_are_hardened(self):
+        canonical = (ROOT / 'player-client/install/player-client.sh').read_text()
+        generated = (ROOT / 'player-client/static/install/player-client.sh').read_text()
+        for installer in (canonical, generated):
+            self.assertNotIn('_create_unverified_context', installer)
+            self.assertNotIn('RIPLEY_INSECURE_SSL', installer)
+            self.assertNotIn('RIPLEY_ADMIN_DEFAULT', installer)
+            self.assertNotIn('--host 0.0.0.0', installer)
+            self.assertIn('--host 127.0.0.1', installer)
+            self.assertIn('RIPLEY_ADMIN_MODE', installer)
+        deprecated = ROOT / 'static/install/screentra-cast-player-client.sh'
+        mode = deprecated.stat().st_mode
+        self.assertFalse(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+        self.assertNotIn('sudo', deprecated.read_text())
+        bootstrap = (ROOT / 'static/install/player-client-bundle-install.sh').read_text()
+        self.assertIn('MAX_BUNDLE_BYTES', bootstrap)
+        self.assertIn('tarfile.open', bootstrap)
+        self.assertNotIn('extractall', bootstrap)
+        self.assertIn('pkeyutl', bootstrap)
+
+
+if __name__ == '__main__':
+    unittest.main()

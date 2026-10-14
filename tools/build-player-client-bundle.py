@@ -42,9 +42,16 @@ def write_result(output: Path) -> dict[str, object]:
 
 
 def ensure_generated_installer(repo: Path) -> Path:
-    generated = repo / "static/install/player-client.sh"
-    template = repo / "install/player-client.sh"
-    builder = repo / "scripts/build-installer.py"
+    player_root = repo / "player-client"
+    generated = player_root / "static/install/player-client.sh"
+    template = player_root / "install/player-client.sh"
+    builder = player_root / "scripts/build-installer.py"
+    if not template.exists():
+        # Preserve the installed-tree mode used when building from a staged
+        # server directory rather than the source repository.
+        generated = repo / "static/install/player-client.sh"
+        template = repo / "install/player-client.sh"
+        builder = repo / "scripts/build-installer.py"
     if template.exists() and builder.exists():
         # Always regenerate the embedded installer. A stale generated file can
         # otherwise be selected over newer installer source changes.

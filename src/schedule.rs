@@ -120,6 +120,14 @@ async fn apply_repository_schedules_at(
     let active = repository
         .get_active_schedules_full(&current_time, day)
         .await?;
+    if !active.is_empty() {
+        log::info!(
+            "Scheduler active schedules count={} local_time={} day={}",
+            active.len(),
+            current_time,
+            day
+        );
+    }
     let now_rfc = chrono::Utc::now().to_rfc3339();
     for schedule in active {
         let action = if schedule.action.is_empty() {
@@ -679,6 +687,14 @@ mod tests {
         Local.with_ymd_and_hms(2026, 9, 14, 14, 30, 0).unwrap()
     }
 
+    fn monday_late_evening() -> DateTime<Local> {
+        Local.with_ymd_and_hms(2026, 9, 14, 23, 30, 0).unwrap()
+    }
+
+    fn tuesday_early_morning() -> DateTime<Local> {
+        Local.with_ymd_and_hms(2026, 9, 15, 1, 30, 0).unwrap()
+    }
+
     /// Insert a real `layouts` row so the FK from `schedules.layout_id`
     /// is satisfied. Returns the new layout's id.
     fn insert_layout(db: &Database, id: &str) -> String {
@@ -832,7 +848,43 @@ mod tests {
         });
     }
 
-    // ── Layout-set cycling tests ─────────────────────────────────
+    #[test]
+    fn scheduler_applies_overnight_schedule_on_start_and_next_day() {
+        let rt = Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let mut sched = active_schedule("overnight", "TestDisplay", "layout-A");
+            sched.day_of_week = 1 << 1; // Monday start day only
+            sched.start_time = "22:00".to_string();
+            sched.end_time = "02:00".to_string();
+            let (db, _path) = fresh_db();
+            insert_layout(&db, "layout-A");
+            db.create_schedule(&sched).expect("create_schedule");
+
+            apply_active_schedules_at(&db, monday_late_evening())
+                .await
+                .expect("Monday late-evening tick");
+            assert_eq!(
+                db.get_display_assignment("TestDisplay")
+                    .unwrap()
+                    .and_then(|assignment| assignment.layout_id),
+                Some("layout-A".to_string())
+            );
+
+            db.delete_display_assignment("TestDisplay")
+                .expect("clear assignment");
+            apply_active_schedules_at(&db, tuesday_early_morning())
+                .await
+                .expect("Tuesday early-morning tick");
+            assert_eq!(
+                db.get_display_assignment("TestDisplay")
+                    .unwrap()
+                    .and_then(|assignment| assignment.layout_id),
+                Some("layout-A".to_string())
+            );
+        });
+    }
+
+    // ── Layout-set cycling tests ───────────────────────────────────
 
     fn make_set_with_items(
         id: &str,

@@ -2,6 +2,11 @@
 use crate::db::{Database, UserRecord};
 use crate::postgres::PostgresStore;
 use crate::rate_limit::{Decision, RateLimiter, POLICY_AUTH_LOGIN};
+use argon2::{
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
+use rand_core::OsRng;
 use axum::{
     extract::{Extension, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
@@ -14,8 +19,8 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashSet, HashMap},
-    sync::{Arc, Mutex, RwLock},
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex, OnceLock, RwLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use subtle::ConstantTimeEq;
@@ -309,8 +314,14 @@ impl AuthState {
                 .as_deref(),
             Some("1") | Some("true") | Some("yes")
         );
-        let hash_set = std::env::var("SIGNAGE_ADMIN_PASSWORD_HASH").is_ok();
-        let pw_set = std::env::var("SIGNAGE_ADMIN_PASSWORD").is_ok();
+        let configured_hash = std::env::var("SIGNAGE_ADMIN_PASSWORD_HASH")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let configured_password = std::env::var("SIGNAGE_ADMIN_PASSWORD")
+            .ok()
+            .filter(|value| !value.is_empty());
+        let hash_set = configured_hash.is_some();
+        let pw_set = configured_password.is_some();
         if !hash_set && !pw_set && !allow_default {
             eprintln!(
                 "FATAL: no admin password configured. Set SIGNAGE_ADMIN_PASSWORD or \
@@ -319,8 +330,8 @@ impl AuthState {
             );
             std::process::exit(2);
         }
-        let raw = std::env::var("SIGNAGE_ADMIN_PASSWORD").unwrap_or_else(|_| "admin".to_string());
-        let key_input = std::env::var("SIGNAGE_ADMIN_PASSWORD_HASH").unwrap_or_else(|_| {
+        let raw = configured_password.unwrap_or_else(|| "admin".to_string());
+        let key_input = configured_hash.unwrap_or_else(|| {
             let mut h = Sha256::new();
             h.update(raw.as_bytes());
             format!("{:x}", h.finalize())
@@ -567,15 +578,22 @@ struct DbLoginUser {
 }
 
 pub fn hash_password(password: &str) -> String {
-    let salt = uuid::Uuid::new_v4().to_string();
-    let mut h = Sha256::new();
-    h.update(salt.as_bytes());
-    h.update(b":");
-    h.update(password.as_bytes());
-    format!("sha256:{}:{:x}", salt, h.finalize())
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .expect("Argon2 password hashing failed")
+        .to_string()
 }
 
 pub fn verify_password(password: &str, stored: &str) -> bool {
+    if let Ok(parsed) = PasswordHash::new(stored) {
+        return Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok();
+    }
+
+    // Legacy records used sha256:<salt>:<hex digest>. Keep accepting this
+    // format so existing accounts can migrate without a forced reset.
     let Some(rest) = stored.strip_prefix("sha256:") else {
         return false;
     };
@@ -588,6 +606,10 @@ pub fn verify_password(password: &str, stored: &str) -> bool {
     h.update(password.as_bytes());
     let got = format!("{:x}", h.finalize());
     got.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() == 1
+}
+
+fn password_hash_needs_upgrade(stored: &str) -> bool {
+    !stored.starts_with("$argon2id$")
 }
 
 async fn authenticate_db_user(
@@ -608,6 +630,15 @@ async fn authenticate_db_user(
         return None;
     }
     let now = chrono::Utc::now().to_rfc3339();
+    if password_hash_needs_upgrade(&row.2) {
+        let upgraded = hash_password(password);
+        if let Err(error) = repository
+            .update_user_password(&row.0, &upgraded, &now)
+            .await
+        {
+            log::warn!("auth: legacy password hash upgrade failed for {}: {}", row.0, error);
+        }
+    }
     let _ = repository.record_user_login(&row.0, &now).await;
     Some(DbLoginUser {
         username: row.0,
@@ -733,31 +764,52 @@ fn clear_session_cookie_value(headers: &HeaderMap) -> Option<&'static str> {
     }
 }
 
-fn state_key() -> Vec<u8> {
-    std::env::var("SIGNAGE_AUTH_SECRET")
-        .expect("SIGNAGE_AUTH_SECRET must be set before Google OAuth state signing is used")
-        .into_bytes()
+fn state_key() -> Option<Vec<u8>> {
+    let key = std::env::var("SIGNAGE_AUTH_SECRET").ok()?.into_bytes();
+    (key.len() >= 32).then_some(key)
 }
-fn sign_google_state(mode: &str, username: Option<&str>) -> String {
+fn oauth_state_store() -> &'static Mutex<HashMap<String, u64>> {
+    static STORE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+fn sign_google_state(mode: &str, username: Option<&str>) -> Option<String> {
     let nonce = uuid::Uuid::new_v4().to_string();
-    let body = serde_json::json!({"mode":mode,"username":username.unwrap_or(""),"nonce":nonce})
+    let issued_at = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let body = serde_json::json!({"mode":mode,"username":username.unwrap_or(""),"nonce":nonce,"iat":issued_at})
         .to_string();
     let body64 = URL_SAFE_NO_PAD.encode(body.as_bytes());
-    let mut mac = HmacSha256::new_from_slice(&state_key()).expect("HMAC accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(&state_key()?).ok()?;
     mac.update(body64.as_bytes());
     let sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
-    format!("{}.{}", body64, sig)
+    let mut store = oauth_state_store().lock().ok()?;
+    store.retain(|_, timestamp| issued_at.saturating_sub(*timestamp) <= 900);
+    if store.len() >= 4096 {
+        store.clear();
+    }
+    store.insert(nonce, issued_at);
+    Some(format!("{}.{}", body64, sig))
 }
 fn verify_google_state(state: &str) -> Option<serde_json::Value> {
     let (body64, sig) = state.rsplit_once('.')?;
-    let mut mac = HmacSha256::new_from_slice(&state_key()).ok()?;
+    let mut mac = HmacSha256::new_from_slice(&state_key()?).ok()?;
     mac.update(body64.as_bytes());
     let expected = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
     if expected.as_bytes().ct_eq(sig.as_bytes()).unwrap_u8() != 1 {
         return None;
     }
     let body = URL_SAFE_NO_PAD.decode(body64.as_bytes()).ok()?;
-    serde_json::from_slice(&body).ok()
+    let value: serde_json::Value = serde_json::from_slice(&body).ok()?;
+    let issued_at = value.get("iat")?.as_u64()?;
+    let nonce = value.get("nonce")?.as_str()?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    if now.saturating_sub(issued_at) > 600 {
+        return None;
+    }
+    let mut store = oauth_state_store().lock().ok()?;
+    if store.remove(nonce).is_none() {
+        return None;
+    }
+    Some(value)
 }
 
 fn google_auth_url(
@@ -776,14 +828,20 @@ fn google_auth_url(
         ));
     }
     let mut url = Url::parse("https://accounts.google.com/o/oauth2/v2/auth")
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
     url.query_pairs_mut()
         .append_pair("client_id", &client_id)
         .append_pair("redirect_uri", &google_redirect_uri(headers))
         .append_pair("response_type", "code")
         .append_pair("scope", "openid email profile")
         .append_pair("prompt", "select_account")
-        .append_pair("state", &sign_google_state(mode, username));
+        .append_pair(
+            "state",
+            &sign_google_state(mode, username).ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "OAuth state signing is not configured".to_string(),
+            ))?,
+        );
     Ok(url.to_string())
 }
 
@@ -1281,7 +1339,7 @@ pub async fn account_status(
         .repository
         .get_user_account(&username)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
     Ok(Json(serde_json::json!({
         "username": user.0,
@@ -1319,7 +1377,7 @@ pub async fn change_password(
         .repository
         .get_active_password_hash(&username)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
     if !verify_password(&body.current_password, &stored) {
         return Err((
@@ -1333,7 +1391,7 @@ pub async fn change_password(
         .repository
         .update_user_password(&username, &hash, &now)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
     Ok(Json(serde_json::json!({"ok":true})))
 }
 
@@ -1380,7 +1438,7 @@ pub async fn google_unbind(
         .repository
         .clear_google_binding(&username, &chrono::Utc::now().to_rfc3339())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
     Ok(Json(serde_json::json!({"ok":true})))
 }
 
@@ -1416,6 +1474,12 @@ pub async fn google_callback(
         return fail("bad_state");
     };
     let mode = st.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+    if mode == "bind" {
+        let expected = st.get("username").and_then(|v| v.as_str()).unwrap_or("");
+        if expected.is_empty() || current_username(&state.auth, &headers).await.as_deref() != Some(expected) {
+            return fail("bind_session_mismatch");
+        }
+    }
     let client_id = match google_client_id() {
         Some(v) => v,
         None => return fail("google_not_configured"),
@@ -1716,6 +1780,34 @@ mod tests {
         let headers = HeaderMap::new();
         assert_eq!(client_ip(&headers), "unknown");
         std::env::remove_var("SIGNAGE_TRUSTED_PROXY");
+    }
+
+    #[test]
+    fn password_hashes_use_argon2id_and_verify() {
+        let hash = hash_password("correct horse battery staple");
+        assert!(hash.starts_with("$argon2id$"));
+        assert!(verify_password("correct horse battery staple", &hash));
+        assert!(!verify_password("wrong password", &hash));
+        assert!(!password_hash_needs_upgrade(&hash));
+    }
+
+    #[test]
+    fn legacy_sha256_password_hashes_still_verify_and_need_upgrade() {
+        let salt = "legacy-test-salt";
+        let mut hasher = Sha256::new();
+        hasher.update(salt.as_bytes());
+        hasher.update(b":");
+        hasher.update(b"legacy-password");
+        let legacy = format!("sha256:{salt}:{:x}", hasher.finalize());
+        assert!(verify_password("legacy-password", &legacy));
+        assert!(!verify_password("wrong password", &legacy));
+        assert!(password_hash_needs_upgrade(&legacy));
+    }
+
+    #[test]
+    fn malformed_password_hashes_fail_closed() {
+        assert!(!verify_password("password", "sha256:not-a-valid-record"));
+        assert!(!verify_password("password", "not-a-password-hash"));
     }
 
     #[test]

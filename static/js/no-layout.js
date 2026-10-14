@@ -36,16 +36,28 @@
         else { pill.textContent='OFFLINE'; pill.className='pill err'; }
 
         const tl = $('touchline');
+        tl.textContent = '';
+        const touchLabel = document.createElement('strong');
+        const touchPath = document.createElement('span');
+        const cfgLink = document.createElement('a');
+        cfgLink.id = 'cfgLink';
+        cfgLink.href = '#';
+        cfgLink.textContent = 'configure';
+        cfgLink.style.cssText = 'color:var(--accent)';
         if (s.touch_device) {
-          tl.innerHTML = 'Touchscreen <strong>'+ s.touch_device +'</strong>' +
-                         (s.touch_path ? ' <span style="color:var(--muted)">('+ s.touch_path +')</span>' : '') +
-                         ' · <a style="color:var(--accent)" id="cfgLink" href="#">configure</a>';
-          $('cfgLink').addEventListener('click', openModal);
+          tl.append('Touchscreen ', touchLabel);
+          touchLabel.textContent = s.touch_device;
+          if (s.touch_path) {
+            touchPath.textContent = ' (' + s.touch_path + ')';
+            touchPath.style.cssText = 'color:var(--muted)';
+            tl.append(touchPath);
+          }
         } else {
-          tl.innerHTML = 'Touchscreen <strong>not detected</strong> · ' +
-                         '<a style="color:var(--accent)" id="cfgLink" href="#">configure</a>';
-          $('cfgLink').addEventListener('click', openModal);
+          tl.append('Touchscreen ', touchLabel);
+          touchLabel.textContent = 'not detected';
         }
+        tl.append(' · ', cfgLink);
+        cfgLink.addEventListener('click', openModal);
 
         $('foot').textContent = 'Screentra Cast · build ' + (s.build || '?') +
                                 ' · display ' + (s.display_index != null ? s.display_index : '?') +
@@ -71,17 +83,28 @@
         currentDevices = data.devices || [];
         selectedPath = data.selected || null;
         if (currentDevices.length === 0) {
-          list.innerHTML = '<div class="sub">No input devices detected. Try Rescan.</div>';
+          list.textContent = 'No input devices detected. Try Rescan.';
           return;
         }
         list.innerHTML = '';
         for (const d of currentDevices) {
           const el = document.createElement('div');
           el.className = 'device' + ((selectedPath && d.path === selectedPath) ? ' selected' : (d.recommended ? ' selected' : ''));
-          el.innerHTML = '<div><div class="name">' + d.name + '</div>' +
-                         '<div class="path">' + d.path + (d.type ? ' · ' + d.type : '') + '</div></div>' +
-                         '<div class="pick"><span class="pill ' + (d.recommended ? 'ok' : '') + '">' +
-                         (d.recommended ? 'RECOMMENDED' : 'USE') + '</span></div>';
+          const info = document.createElement('div');
+          const name = document.createElement('div');
+          name.className = 'name';
+          name.textContent = d.name || '';
+          const path = document.createElement('div');
+          path.className = 'path';
+          path.textContent = (d.path || '') + (d.type ? ' · ' + d.type : '');
+          info.append(name, path);
+          const pick = document.createElement('div');
+          pick.className = 'pick';
+          const pill = document.createElement('span');
+          pill.className = 'pill' + (d.recommended ? ' ok' : '');
+          pill.textContent = d.recommended ? 'RECOMMENDED' : 'USE';
+          pick.appendChild(pill);
+          el.append(info, pick);
           el.addEventListener('click', () => {
             selectedPath = d.path;
             for (const c of list.children) c.classList.remove('selected');
@@ -91,7 +114,7 @@
           if (d.recommended && !selectedPath) selectedPath = d.path;
         }
       } catch (e) {
-        list.innerHTML = '<div class="sub">Detection failed: ' + e + '</div>';
+        list.textContent = 'Detection failed: ' + (e && e.message ? e.message : String(e));
       }
     }
 

@@ -1,0 +1,30 @@
+-- Idempotent compatibility migration for databases created before the
+-- consolidated PostgreSQL schema. Every statement is safe to re-run.
+ALTER TABLE layouts ADD COLUMN IF NOT EXISTS snap_grid text;
+ALTER TABLE templates ADD COLUMN IF NOT EXISTS layout_set_id text;
+ALTER TABLE layout_sets ADD COLUMN IF NOT EXISTS dwell_secs integer NOT NULL DEFAULT 30;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS layout_set_id text;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS action text NOT NULL DEFAULT 'switch_layout';
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS target_client text;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS power_state text;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS updated_at text;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS display_name text;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS control_method text NOT NULL DEFAULT 'auto';
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS display_index integer NOT NULL DEFAULT 0;
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS assigned_layout_id text;
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS enrolled boolean NOT NULL DEFAULT false;
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS max_displays integer;
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS installer_detected_max_displays integer;
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS touch_binding text;
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS theme text;
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS is_virtual boolean NOT NULL DEFAULT false;
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS url text;
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS client_auth_token_hash text;
+ALTER TABLE client_displays ADD COLUMN IF NOT EXISTS orientation text NOT NULL DEFAULT 'normal';
+ALTER TABLE client_displays ADD COLUMN IF NOT EXISTS control_method text NOT NULL DEFAULT 'auto';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS google_sub text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS google_email text;
+CREATE INDEX IF NOT EXISTS idx_schedules_layout_set_id ON schedules(layout_set_id);
+CREATE INDEX IF NOT EXISTS idx_clients_last_seen ON clients(last_seen);
+CREATE INDEX IF NOT EXISTS idx_client_displays_client ON client_displays(client_id);

@@ -20,7 +20,7 @@ pub const OPEN_ROUTES: &[&str] = &[
     "/api/setup",
     "/api/clients/register",
     "/api/log",
-    "/api/system",
+
     "/api/system/time",
     "/api/system/liveness",
     "/api/system/readiness",
@@ -56,12 +56,22 @@ fn is_open_path(path: &str, method: &str) -> bool {
         return true;
     }
 
+    if path == "/api/setup/" && method == "POST" {
+        return true;
+    }
+
     // open so the player UI can mark itself enrolled without a session.
     if method == "POST" && path.starts_with("/api/clients/") && path.ends_with("/enroll") {
         return true;
     }
     // OPTIONS pre-flight for that endpoint.
     if method == "OPTIONS" && path.starts_with("/api/clients/") && path.ends_with("/enroll") {
+        return true;
+    }
+    if method == "POST"
+        && path.starts_with("/clients/")
+        && path.ends_with("/screenshot")
+    {
         return true;
     }
     // Client command acknowledgements authenticate in the handler with the
@@ -74,6 +84,9 @@ fn is_open_path(path: &str, method: &str) -> bool {
     }
     // Player config fetches (read-only) are open so enrolled players still work
     // without a session. Player writes (assign layout, set command) stay gated.
+    if method == "GET" && (path == "/uploads" || path.starts_with("/uploads/")) {
+        return true;
+    }
     if method == "GET" {
         if path.starts_with("/api/clients/") && path.ends_with("/config") {
             return true;
@@ -108,9 +121,7 @@ fn is_open_path(path: &str, method: &str) -> bool {
             return true;
         }
         // Player heartbeat reads (no such endpoint yet; placeholder).
-        if path == "/api/clients" {
-            return true;
-        }
+
         // Player command poll (read-only — clients pull to see if they have
         // a pending nudge/layout-assignment/etc. Idempotent and safe to
         // expose without auth since no state leaks.
@@ -149,12 +160,7 @@ fn is_open_path(path: &str, method: &str) -> bool {
             }
             // Read-only file browsing so the UI file picker can render before login.
             // Writes (POST/DELETE) stay gated.
-            if path.starts_with("/api/files/") {
-                return true;
-            }
-            if path == "/api/version" {
-                return true;
-            }
+
             // /api/system/health — health probe for external monitoring
             // (Uptime Kuma, Prometheus blackbox, etc.). No secrets leak;
             // returns counts + version only.
@@ -378,7 +384,8 @@ fn role_has_capability(role: &str, capability: &str) -> bool {
     }
 }
 fn required_step_up_scope(path: &str, _method: &str) -> Option<String> {
-    if path == "/api/version/update/export"
+    if path == "/api/version/export"
+        || path == "/api/version/update/export"
         || path == "/api/version/update/import"
         || path == "/api/version/update/apply"
         || path == "/api/version/update/github/settings" {
@@ -479,12 +486,21 @@ mod authorization_tests {
     }
 
     #[test]
+    fn state_export_requires_server_update_step_up() {
+        assert_eq!(required_capability("/api/version/export", "GET"), "server_update");
+        assert_eq!(required_step_up_scope("/api/version/export", "GET").as_deref(), Some("server-update"));
+        assert_eq!(required_step_up_scope("/api/version/update/export", "GET").as_deref(), Some("server-update"));
+    }
+
+    #[test]
     fn client_command_poll_is_open_only_for_get() {
         assert!(is_open_path("/api/clients/example/command", "GET"));
         assert!(!is_open_path("/api/clients/example/command", "DELETE"));
         assert!(!is_open_path("/api/clients/example/displays/0/command", "DELETE"));
         assert!(is_open_path("/api/clients/example/command/ack", "POST"));
         assert!(!is_open_path("/api/clients/example/command/ack", "GET"));
+        assert!(is_open_path("/clients/example/screenshot", "POST"));
+        assert!(!is_open_path("/clients/example/screenshot", "GET"));
     }
 
     #[test]
@@ -513,6 +529,7 @@ mod authorization_tests {
         assert_eq!(required_capability("/api/clients/one/assignment", "PUT"), "assign_clients");
         assert_eq!(required_capability("/api/backups", "GET"), "manage_backups");
         assert_eq!(required_capability("/api/version/update/import", "POST"), "server_update");
+        assert_eq!(required_capability("/api/version/export", "GET"), "server_update");
         assert_eq!(required_capability("/api/audit", "GET"), "view_audit");
         assert_eq!(required_capability("/api/layouts/one", "GET"), "viewer");
         assert_eq!(required_capability("/api/clients/one", "DELETE"), "manage_clients");
@@ -532,7 +549,6 @@ mod authorization_tests {
         assert_eq!(required_step_up_scope("/api/version/update/github/settings", "POST"), Some("server-update".to_string()));
         assert_eq!(required_capability("/api/version/update/apply", "POST"), "server_update");
         assert_eq!(required_capability("/api/version/update/github", "GET"), "server_admin");
-        assert_eq!(required_step_up_scope("/api/clients/one/nudge", "POST"), None);
         assert_eq!(required_step_up_scope("/api/clients/one/displays/0/layout", "POST"), None);
         assert_eq!(required_step_up_scope("/api/layouts/one/publish", "POST"), None);
         assert_eq!(required_step_up_scope("/api/display-state", "POST"), None);

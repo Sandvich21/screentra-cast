@@ -17,6 +17,7 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -28,11 +29,17 @@ use std::path::{Path as StdPath, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
+use tower::ServiceExt;
 use uuid::Uuid;
 
-use crate::screenshot::routes as screenshot_routes;
+
 
 pub type AppState = Arc<Database>;
+
+fn internal_server_error() -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
+}
 
 #[derive(Clone)]
 pub(crate) enum ClientRepository {
@@ -1004,7 +1011,7 @@ impl ClientRepository {
         &self,
         client_id: &str,
         display_index: i64,
-    ) -> Result<(Option<String>, Option<String>, Option<i64>, Option<i64>, Option<f64>, bool, String, String), String> {
+    ) -> Result<Option<(Option<String>, Option<String>, Option<i64>, Option<i64>, Option<f64>, bool, String, String)>, String> {
         match self {
             Self::Sqlite(db) => db.get_display_control(client_id, display_index),
             Self::Postgres(db) => db.get_display_control(client_id, display_index).await,
@@ -1077,7 +1084,6 @@ impl ClientRepository {
 }
 
 pub fn router(runtime_state: RuntimeState) -> Router {
-    let app_state = runtime_state.legacy_db.clone();
     let auth = crate::auth::AuthState::from_env();
     let auth_repository = runtime_state.auth_repository.clone();
     auth.load_from_repository(auth_repository.clone());
@@ -1413,11 +1419,12 @@ pub fn router(runtime_state: RuntimeState) -> Router {
                 .with_state(auth_app.clone()),
         )
         // Serve uploaded files (icons, images, videos, music, etc.)
+        .route("/api/setup", post(create_initial_admin).with_state(auth_app.clone()))
+        .route("/api/setup/", post(create_initial_admin).with_state(auth_app.clone()))
         .nest(
             "/api/setup",
             axum::Router::new()
                 .route("/status", get(setup_status))
-                .route("/", post(create_initial_admin))
                 .with_state(auth_app.clone()),
         )
         .nest(
@@ -1457,11 +1464,11 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             "/clients/{client_id}/screenshot",
             get(crate::screenshot::get_screenshot)
                 .post(crate::screenshot::post_screenshot)
-                .with_state(app_state.clone()),
+                .layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
         .route(
             "/api/screenshots",
-            get(crate::screenshot::list_screenshots).with_state(app_state.clone()),
+            get(crate::screenshot::list_screenshots),
         )
         .layer(axum::middleware::from_fn_with_state(
             rate_limit_state,
@@ -1472,7 +1479,8 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             crate::middleware::require_auth,
         ))
         .layer(axum::Extension(auth.clone()))
-        .nest_service("/uploads", tower_http::services::ServeDir::new("uploads"))
+        .route("/uploads", get(serve_upload))
+        .route("/uploads/{*path}", get(serve_upload))
         .fallback_service(
             tower_http::services::ServeDir::new("static").append_index_html_on_directories(true),
         )
@@ -1493,7 +1501,7 @@ async fn list_layout_folders(
         .list_layout_folders()
         .await
         .map(AxumJson)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+        .map_err(|_| internal_server_error())
 }
 
 async fn create_layout_folder(
@@ -1522,7 +1530,7 @@ async fn update_layout_folder(
     let existing = repository
         .get_layout_folder(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .ok_or((StatusCode::NOT_FOUND, "Folder not found".to_string()))?;
     folder.id = id;
     folder.created_at = existing.created_at;
@@ -1553,7 +1561,7 @@ async fn list_layouts(
         .list_layouts()
         .await
         .map(AxumJson)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+        .map_err(|_| internal_server_error())
 }
 
 async fn get_layout(
@@ -1563,7 +1571,7 @@ async fn get_layout(
     repository
         .get_layout(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .map(AxumJson)
         .ok_or((StatusCode::NOT_FOUND, "Layout not found".to_string()))
 }
@@ -1593,7 +1601,7 @@ async fn create_layout(
     repository
         .save_layout(&layout)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     // If the layout contains any News widgets, make sure their feed URLs
     // are registered in the news_feeds cache so the next maintenance pass
     // starts fetching them. Errors here are non-fatal: the maintenance
@@ -1626,7 +1634,7 @@ async fn update_layout(
     repository
         .save_layout(&layout)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     for (_, url) in crate::news::collect_news_feed_urls(&[layout.clone()]) {
         if let Err(e) = repository.ensure_news_feed_registered(&url).await {
             log::warn!("could not register news feed {url}: {e}");
@@ -1642,7 +1650,7 @@ async fn list_layout_revisions(
     let revisions = repository
         .list_layout_revisions(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(revisions))
 }
 
@@ -1653,18 +1661,18 @@ async fn publish_layout(
     let layout = repository
         .get_layout(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let Some(layout) = layout else {
         return Err((StatusCode::NOT_FOUND, "Layout not found".to_string()));
     };
     let revision = repository
         .publish_layout_revision(&layout, None)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let epoch = repository
         .bump_refresh_epoch()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let mut reload_queued = 0usize;
     let reload_payload = serde_json::json!({
         "all_displays": true,
@@ -1673,7 +1681,7 @@ async fn publish_layout(
     for client in repository
         .list_registered_clients()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
     {
         let client_id = &client.0;
         let enrolled = client.14 != 0;
@@ -1684,7 +1692,7 @@ async fn publish_layout(
         let (_, client_layout_id, displays) = repository
             .list_client_displays(client_id)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            .map_err(|_| internal_server_error())?;
         let assigned = client_layout_id.as_deref() == Some(id.as_str())
             || displays
                 .iter()
@@ -1719,7 +1727,7 @@ async fn delete_layout(
     repository
         .delete_layout(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1761,7 +1769,7 @@ async fn get_display_state(
         .get_display_state()
         .await
         .map(AxumJson)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+        .map_err(|_| internal_server_error())
 }
 
 async fn get_display_state_for_display(
@@ -1771,7 +1779,7 @@ async fn get_display_state_for_display(
     if let Some(assignment) = repository
         .get_display_assignment(&display)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
     {
         Ok(AxumJson(DisplayState {
             assignments: vec![assignment],
@@ -1791,7 +1799,7 @@ async fn set_display_state(
         repository
             .set_display_assignment(&assignment.display, assignment.layout_id.as_deref())
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            .map_err(|_| internal_server_error())?;
     }
     Ok(AxumJson(state))
 }
@@ -1809,7 +1817,7 @@ async fn delete_display_state(
     let rows = repository
         .delete_display_assignment(&display)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(
         serde_json::json!({"deleted": rows, "display": display}),
     ))
@@ -1829,7 +1837,7 @@ async fn get_refresh(
     let epoch = repository
         .get_refresh_epoch()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(serde_json::json!({"epoch": epoch})))
 }
 
@@ -1839,7 +1847,7 @@ async fn bump_refresh(
     let epoch = repository
         .bump_refresh_epoch()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(serde_json::json!({"epoch": epoch})))
 }
 
@@ -1882,7 +1890,31 @@ async fn player_log(AxumJson(body): AxumJson<serde_json::Value>) -> AxumJson<ser
 
 // ── ICS Proxy ───────────────────────────────────────────────
 
-fn validate_proxy_url(url: &str) -> Result<(), String> {
+fn disallowed_proxy_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback() || v4.is_private() || v4.is_link_local()
+                || v4.is_unspecified() || v4.is_broadcast() || v4.is_multicast()
+                || o[0] == 0 || (o[0] == 100 && (64..=127).contains(&o[1]))
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+                || (o[0] == 192 && o[1] == 0 && o[2] == 2)
+                || (o[0] == 198 && o[1] == 51 && o[2] == 100)
+                || (o[0] == 203 && o[1] == 0 && o[2] == 113)
+                || (o[0] == 198 && (o[1] == 18 || o[1] == 19)) || o[0] >= 240
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4() {
+                return disallowed_proxy_ip(std::net::IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            v6.is_loopback() || v6.is_unspecified() || v6.is_multicast()
+                || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+fn validate_proxy_url(url: &str) -> Result<(String, u16, std::net::IpAddr), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid url: {}", e))?;
     match parsed.scheme() {
         "http" | "https" => {}
@@ -1909,31 +1941,13 @@ fn validate_proxy_url(url: &str) -> Result<(), String> {
         return Err("dns resolve returned no addresses".to_string());
     }
     for ip in &addrs {
-        match ip {
-            std::net::IpAddr::V4(v4) => {
-                if v4.is_loopback()
-                    || v4.is_private()
-                    || v4.is_link_local()
-                    || v4.is_unspecified()
-                    || v4.is_broadcast()
-                    || v4.is_multicast()
-                {
-                    return Err("Disallowed url host".to_string());
-                }
-            }
-            std::net::IpAddr::V6(v6) => {
-                if v6.is_loopback()
-                    || v6.is_unspecified()
-                    || v6.is_multicast()
-                    || (v6.segments()[0] & 0xfe00) == 0xfc00
-                    || (v6.segments()[0] & 0xffc0) == 0xfe80
-                {
-                    return Err("Disallowed url host".to_string());
-                }
-            }
+        if disallowed_proxy_ip(*ip) {
+            return Err("Disallowed url host".to_string());
         }
     }
-    Ok(())
+    // Pin the request to the address validated above. This prevents a DNS
+    // rebinding between validation and reqwest's later resolver lookup.
+    Ok((host_lower, port, addrs[0]))
 }
 
 #[derive(Serialize)]
@@ -1970,7 +1984,7 @@ async fn weather_location_lookup(
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("RipleySignage/1.0")
         .build()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|_| internal_server_error())?;
 
     let mut candidates = vec![query.to_string()];
     if !query.contains(',') {
@@ -2237,7 +2251,7 @@ async fn weather_forecast(
     let client = reqwest::Client::builder().timeout(Duration::from_secs(12))
         .connect_timeout(Duration::from_secs(5)).local_address(Some("0.0.0.0".parse().unwrap())).redirect(reqwest::redirect::Policy::none())
         .user_agent("Screentra Cast/1.0 weather contact: admin@screentra-cast.local").build()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|_| internal_server_error())?;
 
     // NWS is authoritative for U.S. points. The points response supplies the
     // correct forecast office/grid URL; never construct that URL ourselves.
@@ -2419,16 +2433,16 @@ async fn traffic_map_image(
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("Screentra Cast/1.0 traffic map snippet")
         .build()
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        .map_err(|_| internal_server_error())?;
     let upstream = client
         .get(map_url)
         .send()
         .await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Google Static Maps unavailable: {error}")))?;
+        .map_err(|_| (StatusCode::BAD_GATEWAY, "Traffic map provider unavailable".to_string()))?;
     if !upstream.status().is_success() {
         return Err((
             StatusCode::BAD_GATEWAY,
-            format!("Google Static Maps returned {}", upstream.status()),
+            "Traffic map provider unavailable".to_string(),
         ));
     }
     let content_type = upstream
@@ -2443,20 +2457,33 @@ async fn traffic_map_image(
             "Google Static Maps returned a non-image response".to_string(),
         ));
     }
-    let body = upstream
-        .bytes()
-        .await
-        .map_err(|error| (StatusCode::BAD_GATEWAY, format!("Google Static Maps image read failed: {error}")))?;
-    if body.len() > 8 * 1024 * 1024 {
+    if upstream
+        .content_length()
+        .is_some_and(|length| length > 8 * 1024 * 1024)
+    {
         return Err((
             StatusCode::BAD_GATEWAY,
-            "Google Static Maps image exceeded the server response limit".to_string(),
+            "Traffic map image exceeded the server response limit".to_string(),
         ));
     }
-    let content_type = axum::http::HeaderValue::from_str(&content_type).map_err(|error| {
+    let mut stream = upstream.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| {
+            (StatusCode::BAD_GATEWAY, "Traffic map image read failed".to_string())
+        })?;
+        if body.len().saturating_add(chunk.len()) > 8 * 1024 * 1024 {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                "Traffic map image exceeded the server response limit".to_string(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let content_type = axum::http::HeaderValue::from_str(&content_type).map_err(|_| {
         (
             StatusCode::BAD_GATEWAY,
-            format!("Invalid Google Static Maps content type: {error}"),
+            "Traffic map provider returned invalid content".to_string(),
         )
     })?;
     let mut headers = HeaderMap::new();
@@ -2522,7 +2549,7 @@ async fn traffic_events(
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("Screentra Cast/1.0 traffic widget")
         .build()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|_| internal_server_error())?;
     let events = provider
         .fetch(
             &client,
@@ -2532,7 +2559,10 @@ async fn traffic_events(
             new_york_api_key.as_deref(),
         )
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+        .map_err(|error| {
+            log::warn!("traffic provider {} failed: {}", provider.source(), error);
+            (StatusCode::BAD_GATEWAY, "Traffic provider unavailable".to_string())
+        })?;
     if provider == TrafficProvider::Public511Pa {
         return Ok(AxumJson(serde_json::json!({
             "source": provider.source(),
@@ -2734,50 +2764,65 @@ async fn ics_proxy(
         .get("url")
         .ok_or((StatusCode::BAD_REQUEST, "Missing url parameter".to_string()))?;
 
-    if let Err(reason) = validate_proxy_url(url) {
+    let (resolved_host, resolved_port, resolved_ip) = validate_proxy_url(url).map_err(|reason| {
+        log::warn!("proxy URL rejected: {reason}");
         let status =
             if reason.starts_with("dns resolve") || reason == "dns resolve returned no addresses" {
                 StatusCode::BAD_GATEWAY
             } else {
                 StatusCode::BAD_REQUEST
             };
-        return Err((status, reason));
-    }
+        (status, "Proxy URL unavailable".to_string())
+    })?;
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .connect_timeout(std::time::Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("DigitalSignage/1.0")
+        .resolve(
+            &resolved_host,
+            std::net::SocketAddr::new(resolved_ip, resolved_port),
+        )
         .build()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|_| internal_server_error())?;
 
     let res = client
         .get(url)
         .header("User-Agent", "DigitalSignage/1.0")
         .send()
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to fetch: {}", e)))?;
+        .map_err(|e| {
+            log::warn!("proxy request failed: {e}");
+            (StatusCode::BAD_GATEWAY, "Upstream unavailable".to_string())
+        })?;
 
     let status = res.status();
     if !status.is_success() {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("upstream returned {}", status),
-        ));
+        log::warn!("proxy upstream returned status {status}");
+        return Err((StatusCode::BAD_GATEWAY, "Upstream unavailable".to_string()));
     }
 
-    // Fetch the body but refuse anything beyond a sane cap to avoid memory abuse.
+    // Stream the body so an upstream cannot force an unbounded allocation.
     const MAX_BYTES: usize = 4 * 1024 * 1024;
-    let bytes = res
-        .bytes()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("read failed: {}", e)))?;
-    if bytes.len() > MAX_BYTES {
+    if res.content_length().is_some_and(|n| n > MAX_BYTES as u64) {
         return Err((StatusCode::BAD_GATEWAY, "upstream too large".to_string()));
     }
-    String::from_utf8(bytes.to_vec())
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("non-utf8 body: {}", e)))
+    let mut stream = res.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|e| {
+                log::warn!("proxy response read failed: {e}");
+                (StatusCode::BAD_GATEWAY, "Upstream unavailable".to_string())
+            })?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_BYTES {
+            return Err((StatusCode::BAD_GATEWAY, "upstream too large".to_string()));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| (StatusCode::BAD_GATEWAY, "upstream body was not valid UTF-8".to_string()))
 }
 
 // ---- News feed headlines ----
@@ -2836,7 +2881,7 @@ async fn post_news_refresh(
     let feeds = repository
         .list_news_feeds()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     if feeds.is_empty() {
         return Ok(AxumJson(serde_json::json!({
             "refreshed": 0,
@@ -2921,7 +2966,7 @@ async fn list_templates(
 ) -> Result<AxumJson<Vec<TemplateMeta>>, (StatusCode, String)> {
     repository.list_templates().await
         .map(AxumJson)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+        .map_err(|_| internal_server_error())
 }
 
 async fn get_template(
@@ -2931,7 +2976,7 @@ async fn get_template(
     let json: Option<String> = repository
         .get_template(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|_| internal_server_error())?;
     match json.as_deref() {
         Some(j) => {
             let parsed: serde_json::Value =
@@ -2963,7 +3008,7 @@ async fn create_template(
         .to_string();
     let layout = body.get("layout").unwrap_or(&serde_json::Value::Null);
     let layout_json = serde_json::to_string(layout)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|_| internal_server_error())?;
 
     let final_id = if id.is_empty() {
         Uuid::new_v4().to_string()
@@ -2974,7 +3019,7 @@ async fn create_template(
 
     repository.save_template(&final_id, &name, &category, false, &layout_json, &now)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
 
     Ok(AxumJson(
         serde_json::json!({"id": final_id, "name": name, "category": category}),
@@ -2987,7 +3032,7 @@ async fn delete_template(
 ) -> Result<StatusCode, (StatusCode, String)> {
     repository.delete_template(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2999,7 +3044,7 @@ async fn get_overrides(
     let overrides = repository
         .get_display_overrides()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let map: serde_json::Map<String, serde_json::Value> = overrides
         .into_iter()
         .map(|(k, (w, h))| (k, serde_json::json!({"width": w, "height": h})))
@@ -3027,7 +3072,7 @@ async fn set_override(
     repository
         .set_display_override(display, width, height)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(
         serde_json::json!({"display": display, "width": width, "height": height}),
     ))
@@ -3040,7 +3085,7 @@ async fn clear_override(
     repository
         .clear_display_override(&display)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3051,6 +3096,60 @@ struct FileEntry {
     name: String,
     url: String,
     size: u64,
+}
+
+fn is_active_upload_name(name: &str) -> bool {
+    name.rsplit_once('.')
+        .map(|(_, extension)| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "html" | "htm" | "xhtml" | "js" | "mjs" | "cjs" | "css" | "svg" | "xml" | "wasm"
+            )
+        })
+        .unwrap_or(false)
+}
+
+async fn serve_upload(request: axum::extract::Request) -> Response {
+    let active = request
+        .uri()
+        .path()
+        .rsplit('/')
+        .next()
+        .map(is_active_upload_name)
+        .unwrap_or(false);
+    let mut request = request;
+    let path_and_query = request
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+    let stripped = path_and_query.strip_prefix("/uploads").unwrap_or("/");
+    *request.uri_mut() = stripped.parse().unwrap_or_else(|_| axum::http::Uri::from_static("/"));
+    let mut response = match tower_http::services::ServeDir::new("uploads")
+        .oneshot(request)
+        .await
+    {
+        Ok(response) => response.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    // User uploads are public player assets. Prevent content sniffing for all
+    // of them, and force potentially active formats to download instead of
+    // being interpreted as same-origin documents/scripts.
+    response.headers_mut().insert(
+        "x-content-type-options",
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    if active {
+        response.headers_mut().insert(
+            "content-type",
+            axum::http::HeaderValue::from_static("application/octet-stream"),
+        );
+        response.headers_mut().insert(
+            "content-disposition",
+            axum::http::HeaderValue::from_static("attachment"),
+        );
+    }
+    response
 }
 
 fn uploads_dir(category: &str) -> Result<PathBuf, (StatusCode, String)> {
@@ -3073,7 +3172,7 @@ fn uploads_dir(category: &str) -> Result<PathBuf, (StatusCode, String)> {
         return Err((StatusCode::BAD_REQUEST, "Invalid category".to_string()));
     }
     let root = std::env::current_dir()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|_| internal_server_error())?
         .join("uploads");
     let dir = root.join(category);
     // Final canonical containment check.
@@ -3256,38 +3355,72 @@ async fn upload_file(
     mut multipart: Multipart,
 ) -> Result<AxumJson<FileEntry>, (StatusCode, String)> {
     let dir = uploads_dir(&category)?;
-    fs::create_dir_all(&dir).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    fs::create_dir_all(&dir).map_err(|_| internal_server_error())?;
 
     if let Ok(Some(field)) = multipart.next_field().await {
         let filename = field.file_name().unwrap_or("unnamed").to_string();
         let original_name = safe_filename(&filename)?;
-        let data = field
-            .bytes()
+        if is_active_upload_name(&original_name) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "active-content upload formats are not allowed".to_string(),
+            ));
+        }
+        const MAX_UPLOAD_BYTES: u64 = 1024 * 1024 * 1024;
+        let tmp_path = dir.join(format!(".upload-{}", Uuid::new_v4()));
+        let mut tmp = fs::File::create(&tmp_path).map_err(|_| internal_server_error())?;
+        let mut total = 0u64;
+        let mut field = field;
+        while let Some(chunk) = field
+            .chunk()
             .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Unable to read upload".to_string()))?
+        {
+            total = total.saturating_add(chunk.len() as u64);
+            if total > MAX_UPLOAD_BYTES {
+                let _ = fs::remove_file(&tmp_path);
+                return Err((
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Upload is too large".to_string(),
+                ));
+            }
+            tmp.write_all(&chunk).map_err(|_| internal_server_error())?;
+        }
+        tmp.flush().map_err(|_| internal_server_error())?;
+        drop(tmp);
 
+        let mut image_data: Option<Vec<u8>> = None;
         let safe_name = if category == "images" || category == "icons" {
             const MAX_IMAGE_UPLOAD_BYTES: usize = 15 * 1024 * 1024;
-            if data.len() > MAX_IMAGE_UPLOAD_BYTES {
+            if total > MAX_IMAGE_UPLOAD_BYTES as u64 {
+                let _ = fs::remove_file(&tmp_path);
                 return Err((
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "Image upload is too large".to_string(),
                 ));
             }
+            let data = fs::read(&tmp_path).map_err(|_| internal_server_error())?;
             let ext = image_extension_from_upload(&original_name, &data)?;
+            fs::remove_file(&tmp_path).map_err(|_| internal_server_error())?;
+            image_data = Some(data);
             format!("{}-{}.{}", Utc::now().timestamp(), Uuid::new_v4(), ext)
         } else {
             original_name
         };
         let dest = dir.join(&safe_name);
 
-        fs::write(&dest, &data).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if category == "images" || category == "icons" {
+            fs::write(&dest, image_data.as_deref().unwrap_or_default())
+                .map_err(|_| internal_server_error())?;
+        } else {
+            fs::rename(&tmp_path, &dest).map_err(|_| internal_server_error())?;
+        }
 
         let url = format!("/uploads/{}/{}", category, safe_name);
         return Ok(AxumJson(FileEntry {
             name: safe_name,
             url,
-            size: data.len() as u64,
+            size: total,
         }));
     }
 
@@ -3305,7 +3438,7 @@ async fn delete_file(
     // Move to trash instead of deleting
     let trash_dir = std::path::Path::new("trash");
     if !trash_dir.exists() {
-        fs::create_dir_all(trash_dir).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        fs::create_dir_all(trash_dir).map_err(|_| internal_server_error())?;
     }
     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S_%f").to_string();
     let ext = std::path::Path::new(&name)
@@ -3319,7 +3452,7 @@ async fn delete_file(
         format!("{}_{}.{}", ts, stem, ext)
     };
     let final_trash_path = trash_dir.join(&trash_name);
-    fs::rename(&path, &final_trash_path).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    fs::rename(&path, &final_trash_path).map_err(|_| internal_server_error())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3341,8 +3474,8 @@ async fn list_trash() -> Result<Json<Vec<TrashEntry>>, (StatusCode, String)> {
         return Ok(Json(vec![]));
     }
     let mut entries = Vec::new();
-    for entry in fs::read_dir(trash_dir).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))? {
-        let entry = entry.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    for entry in fs::read_dir(trash_dir).map_err(|_| internal_server_error())? {
+        let entry = entry.map_err(|_| internal_server_error())?;
         let path = entry.path();
         if !path.is_file() { continue; }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
@@ -3384,12 +3517,23 @@ async fn list_trash() -> Result<Json<Vec<TrashEntry>>, (StatusCode, String)> {
 }
 
 async fn restore_trash(Path(id): Path<String>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if id.is_empty()
+        || id.contains("..")
+        || StdPath::new(&id).file_name().and_then(|name| name.to_str()) != Some(id.as_str())
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid trash entry".to_string()));
+    }
     let trash_dir = std::path::Path::new("trash");
     let trash_path = trash_dir.join(&id);
     if !trash_path.exists() {
         return Err((StatusCode::NOT_FOUND, "File not found in trash".to_string()));
     }
-    let original_name = if id.len() > 26 { id[26..].to_string() } else { id.clone() };
+    let original_name = id
+        .splitn(4, '_')
+        .nth(3)
+        .unwrap_or(&id)
+        .to_string();
+    let original_name = safe_filename(&original_name)?;
     let category = if original_name.ends_with(".mp4") || original_name.ends_with(".webm") || original_name.ends_with(".mov") {
         "videos"
     } else if original_name.ends_with(".png") || original_name.ends_with(".jpg") || original_name.ends_with(".jpeg") || original_name.ends_with(".gif") || original_name.ends_with(".webp") {
@@ -3400,8 +3544,9 @@ async fn restore_trash(Path(id): Path<String>) -> Result<Json<serde_json::Value>
         "other"
     };
     let uploads_dir = std::path::Path::new("uploads").join(category);
+    fs::create_dir_all(&uploads_dir).map_err(|_| internal_server_error())?;
     let dest = uploads_dir.join(&original_name);
-    fs::rename(&trash_path, &dest).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    fs::rename(&trash_path, &dest).map_err(|_| internal_server_error())?;
     let restored_json = serde_json::json!({"restored": true, "name": original_name.clone(), "category": category});
     Ok(Json(restored_json))
 }
@@ -3415,13 +3560,13 @@ async fn restore_trash(Path(id): Path<String>) -> Result<Json<serde_json::Value>
 //
 async fn fonts_catalog_handler() -> Result<AxumJson<Vec<crate::fonts::FontCatalogEntry>>, (StatusCode, String)> {
     let entries = crate::fonts::get_cached_catalog().await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(entries))
 }
 
 async fn fonts_installed_handler() -> Result<AxumJson<Vec<crate::fonts::InstalledFont>>, (StatusCode, String)> {
     let entries = crate::fonts::list_installed()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(entries))
 }
 
@@ -3437,7 +3582,7 @@ async fn fonts_download_handler(
 ) -> Result<AxumJson<Vec<crate::fonts::InstalledFont>>, (StatusCode, String)> {
     let weights = if req.weights.is_empty() { vec![400, 700] } else { req.weights };
     let installed = crate::fonts::download_family(&req.family, &weights).await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+        .map_err(|_| (StatusCode::BAD_GATEWAY, "Font download unavailable".to_string()))?;
     Ok(AxumJson(installed))
 }
 
@@ -3445,7 +3590,7 @@ async fn fonts_delete_handler(
     Path(filename): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     crate::fonts::delete_font(&filename)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3557,6 +3702,77 @@ async fn fonts_full_preview_css_handler(
 
 // ── Schedule handlers ───────────────────────────────────────
 
+fn validate_schedule_entry(entry: &ScheduleEntry) -> Result<(), (StatusCode, String)> {
+    let bad = |message: &'static str| (StatusCode::BAD_REQUEST, message.to_string());
+    if entry.display.trim().is_empty() || entry.display.len() > 256 {
+        return Err(bad("Invalid schedule display"));
+    }
+    if entry.day_of_week != crate::schedule::DAY_EVERY
+        && (entry.day_of_week < 0 || entry.day_of_week > 127)
+    {
+        return Err(bad("Invalid schedule day mask"));
+    }
+    for value in [&entry.start_time, &entry.end_time] {
+        if chrono::NaiveTime::parse_from_str(value, "%H:%M").is_err() {
+            return Err(bad("Schedule times must use HH:MM format"));
+        }
+    }
+    match entry.action.as_str() {
+        "switch_layout" => {
+            let has_layout = !entry.layout_id.trim().is_empty();
+            let has_set = entry
+                .layout_set_id
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty());
+            if has_layout == has_set {
+                return Err(bad("A schedule must select exactly one layout or layout set"));
+            }
+        }
+        "power_on" | "power_off" => {
+            if entry
+                .target_client
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(bad("Power schedules require a target client"));
+            }
+            if let Some(state) = entry.power_state.as_deref() {
+                if state != "on" && state != "off" {
+                    return Err(bad("Invalid power state"));
+                }
+            }
+        }
+        _ => return Err(bad("Invalid schedule action")),
+    }
+    if let Some(method) = entry.control_method.as_deref() {
+        if !matches!(method, "auto" | "ddc" | "cec" | "ir") {
+            return Err(bad("Invalid schedule control method"));
+        }
+    }
+    if entry.display_index.is_some_and(|index| !(0..=63).contains(&index)) {
+        return Err(bad("Invalid schedule display index"));
+    }
+    Ok(())
+}
+
+fn validate_layout_set_values(set: &LayoutSetWithItems) -> Result<(), StatusCode> {
+    if set.id.trim().is_empty() || set.id.len() > 128 || set.name.trim().is_empty() || set.name.len() > 256 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if set.dwell_secs == 0 || set.dwell_secs > 86_400 || set.items.len() > 256 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    for item in &set.items {
+        if item.layout_id.trim().is_empty()
+            || item.layout_id.len() > 128
+            || item.interval_secs.is_some_and(|seconds| seconds == 0 || seconds > 86_400)
+        {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    Ok(())
+}
+
 async fn list_schedules(
     State(repository): State<ClientRepository>,
 ) -> Result<AxumJson<Vec<ScheduleEntry>>, (StatusCode, String)> {
@@ -3564,7 +3780,36 @@ async fn list_schedules(
         .list_schedules()
         .await
         .map(AxumJson)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+        .map_err(|_| internal_server_error())
+}
+
+async fn validate_schedule_references(
+    repository: &ClientRepository,
+    entry: &ScheduleEntry,
+) -> Result<(), (StatusCode, String)> {
+    if entry.action != "switch_layout" {
+        return Ok(());
+    }
+    if !entry.layout_id.trim().is_empty() {
+        let exists = repository
+            .get_layout(&entry.layout_id)
+            .await
+            .map_err(|_| internal_server_error())?
+            .is_some();
+        if !exists {
+            return Err((StatusCode::BAD_REQUEST, "Scheduled layout does not exist".to_string()));
+        }
+    } else if let Some(layout_set_id) = entry.layout_set_id.as_deref() {
+        let exists = repository
+            .get_layout_set(layout_set_id)
+            .await
+            .map_err(|_| internal_server_error())?
+            .is_some();
+        if !exists {
+            return Err((StatusCode::BAD_REQUEST, "Scheduled layout set does not exist".to_string()));
+        }
+    }
+    Ok(())
 }
 
 async fn create_schedule(
@@ -3577,10 +3822,12 @@ async fn create_schedule(
     if entry.created_at.is_empty() {
         entry.created_at = chrono::Utc::now().to_rfc3339();
     }
+    validate_schedule_entry(&entry)?;
+    validate_schedule_references(&repository, &entry).await?;
     repository
         .create_schedule(&entry)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(entry))
 }
 
@@ -3591,7 +3838,7 @@ async fn get_schedule(
     repository
         .get_schedule(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .map(AxumJson)
         .ok_or((StatusCode::NOT_FOUND, "Schedule not found".to_string()))
 }
@@ -3602,10 +3849,12 @@ async fn update_schedule(
     AxumJson(mut entry): AxumJson<ScheduleEntry>,
 ) -> Result<AxumJson<ScheduleEntry>, (StatusCode, String)> {
     entry.id = id;
+    validate_schedule_entry(&entry)?;
+    validate_schedule_references(&repository, &entry).await?;
     repository
         .update_schedule(&entry)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(entry))
 }
 
@@ -3616,7 +3865,7 @@ async fn delete_schedule(
     repository
         .delete_schedule(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(StatusCode::NO_CONTENT)
 }
 // ── Layout Set handlers ─────────────────────────────────────
@@ -3657,6 +3906,7 @@ async fn create_layout_set(
         updated_at: now,
         items,
     };
+    validate_layout_set_values(&set)?;
     repository
         .create_layout_set(&set)
         .await
@@ -3702,6 +3952,7 @@ async fn update_layout_set(
         }
     };
     let updated = payload.apply_to(existing);
+    validate_layout_set_values(&updated)?;
     repository
         .update_layout_set(&updated)
         .await
@@ -3735,6 +3986,12 @@ async fn add_layout_set_entry(
     Path(layout_set_id): Path<String>,
     Json(payload): Json<AddLayoutSetEntry>,
 ) -> Result<Json<LayoutSetWithItems>, StatusCode> {
+    if layout_set_id.trim().is_empty() || payload.layout_id.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if payload.interval_secs.is_some_and(|seconds| seconds == 0 || seconds > 86_400) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     repository
         .add_layout_set_entry(&layout_set_id, &payload)
         .await
@@ -3782,17 +4039,28 @@ async fn replace_layout_set_entries(
     Path(layout_set_id): Path<String>,
     Json(entries): Json<Vec<CreateLayoutSetItem>>,
 ) -> Result<Json<LayoutSetWithItems>, StatusCode> {
+    if layout_set_id.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let entries: Vec<LayoutSetEntry> = entries
         .into_iter()
-        .map(|e| LayoutSetEntry {
+        .map(|e| {
+            if e.layout_id.trim().is_empty()
+                || e.layout_id.len() > 128
+                || e.interval_secs.is_some_and(|seconds| seconds == 0 || seconds > 86_400)
+            {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            Ok(LayoutSetEntry {
             id: uuid::Uuid::new_v4().to_string(),
             layout_set_id: layout_set_id.clone(),
             layout_id: e.layout_id,
             position: e.position,
             interval_secs: e.interval_secs,
             transition: None,
+            })
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     repository
         .replace_layout_set_entries(&layout_set_id, entries)
         .await
@@ -3842,7 +4110,7 @@ async fn list_widget_presets(
         .list_widget_presets(widget_type)
         .await
         .map(AxumJson)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))
+        .map_err(|_| internal_server_error())
 }
 
 async fn get_widget_preset(
@@ -3852,7 +4120,7 @@ async fn get_widget_preset(
     repository
         .get_widget_preset(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .map(AxumJson)
         .ok_or((StatusCode::NOT_FOUND, "Widget preset not found".to_string()))
 }
@@ -3868,11 +4136,11 @@ async fn create_widget_preset(
     repository
         .create_widget_preset(&id, &body.name, &body.widget_type, &props_json, &now)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     repository
         .get_widget_preset(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .map(AxumJson)
         .ok_or((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3891,7 +4159,7 @@ async fn update_widget_preset(
     repository
         .update_widget_preset(&id, &body.name, &body.widget_type, &props_json, &now)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3902,7 +4170,7 @@ async fn delete_widget_preset(
     repository
         .delete_widget_preset(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3922,7 +4190,7 @@ async fn add_widget_preset_asset(
     repository
         .upsert_widget_preset_asset(&asset)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(asset))
 }
 
@@ -3933,7 +4201,7 @@ async fn remove_widget_preset_asset(
     let deleted = repository
         .delete_widget_preset_asset(&preset_id, &asset_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     if !deleted {
         log::debug!(
             "widget preset asset delete requested for missing asset preset={} asset={}",
@@ -3957,14 +4225,14 @@ async fn export_widget_preset(
     let preset = repository
         .get_widget_preset(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .ok_or((StatusCode::NOT_FOUND, "Widget preset not found".to_string()))?;
     let props =
         normalize_widget_preset_props(Some(serde_json::Value::String(preset.props_json.clone())))?;
     let export_assets = widget_preset_assets_from_export(
         Some(
             serde_json::to_value(&preset.assets)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+                .map_err(|_| internal_server_error())?,
         ),
         &props,
     );
@@ -3985,7 +4253,7 @@ async fn export_widget_preset(
         sanitized_download_stem(&preset.name)
     );
     let disposition = axum::http::HeaderValue::from_str(&filename)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|_| internal_server_error())?;
     let header = [(axum::http::header::CONTENT_DISPOSITION, disposition)];
     let body = serde_json::to_string_pretty(&export).unwrap_or_else(|_| "{}".to_string());
     Ok((header, body))
@@ -4100,7 +4368,7 @@ async fn import_widget_preset(
     repository
         .create_widget_preset(&id, &name, &widget_type, &props_json, &now)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     if let Some(arr) = assets.as_array() {
         for asset in arr {
             let kind = asset
@@ -4129,13 +4397,13 @@ async fn import_widget_preset(
                     url,
                 })
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                .map_err(|_| internal_server_error())?;
         }
     }
     repository
         .get_widget_preset(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .map(AxumJson)
         .ok_or((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4205,7 +4473,7 @@ async fn export_state_bundle_handler(
         chrono::Utc::now().timestamp()
     ));
     crate::version::export_state_bundle(&dest)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let bytes = tokio::fs::read(&dest).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4220,6 +4488,44 @@ async fn export_state_bundle_handler(
         ),
     )];
     Ok((header, bytes))
+}
+
+const MAX_STATE_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
+
+async fn stage_multipart_bundle(
+    mut field: axum::extract::multipart::Field<'_>,
+    prefix: &str,
+) -> Result<PathBuf, (StatusCode, String)> {
+    let dest = PathBuf::from(crate::version::install_dir_for_static())
+        .join(format!(".{prefix}-{}.tar.gz", Uuid::new_v4()));
+    let mut file = tokio::fs::File::create(&dest)
+        .await
+        .map_err(|_| internal_server_error())?;
+    let mut total = 0u64;
+    loop {
+        let next = match field.chunk().await {
+            Ok(next) => next,
+            Err(_) => {
+                let _ = tokio::fs::remove_file(&dest).await;
+                return Err((StatusCode::BAD_REQUEST, "Unable to read bundle".to_string()));
+            }
+        };
+        let Some(chunk) = next else { break };
+        total = total.saturating_add(chunk.len() as u64);
+        if total > MAX_STATE_BUNDLE_BYTES {
+            let _ = tokio::fs::remove_file(&dest).await;
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Bundle is too large".to_string(),
+            ));
+        }
+        if file.write_all(&chunk).await.is_err() {
+            let _ = tokio::fs::remove_file(&dest).await;
+            return Err(internal_server_error());
+        }
+    }
+    file.flush().await.map_err(|_| internal_server_error())?;
+    Ok(dest)
 }
 
 async fn import_state_bundle_handler(
@@ -4245,27 +4551,19 @@ async fn import_state_bundle_handler(
     {
         let name = field.name().unwrap_or("").to_string();
         if name == "bundle" || name == "file" {
-            let data = field
-                .bytes()
-                .await
-                .map_err(|e| (StatusCode::BAD_REQUEST, format!("read field: {}", e)))?;
-            let dest = std::path::PathBuf::from(crate::version::install_dir_for_static()).join(
-                format!(".signage-import-{}.tar.gz", chrono::Utc::now().timestamp()),
-            );
-            tokio::fs::write(&dest, &data)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("write: {}", e)))?;
+            let dest = stage_multipart_bundle(field, "signage-import").await?;
             // Synchronous import (it's not that slow)
-            tokio::task::spawn_blocking(move || crate::version::import_state_bundle(&dest))
+            let import_dest = dest.clone();
+            let result = tokio::task::spawn_blocking(move || crate::version::import_state_bundle(&import_dest))
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {}", e)))?
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-            // Restart the service so the new DB is loaded. The service unit is `signage.service`.
-            // We do this via systemctl, but it's a best-effort fire-and-forget.
-            let _ = std::process::Command::new("systemctl")
-                .arg("restart")
-                .arg("signage.service")
-                .status();
+                .map_err(|_| internal_server_error());
+            let _ = tokio::fs::remove_file(&dest).await;
+            result?;
+            // Restart the configured service so the new DB is loaded. The
+            // helper prefers explicit service configuration, then detects the
+            // current user/system unit instead of assuming a legacy unit.
+            let _ = tokio::task::spawn_blocking(crate::version::restart_configured_service).await;
             return Ok(StatusCode::NO_CONTENT);
         }
     }
@@ -4444,7 +4742,7 @@ async fn import_update_bundle_handler(
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
-    let mut bundle_bytes: Option<Vec<u8>> = None;
+    let mut bundle_path: Option<PathBuf> = None;
     loop {
         let field = match multipart.next_field().await {
             Ok(Some(field)) => field,
@@ -4459,26 +4757,17 @@ async fn import_update_bundle_handler(
         };
         let name = field.name().unwrap_or("").to_string();
         if name == "bundle" || name == "file" {
-            let data = match field.bytes().await {
-                Ok(data) => data,
+            match stage_multipart_bundle(field, "signage-update-import").await {
+                Ok(path) => bundle_path = Some(path),
                 Err(error) => {
-                    audit_update_import_failure(
-                        &state,
-                        &principal,
-                        "bundle field read failed",
-                    )
-                    .await;
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        format!("read field: {}", error),
-                    ));
+                    audit_update_import_failure(&state, &principal, "bundle field read failed").await;
+                    return Err(error);
                 }
-            };
-            bundle_bytes = Some(data.to_vec());
+            }
         }
     }
-    let bundle_bytes = match bundle_bytes {
-        Some(bytes) => bytes,
+    let dest = match bundle_path {
+        Some(path) => path,
         None => {
             audit_update_import_failure(&state, &principal, "bundle file missing").await;
             return Err((
@@ -4487,22 +4776,13 @@ async fn import_update_bundle_handler(
             ));
         }
     };
-    let dest = std::path::PathBuf::from(crate::version::install_dir_for_static()).join(format!(
-        ".signage-update-import-{}.tar.gz",
-        chrono::Utc::now().timestamp()
-    ));
-    if let Err(error) = tokio::fs::write(&dest, &bundle_bytes).await {
-        audit_update_import_failure(&state, &principal, "staging write failed").await;
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("write: {}", error),
-        ));
-    }
-    let result = match tokio::task::spawn_blocking(move || {
-        crate::version::import_update_bundle(&dest, force_skip_rollback)
+    let import_dest = dest.clone();
+    let worker_result = tokio::task::spawn_blocking(move || {
+        crate::version::import_update_bundle(&import_dest, force_skip_rollback)
     })
-    .await
-    {
+    .await;
+    let _ = tokio::fs::remove_file(&dest).await;
+    let result = match worker_result {
         Ok(Ok(result)) => result,
         Ok(Err(error)) => {
             let status = if error.starts_with("update bundle signature rejected:")
@@ -4560,33 +4840,31 @@ async fn import_update_bundle_handler(
             ));
         }
     };
-    let restart = std::process::Command::new("systemctl")
-        .arg("restart")
-        .arg("screentra-cast-server.service")
-        .status();
+    let (configured_service, _) = crate::version::configured_service();
+    let restart = tokio::task::spawn_blocking(crate::version::restart_configured_service).await;
     match restart {
-        Ok(status) if status.success() => {
+        Ok(Ok(())) => {
             let _ = state
                 .client_repository()
                 .record_audit_event(
                     Some(&principal.username),
                     Some(&principal.role),
                     "server_update_restart",
-                    Some("screentra-cast-server.service"),
+                    Some(&configured_service),
                     "success",
                     Some("service restart returned success"),
                     &Utc::now().to_rfc3339(),
                 )
                 .await;
         }
-        Ok(status) => {
+        Ok(Err(error)) => {
             let _ = state
                 .client_repository()
                 .record_audit_event(
                     Some(&principal.username),
                     Some(&principal.role),
                     "server_update_restart",
-                    Some("screentra-cast-server.service"),
+                    Some(&configured_service),
                     "failure",
                     Some("service restart returned failure"),
                     &Utc::now().to_rfc3339(),
@@ -4607,8 +4885,7 @@ async fn import_update_bundle_handler(
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!(
-                    "update applied but screentra-cast-server.service restart failed (status {:?})",
-                    status.code()
+                    "update applied but {configured_service} restart failed: {error}"
                 ),
             ));
         }
@@ -4619,7 +4896,7 @@ async fn import_update_bundle_handler(
                     Some(&principal.username),
                     Some(&principal.role),
                     "server_update_restart",
-                    Some("screentra-cast-server.service"),
+                    Some(&configured_service),
                     "failure",
                     Some("service restart could not be started"),
                     &Utc::now().to_rfc3339(),
@@ -4639,7 +4916,7 @@ async fn import_update_bundle_handler(
                 .await;
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("update applied but could not restart screentra-cast-server.service: {e}"),
+                format!("update applied but could not restart {configured_service}: {e}"),
             ));
         }
     }
@@ -5052,24 +5329,11 @@ async fn download_screentra_cast_installers_handler() -> Result<
 }
 
 async fn restart_service_handler() -> Result<StatusCode, (StatusCode, String)> {
-    let status = std::process::Command::new("systemctl")
-        .arg("restart")
-        .arg("screentra-cast-server.service")
-        .status()
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("systemctl: {}", e),
-            )
-        })?;
-    if status.success() {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("systemctl exited with {:?}", status.code()),
-        ))
-    }
+    tokio::task::spawn_blocking(crate::version::restart_configured_service)
+        .await
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("restart worker: {error}")))?
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))
 }
 
 // ── System Time / Timezone handlers ───────────────────────
@@ -5213,7 +5477,7 @@ async fn set_timezone(
     }
     log::info!("Setting timezone to {}", tz);
     run_sudo(&["timedatectl", "set-timezone", tz])
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -5238,7 +5502,7 @@ async fn set_clock(
     let res = run_sudo(&["timedatectl", "set-time", s]);
     // Always try to re-enable NTP, regardless of whether the time-set succeeded
     let _ = run_sudo(&["timedatectl", "set-ntp", "true"]);
-    res.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    res.map_err(|_| internal_server_error())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -5248,10 +5512,10 @@ async fn sync_ntp() -> Result<StatusCode, (StatusCode, String)> {
     // Try chrony first (most common on modern Ubuntu), fall back to systemd-timesyncd.
     let chrony_res = run_sudo(&["chronyc", "tracking"]);
     if chrony_res.is_ok() {
-        run_sudo(&["chronyc", "makestep"]).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        run_sudo(&["chronyc", "makestep"]).map_err(|_| internal_server_error())?;
     } else {
         run_sudo(&["systemctl", "restart", "systemd-timesyncd"])
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            .map_err(|_| internal_server_error())?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -5275,7 +5539,7 @@ async fn vacuum_database(
         .unwrap_or_else(|_| PathBuf::from("/home/board/data"))
         .join("signage.db");
     let size_before = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-    db.vacuum().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    db.vacuum().map_err(|_| internal_server_error())?;
     let size_after = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     log::info!(
         "VACUUM complete: {} bytes -> {} bytes (saved {})",
@@ -5303,7 +5567,7 @@ async fn purge_sessions(
         .repository
         .purge_expired_sessions()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     log::info!("purged {rows} expired sessions");
     Ok(AxumJson(serde_json::json!({"deleted": rows})))
 }
@@ -5325,7 +5589,7 @@ async fn get_system_health(
     let stale = repository
         .count_stale_clients(5 * 60)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(serde_json::json!({
         "db_ok": true,
         "stale_clients": stale,
@@ -5397,7 +5661,7 @@ async fn list_schedule_runs(
     let rows = repository
         .list_schedule_runs(limit)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(rows))
 }
 
@@ -5426,14 +5690,14 @@ async fn reset_default_widget_presets(
     let existing = repository
         .list_widget_presets(None)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let mut deleted = 0;
     for p in existing {
         if p.id.starts_with("default-") {
             repository
                 .delete_widget_preset(&p.id)
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                .map_err(|_| internal_server_error())?;
             deleted += 1;
         }
     }
@@ -5466,7 +5730,7 @@ async fn reset_default_widget_presets(
         repository
             .create_widget_preset(&id, &name, &widget_type, &props_json, &now)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            .map_err(|_| internal_server_error())?;
         if let Some(a) = assets.as_array() {
             for asset in a {
                 let kind = asset
@@ -5495,7 +5759,7 @@ async fn reset_default_widget_presets(
                         url,
                     })
                     .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                    .map_err(|_| internal_server_error())?;
             }
         }
         created += 1;
@@ -5523,7 +5787,7 @@ async fn setup_status(
         .repository
         .count_active_admins()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(serde_json::json!({
         "setup_required": active_admins == 0,
     })))
@@ -5577,7 +5841,7 @@ async fn create_initial_admin(
         .repository
         .create_session(&token, &username, expires_at)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(serde_json::json!({
         "token": token,
         "expires_in": state.auth.ttl_seconds(),
@@ -5701,7 +5965,7 @@ async fn list_users(
         .repository
         .list_users()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(users.into_iter().map(user_from_record).collect()))
 }
 
@@ -5715,7 +5979,7 @@ async fn get_user(
         .repository
         .get_user(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
     Ok(AxumJson(user_from_record(user)))
 }
@@ -5765,7 +6029,7 @@ async fn create_user(
         .repository
         .get_user(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "User insert failed".to_string()))?;
     Ok(AxumJson(user_from_record(user)))
 }
@@ -5781,7 +6045,7 @@ async fn update_user(
         .repository
         .get_user(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
     let username = match payload.username {
         Some(v) => normalize_username(&v)?,
@@ -5847,7 +6111,7 @@ async fn update_user(
         .repository
         .get_user(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "User update failed".to_string()))?;
     Ok(AxumJson(user_from_record(user)))
 }
@@ -5862,7 +6126,7 @@ async fn delete_user(
         .repository
         .get_user(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
     if current.role == "admin"
         && current.active
@@ -5882,7 +6146,7 @@ async fn delete_user(
         .repository
         .delete_user_record(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(
         serde_json::json!({"deleted": deleted, "username": current.username}),
     ))
@@ -6011,12 +6275,12 @@ async fn adopt_client(
     let changed = repository
         .set_client_enrolled(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     if !changed {
         let exists = repository
             .get_client_virtual_flag(&id)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            .map_err(|_| internal_server_error())?;
         return Err(match exists {
             Some(true) => (
                 StatusCode::BAD_REQUEST,
@@ -6053,7 +6317,7 @@ async fn get_client_assignment(
     let layout_id = repository
         .get_client_assignment(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(
         serde_json::json!({ "client_id": id, "layout_id": layout_id }),
     ))
@@ -6067,11 +6331,11 @@ async fn set_client_assignment(
     repository
         .set_client_assignment(&id, payload.layout_id.as_deref())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let layout_id = repository
         .get_client_assignment(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(
         serde_json::json!({ "client_id": id, "layout_id": layout_id }),
     ))
@@ -6090,7 +6354,7 @@ async fn set_client_display_count(
     let Some((installer, active)) = repository
         .set_client_display_count(&id, payload.max_displays)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
     else {
         return Err((StatusCode::NOT_FOUND, "client not found".to_string()));
     };
@@ -6159,7 +6423,7 @@ async fn set_client_touch_binding(
     if !repository
         .client_exists(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
     {
         return Err((StatusCode::NOT_FOUND, "client not found".to_string()));
     }
@@ -6174,7 +6438,7 @@ async fn set_client_touch_binding(
     repository
         .set_client_touch_binding(&id, &binding_json)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let queued = queue_repository_command(
         &repository,
         &id,
@@ -6200,7 +6464,7 @@ async fn set_client_theme(
     let updated = repository
         .set_client_theme(&id, &payload.theme)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     if !updated {
         return Err((StatusCode::NOT_FOUND, "client not found".to_string()));
     }
@@ -6212,12 +6476,31 @@ async fn set_client_theme(
 
 async fn get_client_admin_users(
     State(repository): State<ClientRepository>,
+    Extension(auth): Extension<crate::auth::AuthState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    // This route remains reachable by the player heartbeat, but it is not
+    // public: an enrolled client credential or an authenticated admin session
+    // is required. The repository intentionally returns metadata only.
+    let authenticated_role = if let Some(token) = crate::auth::extract_token(&headers) {
+        auth.token_payload(&token)
+            .await
+            .and_then(|payload| payload.get("role").and_then(|role| role.as_str()).map(str::to_string))
+    } else {
+        None
+    };
+    if let Some(role) = authenticated_role {
+        if role != "admin" {
+            return Err((StatusCode::FORBIDDEN, "admin authority required".to_string()));
+        }
+    } else {
+        require_client_command_token(&repository, &id, &headers).await?;
+    }
     let Some((enrolled, users)) = repository
         .list_client_admin_users(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
     else {
         return Err((StatusCode::NOT_FOUND, "client not enrolled".to_string()));
     };
@@ -6230,7 +6513,6 @@ async fn get_client_admin_users(
             "username": user.username,
             "display_name": user.display_name,
             "role": user.role,
-            "password_hash": user.password_hash,
         }))
         .collect();
     Ok(AxumJson(serde_json::json!({
@@ -6247,19 +6529,19 @@ async fn get_client_config(
     let layout_id = repository
         .get_client_assignment(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let theme = repository
         .get_client_theme(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let layout = if let Some(ref lid) = layout_id {
         repository
             .get_layout(lid)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .map_err(|_| internal_server_error())?
             .map(serde_json::to_value)
             .transpose()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|_| internal_server_error())?
     } else {
         None
     };
@@ -6353,7 +6635,7 @@ async fn bulk_assign_clients(
     let updated = repository
         .bulk_set_client_assignment(&payload.client_ids, payload.layout_id.as_deref())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(BulkAssignResult {
         updated,
         client_ids: payload.client_ids,
@@ -6424,6 +6706,8 @@ const ALLOWED_CLIENT_COMMAND_ACTIONS: &[&str] = &[
     "audio_set_default",
     "audio_set_volume",
     "restart_client",
+    "start_display_preview",
+    "stop_display_preview",
     "ddc_set",
     "cec_send",
     "ir_send",
@@ -6550,6 +6834,13 @@ async fn queue_repository_command(
         }
         return Err(error);
     }
+    if action == "start_display_preview" {
+        let display = payload
+            .and_then(|value| value.get("display_index"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0) as u32;
+        crate::screenshot::clear_screenshot(client_id, display).await;
+    }
     let detail = format!("action={action}");
     let _ = repository
         .record_audit_event(
@@ -6583,6 +6874,9 @@ async fn queue_repository_command(
 }
 
 fn command_queue_http_error(error: String) -> (StatusCode, String) {
+    if error == "command_pending" {
+        return (StatusCode::CONFLICT, "A client command is already pending".to_string());
+    }
     if let Some(raw) = error.strip_prefix("cooldown:") {
         let retry_after = raw.parse::<u64>().unwrap_or(1).clamp(1, 86_400);
         return (
@@ -6590,7 +6884,7 @@ fn command_queue_http_error(error: String) -> (StatusCode, String) {
             format!("client command cooldown active; retry after {retry_after} seconds"),
         );
     }
-    (StatusCode::INTERNAL_SERVER_ERROR, error)
+    internal_server_error()
 }
 
 fn hash_client_auth_token(token: &str) -> String {
@@ -6607,7 +6901,7 @@ fn client_auth_token_matches(expected_hash: &str, supplied: &str) -> bool {
         == 1
 }
 
-async fn require_client_command_token(
+pub(crate) async fn require_client_command_token(
     repository: &ClientRepository,
     client_id: &str,
     headers: &HeaderMap,
@@ -6661,7 +6955,7 @@ async fn get_client_command(
     let row = repository
         .get_client_command(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
 
     let record = row.map(|(client_id, action, payload_str, requested_at, requested_by)| {
         let payload = payload_str
@@ -6907,12 +7201,12 @@ async fn list_scenes(
     let ids = repository
         .list_scene_ids()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let mut out = Vec::new();
     for id in ids {
         if let Some(scene) = load_scene(&repository, &id)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .map_err(|_| internal_server_error())?
         {
             out.push(scene);
         }
@@ -6926,7 +7220,7 @@ async fn get_scene(
 ) -> Result<AxumJson<SceneRecord>, (StatusCode, String)> {
     load_scene(&repository, &id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .map(AxumJson)
         .ok_or((StatusCode::NOT_FOUND, "scene not found".to_string()))
 }
@@ -6945,14 +7239,14 @@ async fn create_scene(
     if !repository
         .save_scene(&id, &payload.name, payload.description.as_deref(), &now, &assignments, false)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
     {
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "scene insert failed".to_string()));
     }
     Ok(AxumJson(
         load_scene(&repository, &id)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .map_err(|_| internal_server_error())?
             .unwrap(),
     ))
 }
@@ -6971,14 +7265,14 @@ async fn update_scene(
     let updated = repository
         .save_scene(&id, &payload.name, payload.description.as_deref(), &now, &assignments, true)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     if !updated {
         return Err((StatusCode::NOT_FOUND, "scene not found".to_string()));
     }
     Ok(AxumJson(
         load_scene(&repository, &id)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .map_err(|_| internal_server_error())?
             .unwrap(),
     ))
 }
@@ -6990,7 +7284,7 @@ async fn delete_scene(
     let deleted = repository
         .delete_scene(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(serde_json::json!({"deleted": deleted, "id": id})))
 }
 
@@ -7000,7 +7294,7 @@ async fn publish_scene_to_client(
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
     let scene = load_scene(&repository, &id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .ok_or((StatusCode::NOT_FOUND, "scene not found".to_string()))?;
     let assignment_rows = scene
         .assignments
@@ -7010,7 +7304,7 @@ async fn publish_scene_to_client(
     let updated = repository
         .publish_scene_assignments(&client_id, &assignment_rows)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let indexes: Vec<i64> = scene.assignments.iter().map(|a| a.display_index).collect();
     let command_payload = serde_json::json!({
         "scene_id": id,
@@ -7026,7 +7320,7 @@ async fn publish_scene_to_client(
         Some("scene-publish"),
     )
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    .map_err(|_| internal_server_error())?;
     Ok(AxumJson(serde_json::json!({
         "scene_id": id,
         "client_id": client_id,
@@ -7108,7 +7402,7 @@ async fn layout_propagation_status(
     let target_revision = repository
         .list_layout_revisions(&layout_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .into_iter()
         .map(|revision| revision.revision)
         .max()
@@ -7117,7 +7411,7 @@ async fn layout_propagation_status(
         repository
             .list_registered_clients()
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?,
+            .map_err(|_| internal_server_error())?,
     );
     let observations = nudge_registry().observed_layouts.lock().unwrap().clone();
     let mut targets = Vec::new();
@@ -7130,7 +7424,7 @@ async fn layout_propagation_status(
         let (_, client_layout_id, records) = repository
             .list_client_displays(&client.id)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            .map_err(|_| internal_server_error())?;
         let mut matched = false;
         for record in records {
             if record.assigned_layout_id.as_deref() != Some(layout_id.as_str()) {
@@ -7232,7 +7526,7 @@ async fn list_client_displays(
     let (is_virtual, _client_layout_id, records) = repository
         .list_client_displays(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let mut out = Vec::<ClientDisplayInfo>::new();
     for record in records {
         let display_index = record.display_index;
@@ -7268,7 +7562,7 @@ async fn list_client_displays(
         if !layout_ids.is_empty() {
             let sets_map = repository.get_layout_sets_for_layouts(&layout_ids)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|_| internal_server_error())?;
             for disp in out.iter_mut() {
                 if let Some(ref lid) = disp.assigned_layout_id {
                     disp.layout_set = sets_map.get(lid).cloned();
@@ -7299,7 +7593,7 @@ async fn bulk_assign_displays(
     let updated = repository
         .bulk_set_display_layout(&id, payload.layout_id.as_deref())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(BulkAssignDisplaysResult {
         updated,
         client_id: id,
@@ -7313,19 +7607,19 @@ async fn get_client_display_config(
     let (layout_id, orientation) = repository
         .get_display_config(&id, index)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let layout = if let Some(ref lid) = layout_id {
         repository
             .get_published_layout(lid)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .map_err(|_| internal_server_error())?
             .or(repository
                 .get_layout(lid)
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?)
+                .map_err(|_| internal_server_error())?)
             .map(serde_json::to_value)
             .transpose()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|_| internal_server_error())?
     } else {
         None
     };
@@ -7333,7 +7627,7 @@ async fn get_client_display_config(
         repository
             .list_layout_revisions(lid)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+            .map_err(|_| internal_server_error())?
             .into_iter()
             .map(|r| r.revision)
             .max()
@@ -7388,7 +7682,7 @@ async fn set_client_display_command(
                 let row = repository
                     .get_display_assignment_and_last_seen(&id, index)
                     .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                    .map_err(|_| internal_server_error())?;
                 match row {
                     Some((Some(_), _)) => true,
                     Some((None, last_seen)) => {
@@ -7432,7 +7726,7 @@ async fn set_client_display_layout(
     let updated = repository
         .set_display_layout(&id, index, payload.layout_id.as_deref())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let command_payload = serde_json::json!({
         "display_index": index,
         "assigned_layout_id": payload.layout_id,
@@ -7472,7 +7766,10 @@ async fn get_client_display_control(
     let row = repository
         .get_display_control(&id, index)
         .await
-        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+        .map_err(|_| internal_server_error())?;
+    let Some(row) = row else {
+        return Err((StatusCode::NOT_FOUND, "Display not found".to_string()));
+    };
 
     Ok(AxumJson(serde_json::json!({
         "client_id": id,
@@ -7505,7 +7802,7 @@ async fn set_client_display_control_method(
     let updated = repository
         .set_display_control_method(&id, index, &method)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     if updated == 0 {
         return Err((StatusCode::NOT_FOUND, "Display not found".to_string()));
     }
@@ -7537,7 +7834,7 @@ async fn set_client_display_orientation(
     let updated = repository
         .set_display_orientation(&id, index, &orientation)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     if updated == 0 {
         return Err((StatusCode::NOT_FOUND, "Display not found".to_string()));
     }
@@ -7567,7 +7864,7 @@ async fn clear_client_display_command(
     let deleted = repository
         .clear_client_display_command(&id, index)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(serde_json::json!({
         "cleared": deleted,
         "client_id": id,
@@ -7582,7 +7879,7 @@ async fn delete_client_history(
     let rows = repository
         .delete_client_history(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(
         serde_json::json!({"deleted": rows, "client_id": id}),
     ))
@@ -7597,7 +7894,7 @@ async fn get_client_history(
     let mut records = repository
         .list_client_heartbeats(&id, limit as i64)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .into_iter()
         .map(|(recorded_at, cpu_usage, memory_used, memory_total, disk_used, disk_total, uptime_seconds)| {
             HeartbeatRecord {
@@ -7624,7 +7921,7 @@ async fn delete_virtual_client(
     let deleted = repository
         .delete_virtual_client(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     if !deleted {
         return Err((StatusCode::NOT_FOUND, "Not a virtual client".to_string()));
     }
@@ -7640,7 +7937,7 @@ async fn delete_client(
     let deleted = repository
         .delete_client(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     nudge_registry().last_nudge.lock().unwrap().remove(&id);
     nudge_registry().observed_layouts.lock().unwrap().retain(|key, _| key != &id && !key.starts_with(&format!("{}:", id)));
     Ok(AxumJson(DeleteClientResponse {
@@ -7656,7 +7953,7 @@ async fn nudge_client(
     let layout_id = repository
         .get_client_assignment(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let now = Utc::now().to_rfc3339();
     nudge_registry()
         .last_nudge
@@ -7688,10 +7985,10 @@ async fn render_layout(
     let layout = repository
         .get_layout(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .ok_or((StatusCode::NOT_FOUND, format!("Layout {} not found", id)))?;
     let widgets_json = serde_json::to_value(&layout.widgets)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|_| internal_server_error())?;
     let widgets_arr = widgets_json.as_array().cloned().unwrap_or_default();
     Ok(AxumJson(LayoutRender {
         id: layout.id,
@@ -7773,7 +8070,23 @@ async fn register_client(
         .get_client_auth_token_hash(&id)
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "client authentication lookup failed".to_string()))?;
+    let existing_client = repository
+        .list_registered_clients()
+        .await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "client registration lookup failed".to_string()))?
+        .into_iter()
+        .find(|row| row.0 == id);
+    let was_enrolled = existing_client.as_ref().map(|row| row.14 != 0).unwrap_or(false);
     let client_auth_token_hash = client_auth_token.map(hash_client_auth_token);
+    if existing_client.is_some() && stored_hash.is_none() {
+        // Existing legacy rows without a token must be claimed through the
+        // authenticated admin enrollment flow. Otherwise anyone who learns a
+        // client ID can win the first-registration race and set its token.
+        return Err((
+            StatusCode::CONFLICT,
+            "client requires authenticated administrator enrollment".to_string(),
+        ));
+    }
     match stored_hash.as_deref() {
         Some(expected_hash) => {
             let Some(provided_hash) = client_auth_token_hash.as_deref() else {
@@ -7843,12 +8156,6 @@ async fn register_client(
         enabled: disp.enabled,
         last_error: disp.last_error.clone(),
     }).collect::<Vec<_>>();
-    let was_enrolled = repository
-        .list_registered_clients()
-        .await
-        .ok()
-        .and_then(|rows| rows.into_iter().find(|row| row.0 == id).map(|row| row.14 != 0))
-        .unwrap_or(false);
     if let Err(error) = repository
         .register_client(&client_record, &display_records)
         .await
@@ -7962,7 +8269,7 @@ async fn register_client(
     let rows = repository
         .list_registered_clients()
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     load_registered_clients_from_rows(rows)
         .into_iter()
         .find(|c| c.id == id)
@@ -8328,6 +8635,8 @@ mod tests {
     fn client_command_policy_rejects_unknown_actions_and_oversized_payloads() {
         assert!(validate_client_command("reload_layout", None).is_ok());
         assert!(validate_client_command("restart_client", None).is_ok());
+        assert!(validate_client_command("start_display_preview", Some(&serde_json::json!({"display_index": 0, "duration_seconds": 30}))).is_ok());
+        assert!(validate_client_command("stop_display_preview", Some(&serde_json::json!({"display_index": 0}))).is_ok());
         assert!(validate_client_command("run_shell", None).is_err());
         assert!(validate_client_command(
             "reload_layout",
@@ -8534,6 +8843,16 @@ mod tests {
         for c in ["images", "videos", "audio", "templates", "icons", "misc"] {
             let d = uploads_dir(c).expect("should accept");
             assert!(d.ends_with(c), "category {} should yield {:?}", c, d);
+        }
+    }
+
+    #[test]
+    fn public_uploads_reject_active_content_and_force_safe_serving_policy() {
+        for name in ["page.html", "script.js", "module.mjs", "style.css", "image.svg", "payload.wasm"] {
+            assert!(is_active_upload_name(name), "must classify {name} as active content");
+        }
+        for name in ["photo.png", "movie.mp4", "font.woff2", "sound.ogg"] {
+            assert!(!is_active_upload_name(name), "must allow inert asset {name}");
         }
     }
 
@@ -8871,6 +9190,84 @@ fn interactive_validate_payload_checkbox_list_caps_items_and_strings() {
     assert!(validate_payload("checkbox-list", &p).is_err());
 }
 
+#[cfg(test)]
+mod audit_validation_tests {
+    use super::*;
+
+    fn layout_schedule() -> ScheduleEntry {
+        ScheduleEntry {
+            id: "s1".into(),
+            display: "DP-1".into(),
+            layout_id: "layout-1".into(),
+            layout_set_id: None,
+            day_of_week: crate::schedule::DAY_EVERY,
+            start_time: "08:00".into(),
+            end_time: "17:00".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            action: "switch_layout".into(),
+            target_client: None,
+            power_state: None,
+            display_name: None,
+            control_method: None,
+            display_index: None,
+        }
+    }
+
+    #[test]
+    fn schedule_validation_rejects_malformed_time_and_ambiguous_layout() {
+        let mut entry = layout_schedule();
+        entry.start_time = "25:00".into();
+        assert!(validate_schedule_entry(&entry).is_err());
+        entry.start_time = "08:00".into();
+        entry.layout_set_id = Some("set-1".into());
+        assert!(validate_schedule_entry(&entry).is_err());
+    }
+
+    #[test]
+    fn schedule_validation_accepts_overnight_power_schedule() {
+        let mut entry = layout_schedule();
+        entry.action = "power_off".into();
+        entry.layout_id.clear();
+        entry.target_client = Some("client-1".into());
+        entry.power_state = Some("off".into());
+        entry.start_time = "22:00".into();
+        entry.end_time = "02:00".into();
+        assert!(validate_schedule_entry(&entry).is_ok());
+    }
+
+    #[test]
+    fn layout_set_validation_rejects_empty_ids_and_unbounded_values() {
+        let set = LayoutSetWithItems {
+            id: "".into(),
+            name: "set".into(),
+            shuffle: false,
+            dwell_secs: 30,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            items: Vec::new(),
+        };
+        assert_eq!(validate_layout_set_values(&set), Err(StatusCode::BAD_REQUEST));
+
+        let set = LayoutSetWithItems {
+            id: "set-1".into(),
+            name: "set".into(),
+            shuffle: false,
+            dwell_secs: 30,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            items: vec![LayoutSetEntry {
+                id: "entry-1".into(),
+                layout_set_id: "set-1".into(),
+                layout_id: "layout-1".into(),
+                position: 0,
+                interval_secs: Some(0),
+                transition: None,
+            }],
+        };
+        assert_eq!(validate_layout_set_values(&set), Err(StatusCode::BAD_REQUEST));
+    }
+}
+
 #[derive(Clone)]
 struct RateLimitLayerState {
     limiter: std::sync::Arc<crate::rate_limit::RateLimiter>,
@@ -8910,6 +9307,8 @@ async fn rate_limit_files_layer(
         ("clients", crate::rate_limit::POLICY_REGISTER)
     } else if path == "/api/interactive/submit" {
         ("interactive_submit", crate::rate_limit::POLICY_INTERACTIVE_SUBMIT)
+    } else if path == "/api/traffic/events" || path == "/api/traffic/map.png" {
+        ("traffic", crate::rate_limit::POLICY_TRAFFIC)
     } else {
         return next.run(req).await;
     };
@@ -8957,13 +9356,17 @@ async fn rate_limit_files_layer(
 /// unsafe-inline for styles because the editor sets inline styles
 /// for widget positioning. Tighten further with a nonce-based approach if
 /// needed.
-const CSP_HEADER: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://api.weather.gov https://nominatim.openstreetmap.org; frame-src 'self' https:; object-src 'none'; base-uri 'self'; form-action 'self'";
+const CSP_HEADER: &str = "default-src 'self'; script-src 'self' https://www.youtube.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://api.weather.gov https://nominatim.openstreetmap.org https://www.youtube.com; frame-src 'self' https:; frame-ancestors 'self'; object-src 'none'; base-uri 'self'; form-action 'self'";
 
 async fn csp_layer(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let mut resp = next.run(req).await;
     let value = axum::http::HeaderValue::from_static(CSP_HEADER);
     resp.headers_mut()
         .insert(axum::http::header::CONTENT_SECURITY_POLICY, value);
+    resp.headers_mut().insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("SAMEORIGIN"),
+    );
     resp
 }
 
@@ -9073,7 +9476,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
         "totals": body.totals,
     });
     let body_bytes = serde_json::to_vec_pretty(&payload)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|_| internal_server_error())?;
     std::fs::write(&dest, &body_bytes).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -9230,7 +9633,7 @@ async fn download_client_diagnostics(
         (
             CONTENT_DISPOSITION,
             axum::http::HeaderValue::from_str(&cd)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+                .map_err(|_| internal_server_error())?,
         ),
     ];
     Ok((headers, bytes))
@@ -9531,7 +9934,7 @@ async fn post_interactive_submission_handler(
             &collected_at,
         )
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(serde_json::json!({
         "id": id,
         "status": "received",
@@ -9565,7 +9968,7 @@ async fn get_interactive_submissions_handler(
             q.status.as_deref(),
         )
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(serde_json::json!({
         "submissions": submissions,
         "count": submissions.len(),
@@ -9578,19 +9981,19 @@ async fn get_interactive_submissions_stats_handler(
     let total = repository
         .count_interactive_submissions(None)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let pending = repository
         .count_interactive_submissions(Some("pending"))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let success = repository
         .count_interactive_submissions(Some("success"))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let failed = repository
         .count_interactive_submissions(Some("failed"))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(serde_json::json!({
         "total": total,
         "pending": pending,
@@ -9618,7 +10021,7 @@ async fn export_interactive_submissions_csv_handler(
             q.status.as_deref(),
         )
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
 
     // Build CSV with a header row
     let mut csv = String::new();
@@ -9658,7 +10061,7 @@ async fn export_interactive_submissions_csv_handler(
         (
             CONTENT_DISPOSITION,
             axum::http::HeaderValue::from_str(&cd)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+                .map_err(|_| internal_server_error())?,
         ),
     ];
     Ok((headers, csv.into_bytes()))
@@ -9685,7 +10088,7 @@ async fn delete_interactive_submissions_handler(
     let n = repository
         .delete_interactive_submissions(&payload.ids)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(serde_json::json!({"deleted": n})))
 }
 
@@ -9719,7 +10122,7 @@ async fn sync_interactive_submissions_to_google_handler(
                     let rows = repository
                         .list_interactive_submissions(5000, None, Some(layout_id), Some("pending"))
                         .await
-                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                        .map_err(|_| internal_server_error())?;
                     rows.iter().filter_map(|v| v["id"].as_i64()).collect()
                 } else {
                     return Err((
@@ -9733,7 +10136,7 @@ async fn sync_interactive_submissions_to_google_handler(
                 let rows = repository
                     .list_interactive_submissions(5000, None, None, Some("pending"))
                     .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                    .map_err(|_| internal_server_error())?;
                 rows.iter().filter_map(|v| v["id"].as_i64()).collect()
             }
         }
@@ -9765,7 +10168,7 @@ async fn sync_interactive_submissions_to_google_handler(
                 None,
             )
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            .map_err(|_| internal_server_error())?;
         return Ok(AxumJson(serde_json::json!({
             "synced": n,
             "google_configured": false,
@@ -9786,7 +10189,7 @@ async fn sync_interactive_submissions_to_google_handler(
                     sheet_id.as_deref(),
                 )
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                .map_err(|_| internal_server_error())?;
             Ok(AxumJson(serde_json::json!({
                 "synced": n,
                 "google_configured": true,
@@ -9803,7 +10206,7 @@ async fn sync_interactive_submissions_to_google_handler(
                     spreadsheet_id.as_deref(),
                 )
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                .map_err(|_| internal_server_error())?;
             Ok(AxumJson(serde_json::json!({
                 "synced": n,
                 "google_configured": true,
@@ -9866,7 +10269,7 @@ async fn list_tables_handler(
     ))?;
     let names = db
         .list_table_names()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(
         names.into_iter().map(|name| TableInfo { name }).collect(),
     ))
@@ -9897,7 +10300,7 @@ async fn query_table_handler(
 
     let result = db
         .query_table_rows(&safe_table, limit, offset)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
 
     let columns = result
         .columns
@@ -9945,7 +10348,7 @@ async fn delete_table_rows_handler(
 
     let deleted = db
         .delete_table_rows(&safe_table, &payload.ids)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
 
     Ok(AxumJson(serde_json::json!({"deleted": deleted})))
 }
@@ -9965,7 +10368,7 @@ async fn export_table_csv_handler(
 
     let export = db
         .export_table_rows(&safe_table)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let mut csv = String::new();
     csv.push_str(
         &export
@@ -10011,7 +10414,7 @@ async fn push_submissions_to_google_sheets(
     let all = repository
         .list_interactive_submissions(5000, None, None, None)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let rows: Vec<serde_json::Value> = all
         .into_iter()
         .filter(|v| {
@@ -10120,7 +10523,7 @@ async fn create_virtual_client(
     repository
         .create_virtual_client(&id, &name)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let url = format!("/player.html?client_id={}", id);
     Ok(AxumJson(VirtualClientResponse { id, name, url }))
 }
@@ -10132,7 +10535,7 @@ async fn get_virtual_client(
     let (name, is_virtual) = repository
         .get_virtual_client(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .map_err(|_| internal_server_error())?
         .ok_or((StatusCode::NOT_FOUND, "Virtual client not found".to_string()))?;
     if !is_virtual {
         return Err((StatusCode::NOT_FOUND, "Not a virtual client".to_string()));
@@ -10153,7 +10556,7 @@ async fn update_virtual_client(
     let is_virtual = repository
         .is_virtual_client(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     if !is_virtual {
         return Err((StatusCode::NOT_FOUND, "Not a virtual client".to_string()));
     }
@@ -10163,7 +10566,7 @@ async fn update_virtual_client(
     repository
         .update_virtual_client_name(&id, &name)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     let url = format!("/player.html?client_id={}", id);
     Ok(AxumJson(VirtualClientResponse {
         id,
@@ -10180,7 +10583,7 @@ async fn set_virtual_client_layout(
     let is_virtual = repository
         .is_virtual_client(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     if !is_virtual {
         return Err((StatusCode::NOT_FOUND, "Not a virtual client".to_string()));
     }
@@ -10188,7 +10591,7 @@ async fn set_virtual_client_layout(
     let updated = repository
         .set_virtual_client_layout(&id, &layout_id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|_| internal_server_error())?;
     if updated == 0 {
         return Err((StatusCode::NOT_FOUND, "Virtual client not found".to_string()));
     }

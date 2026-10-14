@@ -21,6 +21,7 @@ import socket
 import subprocess
 import sys
 import urllib.request
+from urllib.parse import urlparse
 from pathlib import Path
 
 
@@ -87,10 +88,22 @@ def tls_context():
             return None
     return None
 
+
+def validate_server_url(server):
+    parsed = urlparse((server or '').strip())
+    if parsed.scheme not in ('https', 'http') or not parsed.hostname:
+        raise ValueError('server URL must include an https:// origin')
+    if parsed.scheme == 'http' and parsed.hostname not in ('127.0.0.1', 'localhost', '::1'):
+        raise ValueError('non-loopback server URLs must use HTTPS')
+    return parsed
+
 def urlopen_ripley(req, timeout=10):
     kw = {'timeout': timeout}
-    ctx = tls_context()
-    if ctx is not None:
+    parsed = validate_server_url(req if isinstance(req, str) else req.full_url)
+    if parsed.scheme == 'https':
+        ctx = tls_context()
+        if ctx is None:
+            raise RuntimeError('Screentra Cast CA certificate is unavailable or invalid')
         kw['context'] = ctx
     return urllib.request.urlopen(req, **kw)
 

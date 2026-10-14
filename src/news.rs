@@ -15,6 +15,7 @@
 //! declare itself as RSS or Atom.
 
 use crate::models::{NewsFeed, NewsHeadline};
+use std::io::Read;
 use std::time::Duration;
 
 /// Cap on the body we will read from a feed. RSS feeds should be tiny;
@@ -348,16 +349,20 @@ pub fn fetch_feed(
     if scheme != "http" && scheme != "https" {
         return Err(format!("unsupported scheme: {scheme}"));
     }
-    if let Some(host) = parsed.host_str() {
-        if is_private_host(host) {
-            return Err(format!("refusing to fetch private host: {host}"));
-        }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "url has no host".to_string())?;
+    if is_private_host(host) {
+        return Err(format!("refusing to fetch private host: {host}"));
     }
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let resolved_ip = resolve_public_host(host, port)?;
 
     let client = reqwest::blocking::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(FETCH_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
+        .resolve(host, std::net::SocketAddr::new(resolved_ip, port))
         .build()
         .map_err(|e| format!("client build: {e}"))?;
 
@@ -399,16 +404,27 @@ pub fn fetch_feed(
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
 
-    // Read the body with a hard size cap.
-    let body = resp
-        .bytes()
+    // Reject oversized responses before allocation, then read at most one byte
+    // beyond the limit so a lying/missing Content-Length cannot grow memory.
+    if resp
+        .content_length()
+        .is_some_and(|length| length > (MAX_BODY_BYTES + 1) as u64)
+    {
+        return Err(format!("body too large (max {} bytes)", MAX_BODY_BYTES));
+    }
+    let mut limited = resp.take((MAX_BODY_BYTES + 1) as u64);
+    let mut body = Vec::with_capacity(
+        limited
+            .get_ref()
+            .content_length()
+            .unwrap_or(0)
+            .min(MAX_BODY_BYTES as u64) as usize,
+    );
+    limited
+        .read_to_end(&mut body)
         .map_err(|e| format!("read body: {e}"))?;
     if body.len() > MAX_BODY_BYTES {
-        return Err(format!(
-            "body too large: {} bytes (max {})",
-            body.len(),
-            MAX_BODY_BYTES
-        ));
+        return Err(format!("body too large (max {} bytes)", MAX_BODY_BYTES));
     }
 
     let title = extract_feed_title(&body, content_type.as_deref());
@@ -451,9 +467,24 @@ fn extract_feed_title(body: &[u8], content_type: Option<&str>) -> String {
     String::new()
 }
 
-/// Refuse to fetch hosts that resolve to private/loopback/link-local
-/// addresses. Prevents a feed URL like `http://192.168.1.1/admin` from
-/// being used to probe the internal network.
+/// Resolve a feed hostname once and reject every resolved address that is not
+/// publicly routable. The caller pins the HTTP client to the returned address
+/// so a later DNS answer cannot redirect the request into the LAN.
+fn resolve_public_host(host: &str, port: u16) -> Result<std::net::IpAddr, String> {
+    let addrs: Vec<std::net::IpAddr> = std::net::ToSocketAddrs::to_socket_addrs(&(host, port))
+        .map_err(|error| format!("dns resolve failed: {error}"))?
+        .map(|address| address.ip())
+        .collect();
+    if addrs.is_empty() {
+        return Err("dns resolve returned no addresses".to_string());
+    }
+    if addrs.iter().any(|address| disallowed_news_ip(*address)) {
+        return Err(format!("refusing to fetch private host: {host}"));
+    }
+    Ok(addrs[0])
+}
+
+/// Refuse to fetch hosts that are obviously private before DNS resolution.
 fn is_private_host(host: &str) -> bool {
     let h = host.to_ascii_lowercase();
     if h == "localhost" || h.ends_with(".local") || h.ends_with(".internal") {
@@ -462,30 +493,35 @@ fn is_private_host(host: &str) -> bool {
     // Strip IPv6 brackets if present.
     let bare = h.trim_start_matches('[').trim_end_matches(']');
     if let Ok(addr) = bare.parse::<std::net::IpAddr>() {
-        match addr {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_private()
-                    || v4.is_loopback()
-                    || v4.is_link_local()
-                    || v4.is_unspecified()
-                    || v4.is_multicast()
-            }
-            std::net::IpAddr::V6(v6) => {
-                // fe80::/10 is link-local, which std::net::Ipv6Addr does
-                // not expose as a single method call. Check the first 10
-                // bits of the address manually.
-                let is_link_local = (v6.segments()[0] & 0xffc0) == 0xfe80;
-                v6.is_loopback()
-                    || v6.is_unspecified()
-                    || v6.is_unique_local()
-                    || is_link_local
-                    || v6.is_multicast()
-            }
-        }
+        disallowed_news_ip(addr)
     } else {
         // Hostname (not an IP literal) — trust DNS resolution, the
         // network sandbox will block private ranges at the OS level.
         false
+    }
+}
+
+fn disallowed_news_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_private() || v4.is_loopback() || v4.is_link_local()
+                || v4.is_unspecified() || v4.is_broadcast() || v4.is_multicast()
+                || o[0] == 0 || (o[0] == 100 && (64..=127).contains(&o[1]))
+                || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+                || (o[0] == 192 && o[1] == 0 && o[2] == 2)
+                || (o[0] == 198 && o[1] == 51 && o[2] == 100)
+                || (o[0] == 203 && o[1] == 0 && o[2] == 113)
+                || (o[0] == 198 && (o[1] == 18 || o[1] == 19)) || o[0] >= 240
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4() {
+                return disallowed_news_ip(std::net::IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            v6.is_loopback() || v6.is_unspecified() || v6.is_multicast()
+                || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
     }
 }
 

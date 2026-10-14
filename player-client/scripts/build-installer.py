@@ -4,24 +4,25 @@
 from pathlib import Path
 import sys
 
-# Map: heredoc marker -> source file path (relative to repo root)
+# Map: heredoc marker -> source file path (relative to the player-client tree)
+PLAYER_ROOT = Path(__file__).resolve().parents[1]
 SECTIONS = {
-    "PY_PREFLIGHT":           "scripts/screentra-player-preflight.py",
-    "PY":                     "scripts/screentra-player-heartbeat.py",
-    "PY_RENDERER":            "scripts/screentra-player-renderer.py",
-    "PY_GPU_HEALTH":          "scripts/screentra-gpu-health.py",
-    "PY_DETECT_FILE":         "scripts/screentra-display-detect.py",
-    "PY_DISPLAY_GOVERNANCE":  "scripts/screentra-display-governance.py",
-    "PY_ACTOR":               "scripts/screentra-player-actor.py",
-    "SH_STATUS":              "scripts/screentra-player-status.sh",
-    "SH_KIOSK":               "install/screentra-kiosk.sh",
-    "PY_NOLAYOUT":            "static/no-layout.html",
-    "PY_CALIB":               "static/touch-calibration.html",
-    "EOF_UNIT":               "static/screentra-cast-kiosk@.service",
+    "PY_PREFLIGHT":           PLAYER_ROOT / "scripts/screentra-player-preflight.py",
+    "PY":                     PLAYER_ROOT / "scripts/screentra-player-heartbeat.py",
+    "PY_RENDERER":            PLAYER_ROOT / "scripts/screentra-player-renderer.py",
+    "PY_GPU_HEALTH":          PLAYER_ROOT / "scripts/screentra-gpu-health.py",
+    "PY_DETECT_FILE":         PLAYER_ROOT / "scripts/screentra-display-detect.py",
+    "PY_DISPLAY_GOVERNANCE":  PLAYER_ROOT / "scripts/screentra-display-governance.py",
+    "PY_ACTOR":               PLAYER_ROOT / "scripts/screentra-player-actor.py",
+    "SH_STATUS":              PLAYER_ROOT / "scripts/screentra-player-status.sh",
+    "SH_KIOSK":               PLAYER_ROOT / "install/screentra-kiosk.sh",
+    "PY_NOLAYOUT":            PLAYER_ROOT / "static/no-layout.html",
+    "PY_CALIB":               PLAYER_ROOT / "static/touch-calibration.html",
+    "EOF_UNIT":               PLAYER_ROOT / "static/screentra-cast-kiosk@.service",
 }
 
-TEMPLATE = Path("install/player-client.sh")
-OUTPUT  = Path("static/install/player-client.sh")
+TEMPLATE = PLAYER_ROOT / "install/player-client.sh"
+OUTPUT  = PLAYER_ROOT / "static/install/player-client.sh"
 
 
 def replace_section(text: str, marker: str, src: Path) -> str:

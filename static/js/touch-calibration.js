@@ -423,7 +423,9 @@ function summaryEnter() {
       if (!misses) return;
       misses.forEach(m => {
         const li = document.createElement('li');
-        li.innerHTML = `<b>${stage} ${fmt(m)}</b> ${m.reason}`;
+        const label = document.createElement('b');
+        label.textContent = `${stage} ${fmt(m)}`;
+        li.append(label, document.createTextNode(` ${m.reason || ''}`));
         list.appendChild(li);
       });
     });

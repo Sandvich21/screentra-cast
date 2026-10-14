@@ -152,7 +152,7 @@ while IFS='|' read -r idx connector port; do
         RIPLEY_DISPLAY_INDEX="$idx" RIPLEY_RENDER_PORT="$port" \
         RIPLEY_RENDER_BASE_PORT="$BASE_PORT" \
         python3 "$CLIENT_DIR/screentra-client-renderer.py" \
-        --host 0.0.0.0 --port "$port" --cache-dir "$CACHE_DIR" \
+        --host 127.0.0.1 --port "$port" --cache-dir "$CACHE_DIR" \
         >> "$LOG" 2>&1 &
     RENDERER_PIDS+=("$!")
 done <<< "$DISPLAY_SPEC"
@@ -193,7 +193,7 @@ while IFS='|' read -r idx connector port; do
     LIVE_READY=0
     for i in $(seq 1 40); do
         if curl -fsS --max-time 2 "http://127.0.0.1:${port}/" | \
-            python3 -c 'import sys; raise SystemExit(0 if "Screentra Cast Live Player" in sys.stdin.read() else 1)'; then
+            python3 -c 'import sys; raise SystemExit(0 if "Screentra Cast Display" in sys.stdin.read() else 1)'; then
             LIVE_READY=1
             break
         fi

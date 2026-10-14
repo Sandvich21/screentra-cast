@@ -1,26 +1,8 @@
 #!/usr/bin/env bash
-# Screentra Cast Server Installer v0.5.0 — local HTTPS + client trust refresh
-# One-line install (no sudo pre-installed):
-#   curl -fsSL http://<server>:3000/install/screentra-cast-server-install.sh | su -c "bash -s" --
-#
-# One-line install (sudo pre-installed):
-#   curl -fsSL http://<server>:3000/install/screentra-cast-server-install.sh | sudo bash
-#
-# Two-step (if you want to separate sudo setup from install):
-#   Step 1: curl ... | sudo bash --setup-sudo
-#   Step 2: curl ... | sudo bash
-#
-# Installs Screentra Cast as a systemd service under a dedicated "board" user.
-# The calling user is granted NOPASSWD:ALL via sudoers for installation.
-#
+# Screentra Cast Server Installer — signed HTTPS release only.
+# Requires root and an explicit SCREENTRA_CAST_RELEASE_BASE_URL.
 set -eo pipefail
 
-# ── Who ran us ───────────────────────────────────────────────────────────────
-# SUDO_USER is set when run via "sudo bash". Fall back to logname.
-CALLER="${SUDO_USER:-$(logname 2>/dev/null || echo 'unknown')}"
-MODE="${1:-install}"  # --setup-sudo or install
-
-# ── Config ───────────────────────────────────────────────────────────────────
 BOARD_USER="${BOARD_USER:-board}"
 BOARD_HOME="${BOARD_HOME:-/home/board}"
 BOARD_INSTALL_DIR="${BOARD_INSTALL_DIR:-/home/board/server}"
@@ -38,88 +20,44 @@ LOG_DIR="$BOARD_DATA_DIR/logs"
 LOG_FILE="$LOG_DIR/screentra-cast.log"
 SERVICE_NAME="screentra-cast-server.service"
 TMP="$BOARD_HOME/tmp"
-
-# Installer URLs — use a GitHub Release for new installations, or an existing
-# Screentra Cast server as a local source when RELEASE_BASE_URL is unset.
-# SERVER_HOST remains the legacy source-server setting. Set
-# SCREENTRA_CAST_SERVER_HOST to the new target's address so its certificate and
-# server URL are generated for the device being installed.
-SERVER_HOST="${SERVER_HOST:-11.1.1.26}"
-TARGET_HOST="${SCREENTRA_CAST_SERVER_HOST:-${SCREENTRA_CAST_TARGET_HOST:-$SERVER_HOST}}"
-SERVER_SCHEME="${SERVER_SCHEME:-https}"
+TARGET_HOST="${SCREENTRA_CAST_TARGET_HOST:-$LOCAL_HOSTNAME}"
+case "$TARGET_HOST" in
+    ''|*[!a-zA-Z0-9.-]*) printf '%s\n' 'FATAL: SCREENTRA_CAST_TARGET_HOST must contain only hostname or IPv4 characters.' >&2; exit 1 ;;
+esac
 RELEASE_BASE_URL="${SCREENTRA_CAST_RELEASE_BASE_URL:-}"
-if [ -n "$RELEASE_BASE_URL" ]; then
-    RELEASE_BASE_URL="${RELEASE_BASE_URL%/}"
-    RELEASE_BINARY_NAME="screentra-cast-server-amd64"
-    SERVER_URL="$RELEASE_BASE_URL/$RELEASE_BINARY_NAME"
-    STATIC_URL="$RELEASE_BASE_URL/screentra-cast-static.tar.gz"
-    CHECKSUMS_URL="$RELEASE_BASE_URL/SHA256SUMS"
-else
-    RELEASE_BINARY_NAME="screentra-cast-server"
-    SERVER_URL="${SERVER_SCHEME}://${SERVER_HOST}:3000/download/screentra-cast"
-    STATIC_URL="${SERVER_SCHEME}://${SERVER_HOST}:3000/download/screentra-cast-static.tar.gz"
-    CHECKSUMS_URL=""
-fi
+case "$RELEASE_BASE_URL" in
+    https://*/*) RELEASE_BASE_URL="${RELEASE_BASE_URL%/}" ;;
+    *) printf '%s\n' 'FATAL: SCREENTRA_CAST_RELEASE_BASE_URL must be an explicit HTTPS release URL.' >&2; exit 1 ;;
+esac
+RELEASE_BINARY_NAME="screentra-cast-server-amd64"
+SERVER_URL="$RELEASE_BASE_URL/$RELEASE_BINARY_NAME"
+STATIC_URL="$RELEASE_BASE_URL/screentra-cast-static.tar.gz"
+INSTALLERS_URL="$RELEASE_BASE_URL/screentra-cast-installers.tar.gz"
+CHECKSUMS_URL="$RELEASE_BASE_URL/SHA256SUMS"
 
 log() { printf '[screentra-cast-installer] %s\n' "$*"; }
 
-# ── Detect / install curl ────────────────────────────────────────────────────
-ensure_curl() {
-    if command -v curl >/dev/null 2>&1; then
-        log "curl found: $(curl --version | head -1)"
-        return 0
-    fi
-    log "curl not found — installing..."
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y curl
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y curl
-    elif command -v pacman >/dev/null 2>&1; then
-        pacman -Sy --noconfirm curl
-    elif command -v apk >/dev/null 2>&1; then
-        apk add curl
-    else
-        log "FATAL: Cannot install curl (no apt/dnf/pacman/apk found). Please install curl manually."
-        exit 1
-    fi
-}
+if [ "$(id -u)" -ne 0 ]; then
+    log 'FATAL: the release installer must run as root.'
+    exit 1
+fi
+for required in curl python3 sha256sum; do
+    command -v "$required" >/dev/null 2>&1 || { log "FATAL: required command is missing: $required"; exit 1; }
+done
 
-# ── Download helper (no heredoc — works with stdin exhaustion) ─────────────────
-# Downloads $1 to $2 using Python stdlib, as the board user so files land
-# with correct ownership without extra chown calls.
 _dl() {
     local url=$1 dest=$2
-    local ca_file="${SCREENTRA_CAST_CA_CERT:-${RIPLEY_CA_CERT:-}}"
-    runuser -u "$BOARD_USER" -- env SCREENTRA_CAST_CA_CERT="$ca_file" python3 -c "
-import os, sys, urllib.request, ssl
-url, dest = sys.argv[1], sys.argv[2]
-if url.startswith('https://'):
-    cafile = os.environ.get('SCREENTRA_CAST_CA_CERT')
-    ctx = ssl.create_default_context(cafile=cafile) if cafile else ssl.create_default_context()
-else:
-    ctx = None
-try:
-    request = urllib.request.urlopen(url, timeout=30, context=ctx) if ctx else urllib.request.urlopen(url, timeout=30)
-    with request as r:
-        data = r.read()
-    with open(dest, 'wb') as f:
-        f.write(data)
-    print('Downloaded %d bytes to %s' % (len(data), dest), file=sys.stderr)
-except Exception as e:
-    print('Download error: ' + str(e), file=sys.stderr)
-    sys.exit(1)
-" "$url" "$dest"
+    case "$url" in https://*) ;; *) log "FATAL: refusing non-HTTPS download"; exit 1 ;; esac
+    curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+        --connect-timeout 10 --max-time 120 --output "$dest" "$url"
 }
 
 verify_release_asset() {
     local asset=$1
-    local verification_output
-    [ -n "$RELEASE_BASE_URL" ] || return 0
-    verification_output="$(cd "$TMP" && sha256sum -c "$CHECKSUMS_FILE" --ignore-missing 2>/dev/null || true)"
-    if ! grep -Fqx "$asset: OK" <<< "$verification_output"; then
+    (cd "$TMP" && sha256sum -c "$CHECKSUMS_FILE" --ignore-missing 2>/dev/null) | grep -Fqx "$asset: OK" || {
         log "FATAL: SHA-256 verification failed for $asset"
         exit 1
-    fi
+    }
     log "SHA-256 verified: $asset"
 }
 
@@ -243,53 +181,12 @@ PY
     log "Local HTTPS ready for https://$LOCAL_HOSTNAME:3000"
 }
 
-# ── Bootstrap sudo if missing ───────────────────────────────────────────────
-bootstrap_sudo() {
-    # If already running as root, nothing to do
-    [ "$(id -u)" = "0" ] && return 0
-    # If sudo is available and works, nothing to do
-    command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null && return 0
-    # Need to install sudo via su
-    log "sudo not found — installing via su (will prompt for root password)..."
-    if ! command -v su >/dev/null 2>&1; then
-        log "FATAL: neither sudo nor su found. Cannot bootstrap."
-        exit 1
-    fi
-    su -c "apt-get update -qq && apt-get install -y -qq sudo curl 2>&1" || {
-        log "FATAL: su -c apt-get install failed."
-        log "Try running manually: su -c 'apt-get install -y sudo curl'"
-        exit 1
-    }
-    log "sudo and curl installed."
-}
-
-# ── Setup sudo phase ───────────────────────────────────────────────────────────
-if [ "$MODE" = "--setup-sudo" ] || [ "$MODE" = "setup-sudo" ]; then
-    log "=== Sudo Setup Phase ==="
-    log "Configuring passwordless sudo for '$CALLER'..."
-    bootstrap_sudo
-
-    # Grant full NOPASSWD so the installer can run without further prompts
-    echo "$CALLER ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/screentra-cast-$CALLER" > /dev/null
-    sudo chmod 440 "/etc/sudoers.d/screentra-cast-$CALLER"
-    sudo visudo -c -f "/etc/sudoers.d/screentra-cast-$CALLER" 2>/dev/null || true
-    log "Done. '$CALLER' can now run: curl ... | sudo bash"
-    exit 0
-fi
-
 # ── Pre-flight ───────────────────────────────────────────────────────────────
-log "=== Screentra Cast Server Installer ==="
-log "Installer run as: root (via sudo)"
-log "Original caller:  $CALLER"
-log "Target user:     $BOARD_USER"
-log "Install dir:     $BOARD_INSTALL_DIR"
-log "Data dir:        $BOARD_DATA_DIR"
-
-if [ "$(id -u)" -ne 0 ]; then
-    log "FATAL: The install phase must run as root. Use: sudo bash"
-    exit 1
-fi
-ensure_curl
+log "=== Screentra Cast Server Release Installer ==="
+log "Release:          $RELEASE_BASE_URL"
+log "Target user:      $BOARD_USER"
+log "Install dir:      $BOARD_INSTALL_DIR"
+log "Data dir:         $BOARD_DATA_DIR"
 
 # ── Create board user if missing ──────────────────────────────────────────────
 if ! id "$BOARD_USER" >/dev/null 2>&1; then
@@ -317,90 +214,59 @@ mkdir -p "$BOARD_INSTALL_DIR/static" \
 chown -R "$BOARD_USER:$BOARD_USER" "$BOARD_HOME"
 log "Directories created."
 
-# ── Download binary ───────────────────────────────────────────────────────────
-log "Downloading screentra-cast-server..."
+# ── Download release assets ────────────────────────────────────────────────────
+log "Downloading release checksums..."
 mkdir -p "$TMP"
 CHECKSUMS_FILE="$TMP/SHA256SUMS"
-if [ -n "$RELEASE_BASE_URL" ]; then
-    if ! command -v sha256sum >/dev/null 2>&1; then
-        log "FATAL: sha256sum is required for GitHub Release installation."
-        exit 1
-    fi
-    if ! _dl "$CHECKSUMS_URL" "$CHECKSUMS_FILE" 2>&1; then
-        log "FATAL: Failed to download release checksums from $CHECKSUMS_URL"
-        exit 1
-    fi
-fi
-if ! _dl "$SERVER_URL" "$TMP/$RELEASE_BINARY_NAME" 2>&1; then
-    log "ERROR: Failed to download binary from $SERVER_URL"
-    log "Make sure the configured source is reachable (release: ${RELEASE_BASE_URL:-no})"
-    exit 1
-fi
+_dl "$CHECKSUMS_URL" "$CHECKSUMS_FILE"
+_dl "$SERVER_URL" "$TMP/$RELEASE_BINARY_NAME"
 verify_release_asset "$RELEASE_BINARY_NAME"
 mv "$TMP/$RELEASE_BINARY_NAME" "$BIN"
 chown "$BOARD_USER:$BOARD_USER" "$BIN"
 chmod +x "$BIN"
 log "Binary installed: $BIN"
 
-# ── Download static tarball ───────────────────────────────────────────────────
-static_ok=false
-log "Downloading static tarball..."
-if _dl "$STATIC_URL" "$TMP/screentra-cast-static.tar.gz" 2>&1; then
-    verify_release_asset "screentra-cast-static.tar.gz"
-    static_ok=true
-    log "Static tarball downloaded."
-else
-    if [ -n "$RELEASE_BASE_URL" ]; then
-        log "FATAL: Failed to download or verify the release static tarball."
-        exit 1
-    fi
-    log "WARNING: Failed to download static tarball (server may not have it yet)."
-fi
+_dl "$STATIC_URL" "$TMP/screentra-cast-static.tar.gz"
+verify_release_asset "screentra-cast-static.tar.gz"
 
-# ── Extract static ────────────────────────────────────────────────────────────
-if $static_ok && [ -s "$TMP/screentra-cast-static.tar.gz" ]; then
-    log "Extracting static files..."
-    STAGING_DIR="$TMP/static-staging"
-    rm -rf "$STAGING_DIR"
-    mkdir -p "$STAGING_DIR" "$BOARD_INSTALL_DIR/static"
-    tar -xzf "$TMP/screentra-cast-static.tar.gz" -C "$STAGING_DIR"
-    # Copy only the archive contents from the isolated staging directory.
-    cp -a "$STAGING_DIR/." "$BOARD_INSTALL_DIR/static/"
-    rm -rf "$STAGING_DIR"
-    chown -R "$BOARD_USER:$BOARD_USER" "$BOARD_INSTALL_DIR/static/"
-    if [ -d "$BOARD_INSTALL_DIR/static/js" ]; then
-        log "Static files extracted OK."
-    else
-        log "WARNING: static extraction may have failed (no js/ dir)."
-    fi
-fi
+# Extract regular files only after validating every archive member.
+log "Extracting static files..."
+STAGING_DIR="$TMP/static-staging"
+rm -rf "$STAGING_DIR"
+mkdir -p "$STAGING_DIR" "$BOARD_INSTALL_DIR/static"
+python3 - "$TMP/screentra-cast-static.tar.gz" "$STAGING_DIR" <<'PY'
+import pathlib, sys, tarfile
+archive, target = map(pathlib.Path, sys.argv[1:])
+with tarfile.open(archive, 'r:gz') as tf:
+    members = tf.getmembers()
+    for m in members:
+        p = pathlib.PurePosixPath(m.name)
+        if p.is_absolute() or '..' in p.parts or not m.isfile():
+            raise SystemExit(f'unsafe static archive member: {m.name}')
+    for m in members:
+        out = target.joinpath(*pathlib.PurePosixPath(m.name).parts)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with tf.extractfile(m) as src, out.open('wb') as dst:
+            dst.write(src.read())
+        out.chmod(m.mode & 0o777)
+PY
+cp -a "$STAGING_DIR/." "$BOARD_INSTALL_DIR/static/"
+rm -rf "$STAGING_DIR"
+chown -R "$BOARD_USER:$BOARD_USER" "$BOARD_INSTALL_DIR/static/"
+[ -d "$BOARD_INSTALL_DIR/static/js" ] || { log "FATAL: static extraction did not produce js/."; exit 1; }
+log "Static files extracted OK."
 
 if [ "$FRESH_INSTALL" = "true" ]; then
     provision_local_tls
 fi
 
-# ── Download client installers tarball into static ────────────────────────────
-# This makes the tarball available at /install/screentra-cast-installers.tar.gz
-# so other devices on the network can pull it after the server is running.
-if [ -n "$RELEASE_BASE_URL" ]; then
-    INSTALLERS_URL="$RELEASE_BASE_URL/screentra-cast-installers.tar.gz"
-else
-    INSTALLERS_URL="${SERVER_SCHEME}://${SERVER_HOST}:3000/install/screentra-cast-installers.tar.gz"
-fi
+# Make the signed installer archive available to clients.
 mkdir -p "$BOARD_INSTALL_DIR/static/install"
-log "Downloading client installers tarball..."
-if _dl "$INSTALLERS_URL" "$TMP/screentra-cast-installers.tar.gz" 2>&1; then
-    verify_release_asset "screentra-cast-installers.tar.gz"
-    cp "$TMP/screentra-cast-installers.tar.gz" "$BOARD_INSTALL_DIR/static/install/"
-    chown "$BOARD_USER:$BOARD_USER" "$BOARD_INSTALL_DIR/static/install/screentra-cast-installers.tar.gz"
-    log "Client installers tarball saved to static/install/."
-else
-    if [ -n "$RELEASE_BASE_URL" ]; then
-        log "FATAL: Failed to download or verify the release client installers tarball."
-        exit 1
-    fi
-    log "WARNING: Could not download client installers tarball (server may still be starting)."
-fi
+_dl "$INSTALLERS_URL" "$TMP/screentra-cast-installers.tar.gz"
+verify_release_asset "screentra-cast-installers.tar.gz"
+cp "$TMP/screentra-cast-installers.tar.gz" "$BOARD_INSTALL_DIR/static/install/"
+chown "$BOARD_USER:$BOARD_USER" "$BOARD_INSTALL_DIR/static/install/screentra-cast-installers.tar.gz"
+log "Client installers tarball saved to static/install/."
 
 # ── Write env file ────────────────────────────────────────────────────────────
 log "Writing env file..."
@@ -501,13 +367,9 @@ log "Waiting for server to start..."
 port="${BOARD_LISTEN_ADDR#*:}"
 startup_timeout="${SCREENTRA_CAST_STARTUP_TIMEOUT:-90}"
 for i in $(seq 1 "$startup_timeout"); do
-    if [ "${env_lines[SIGNAGE_TLS]:-0}" = "1" ]; then
-        if curl -k -sf "https://127.0.0.1:$port/api/version" > /dev/null 2>&1; then
-            log "Server is up on HTTPS port $port."
-            break
-        fi
-    elif curl -sf "http://127.0.0.1:$port/api/version" > /dev/null 2>&1; then
-        log "Server is up on HTTP port $port."
+    if curl --fail --silent --show-error --cacert "$CERT_DIR/screentra-cast-local-ca.crt" \
+        "https://127.0.0.1:$port/api/version" > /dev/null 2>&1; then
+        log "Server is up on HTTPS port $port."
         break
     fi
     if [ "$i" -eq "$startup_timeout" ]; then
@@ -549,10 +411,9 @@ Install the local CA from:
 No default admin password is created on a fresh install. If you supplied
 ADMIN_PASSWORD, it remains available as a temporary bootstrap credential.
 
-Cleanup (run these as $CALLER with sudo):
-  sudo systemctl stop $SERVICE_NAME
-  sudo rm -rf $BOARD_HOME
-  sudo userdel $BOARD_USER
-  sudo rm -f $SUDOERS_FILE
+Cleanup (run as root after stopping the service):
+  systemctl stop $SERVICE_NAME
+  rm -rf $BOARD_HOME
+  userdel $BOARD_USER
 
 EOF

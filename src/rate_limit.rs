@@ -54,6 +54,8 @@ pub const POLICY_SERVER_UPDATE: Policy = Policy::new(3, Duration::from_secs(300)
 /// handler. 60 req/min/IP keeps one interactive browser saturated while still
 /// preventing disk-fill attacks from a single source.
 pub const POLICY_INTERACTIVE_SUBMIT: Policy = Policy::new(60, Duration::from_secs(60));
+/// Provider-backed traffic proxy requests have a separate quota bucket.
+pub const POLICY_TRAFFIC: Policy = Policy::new(6, Duration::from_secs(300));
 
 /// Maximum number of accepted commands in one burst per client/action.
 pub const CLIENT_COMMAND_BURST_LIMIT: i64 = 10;
