@@ -36,6 +36,18 @@ const DECLARATIVE_RENDERERS: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustedServerServiceSpec {
+    pub image: String,
+    pub image_digest: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub storage_namespace: String,
+    pub api_namespace: String,
+    #[serde(default)]
+    pub client_extension_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddonManifest {
     pub schema_version: u32,
     pub id: String,
@@ -59,6 +71,8 @@ pub struct AddonManifest {
     pub client_entrypoint: Option<String>,
     #[serde(default)]
     pub server_entrypoint: Option<String>,
+    #[serde(default)]
+    pub trusted_service: Option<TrustedServerServiceSpec>,
     #[serde(default)]
     pub client_sha256: Option<String>,
     #[serde(default)]
@@ -298,9 +312,20 @@ pub fn validate_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
         ));
     }
     validate_token(&manifest.version, "Addon version")?;
+    if manifest.kind == "trusted_server_service" {
+        return Err(AddonError::Invalid(
+            "Trusted server addon services are contract-only; container execution is not enabled yet"
+                .to_string(),
+        ));
+    }
     if manifest.kind != "declarative" {
         return Err(AddonError::Invalid(
             "Only declarative addons are supported in this release; executable client/server addons are not enabled yet".to_string(),
+        ));
+    }
+    if manifest.trusted_service.is_some() {
+        return Err(AddonError::Invalid(
+            "trusted_service metadata requires kind=trusted_server_service".to_string(),
         ));
     }
     if manifest.client_entrypoint.is_some() || manifest.server_entrypoint.is_some() {
@@ -765,6 +790,7 @@ mod tests {
             permissions: Vec::new(),
             client_entrypoint: None,
             server_entrypoint: None,
+            trusted_service: None,
             client_sha256: None,
             client_api_version: None,
         }
@@ -802,6 +828,21 @@ mod tests {
         let mut value = client_manifest(&"a".repeat(64));
         value.client_entrypoint = Some("client/../server.js".to_string());
         assert!(validate_client_extension_manifest(&value).is_err());
+    }
+    #[test]
+    fn rejects_trusted_service_until_container_runtime_exists() {
+        let mut value = manifest();
+        value.kind = "trusted_server_service".to_string();
+        value.trusted_service = Some(TrustedServerServiceSpec {
+            image: "registry.example/air-quality".to_string(),
+            image_digest: "sha256:".to_string() + &"a".repeat(64),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "air-quality".to_string(),
+            api_namespace: "air-quality".to_string(),
+            client_extension_id: Some("air-quality.client".to_string()),
+        });
+        let error = validate_manifest(&value).unwrap_err().to_string();
+        assert!(error.contains("container execution is not enabled"));
     }
     #[test]
     fn rejects_executable_manifest() {

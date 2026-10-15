@@ -233,9 +233,13 @@ client/<entrypoint>.js
 The server verifies the detached Ed25519 signature against
 `/etc/screentra-cast/addon-signing.pub` (or the
 `SCREENTRA_CAST_ADDON_SIGNING_PUBKEY` override), validates the declared entrypoint
-SHA-256, and stores the package without executing it. The runtime boundary and
-activation gates are documented in `docs/addon-runtime-contract.md`; that
-document is design-only and does not authorize execution. A valid upload is not
+SHA-256, and stores the package without executing it. The future client runtime
+boundary and activation gates are documented in
+`docs/addon-runtime-contract.md`; that document is design-only and does not
+authorize execution. The separate trusted server-container contract is
+`docs/trusted-server-addon-contract.md` and illustrated by
+`examples/addons/trusted-service/manifest.json`; the current validator rejects
+that service kind and does not pull or start containers. A valid upload is not
 proof that a player has installed or activated the extension.
 
 ## Player client installation and LAN adoption

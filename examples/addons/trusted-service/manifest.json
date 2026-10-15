@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "id": "example.air-quality",
+  "name": "Example Air Quality",
+  "description": "Normalizes air-quality readings for signage widgets.",
+  "version": "1.0.0",
+  "kind": "trusted_server_service",
+  "widget_types": [],
+  "permissions": [
+    "storage",
+    "read:clients",
+    "client_extension"
+  ],
+  "trusted_service": {
+    "image": "registry.example.invalid/screentra/air-quality",
+    "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "capabilities": [
+      "storage",
+      "read:clients"
+    ],
+    "storage_namespace": "example.air-quality",
+    "api_namespace": "example.air-quality",
+    "client_extension_id": "example.air-quality.client"
+  }
+}
