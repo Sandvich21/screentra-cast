@@ -189,6 +189,20 @@ SCREENTRA_CAST_GITHUB_REPO=owner/repository
 SCREENTRA_CAST_UPDATE_ASSET=screentra-cast-server-update.tar.gz
 ```
 
+## Add-on manager
+
+The System page now contains the first add-on manager slice. Administrators can
+install, enable, disable, and remove versioned **declarative** add-on manifests
+persisted below the runtime data directory. Manifests may include widget-type
+metadata and editor schemas; this phase validates and stores that contract but
+does not yet register new widgets in the editor or player.
+
+Executable server code and client JavaScript are intentionally rejected in this
+first stage. A later signed-extension stage will add editor/player registration,
+client delivery, signature verification, compatibility checks, staged rollout,
+and rollback before any custom client renderer is allowed to run. Do not treat
+the current manifest manager as support for native or executable add-ons.
+
 ## Player client installation and LAN adoption
 
 The player client release bundle is intended for users who do not have Rust,

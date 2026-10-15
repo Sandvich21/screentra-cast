@@ -544,6 +544,7 @@ const App = {
             this.renderSystem(status);
 
             this.loadBackups();
+            this.loadAddons();
         } catch (e) {
             document.getElementById('system-info').innerHTML = `<p>Error: ${esc(e.message)}</p>`;
         }
@@ -554,6 +555,7 @@ const App = {
         this.wireUserManager();
         this.wireSystemGoogleOAuth();
         this.wireVersionManager();
+        this.wireAddonManager();
         this.wireSystemTime();
         this.wireExternalMonitoring();
         // Surface last-failure state if any. Shows the failure banner and
@@ -816,6 +818,68 @@ const App = {
         } catch (e) {
             container.innerHTML = `<p>Error loading backups: ${esc(e.message)}</p>`;
         }
+    },
+    async loadAddons() {
+        const container = document.getElementById('addons-list');
+        if (!container) return;
+        try {
+            const addons = await API.listAddons();
+            if (!addons.length) {
+                container.innerHTML = '<p>No addons installed.</p>';
+                return;
+            }
+            container.innerHTML = addons.map(addon => `
+                <div class="sys-card" style="display:flex; justify-content:space-between; align-items:center; gap:1rem; margin-bottom:0.5rem; padding:0.75rem 1rem;">
+                    <div style="display:flex; flex-direction:column; gap:0.25rem; min-width:0;">
+                        <div style="font-weight:bold;">${esc(addon.name)} <span style="font-weight:normal; color:var(--text-dim);">v${esc(addon.version)}</span></div>
+                        <div style="font-size:0.78rem; color:var(--text-dim);">${esc(addon.id)} · ${addon.widget_types.length} widget type(s) · ${addon.enabled ? 'Enabled' : 'Disabled'}</div>
+                        <div style="font-size:0.8rem; color:var(--text-dim);">${esc(addon.description || 'No description')}</div>
+                    </div>
+                    <div style="display:flex; gap:0.5rem; flex-wrap:wrap; justify-content:flex-end;">
+                        <button class="btn btn-secondary btn-sm addon-toggle" data-id="${esc(addon.id)}" data-enabled="${addon.enabled}">${addon.enabled ? 'Disable' : 'Enable'}</button>
+                        <button class="btn btn-danger btn-sm addon-delete" data-id="${esc(addon.id)}">Remove</button>
+                    </div>
+                </div>
+            `).join('');
+            container.querySelectorAll('.addon-toggle').forEach(btn => {
+                btn.onclick = async () => {
+                    try {
+                        await API.setAddonEnabled(btn.dataset.id, btn.dataset.enabled !== 'true');
+                        await this.loadAddons();
+                    } catch (e) { alert('Addon update failed: ' + e.message); }
+                };
+            });
+            container.querySelectorAll('.addon-delete').forEach(btn => {
+                btn.onclick = async () => {
+                    if (!(await App.confirm('Remove this addon?', 'The installed manifest will be deleted.'))) return;
+                    try {
+                        await API.deleteAddon(btn.dataset.id);
+                        await this.loadAddons();
+                    } catch (e) { alert('Addon removal failed: ' + e.message); }
+                };
+            });
+        } catch (e) {
+            container.innerHTML = `<p>Error loading addons: ${esc(e.message)}</p>`;
+        }
+    },
+    wireAddonManager() {
+        const button = document.getElementById('btn-addon-install');
+        const input = document.getElementById('addon-manifest-input');
+        const status = document.getElementById('addon-install-status');
+        if (!button || !input || button.dataset.wired === 'true') return;
+        button.dataset.wired = 'true';
+        button.onclick = async () => {
+            status.textContent = '';
+            try {
+                const manifest = JSON.parse(input.value);
+                await API.installAddon(manifest);
+                status.textContent = '✓ Installed';
+                input.value = '';
+                await this.loadAddons();
+            } catch (e) {
+                status.textContent = '✕ ' + e.message;
+            }
+        };
     },
     async handleRestore(id) {
         if (!(await App.confirm('Restore this backup?', 'This will overwrite current settings and layouts. This cannot be undone.'))) return;

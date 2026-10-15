@@ -250,6 +250,34 @@ window.API = {
         return res.json();
     },
 
+    async listAddons() {
+        const res = await fetch('/api/addons');
+        if (!res.ok) throw new Error('Failed to fetch addons');
+        return res.json();
+    },
+
+    async installAddon(manifest) {
+        const res = await fetch('/api/addons', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(manifest),
+        });
+        if (!res.ok) throw new Error(await res.text() || 'Failed to install addon');
+        return res.json();
+    },
+
+    async setAddonEnabled(id, enabled) {
+        const action = enabled ? 'enable' : 'disable';
+        const res = await fetch(`/api/addons/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text() || `Failed to ${action} addon`);
+        return res.json();
+    },
+
+    async deleteAddon(id) {
+        const res = await fetch(`/api/addons/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(await res.text() || 'Failed to remove addon');
+    },
+
     async getCertificateStatus() {
         const res = await fetch('/api/system/certificates');
         if (!res.ok) throw new Error('Failed to fetch certificate status');

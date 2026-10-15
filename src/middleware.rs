@@ -338,6 +338,13 @@ fn required_capability(path: &str, method: &str) -> &'static str {
         }
         return "control_clients";
     }
+    if path == "/api/addons" || path.starts_with("/api/addons/") {
+        return if is_unsafe_method(method) {
+            "manage_addons"
+        } else {
+            "viewer"
+        };
+    }
     if path == "/api/refresh" || path == "/api/clear-cache" || path == "/api/news/refresh" {
         return if is_unsafe_method(method) {
             "control_system"

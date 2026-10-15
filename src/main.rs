@@ -1,4 +1,5 @@
 mod api;
+mod addons;
 mod auth;
 mod backup_api;
 mod db;

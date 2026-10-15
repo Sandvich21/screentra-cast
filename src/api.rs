@@ -1,4 +1,5 @@
 use crate::backup_api;
+use crate::addons::{AddonError, AddonManifest, AddonRecord};
 use crate::db::{ClientDisplayRegistration, ClientRegistration, Database};
 use crate::display::detect_displays;
 use crate::models::{
@@ -1124,6 +1125,10 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             get(get_display_state_for_display).delete(delete_display_state),
         )
         .route("/api/system", get(system_status))
+        .route("/api/addons", get(list_addons).post(install_addon))
+        .route("/api/addons/{id}/enable", post(enable_addon))
+        .route("/api/addons/{id}/disable", post(disable_addon))
+        .route("/api/addons/{id}", delete(delete_addon))
         .route("/api/scenes", get(list_scenes).post(create_scene))
         .route(
             "/api/scenes/{id}",
@@ -1824,6 +1829,56 @@ async fn delete_display_state(
 }
 
 // ── System Status handler ────────────────────────────────────
+
+fn addon_error_response(error: AddonError) -> (StatusCode, String) {
+    match error {
+        AddonError::Invalid(message) => (StatusCode::BAD_REQUEST, message),
+        AddonError::AlreadyInstalled => (StatusCode::CONFLICT, error.to_string()),
+        AddonError::NotFound => (StatusCode::NOT_FOUND, error.to_string()),
+        AddonError::Io(message) => {
+            log::error!("Addon manager storage failure: {message}");
+            internal_server_error()
+        }
+    }
+}
+
+async fn list_addons() -> Result<AxumJson<Vec<AddonRecord>>, (StatusCode, String)> {
+    crate::addons::list()
+        .map(AxumJson)
+        .map_err(addon_error_response)
+}
+
+async fn install_addon(
+    Json(manifest): Json<AddonManifest>,
+) -> Result<(StatusCode, AxumJson<AddonRecord>), (StatusCode, String)> {
+    crate::addons::install(manifest)
+        .map(|record| (StatusCode::CREATED, AxumJson(record)))
+        .map_err(addon_error_response)
+}
+
+async fn enable_addon(
+    Path(id): Path<String>,
+) -> Result<AxumJson<AddonRecord>, (StatusCode, String)> {
+    crate::addons::set_enabled(&id, true)
+        .map(AxumJson)
+        .map_err(addon_error_response)
+}
+
+async fn disable_addon(
+    Path(id): Path<String>,
+) -> Result<AxumJson<AddonRecord>, (StatusCode, String)> {
+    crate::addons::set_enabled(&id, false)
+        .map(AxumJson)
+        .map_err(addon_error_response)
+}
+
+async fn delete_addon(
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    crate::addons::remove(&id)
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(addon_error_response)
+}
 
 async fn system_status() -> AxumJson<SystemStatus> {
     AxumJson(get_system_status())
