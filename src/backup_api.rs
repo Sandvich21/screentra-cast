@@ -125,10 +125,12 @@ fn validate_postgres_dump_file(path: &StdPath) -> Result<(), String> {
         if trimmed.starts_with("-- PostgreSQL database dump") {
             has_dump_header = true;
         }
+        let upper = trimmed.to_ascii_uppercase();
         if trimmed.starts_with("\\connect")
             || trimmed.starts_with("\\!")
             || trimmed.starts_with("\\copy")
             || trimmed.starts_with("CREATE DATABASE")
+            || (upper.starts_with("COPY ") && upper.contains(" PROGRAM "))
         {
             return Err("PostgreSQL dump contains an unsafe database or shell command".to_string());
         }
@@ -1120,7 +1122,12 @@ mod tests {
 
     #[test]
     fn postgres_dump_validator_rejects_routing_and_shell_commands() {
-        for (label, command) in [("connect", "\\connect other_db\n"), ("shell", "\\! id\n"), ("create", "CREATE DATABASE other_db;\n")] {
+        for (label, command) in [
+            ("connect", "\\connect other_db\n"),
+            ("shell", "\\! id\n"),
+            ("create", "CREATE DATABASE other_db;\n"),
+            ("copy-program", "COPY users FROM PROGRAM 'id';\n"),
+        ] {
             let path = test_root(&format!("postgres-dump-{label}"));
             std::fs::write(
                 &path,
