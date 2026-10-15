@@ -246,7 +246,8 @@ boundary and activation gates are documented in
 `docs/addon-runtime-contract.md`; that document is design-only and does not
 authorize execution. The separate trusted server-container contract is
 `docs/trusted-server-addon-contract.md`; the future service boundary is specified
-in `docs/trusted-server-addon-gateway.md` and illustrated by
+in `docs/trusted-server-addon-gateway.md` and its disabled staging and validation
+rules are documented in `docs/trusted-server-addon-operations.md`, illustrated by
 `examples/addons/trusted-service/manifest.json`. The current validator rejects
 that service kind and does not expose a gateway, pull images, or start
 containers. A valid upload is not proof that a player has installed or activated

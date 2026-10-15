@@ -332,6 +332,71 @@ fn validate_token(value: &str, field: &str) -> Result<(), AddonError> {
     Ok(())
 }
 
+const TRUSTED_SERVICE_CAPABILITIES: &[&str] = &[
+    "storage",
+    "read:clients",
+    "read:layouts",
+    "client_extension",
+];
+
+fn validate_trusted_service_spec(spec: &TrustedServerServiceSpec) -> Result<(), AddonError> {
+    if spec.image.is_empty()
+        || spec.image.len() > 255
+        || spec.image.contains("..")
+        || spec.image.contains("://")
+        || spec.image.starts_with('/')
+        || spec.image.ends_with('/')
+        || spec
+            .image
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control())
+        || !spec
+            .image
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | ':'))
+        || spec.image.split('/').any(|component| {
+            component.is_empty() || component.starts_with(':') || component.ends_with(':')
+        })
+    {
+        return Err(AddonError::Invalid(
+            "Invalid trusted service image reference".to_string(),
+        ));
+    }
+    if spec.image_digest.len() != "sha256:".len() + 64
+        || !spec.image_digest.starts_with("sha256:")
+        || !spec.image_digest["sha256:".len()..]
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+    {
+        return Err(AddonError::Invalid(
+            "Invalid trusted service image digest".to_string(),
+        ));
+    }
+    validate_id(&spec.storage_namespace).map_err(|_| {
+        AddonError::Invalid("Invalid trusted service storage namespace".to_string())
+    })?;
+    validate_id(&spec.api_namespace)
+        .map_err(|_| AddonError::Invalid("Invalid trusted service API namespace".to_string()))?;
+    if let Some(client_extension_id) = spec.client_extension_id.as_deref() {
+        validate_id(client_extension_id).map_err(|_| {
+            AddonError::Invalid("Invalid trusted service client extension ID".to_string())
+        })?;
+    }
+    if spec.capabilities.len() > TRUSTED_SERVICE_CAPABILITIES.len() {
+        return Err(AddonError::Invalid(
+            "Too many trusted service capabilities".to_string(),
+        ));
+    }
+    for capability in &spec.capabilities {
+        if !TRUSTED_SERVICE_CAPABILITIES.contains(&capability.as_str()) {
+            return Err(AddonError::Invalid(format!(
+                "Unknown trusted service capability: {capability}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
     if manifest.schema_version != 1 {
         return Err(AddonError::Invalid(
@@ -351,6 +416,12 @@ pub fn validate_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
     }
     validate_token(&manifest.version, "Addon version")?;
     if manifest.kind == "trusted_server_service" {
+        let trusted_service = manifest.trusted_service.as_ref().ok_or_else(|| {
+            AddonError::Invalid(
+                "trusted_server_service requires trusted_service metadata".to_string(),
+            )
+        })?;
+        validate_trusted_service_spec(trusted_service)?;
         return Err(AddonError::Invalid(
             "Trusted server addon services are contract-only; container execution is not enabled yet"
                 .to_string(),
@@ -880,6 +951,54 @@ mod tests {
         value.client_entrypoint = Some("client/../server.js".to_string());
         assert!(validate_client_extension_manifest(&value).is_err());
     }
+    #[test]
+    fn rejects_unsafe_trusted_service_image_before_runtime_gate() {
+        let mut value = manifest();
+        value.kind = "trusted_server_service".to_string();
+        value.trusted_service = Some(TrustedServerServiceSpec {
+            image: "registry.example/air-quality:latest bad".to_string(),
+            image_digest: "sha256:".to_string() + &"a".repeat(64),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "air-quality".to_string(),
+            api_namespace: "air-quality".to_string(),
+            client_extension_id: Some("air-quality.client".to_string()),
+        });
+        let error = validate_manifest(&value).unwrap_err().to_string();
+        assert!(error.contains("trusted service image"));
+    }
+
+    #[test]
+    fn rejects_invalid_trusted_service_digest_before_runtime_gate() {
+        let mut value = manifest();
+        value.kind = "trusted_server_service".to_string();
+        value.trusted_service = Some(TrustedServerServiceSpec {
+            image: "registry.example/air-quality".to_string(),
+            image_digest: "sha256:not-a-digest".to_string(),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "air-quality".to_string(),
+            api_namespace: "air-quality".to_string(),
+            client_extension_id: Some("air-quality.client".to_string()),
+        });
+        let error = validate_manifest(&value).unwrap_err().to_string();
+        assert!(error.contains("trusted service image digest"));
+    }
+
+    #[test]
+    fn rejects_unknown_trusted_service_capability_before_runtime_gate() {
+        let mut value = manifest();
+        value.kind = "trusted_server_service".to_string();
+        value.trusted_service = Some(TrustedServerServiceSpec {
+            image: "registry.example/air-quality".to_string(),
+            image_digest: "sha256:".to_string() + &"a".repeat(64),
+            capabilities: vec!["read:secrets".to_string()],
+            storage_namespace: "air-quality".to_string(),
+            api_namespace: "air-quality".to_string(),
+            client_extension_id: Some("air-quality.client".to_string()),
+        });
+        let error = validate_manifest(&value).unwrap_err().to_string();
+        assert!(error.contains("trusted service capability"));
+    }
+
     #[test]
     fn rejects_trusted_service_until_container_runtime_exists() {
         let mut value = manifest();
