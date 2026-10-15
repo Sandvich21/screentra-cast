@@ -9,6 +9,8 @@ use std::fs::{self, File};
 use std::path::{Component, Path, PathBuf};
 use tar::{Archive, EntryType};
 
+const MAX_ARCHIVE_ENTRIES: usize = 100_000;
+
 fn normalized_components(path: &Path) -> Result<Vec<std::ffi::OsString>, String> {
     let mut components = Vec::new();
     for component in path.components() {
@@ -47,10 +49,14 @@ fn validate_entry_type(entry_type: EntryType, path: &Path) -> Result<(), String>
 
 fn inspect_entries<R: std::io::Read>(archive: &mut Archive<R>) -> Result<Vec<String>, String> {
     let mut top_level = Vec::new();
-    for entry in archive
+    for (index, entry) in archive
         .entries()
         .map_err(|error| format!("read archive entries: {error}"))?
+        .enumerate()
     {
+        if index >= MAX_ARCHIVE_ENTRIES {
+            return Err(format!("archive contains more than {MAX_ARCHIVE_ENTRIES} entries"));
+        }
         let entry = entry.map_err(|error| format!("read archive entry: {error}"))?;
         let path = entry
             .path()
@@ -87,10 +93,14 @@ fn archive_contains_path_matching(
     let decoder = GzDecoder::new(file);
     let mut archive = Archive::new(decoder);
     let mut found = false;
-    for entry in archive
+    for (index, entry) in archive
         .entries()
         .map_err(|error| format!("read archive entries: {error}"))?
+        .enumerate()
     {
+        if index >= MAX_ARCHIVE_ENTRIES {
+            return Err(format!("archive contains more than {MAX_ARCHIVE_ENTRIES} entries"));
+        }
         let entry = entry.map_err(|error| format!("read archive entry: {error}"))?;
         let entry_path = entry
             .path()
@@ -180,10 +190,16 @@ pub fn extract_tar_gz(
     let file = File::open(path).map_err(|error| format!("open archive: {error}"))?;
     let decoder = GzDecoder::new(file);
     let mut archive = Archive::new(decoder);
-    for entry in archive
+    for (index, entry) in archive
         .entries()
         .map_err(|error| format!("read archive entries: {error}"))?
+        .enumerate()
     {
+        if index >= MAX_ARCHIVE_ENTRIES {
+            return Err(format!(
+                "archive contains more than {MAX_ARCHIVE_ENTRIES} entries"
+            ));
+        }
         let mut entry = entry.map_err(|error| format!("read archive entry: {error}"))?;
         let path = entry
             .path()
