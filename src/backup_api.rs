@@ -858,7 +858,10 @@ pub async fn upload_backup(
             .next()
             .unwrap_or(&filename)
             .to_string();
-        if safe_name.is_empty() || safe_name.contains("..") {
+        if safe_name.is_empty()
+            || safe_name.contains("..")
+            || safe_name.chars().any(|character| character.is_ascii_control() || character == '"')
+        {
             return Err((StatusCode::BAD_REQUEST, "Invalid backup filename".to_string()));
         }
         let storage_name = format!("{}-{}", Uuid::new_v4(), safe_name);
@@ -976,12 +979,18 @@ pub async fn download_backup(
     let path = StdPath::new(&file_path);
     let filename = path
         .file_name()
-        .ok_or((StatusCode::NOT_FOUND, "Invalid filename".to_string()))?
-        .to_str()
-        .ok_or((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Invalid encoding".to_string(),
-        ))?;
+        .and_then(|name| name.to_str())
+        .ok_or((StatusCode::NOT_FOUND, "Backup not found".to_string()))?;
+    let header_filename: String = filename
+        .chars()
+        .map(|character| {
+            if character.is_ascii_control() || character == '"' || character == '\\' {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
     let metadata = fs::metadata(path)
         .map_err(|_| (StatusCode::NOT_FOUND, "Backup not found".to_string()))?;
 
@@ -996,7 +1005,7 @@ pub async fn download_backup(
         .header("Content-Type", "application/gzip")
         .header(
             "Content-Disposition",
-            format!("attachment; filename=\"{}\"", filename),
+            format!("attachment; filename=\"{}\"", header_filename),
         )
         .header("Content-Length", metadata.len().to_string())
         .body(body)
