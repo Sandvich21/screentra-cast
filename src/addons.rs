@@ -6,11 +6,16 @@
 //! designed separately.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+use uuid::Uuid;
 
 const MANIFEST_FILE: &str = "manifest.json";
 const STATE_FILE: &str = "state.json";
+const SUPPORTED_CLIENT_API_VERSION: &str = "1";
 const MAX_ID_LEN: usize = 64;
 const MAX_NAME_LEN: usize = 80;
 const MAX_DESCRIPTION_LEN: usize = 500;
@@ -54,6 +59,10 @@ pub struct AddonManifest {
     pub client_entrypoint: Option<String>,
     #[serde(default)]
     pub server_entrypoint: Option<String>,
+    #[serde(default)]
+    pub client_sha256: Option<String>,
+    #[serde(default)]
+    pub client_api_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -233,6 +242,9 @@ pub fn enabled_widget_registrations() -> Result<Vec<AddonWidgetRegistration>, Ad
     let mut registrations = Vec::new();
     for addon in list()?.into_iter().filter(|addon| addon.enabled) {
         for widget in addon.manifest.widget_types {
+            if widget.renderer_type.is_empty() {
+                continue;
+            }
             registrations.push(AddonWidgetRegistration {
                 id: widget.id,
                 addon_id: addon.manifest.id.clone(),
@@ -250,6 +262,113 @@ pub fn enabled_widget_registrations() -> Result<Vec<AddonWidgetRegistration>, Ad
     Ok(registrations)
 }
 
+pub fn validate_client_extension_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
+    if manifest.schema_version != 1 {
+        return Err(AddonError::Invalid(
+            "Unsupported addon manifest schema_version; expected 1".to_string(),
+        ));
+    }
+    validate_id(&manifest.id)?;
+    if manifest.name.trim().is_empty() || manifest.name.len() > MAX_NAME_LEN {
+        return Err(AddonError::Invalid(
+            "Addon name must be 1-80 characters".to_string(),
+        ));
+    }
+    if manifest.description.len() > MAX_DESCRIPTION_LEN {
+        return Err(AddonError::Invalid(
+            "Addon description must be at most 500 characters".to_string(),
+        ));
+    }
+    validate_token(&manifest.version, "Addon version")?;
+    if manifest.kind != "client_extension" {
+        return Err(AddonError::Invalid(
+            "Signed client packages must use kind=client_extension".to_string(),
+        ));
+    }
+    if manifest.server_entrypoint.is_some() {
+        return Err(AddonError::Invalid(
+            "Client packages cannot contain a server entrypoint".to_string(),
+        ));
+    }
+    let entrypoint = manifest.client_entrypoint.as_deref().ok_or_else(|| {
+        AddonError::Invalid("Client packages must declare client_entrypoint".to_string())
+    })?;
+    validate_relative_client_path(entrypoint)?;
+    let digest = manifest.client_sha256.as_deref().ok_or_else(|| {
+        AddonError::Invalid("Client packages must declare client_sha256".to_string())
+    })?;
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AddonError::Invalid(
+            "client_sha256 must be a 64-character hexadecimal digest".to_string(),
+        ));
+    }
+    let api_version = manifest.client_api_version.as_deref().ok_or_else(|| {
+        AddonError::Invalid("Client packages must declare client_api_version".to_string())
+    })?;
+    validate_token(api_version, "client_api_version")?;
+    if api_version != SUPPORTED_CLIENT_API_VERSION {
+        return Err(AddonError::Invalid(format!(
+            "Unsupported client_api_version '{}'; expected {}",
+            api_version, SUPPORTED_CLIENT_API_VERSION
+        )));
+    }
+    for permission in &manifest.permissions {
+        if permission != "render_only" && permission != "network_fetch" {
+            return Err(AddonError::Invalid(format!(
+                "Unsupported client addon permission '{permission}'"
+            )));
+        }
+    }
+    for widget in &manifest.widget_types {
+        validate_token(&widget.id, "Widget type id")?;
+        if widget.name.trim().is_empty() || widget.name.len() > MAX_NAME_LEN {
+            return Err(AddonError::Invalid(
+                "Widget type name must be 1-80 characters".to_string(),
+            ));
+        }
+        if !widget.schema.is_null() && !widget.schema.is_object() {
+            return Err(AddonError::Invalid(format!(
+                "Widget type '{}' schema must be a JSON object",
+                widget.id
+            )));
+        }
+        if !widget.renderer_type.is_empty()
+            && !DECLARATIVE_RENDERERS.contains(&widget.renderer_type.as_str())
+        {
+            return Err(AddonError::Invalid(format!(
+                "Widget type '{}' selected an unsupported fallback renderer",
+                widget.id
+            )));
+        }
+        if !widget.default_props.is_null() && !widget.default_props.is_object() {
+            return Err(AddonError::Invalid(format!(
+                "Widget type '{}' default_props must be a JSON object",
+                widget.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_relative_client_path(value: &str) -> Result<(), AddonError> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+        || !value.starts_with("client/")
+    {
+        return Err(AddonError::Invalid(
+            "client_entrypoint must be a relative path below client/".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn io_error(error: impl std::fmt::Display) -> AddonError {
     AddonError::Io(error.to_string())
 }
@@ -257,7 +376,11 @@ fn io_error(error: impl std::fmt::Display) -> AddonError {
 fn read_record(dir: &Path) -> Result<AddonRecord, AddonError> {
     let manifest_text = fs::read_to_string(dir.join(MANIFEST_FILE)).map_err(io_error)?;
     let manifest: AddonManifest = serde_json::from_str(&manifest_text).map_err(io_error)?;
-    validate_manifest(&manifest)?;
+    if manifest.kind == "client_extension" {
+        validate_client_extension_manifest(&manifest)?;
+    } else {
+        validate_manifest(&manifest)?;
+    }
     let state_text = fs::read_to_string(dir.join(STATE_FILE)).map_err(io_error)?;
     let state: AddonState = serde_json::from_str(&state_text).map_err(io_error)?;
     Ok(AddonRecord {
@@ -334,6 +457,118 @@ pub fn remove(id: &str) -> Result<(), AddonError> {
     fs::remove_dir_all(dir).map_err(io_error)
 }
 
+fn addon_signing_public_key() -> PathBuf {
+    std::env::var("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/etc/screentra-cast/addon-signing.pub"))
+}
+
+fn verify_manifest_signature(manifest: &Path, signature: &Path) -> Result<(), AddonError> {
+    let public_key = addon_signing_public_key();
+    if !public_key.is_file() {
+        return Err(AddonError::Invalid(format!(
+            "Addon signing public key is missing: {}",
+            public_key.display()
+        )));
+    }
+    let result = Command::new("openssl")
+        .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
+        .arg(&public_key)
+        .args(["-sigfile"])
+        .arg(signature)
+        .args(["-in"])
+        .arg(manifest)
+        .output()
+        .map_err(io_error)?;
+    if !result.status.success() {
+        return Err(AddonError::Invalid(
+            "Addon manifest signature verification failed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String, AddonError> {
+    let mut file = fs::File::open(path).map_err(io_error)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let count = file.read(&mut buffer).map_err(io_error)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Validate and persist a signed client-extension package. The package is
+/// never executed by the server; the client-loader phase will consume the
+/// stored manifest and client directory after its own signature verification.
+pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, AddonError> {
+    let root = storage_dir();
+    fs::create_dir_all(&root).map_err(io_error)?;
+    let stage = root.join(format!(".package-install-{}", Uuid::new_v4()));
+    if let Err(error) = crate::safe_archive::extract_tar_gz(archive, &stage, 0) {
+        let _ = fs::remove_dir_all(&stage);
+        return Err(AddonError::Invalid(error));
+    }
+    let result = (|| {
+        let manifest_path = stage.join(MANIFEST_FILE);
+        let signature_path = stage.join("manifest.sig");
+        if !manifest_path.is_file() || !signature_path.is_file() {
+            return Err(AddonError::Invalid(
+                "Addon package must contain manifest.json and manifest.sig at its root".to_string(),
+            ));
+        }
+        verify_manifest_signature(&manifest_path, &signature_path)?;
+        let manifest_bytes = fs::read(&manifest_path).map_err(io_error)?;
+        let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
+        validate_client_extension_manifest(&manifest)?;
+        let entrypoint = manifest.client_entrypoint.as_deref().ok_or_else(|| {
+            AddonError::Invalid("Client package entrypoint is missing".to_string())
+        })?;
+        let client_file = stage.join(entrypoint);
+        if !client_file.is_file() {
+            return Err(AddonError::Invalid(format!(
+                "Client package entrypoint is missing: {entrypoint}"
+            )));
+        }
+        let actual_digest = sha256_file(&client_file)?;
+        if !manifest
+            .client_sha256
+            .as_deref()
+            .unwrap_or_default()
+            .eq_ignore_ascii_case(&actual_digest)
+        {
+            return Err(AddonError::Invalid(
+                "Client package entrypoint SHA-256 does not match manifest".to_string(),
+            ));
+        }
+        let destination = addon_dir(&manifest.id)?;
+        if destination.exists() {
+            return Err(AddonError::AlreadyInstalled);
+        }
+        let installed_at = chrono::Utc::now().to_rfc3339();
+        let state = AddonState {
+            enabled: true,
+            installed_at: installed_at.clone(),
+        };
+        let state_text = serde_json::to_string_pretty(&state).map_err(io_error)?;
+        fs::write(stage.join(STATE_FILE), state_text).map_err(io_error)?;
+        fs::rename(&stage, &destination).map_err(io_error)?;
+        Ok(AddonRecord {
+            manifest,
+            enabled: true,
+            installed_at,
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&stage);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,7 +599,19 @@ mod tests {
             permissions: Vec::new(),
             client_entrypoint: None,
             server_entrypoint: None,
+            client_sha256: None,
+            client_api_version: None,
         }
+    }
+
+    fn client_manifest(client_sha256: &str) -> AddonManifest {
+        let mut value = manifest();
+        value.kind = "client_extension".to_string();
+        value.client_entrypoint = Some("client/index.js".to_string());
+        value.client_sha256 = Some(client_sha256.to_string());
+        value.client_api_version = Some("1".to_string());
+        value.widget_types[0].renderer_type.clear();
+        value
     }
 
     #[test]
@@ -372,6 +619,24 @@ mod tests {
         assert!(validate_manifest(&manifest()).is_ok());
     }
 
+    #[test]
+    fn accepts_signed_client_manifest_metadata() {
+        assert!(validate_client_extension_manifest(&client_manifest(&"a".repeat(64))).is_ok());
+    }
+
+    #[test]
+    fn rejects_incompatible_client_api_version() {
+        let mut value = client_manifest(&"a".repeat(64));
+        value.client_api_version = Some("2".to_string());
+        assert!(validate_client_extension_manifest(&value).is_err());
+    }
+
+    #[test]
+    fn rejects_client_entrypoint_traversal() {
+        let mut value = client_manifest(&"a".repeat(64));
+        value.client_entrypoint = Some("client/../server.js".to_string());
+        assert!(validate_client_extension_manifest(&value).is_err());
+    }
     #[test]
     fn rejects_executable_manifest() {
         let mut value = manifest();
@@ -393,6 +658,96 @@ mod tests {
         assert!(validate_manifest(&value).is_err());
     }
 
+    #[test]
+    fn signed_client_package_round_trip_verifies_and_persists() {
+        let _guard = STORAGE_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-cast-addon-package-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let data_root = root.join("data");
+        let package_root = root.join("package-root");
+        let client_root = package_root.join("client");
+        fs::create_dir_all(&client_root).unwrap();
+        let client_bytes = b"window.ScreentraAddon = { apiVersion: '1' };\n";
+        let client_path = client_root.join("index.js");
+        fs::write(&client_path, client_bytes).unwrap();
+        let digest = format!("{:x}", Sha256::digest(client_bytes));
+        let manifest = client_manifest(&digest);
+        let manifest_path = package_root.join(MANIFEST_FILE);
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let signature_path = package_root.join("manifest.sig");
+        let private_key = root.join("addon-signing.key");
+        let public_key = root.join("addon-signing.pub");
+        assert!(Command::new("openssl")
+            .args(["genpkey", "-algorithm", "ED25519", "-out"])
+            .arg(&private_key)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("openssl")
+            .args(["pkey", "-in"])
+            .arg(&private_key)
+            .args(["-pubout", "-out"])
+            .arg(&public_key)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("openssl")
+            .args(["pkeyutl", "-sign", "-rawin", "-inkey"])
+            .arg(&private_key)
+            .args(["-in"])
+            .arg(&manifest_path)
+            .args(["-out"])
+            .arg(&signature_path)
+            .status()
+            .unwrap()
+            .success());
+        let archive = root.join("addon.tar.gz");
+        let archive_file = fs::File::create(&archive).unwrap();
+        let encoder = flate2::write::GzEncoder::new(archive_file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        builder
+            .append_path_with_name(&manifest_path, MANIFEST_FILE)
+            .unwrap();
+        builder
+            .append_path_with_name(&signature_path, "manifest.sig")
+            .unwrap();
+        builder.append_dir_all("client", &client_root).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        let old_public_key = std::env::var_os("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_root);
+            std::env::set_var("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY", &public_key);
+        }
+        let record = install_signed_client_package(&archive).unwrap();
+        assert_eq!(record.manifest.kind, "client_extension");
+        assert_eq!(
+            fs::read(data_root.join("addons/example.weather/client/index.js")).unwrap(),
+            client_bytes
+        );
+        let _ = fs::remove_dir_all(&root);
+        unsafe {
+            match old_data_root {
+                Some(value) => std::env::set_var("SIGNAGE_DATA_DIR", value),
+                None => std::env::remove_var("SIGNAGE_DATA_DIR"),
+            }
+            match old_public_key {
+                Some(value) => std::env::set_var("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY", value),
+                None => std::env::remove_var("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY"),
+            }
+        }
+    }
     #[test]
     fn storage_round_trip_preserves_enable_state() {
         let _guard = STORAGE_TEST_LOCK

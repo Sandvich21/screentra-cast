@@ -865,6 +865,8 @@ const App = {
     wireAddonManager() {
         const button = document.getElementById('btn-addon-install');
         const input = document.getElementById('addon-manifest-input');
+        const packageButton = document.getElementById('btn-addon-package');
+        const packageInput = document.getElementById('addon-package-file');
         const status = document.getElementById('addon-install-status');
         if (!button || !input || button.dataset.wired === 'true') return;
         button.dataset.wired = 'true';
@@ -880,6 +882,25 @@ const App = {
                 status.textContent = '✕ ' + e.message;
             }
         };
+        if (packageButton && packageInput) {
+            packageButton.onclick = () => packageInput.click();
+            packageInput.onchange = async () => {
+                const file = packageInput.files && packageInput.files[0];
+                if (!file) return;
+                packageButton.disabled = true;
+                status.textContent = 'Uploading and verifying signature…';
+                try {
+                    await API.installAddonPackage(file);
+                    status.textContent = '✓ Signed client package installed';
+                    packageInput.value = '';
+                    await this.loadAddons();
+                } catch (e) {
+                    status.textContent = '✕ ' + e.message;
+                } finally {
+                    packageButton.disabled = false;
+                }
+            };
+        }
     },
     async handleRestore(id) {
         if (!(await App.confirm('Restore this backup?', 'This will overwrite current settings and layouts. This cannot be undone.'))) return;

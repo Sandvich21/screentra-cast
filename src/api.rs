@@ -1127,6 +1127,10 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route("/api/system", get(system_status))
         .route("/api/addons", get(list_addons).post(install_addon))
         .route("/api/addons/widget-types", get(list_addon_widget_types))
+        .route(
+            "/api/addons/package",
+            post(upload_addon_package).layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
+        )
         .route("/api/addons/{id}/enable", post(enable_addon))
         .route("/api/addons/{id}/disable", post(disable_addon))
         .route("/api/addons/{id}", delete(delete_addon))
@@ -1852,6 +1856,46 @@ async fn list_addons() -> Result<AxumJson<Vec<AddonRecord>>, (StatusCode, String
 async fn list_addon_widget_types() -> Result<AxumJson<Vec<AddonWidgetRegistration>>, (StatusCode, String)> {
     crate::addons::enabled_widget_registrations()
         .map(AxumJson)
+        .map_err(addon_error_response)
+}
+
+async fn upload_addon_package(
+    mut multipart: Multipart,
+) -> Result<(StatusCode, AxumJson<AddonRecord>), (StatusCode, String)> {
+    let package_path = std::env::temp_dir().join(format!("screentra-addon-{}.tar.gz", Uuid::new_v4()));
+    let mut received = false;
+    let mut file = fs::File::create(&package_path).map_err(|_| internal_server_error())?;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Unable to read addon package upload".to_string()))?
+    {
+        if received {
+            continue;
+        }
+        received = true;
+        let mut field = field;
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Unable to read addon package upload".to_string()))?
+        {
+            file.write_all(&chunk).map_err(|_| internal_server_error())?;
+        }
+    }
+    file.flush().map_err(|_| internal_server_error())?;
+    drop(file);
+    if !received {
+        let _ = fs::remove_file(&package_path);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Addon package upload is empty".to_string(),
+        ));
+    }
+    let result = crate::addons::install_signed_client_package(&package_path);
+    let _ = fs::remove_file(&package_path);
+    result
+        .map(|record| (StatusCode::CREATED, AxumJson(record)))
         .map_err(addon_error_response)
 }
 

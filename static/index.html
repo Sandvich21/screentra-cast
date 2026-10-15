@@ -986,12 +986,14 @@
                     <div class="sys-collapsible-body">
                         <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
                             <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.75rem;">
-                                The first addon phase validates and stores declarative manifests only. An enabled manifest may alias a trusted built-in renderer and appear in the layout editor palette. Executable server code and custom client modules are intentionally rejected until signed delivery and sandboxing are implemented.
+                                The first addon phase validates declarative manifests and signed client packages. Enabled aliases may use trusted built-in renderers; signed client code is stored for the gated delivery phase but is not executed by the server. Unsigned executable server code and client modules are rejected.
                             </div>
                             <label for="addon-manifest-input" style="display:block; font-size:0.8rem; margin-bottom:0.35rem;">Addon manifest JSON</label>
                             <textarea id="addon-manifest-input" rows="10" spellcheck="false" style="width:100%; box-sizing:border-box; font-family:monospace; font-size:0.78rem; margin-bottom:0.65rem;" placeholder='{"schema_version":1,"id":"example.weather","name":"Example Weather","version":"0.1.0","kind":"declarative","widget_types":[{"id":"forecast","name":"Forecast Alias","renderer_type":"weather","icon":"🌤️","default_props":{"units":"metric"}}]}'></textarea>
                             <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
                                 <button class="btn btn-primary" id="btn-addon-install" type="button">Install Manifest</button>
+                                <input type="file" id="addon-package-file" accept=".tar.gz,.tgz" style="display:none">
+                                <button class="btn btn-accent" id="btn-addon-package" type="button">Install Signed Client Package</button>
                                 <span id="addon-install-status" style="font-size:0.8rem; color:var(--text-dim,#888);"></span>
                             </div>
                         </div>
@@ -1154,7 +1156,7 @@
 
     <script defer src="/js/auth.js?v=20261003004000"></script>
     <script defer src="/js/traffic-runtime.js?v=20261011140500-manual-traffic-closure-classification"></script>
-    <script defer src="/js/api.js?v=20261015-addon-manager-v1"></script>
+    <script defer src="/js/api.js?v=20261015-addon-manager-v2"></script>
     <script src="/js/filebrowser.js?v=1789404930"></script>
     
     <script src="/js/weather-icons.js?v=1791477110-alert-condition-icons"></script>
@@ -1177,7 +1179,7 @@
         </div>
     </div>
 
-<script defer src="/js/app.js?v=20261015-addon-manager-v1"></script>
+<script defer src="/js/app.js?v=20261015-addon-manager-v2"></script>
 
 <script src="/js/ripley-link-guard.js?v=1789404930"></script>
 </body>

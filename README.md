@@ -195,15 +195,29 @@ The System page now contains the first add-on manager slice. Administrators can
 install, enable, disable, and remove versioned **declarative** add-on manifests
 persisted below the runtime data directory. Manifests may include widget-type
 metadata, an editor schema, a trusted existing `renderer_type`, and default
-properties. Enabled addon aliases now appear in the layout editor palette and
-reuse that existing renderer; this phase does not yet load custom client code.
+properties. Enabled addon aliases appear in the layout editor palette and reuse
+that existing renderer. Signed client-extension packages are stored separately
+for the gated client-delivery phase; no custom client code is loaded yet.
 
-Executable server code and client JavaScript are intentionally rejected in this
-first stage. A later signed-extension stage will add custom editor/player
-registration, client delivery, signature verification, compatibility checks,
-staged rollout, and rollback before any custom client renderer is allowed to
-run. Do not treat the current manifest manager as support for native or
-executable add-ons.
+Unsigned executable server code and client JavaScript are rejected. A signed
+package is verified and stored, but it is not proof that a player has installed
+or activated the extension. Client delivery, runtime sandboxing, staged rollout,
+and rollback remain separate implementation work.
+
+Signed client-extension packages can now be uploaded as a `.tar.gz` containing:
+
+```text
+manifest.json
+manifest.sig
+client/<entrypoint>.js
+```
+
+The server verifies the detached Ed25519 signature against
+`/etc/screentra-cast/addon-signing.pub` (or the
+`SCREENTRA_CAST_ADDON_SIGNING_PUBKEY` override), validates the declared entrypoint
+SHA-256, and stores the package without executing it. Client-side verification,
+delivery to enrolled players, and runtime loading are still gated work; a valid
+upload is not yet proof that a player has installed or activated the extension.
 
 ## Player client installation and LAN adoption
 

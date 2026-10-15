@@ -272,6 +272,14 @@ window.API = {
         return res.json();
     },
 
+    async installAddonPackage(file) {
+        const body = new FormData();
+        body.append('package', file);
+        const res = await fetch('/api/addons/package', { method: 'POST', body });
+        if (!res.ok) throw new Error(await res.text() || 'Failed to install addon package');
+        return res.json();
+    },
+
     async setAddonEnabled(id, enabled) {
         const action = enabled ? 'enable' : 'disable';
         const res = await fetch(`/api/addons/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
