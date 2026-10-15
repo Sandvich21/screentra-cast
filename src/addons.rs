@@ -238,6 +238,13 @@ pub struct AddonWidgetRegistration {
     pub default_props: serde_json::Value,
 }
 
+pub fn enabled_client_extensions() -> Result<Vec<AddonManifest>, AddonError> {
+    Ok(list()?
+        .into_iter()
+        .filter(|addon| addon.enabled && addon.manifest.kind == "client_extension")
+        .map(|addon| addon.manifest)
+        .collect())
+}
 pub fn enabled_widget_registrations() -> Result<Vec<AddonWidgetRegistration>, AddonError> {
     let mut registrations = Vec::new();
     for addon in list()?.into_iter().filter(|addon| addon.enabled) {
@@ -732,6 +739,9 @@ mod tests {
         }
         let record = install_signed_client_package(&archive).unwrap();
         assert_eq!(record.manifest.kind, "client_extension");
+        let extensions = enabled_client_extensions().unwrap();
+        assert_eq!(extensions.len(), 1);
+        assert_eq!(extensions[0].id, "example.weather");
         assert_eq!(
             fs::read(data_root.join("addons/example.weather/client/index.js")).unwrap(),
             client_bytes

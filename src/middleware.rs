@@ -91,6 +91,11 @@ fn is_open_path(path: &str, method: &str) -> bool {
         if path.starts_with("/api/clients/") && path.ends_with("/config") {
             return true;
         }
+        // The addon inventory is read by enrolled players; the handler still
+        // requires the per-client credential or an admin session.
+        if path.starts_with("/api/clients/") && path.ends_with("/addons") {
+            return true;
+        }
         // The privileged client updater authenticates this read with the
         // enrolled per-client token in the handler.
         if path.starts_with("/api/clients/") && path.ends_with("/update-check") {
@@ -502,6 +507,7 @@ mod authorization_tests {
     #[test]
     fn client_command_poll_is_open_only_for_get() {
         assert!(is_open_path("/api/clients/example/command", "GET"));
+        assert!(is_open_path("/api/clients/example/addons", "GET"));
         assert!(!is_open_path("/api/clients/example/command", "DELETE"));
         assert!(!is_open_path("/api/clients/example/displays/0/command", "DELETE"));
         assert!(is_open_path("/api/clients/example/command/ack", "POST"));

@@ -201,8 +201,11 @@ for the gated client-delivery phase; no custom client code is loaded yet.
 
 Unsigned executable server code and client JavaScript are rejected. A signed
 package is verified and stored, but it is not proof that a player has installed
-or activated the extension. Client delivery, runtime sandboxing, staged rollout,
-and rollback remain separate implementation work.
+Client-facing inventory is available at `GET /api/clients/{id}/addons`. It
+requires the enrolled per-client token (or an administrator session) and only
+returns enabled client-extension manifests; it does not expose package files or
+execute code. Client delivery, runtime sandboxing, staged rollout, and rollback
+remain separate implementation work.
 
 Signed client-extension packages can now be uploaded as a `.tar.gz` containing:
 
