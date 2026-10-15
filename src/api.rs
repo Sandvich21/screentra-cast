@@ -9003,6 +9003,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn addon_storage_handlers_enforce_admin_and_round_trip() {
+        let db_path = std::env::temp_dir().join(format!("screentra-addon-storage-api-{}.db", Uuid::new_v4()));
+        let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open test database"));
+        let repository = AddonStorageRepository::Sqlite(db);
+        let admin = crate::middleware::AuthenticatedPrincipal {
+            username: "storage-admin".to_string(),
+            role: "admin".to_string(),
+        };
+        let viewer = crate::middleware::AuthenticatedPrincipal {
+            username: "storage-viewer".to_string(),
+            role: "viewer".to_string(),
+        };
+        let addon_id = "example.storage".to_string();
+        let storage_key = "settings".to_string();
+        let value = serde_json::json!({"enabled": true, "refresh_secs": 30});
+
+        let saved = set_addon_storage(
+            State(repository.clone()),
+            Extension(admin.clone()),
+            Path((addon_id.clone(), storage_key.clone())),
+            AxumJson(value.clone()),
+        )
+        .await
+        .expect("admin should save addon storage");
+        assert_eq!(saved.0, value);
+
+        let fetched = get_addon_storage(
+            State(repository.clone()),
+            Extension(admin.clone()),
+            Path((addon_id.clone(), storage_key.clone())),
+        )
+        .await
+        .expect("admin should read addon storage");
+        assert_eq!(fetched.0, value);
+
+        let forbidden = get_addon_storage(
+            State(repository.clone()),
+            Extension(viewer),
+            Path((addon_id.clone(), storage_key.clone())),
+        )
+        .await
+        .expect_err("non-admin must not read addon storage");
+        assert_eq!(forbidden.0, StatusCode::FORBIDDEN);
+
+        let invalid = get_addon_storage(
+            State(repository.clone()),
+            Extension(admin.clone()),
+            Path(("../other-addon".to_string(), storage_key.clone())),
+        )
+        .await
+        .expect_err("traversal namespace must be rejected");
+        assert_eq!(invalid.0, StatusCode::BAD_REQUEST);
+
+        let deleted = delete_addon_storage(
+            State(repository.clone()),
+            Extension(admin.clone()),
+            Path((addon_id.clone(), storage_key.clone())),
+        )
+        .await
+        .expect("admin should delete addon storage");
+        assert_eq!(deleted.0["deleted"], true);
+
+        let missing = get_addon_storage(
+            State(repository),
+            Extension(admin),
+            Path((addon_id, storage_key)),
+        )
+        .await
+        .expect_err("deleted addon storage should be absent");
+        assert_eq!(missing.0, StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn authenticated_audit_listing_reads_bounded_update_failure_events() {
         let db_path = std::env::temp_dir().join(format!("screentra-audit-api-{}.db", Uuid::new_v4()));
         let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open test database"));

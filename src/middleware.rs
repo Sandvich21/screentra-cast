@@ -565,6 +565,24 @@ mod authorization_tests {
     }
 
     #[test]
+    fn addon_storage_routes_require_authenticated_addon_management_capability() {
+        assert_eq!(
+            required_capability("/api/addons/example.storage/storage/settings", "GET"),
+            "viewer"
+        );
+        assert_eq!(
+            required_capability("/api/addons/example.storage/storage/settings", "PUT"),
+            "manage_addons"
+        );
+        assert_eq!(
+            required_capability("/api/addons/example.storage/storage/settings", "DELETE"),
+            "manage_addons"
+        );
+        assert!(!role_has_capability("viewer", "manage_addons"));
+        assert!(!role_has_capability("operator", "manage_addons"));
+    }
+
+    #[test]
     fn step_up_scopes_cover_high_impact_operations() {
         assert_eq!(required_step_up_scope("/api/version/update/import", "POST"), Some("server-update".to_string()));
         assert_eq!(required_step_up_scope("/api/version/update/apply", "POST"), Some("server-update".to_string()));
