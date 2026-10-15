@@ -752,6 +752,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upload_http_registers_backup_without_restoring_it() {
+        let _guard = BACKUP_HTTP_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let parent = test_root("upload");
+        let data_dir = parent.join("data");
+        std::fs::create_dir_all(data_dir.join("backups")).unwrap();
+        std::fs::write(data_dir.join("signage.db"), b"existing database").unwrap();
+        let archive_path = parent.join("source.tar.gz");
+        let archive_file = std::fs::File::create(&archive_path).unwrap();
+        let encoder = GzEncoder::new(archive_file, Compression::default());
+        let mut builder = Builder::new(encoder);
+        append_test_file(&mut builder, "app/server", b"uploaded server");
+        append_test_file(&mut builder, "data/signage.db", b"uploaded database");
+        builder.into_inner().unwrap().finish().unwrap();
+        let archive_bytes = std::fs::read(&archive_path).unwrap();
+
+        let db_path = parent.join("metadata.db");
+        let db = std::sync::Arc::new(crate::db::Database::open(db_path.to_str().unwrap()).unwrap());
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &data_dir); }
+        let app = Router::new()
+            .route("/api/backups/upload", put(upload_backup))
+            .with_state(BackupMetadataRepository::Sqlite(db.clone()));
+        let boundary = "backup-upload-boundary";
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"uploaded.tar.gz\"\r\nContent-Type: application/gzip\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(&archive_bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/backups/upload")
+                    .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let _ = to_bytes(response.into_body(), 1024).await.unwrap();
+
+        if let Some(value) = old_data_dir {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(std::fs::read(data_dir.join("signage.db")).unwrap(), b"existing database");
+        let backups = db.list_backups().unwrap();
+        assert_eq!(backups.len(), 1);
+        assert!(std::path::Path::new(&backups[0].file_path).is_file());
+        assert_eq!(backups[0].size_bytes, archive_bytes.len() as u64);
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[tokio::test]
     async fn restore_http_confirmed_swaps_install_and_data_safely() {
         let _guard = BACKUP_HTTP_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
