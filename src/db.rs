@@ -1689,6 +1689,14 @@ impl Database {
             -- Idempotent migration: ALTER TABLE will fail with duplicate-column if already present; that's fine.
             -- (SQLite has no "ADD COLUMN IF NOT EXISTS" before 3.35.)
 
+            CREATE TABLE IF NOT EXISTS addon_storage (
+                addon_id      TEXT NOT NULL,
+                storage_key   TEXT NOT NULL,
+                value_json    TEXT NOT NULL,
+                updated_at    TEXT NOT NULL,
+                PRIMARY KEY (addon_id, storage_key)
+            );
+
 CREATE TABLE IF NOT EXISTS client_heartbeats (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 client_id     TEXT NOT NULL,
@@ -3993,6 +4001,61 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         Ok(())
         }
 
+    pub fn set_addon_storage(
+        &self,
+        addon_id: &str,
+        storage_key: &str,
+        value_json: &str,
+        updated_at: &str,
+    ) -> Result<(), String> {
+        crate::addons::validate_addon_storage_namespace(addon_id)?;
+        crate::addons::validate_addon_storage_key(storage_key)?;
+        crate::addons::validate_addon_storage_value(value_json)?;
+        if updated_at.is_empty() || updated_at.len() > 80 || updated_at.chars().any(|ch| ch.is_control()) {
+            return Err("Invalid addon storage timestamp".to_string());
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            r#"INSERT INTO addon_storage (addon_id, storage_key, value_json, updated_at)
+               VALUES (?1, ?2, ?3, ?4)
+               ON CONFLICT(addon_id, storage_key) DO UPDATE SET
+               value_json = excluded.value_json, updated_at = excluded.updated_at"#,
+            params![addon_id, storage_key, value_json, updated_at],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_addon_storage(
+        &self,
+        addon_id: &str,
+        storage_key: &str,
+    ) -> Result<Option<String>, String> {
+        crate::addons::validate_addon_storage_namespace(addon_id)?;
+        crate::addons::validate_addon_storage_key(storage_key)?;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT value_json FROM addon_storage WHERE addon_id = ?1 AND storage_key = ?2",
+            params![addon_id, storage_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn delete_addon_storage(&self, addon_id: &str, storage_key: &str) -> Result<bool, String> {
+        crate::addons::validate_addon_storage_namespace(addon_id)?;
+        crate::addons::validate_addon_storage_key(storage_key)?;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM addon_storage WHERE addon_id = ?1 AND storage_key = ?2",
+                params![addon_id, storage_key],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(deleted > 0)
+    }
+
         /// Run SQLite VACUUM to reclaim space from dropped tables and deleted rows.
         /// VACUUM cannot run inside a transaction, so we wrap the lock acquisition
         /// in `tokio::task::spawn_blocking` to avoid holding the runtime's executor
@@ -4109,6 +4172,34 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1, "legacy row should be migrated, not dropped");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn addon_storage_round_trip_is_namespaced_and_upserted() {
+        let path = unique_temp_path("addon-storage");
+        let db = Database::open(&path).expect("open db");
+        db.set_addon_storage("example.one", "settings", "{\"enabled\":true}", "2026-10-15T00:00:00Z")
+            .expect("insert addon storage");
+        assert_eq!(
+            db.get_addon_storage("example.one", "settings")
+                .expect("read addon storage"),
+            Some("{\"enabled\":true}".to_string())
+        );
+        assert_eq!(
+            db.get_addon_storage("example.two", "settings")
+                .expect("read other addon storage"),
+            None
+        );
+        db.set_addon_storage("example.one", "settings", "{\"enabled\":false}", "2026-10-15T00:01:00Z")
+            .expect("upsert addon storage");
+        assert_eq!(
+            db.get_addon_storage("example.one", "settings")
+                .expect("read updated addon storage"),
+            Some("{\"enabled\":false}".to_string())
+        );
+        assert!(db.delete_addon_storage("example.one", "settings").expect("delete addon storage"));
+        assert!(!db.delete_addon_storage("example.one", "settings").expect("delete missing addon storage"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

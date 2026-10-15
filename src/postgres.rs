@@ -16,6 +16,7 @@ use uuid::Uuid;
 const DATABASE_URL_ENV: &str = "SIGNAGE_DATABASE_URL";
 const INITIAL_SCHEMA: &str = include_str!("../migrations/postgres/0001_initial.sql");
 const RUNTIME_COLUMNS_MIGRATION: &str = include_str!("../migrations/postgres/0002_runtime_columns.sql");
+const ADDON_STORAGE_MIGRATION: &str = include_str!("../migrations/postgres/0003_addon_storage.sql");
 
 pub fn configured_database_url() -> Result<String, String> {
     database_url_from(std::env::var(DATABASE_URL_ENV).ok())
@@ -61,6 +62,62 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("migrate client command cooldowns: {error}"))?;
         Ok(store)
+    }
+
+    pub async fn set_addon_storage(
+        &self,
+        addon_id: &str,
+        storage_key: &str,
+        value_json: &str,
+        updated_at: &str,
+    ) -> Result<(), String> {
+        crate::addons::validate_addon_storage_namespace(addon_id)?;
+        crate::addons::validate_addon_storage_key(storage_key)?;
+        crate::addons::validate_addon_storage_value(value_json)?;
+        if updated_at.is_empty() || updated_at.len() > 80 || updated_at.chars().any(|ch| ch.is_control()) {
+            return Err("Invalid addon storage timestamp".to_string());
+        }
+        self.client
+            .execute(
+                "INSERT INTO addon_storage (addon_id, storage_key, value_json, updated_at)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (addon_id, storage_key) DO UPDATE SET
+                 value_json = EXCLUDED.value_json, updated_at = EXCLUDED.updated_at",
+                &[&addon_id, &storage_key, &value_json, &updated_at],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("set addon storage: {error}"))
+    }
+
+    pub async fn get_addon_storage(
+        &self,
+        addon_id: &str,
+        storage_key: &str,
+    ) -> Result<Option<String>, String> {
+        crate::addons::validate_addon_storage_namespace(addon_id)?;
+        crate::addons::validate_addon_storage_key(storage_key)?;
+        self.client
+            .query_opt(
+                "SELECT value_json FROM addon_storage WHERE addon_id = $1 AND storage_key = $2",
+                &[&addon_id, &storage_key],
+            )
+            .await
+            .map(|row| row.map(|row| row.get(0)))
+            .map_err(|error| format!("get addon storage: {error}"))
+    }
+
+    pub async fn delete_addon_storage(&self, addon_id: &str, storage_key: &str) -> Result<bool, String> {
+        crate::addons::validate_addon_storage_namespace(addon_id)?;
+        crate::addons::validate_addon_storage_key(storage_key)?;
+        self.client
+            .execute(
+                "DELETE FROM addon_storage WHERE addon_id = $1 AND storage_key = $2",
+                &[&addon_id, &storage_key],
+            )
+            .await
+            .map(|count| count > 0)
+            .map_err(|error| format!("delete addon storage: {error}"))
     }
 
     pub async fn insert_backup(&self, backup: &Backup) -> Result<(), String> {
@@ -2882,6 +2939,7 @@ pub async fn apply_initial_schema() -> Result<(), String> {
     for (version, sql) in [
         ("0001_initial", INITIAL_SCHEMA),
         ("0002_runtime_columns", RUNTIME_COLUMNS_MIGRATION),
+        ("0003_addon_storage", ADDON_STORAGE_MIGRATION),
     ] {
         let applied = transaction
             .query_opt("SELECT 1 FROM schema_migrations WHERE version=$1", &[&version])
@@ -2909,7 +2967,7 @@ pub async fn apply_initial_schema() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::database_url_from;
+    use super::{apply_initial_schema, database_url_from, PostgresStore};
 
     #[test]
     fn database_url_requires_a_nonempty_value() {
@@ -2919,5 +2977,54 @@ mod tests {
             database_url_from(Some("postgresql://example.invalid/db".into())).unwrap(),
             "postgresql://example.invalid/db"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a disposable PostgreSQL database supplied through SIGNAGE_DATABASE_URL"]
+    async fn addon_storage_round_trip_is_namespaced_and_upserted() {
+        apply_initial_schema().await.expect("apply PostgreSQL migrations");
+        let store = PostgresStore::connect().await.expect("connect to PostgreSQL");
+        let addon_id = format!("test.addon.{}", uuid::Uuid::new_v4());
+        let first = "{\"enabled\":true}";
+        let second = "{\"enabled\":false}";
+        store
+            .set_addon_storage(&addon_id, "settings", first, "2026-10-15T00:00:00Z")
+            .await
+            .expect("insert addon storage");
+        assert_eq!(
+            store
+                .get_addon_storage(&addon_id, "settings")
+                .await
+                .expect("read addon storage"),
+            Some(first.to_string())
+        );
+        store
+            .set_addon_storage(&addon_id, "settings", second, "2026-10-15T00:01:00Z")
+            .await
+            .expect("upsert addon storage");
+        assert_eq!(
+            store
+                .get_addon_storage(&addon_id, "settings")
+                .await
+                .expect("read updated addon storage"),
+            Some(second.to_string())
+        );
+        assert_eq!(
+            store
+                .get_addon_storage("test.other", "settings")
+                .await
+                .expect("read isolated addon storage"),
+            None
+        );
+        assert!(
+            store
+                .delete_addon_storage(&addon_id, "settings")
+                .await
+                .expect("delete addon storage")
+        );
+        assert!(!store
+            .delete_addon_storage(&addon_id, "settings")
+            .await
+            .expect("delete missing addon storage"));
     }
 }

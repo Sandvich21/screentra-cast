@@ -35,6 +35,44 @@ const DECLARATIVE_RENDERERS: &[&str] = &[
     "rectangle",
 ];
 
+pub const MAX_ADDON_STORAGE_KEY_BYTES: usize = 128;
+pub const MAX_ADDON_STORAGE_VALUE_BYTES: usize = 64 * 1024;
+
+/// Validate the addon namespace before it reaches either database backend.
+/// This is deliberately the same conservative identifier shape used by addon
+/// manifests, not a filesystem path or SQL identifier.
+pub fn validate_addon_storage_namespace(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > MAX_ID_LEN {
+        return Err("Invalid addon storage namespace".to_string());
+    }
+    let mut chars = value.chars();
+    if !chars.next().is_some_and(|ch| ch.is_ascii_alphanumeric())
+        || !chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+    {
+        return Err("Invalid addon storage namespace".to_string());
+    }
+    Ok(())
+}
+
+pub fn validate_addon_storage_key(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > MAX_ADDON_STORAGE_KEY_BYTES
+        || value.chars().any(|ch| ch.is_control() || ch == '/')
+    {
+        return Err("Invalid addon storage key".to_string());
+    }
+    Ok(())
+}
+
+pub fn validate_addon_storage_value(value: &str) -> Result<(), String> {
+    if value.len() > MAX_ADDON_STORAGE_VALUE_BYTES {
+        return Err("Addon storage value exceeds the 64 KiB limit".to_string());
+    }
+    serde_json::from_str::<serde_json::Value>(value)
+        .map(|_| ())
+        .map_err(|_| "Addon storage value must be valid JSON".to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustedServerServiceSpec {
     pub image: String,
@@ -809,6 +847,19 @@ mod tests {
     #[test]
     fn accepts_declarative_manifest() {
         assert!(validate_manifest(&manifest()).is_ok());
+    }
+
+    #[test]
+    fn validates_addon_storage_bounds_and_json() {
+        assert!(validate_addon_storage_namespace("example.weather").is_ok());
+        assert!(validate_addon_storage_namespace("../escape").is_err());
+        assert!(validate_addon_storage_key("settings").is_ok());
+        assert!(validate_addon_storage_key("nested/key").is_err());
+        assert!(validate_addon_storage_value("{\"enabled\":true}").is_ok());
+        assert!(validate_addon_storage_value("not-json").is_err());
+        assert!(
+            validate_addon_storage_value(&"x".repeat(MAX_ADDON_STORAGE_VALUE_BYTES + 1)).is_err()
+        );
     }
 
     #[test]

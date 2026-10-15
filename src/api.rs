@@ -48,6 +48,43 @@ pub(crate) enum ClientRepository {
     Postgres(Arc<crate::postgres::PostgresStore>),
 }
 
+#[derive(Clone)]
+pub(crate) enum AddonStorageRepository {
+    Sqlite(Arc<Database>),
+    Postgres(Arc<crate::postgres::PostgresStore>),
+}
+
+impl AddonStorageRepository {
+    async fn set(
+        &self,
+        addon_id: &str,
+        storage_key: &str,
+        value_json: &str,
+        updated_at: &str,
+    ) -> Result<(), String> {
+        match self {
+            Self::Sqlite(db) => db.set_addon_storage(addon_id, storage_key, value_json, updated_at),
+            Self::Postgres(store) => store
+                .set_addon_storage(addon_id, storage_key, value_json, updated_at)
+                .await,
+        }
+    }
+
+    async fn get(&self, addon_id: &str, storage_key: &str) -> Result<Option<String>, String> {
+        match self {
+            Self::Sqlite(db) => db.get_addon_storage(addon_id, storage_key),
+            Self::Postgres(store) => store.get_addon_storage(addon_id, storage_key).await,
+        }
+    }
+
+    async fn delete(&self, addon_id: &str, storage_key: &str) -> Result<bool, String> {
+        match self {
+            Self::Sqlite(db) => db.delete_addon_storage(addon_id, storage_key),
+            Self::Postgres(store) => store.delete_addon_storage(addon_id, storage_key).await,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RepositoryBackend {
     Postgres,
@@ -79,6 +116,7 @@ pub(crate) fn configured_repository_backend() -> Result<RepositoryBackend, Strin
 pub struct RuntimeState {
     legacy_db: Option<AppState>,
     client_repository: ClientRepository,
+    addon_storage_repository: AddonStorageRepository,
     auth_repository: crate::auth::AuthRepository,
     backup_repository: backup_api::BackupMetadataRepository,
     pub(crate) metrics: crate::observability::Metrics,
@@ -93,6 +131,7 @@ impl RuntimeState {
                 Ok(Self {
                     legacy_db: None,
                     client_repository: ClientRepository::Postgres(store.clone()),
+                    addon_storage_repository: AddonStorageRepository::Postgres(store.clone()),
                     auth_repository: crate::auth::AuthRepository::Postgres(store.clone()),
                     backup_repository: backup_api::BackupMetadataRepository::Postgres(store),
                     metrics: crate::observability::Metrics::new(),
@@ -118,7 +157,8 @@ impl RuntimeState {
         let backup_repository = backup_api::BackupMetadataRepository::Sqlite(db.clone());
         Self {
             legacy_db: Some(db.clone()),
-            client_repository: ClientRepository::Sqlite(db),
+            client_repository: ClientRepository::Sqlite(db.clone()),
+            addon_storage_repository: AddonStorageRepository::Sqlite(db),
             auth_repository,
             backup_repository,
             metrics: crate::observability::Metrics::new(),
@@ -129,6 +169,12 @@ impl RuntimeState {
 impl FromRef<RuntimeState> for ClientRepository {
     fn from_ref(state: &RuntimeState) -> Self {
         state.client_repository.clone()
+    }
+}
+
+impl FromRef<RuntimeState> for AddonStorageRepository {
+    fn from_ref(state: &RuntimeState) -> Self {
+        state.addon_storage_repository.clone()
     }
 }
 
@@ -1131,6 +1177,13 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             "/api/addons/package",
             post(upload_addon_package).layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
         )
+        .route(
+            "/api/addons/{addon_id}/storage/{storage_key}",
+            get(get_addon_storage)
+                .put(set_addon_storage)
+                .delete(delete_addon_storage)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/api/addons/{id}/enable", post(enable_addon))
         .route("/api/addons/{id}/disable", post(disable_addon))
         .route("/api/addons/{id}", delete(delete_addon))
@@ -1848,6 +1901,82 @@ fn addon_error_response(error: AddonError) -> (StatusCode, String) {
             internal_server_error()
         }
     }
+}
+
+fn require_addon_storage_admin(
+    principal: &crate::middleware::AuthenticatedPrincipal,
+) -> Result<(), (StatusCode, String)> {
+    if principal.role == "admin" {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            "administrator role required".to_string(),
+        ))
+    }
+}
+
+async fn get_addon_storage(
+    State(repository): State<AddonStorageRepository>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    Path((addon_id, storage_key)): Path<(String, String)>,
+) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    crate::addons::validate_addon_storage_namespace(&addon_id)
+        .and(crate::addons::validate_addon_storage_key(&storage_key))
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let value_json = repository
+        .get(&addon_id, &storage_key)
+        .await
+        .map_err(|error| {
+            log::error!("addon storage read failed: {error}");
+            internal_server_error()
+        })?
+        .ok_or((StatusCode::NOT_FOUND, "Addon storage entry not found".to_string()))?;
+    let value = serde_json::from_str(&value_json).map_err(|error| {
+        log::error!("addon storage contains invalid JSON: {error}");
+        internal_server_error()
+    })?;
+    Ok(AxumJson(value))
+}
+
+async fn set_addon_storage(
+    State(repository): State<AddonStorageRepository>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    Path((addon_id, storage_key)): Path<(String, String)>,
+    AxumJson(value): AxumJson<serde_json::Value>,
+) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    crate::addons::validate_addon_storage_namespace(&addon_id)
+        .and(crate::addons::validate_addon_storage_key(&storage_key))
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let value_json = serde_json::to_string(&value).map_err(|_| internal_server_error())?;
+    crate::addons::validate_addon_storage_value(&value_json)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    repository
+        .set(&addon_id, &storage_key, &value_json, &Utc::now().to_rfc3339())
+        .await
+        .map_err(|error| {
+            log::error!("addon storage write failed: {error}");
+            internal_server_error()
+        })?;
+    Ok(AxumJson(value))
+}
+
+async fn delete_addon_storage(
+    State(repository): State<AddonStorageRepository>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    Path((addon_id, storage_key)): Path<(String, String)>,
+) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    crate::addons::validate_addon_storage_namespace(&addon_id)
+        .and(crate::addons::validate_addon_storage_key(&storage_key))
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let deleted = repository.delete(&addon_id, &storage_key).await.map_err(|error| {
+        log::error!("addon storage delete failed: {error}");
+        internal_server_error()
+    })?;
+    Ok(AxumJson(serde_json::json!({ "deleted": deleted })))
 }
 
 async fn list_addons() -> Result<AxumJson<Vec<AddonRecord>>, (StatusCode, String)> {
@@ -8956,6 +9085,7 @@ mod tests {
         let state = RuntimeState {
             legacy_db: None,
             client_repository: ClientRepository::Postgres(store.clone()),
+            addon_storage_repository: AddonStorageRepository::Postgres(store.clone()),
             auth_repository: crate::auth::AuthRepository::Postgres(store.clone()),
             backup_repository: backup_api::BackupMetadataRepository::Postgres(store),
             metrics: crate::observability::Metrics::new(),

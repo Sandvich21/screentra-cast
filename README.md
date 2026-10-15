@@ -199,6 +199,14 @@ properties. Enabled addon aliases appear in the layout editor palette and reuse
 that existing renderer. Signed client-extension packages are stored separately
 for the gated client-delivery phase; no custom client code is loaded yet.
 
+Core-owned namespaced addon storage is available through the authenticated admin
+boundary at `GET|PUT|DELETE /api/addons/{addon_id}/storage/{storage_key}`. Values
+are JSON text bounded to 64 KiB, keys are bounded to 128 bytes, and both SQLite
+and PostgreSQL use the same namespace/key contract with upsert and delete
+semantics. This API does not expose raw SQL, arbitrary table creation, the main
+SQLite file, credentials, or unrelated core tables; trusted server containers
+remain disabled until their separate capability and isolation runtime exists.
+
 Unsigned executable server code and client JavaScript are rejected. A signed
 package is verified and stored, but it is not proof that a player has installed
 or activated it. Client-facing inventory is available at
