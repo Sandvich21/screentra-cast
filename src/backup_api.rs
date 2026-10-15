@@ -9,6 +9,7 @@ use axum::{
 };
 use chrono::Utc;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::Path as StdPath;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -100,6 +101,37 @@ fn postgres_tool_environment_from_url(
     Ok(environment)
 }
 
+fn validate_postgres_dump_file(path: &StdPath) -> Result<(), String> {
+    let file = fs::File::open(path).map_err(|_| "Failed to read PostgreSQL dump".to_string())?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let mut has_dump_header = false;
+    loop {
+        line.clear();
+        let bytes = reader
+            .read_line(&mut line)
+            .map_err(|_| "Failed to read PostgreSQL dump".to_string())?;
+        if bytes == 0 {
+            break;
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("-- PostgreSQL database dump") {
+            has_dump_header = true;
+        }
+        if trimmed.starts_with("\\connect")
+            || trimmed.starts_with("\\!")
+            || trimmed.starts_with("\\copy")
+            || trimmed.starts_with("CREATE DATABASE")
+        {
+            return Err("PostgreSQL dump contains an unsafe database or shell command".to_string());
+        }
+    }
+    if !has_dump_header {
+        return Err("PostgreSQL dump header is missing".to_string());
+    }
+    Ok(())
+}
+
 async fn create_postgres_dump(output_path: &StdPath) -> Result<(), String> {
     let database_url = crate::postgres::configured_database_url()?;
     let environment = postgres_tool_environment_from_url(&database_url)?;
@@ -133,6 +165,10 @@ async fn create_postgres_dump(output_path: &StdPath) -> Result<(), String> {
     if dump_size == 0 {
         let _ = fs::remove_file(output_path);
         return Err("PostgreSQL dump was empty".to_string());
+    }
+    if let Err(error) = validate_postgres_dump_file(output_path) {
+        let _ = fs::remove_file(output_path);
+        return Err(error);
     }
     Ok(())
 }
@@ -838,6 +874,32 @@ mod tests {
         assert!(postgres_tool_environment_from_url("postgresql://user@/signage").is_err());
         assert!(postgres_tool_environment_from_url("postgresql://user@example.test").is_err());
     }
+    #[test]
+    fn postgres_dump_validator_accepts_pg_dump_header() {
+        let path = test_root("postgres-dump-valid");
+        std::fs::write(
+            &path,
+            b"-- PostgreSQL database dump\nSET statement_timeout = 0;\n",
+        )
+        .unwrap();
+        assert!(validate_postgres_dump_file(&path).is_ok());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn postgres_dump_validator_rejects_routing_and_shell_commands() {
+        for (label, command) in [("connect", "\\connect other_db\n"), ("shell", "\\! id\n"), ("create", "CREATE DATABASE other_db;\n")] {
+            let path = test_root(&format!("postgres-dump-{label}"));
+            std::fs::write(
+                &path,
+                format!("-- PostgreSQL database dump\n{command}").as_bytes(),
+            )
+            .unwrap();
+            assert!(validate_postgres_dump_file(&path).is_err());
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn create_http_backup_contains_addon_related_data() {
         let _guard = BACKUP_HTTP_TEST_LOCK
