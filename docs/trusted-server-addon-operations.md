@@ -68,11 +68,16 @@ execution.
 
 ## Backup and restore scope
 
-The existing backup archive captures the complete configured data directory,
+The filesystem backup archive is currently a **SQLite-only** path. When the
+server uses SQLite, it captures the complete configured data directory,
 excluding only the backup tarball directory itself. Therefore namespaced
 `addon_storage` rows are preserved inside `data/signage.db`, while inert staged
 trusted-service metadata is preserved under `data/trusted-services/`. Restore
-dry-runs now report whether `data/signage.db` and
-`data/trusted-services/` are present and warn when either scope is absent.
-Restoring either scope does not activate a service, pull an image, or execute
-addon code.
+dry-runs report whether `data/signage.db` and `data/trusted-services/` are
+present and warn when either scope is absent. Restoring either scope does not
+activate a service, pull an image, or execute addon code.
+
+When the PostgreSQL repository backend is selected, create/upload/restore
+filesystem backup operations fail closed with HTTP `501 Not Implemented`
+until a database-native dump/restore path exists. The server must not present a
+filesystem archive as a complete PostgreSQL backup.

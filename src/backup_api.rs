@@ -60,6 +60,19 @@ impl BackupMetadataRepository {
     }
 }
 
+fn ensure_filesystem_backup_backend(
+    repository: &BackupMetadataRepository,
+) -> Result<(), (StatusCode, String)> {
+    if matches!(repository, BackupMetadataRepository::Postgres(_)) {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            "PostgreSQL backup and restore require a database-native dump path, which is not enabled yet"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn list_backups(
     State(db): State<AppState>,
 ) -> Result<AxumJson<Vec<Backup>>, (StatusCode, String)> {
@@ -71,6 +84,7 @@ pub async fn list_backups(
 pub async fn create_backup(
     State(db): State<AppState>,
 ) -> Result<AxumJson<Backup>, (StatusCode, String)> {
+    ensure_filesystem_backup_backend(&db)?;
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let safe_ts = now.replace(':', "-");
@@ -268,6 +282,7 @@ pub async fn restore_backup(
     use axum::body::Body;
     use axum::http::{header, StatusCode as SC};
 
+    ensure_filesystem_backup_backend(&db)?;
     let backup_file_path = db
         .get_backup_file_path(&id)
         .await
@@ -522,6 +537,7 @@ pub async fn upload_backup(
     State(db): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<axum::http::StatusCode, (StatusCode, String)> {
+    ensure_filesystem_backup_backend(&db)?;
     let data_dir = signage_data_dir();
     let backup_dir = format!("{}/backups", data_dir);
     fs::create_dir_all(&backup_dir)
