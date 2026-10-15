@@ -483,10 +483,7 @@ pub async fn restore_backup(
         })?;
 
     if !StdPath::new(&backup_file_path).exists() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("backup file not found: {}", backup_file_path),
-        ));
+        return Err((StatusCode::NOT_FOUND, "Backup not found".to_string()));
     }
 
     // Detect service + dirs (same helpers create_backup uses).
@@ -497,13 +494,13 @@ pub async fn restore_backup(
     let postgres_backend = matches!(&db, BackupMetadataRepository::Postgres(_));
     let (service_name, service_kind) = configured_service();
 
-    let top = tar_top_level_entries(&backup_file_path)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("inspect tarball: {}", e),
-            )
-        })?;
+    let top = match tar_top_level_entries(&backup_file_path) {
+        Ok(top) => top,
+        Err(error) => {
+            log::warn!("backup archive inspection failed: {error}");
+            return Err((StatusCode::BAD_REQUEST, "Invalid backup archive".to_string()));
+        }
+    };
     let sha = sha256_file(&backup_file_path)
         .await
         .map_err(|_| {
@@ -514,17 +511,26 @@ pub async fn restore_backup(
         StdPath::new(&backup_file_path),
         StdPath::new("data/signage.db"),
     )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inspect tarball: {}", e)))?;
+    .map_err(|error| {
+        log::warn!("backup archive inspection failed: {error}");
+        (StatusCode::BAD_REQUEST, "Invalid backup archive".to_string())
+    })?;
     let contains_postgresql_dump = safe_archive::archive_contains_path(
         StdPath::new(&backup_file_path),
         StdPath::new("data/postgresql.sql"),
     )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inspect tarball: {}", e)))?;
+    .map_err(|error| {
+        log::warn!("backup archive inspection failed: {error}");
+        (StatusCode::BAD_REQUEST, "Invalid backup archive".to_string())
+    })?;
     let contains_trusted_service_staging = safe_archive::archive_contains_path_prefix(
         StdPath::new(&backup_file_path),
         StdPath::new("data/trusted-services"),
     )
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inspect tarball: {}", e)))?;
+    .map_err(|error| {
+        log::warn!("backup archive inspection failed: {error}");
+        (StatusCode::BAD_REQUEST, "Invalid backup archive".to_string())
+    })?;
 
     let mut warnings: Vec<String> = Vec::new();
     let would_app = top.iter().any(|e| e == "app");
