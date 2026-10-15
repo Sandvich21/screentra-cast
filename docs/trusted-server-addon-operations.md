@@ -68,16 +68,21 @@ execution.
 
 ## Backup and restore scope
 
-The filesystem backup archive is currently a **SQLite-only** path. When the
-server uses SQLite, it captures the complete configured data directory,
+The filesystem archive path is currently a **SQLite-only restore/upload** path.
+When the server uses SQLite, it captures the complete configured data directory,
 excluding only the backup tarball directory itself. Therefore namespaced
 `addon_storage` rows are preserved inside `data/signage.db`, while inert staged
-trusted-service metadata is preserved under `data/trusted-services/`. Restore
-dry-runs report whether `data/signage.db` and `data/trusted-services/` are
-present and warn when either scope is absent. Restoring either scope does not
-activate a service, pull an image, or execute addon code.
+trusted-service metadata is preserved under `data/trusted-services/`.
+Dry-run inspection reports whether `data/signage.db`, `data/postgresql.sql`, and
+`data/trusted-services/` are present and warns when either database scope is
+absent. Restoring either scope does not activate a service, pull an image, or
+execute addon code.
 
-When the PostgreSQL repository backend is selected, create/upload/restore
-filesystem backup operations fail closed with HTTP `501 Not Implemented`
-until a database-native dump/restore path exists. The server must not present a
-filesystem archive as a complete PostgreSQL backup.
+When the PostgreSQL repository backend is selected, backup creation uses a
+`pg_dump` plain SQL dump stored in the archive as `data/postgresql.sql`. The dump
+is generated with credentials supplied only through the child-process
+environment and is removed after archive creation. PostgreSQL upload and restore
+still fail closed with HTTP `501 Not Implemented` until database-native
+validation, pre-restore rollback dumps, and restore handling are implemented.
+The server must not present a filesystem-only archive as a complete PostgreSQL
+backup.

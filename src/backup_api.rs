@@ -100,13 +100,50 @@ fn postgres_tool_environment_from_url(
     Ok(environment)
 }
 
+async fn create_postgres_dump(output_path: &StdPath) -> Result<(), String> {
+    let database_url = crate::postgres::configured_database_url()?;
+    let environment = postgres_tool_environment_from_url(&database_url)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(output_path)
+            .map_err(|_| "Failed to prepare PostgreSQL dump file".to_string())?;
+    }
+    let output = Command::new("pg_dump")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .args(["--format=plain", "--no-owner", "--no-password", "--file"])
+        .arg(output_path)
+        .envs(environment)
+        .output()
+        .await
+        .map_err(|_| "Failed to start pg_dump".to_string())?;
+    if !output.status.success() {
+        let _ = fs::remove_file(output_path);
+        return Err("PostgreSQL dump failed".to_string());
+    }
+    let dump_size = fs::metadata(output_path)
+        .map_err(|_| "PostgreSQL dump did not produce a file".to_string())?
+        .len();
+    if dump_size == 0 {
+        let _ = fs::remove_file(output_path);
+        return Err("PostgreSQL dump was empty".to_string());
+    }
+    Ok(())
+}
+
 fn ensure_filesystem_backup_backend(
     repository: &BackupMetadataRepository,
 ) -> Result<(), (StatusCode, String)> {
     if matches!(repository, BackupMetadataRepository::Postgres(_)) {
         return Err((
             StatusCode::NOT_IMPLEMENTED,
-            "PostgreSQL backup and restore require a database-native dump path, which is not enabled yet"
+            "PostgreSQL upload and restore require a database-native restore path, which is not enabled yet"
                 .to_string(),
         ));
     }
@@ -124,7 +161,6 @@ pub async fn list_backups(
 pub async fn create_backup(
     State(db): State<AppState>,
 ) -> Result<AxumJson<Backup>, (StatusCode, String)> {
-    ensure_filesystem_backup_backend(&db)?;
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let safe_ts = now.replace(':', "-");
@@ -159,6 +195,22 @@ pub async fn create_backup(
         .parent()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| ".".to_string());
+    let postgres_dump_path = if matches!(&db, BackupMetadataRepository::Postgres(_)) {
+        let parent = StdPath::new(&data_dir).parent().ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal server error".to_string(),
+        ))?;
+        let path = parent.join(format!(".screentra-postgres-dump-{id}.sql"));
+        create_postgres_dump(&path).await.map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "PostgreSQL backup failed".to_string(),
+            )
+        })?;
+        Some(path)
+    } else {
+        None
+    };
 
     // Exclude pre-transform paths: `./<install_basename>/target` etc.
     // tar's --exclude matches before --transform runs.
@@ -192,10 +244,26 @@ pub async fn create_backup(
         .arg("-C")
         .arg(&data_parent)
         .arg(format!("./{}", data_basename));
+    if let Some(path) = &postgres_dump_path {
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            ))?;
+        cmd.arg("--transform")
+            .arg(format!("s|./{filename}|./data/postgresql.sql|"))
+            .arg("-C")
+            .arg(path.parent().unwrap_or_else(|| StdPath::new(".")))
+            .arg(format!("./{filename}"));
+    }
 
-    let output = cmd
-        .output()
-        .await
+    let output = cmd.output().await;
+    if let Some(path) = &postgres_dump_path {
+        let _ = fs::remove_file(path);
+    }
+    let output = output
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
 
     if !output.status.success() {
