@@ -796,9 +796,7 @@ pub async fn restore_backup(
         sha256_post: post_sha,
         duration_ms: started.elapsed().as_millis() as u64,
         pre_restore_dir: Some(pre_restore_app),
-        pre_restore_database_dump: postgres_rollback_path
-            .as_ref()
-            .map(|path| path.to_string_lossy().to_string()),
+        pre_restore_database_dump: None,
         restored_at,
     };
 
@@ -1256,6 +1254,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let restore_body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let restore_payload: serde_json::Value = serde_json::from_slice(&restore_body).unwrap();
+        assert!(restore_payload["result"]["pre_restore_database_dump"].is_null());
 
         let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
             .await
