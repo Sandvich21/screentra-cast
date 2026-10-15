@@ -9273,6 +9273,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trusted_service_stage_handlers_require_admin() {
+        let db_path = std::env::temp_dir().join(format!("screentra-trusted-stage-auth-{}.db", Uuid::new_v4()));
+        let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open test database"));
+        let state = RuntimeState::sqlite(db);
+        let viewer = crate::middleware::AuthenticatedPrincipal {
+            username: "stage-viewer".to_string(),
+            role: "viewer".to_string(),
+        };
+        let listed = list_trusted_service_stages(Extension(viewer.clone()))
+            .await
+            .expect_err("viewer must not list trusted service stages");
+        assert_eq!(listed.0, StatusCode::FORBIDDEN);
+        let removed = remove_trusted_service_stage(
+            State(state),
+            Extension(viewer),
+            Path("example.weather".to_string()),
+        )
+        .await
+        .expect_err("viewer must not remove trusted service stages");
+        assert_eq!(removed.0, StatusCode::FORBIDDEN);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn authenticated_audit_listing_reads_bounded_update_failure_events() {
         let db_path = std::env::temp_dir().join(format!("screentra-audit-api-{}.db", Uuid::new_v4()));
         let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open test database"));
