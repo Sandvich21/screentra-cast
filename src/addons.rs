@@ -238,6 +238,43 @@ pub struct AddonWidgetRegistration {
     pub default_props: serde_json::Value,
 }
 
+pub fn client_package(id: &str) -> Result<Vec<u8>, AddonError> {
+    let dir = addon_dir(id)?;
+    if !dir.exists() {
+        return Err(AddonError::NotFound);
+    }
+    let record = read_record(&dir)?;
+    if !record.enabled || record.manifest.kind != "client_extension" {
+        return Err(AddonError::NotFound);
+    }
+    let entrypoint = record
+        .manifest
+        .client_entrypoint
+        .as_deref()
+        .ok_or_else(|| AddonError::Invalid("Client package entrypoint is missing".to_string()))?;
+    let manifest_path = dir.join(MANIFEST_FILE);
+    let signature_path = dir.join("manifest.sig");
+    let client_path = dir.join(entrypoint);
+    if !signature_path.is_file() || !client_path.is_file() {
+        return Err(AddonError::Invalid(
+            "Stored client package is incomplete".to_string(),
+        ));
+    }
+    let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    builder
+        .append_path_with_name(&manifest_path, MANIFEST_FILE)
+        .map_err(io_error)?;
+    builder
+        .append_path_with_name(&signature_path, "manifest.sig")
+        .map_err(io_error)?;
+    builder
+        .append_path_with_name(&client_path, entrypoint)
+        .map_err(io_error)?;
+    let encoder = builder.into_inner().map_err(io_error)?;
+    encoder.finish().map_err(io_error)
+}
+
 pub fn enabled_client_extensions() -> Result<Vec<AddonManifest>, AddonError> {
     Ok(list()?
         .into_iter()
@@ -245,6 +282,7 @@ pub fn enabled_client_extensions() -> Result<Vec<AddonManifest>, AddonError> {
         .map(|addon| addon.manifest)
         .collect())
 }
+
 pub fn enabled_widget_registrations() -> Result<Vec<AddonWidgetRegistration>, AddonError> {
     let mut registrations = Vec::new();
     for addon in list()?.into_iter().filter(|addon| addon.enabled) {
@@ -739,6 +777,17 @@ mod tests {
         }
         let record = install_signed_client_package(&archive).unwrap();
         assert_eq!(record.manifest.kind, "client_extension");
+        let repackaged = client_package("example.weather").unwrap();
+        let repackaged_path = root.join("repackaged.tar.gz");
+        fs::write(&repackaged_path, repackaged).unwrap();
+        assert_eq!(
+            crate::safe_archive::inspect_tar_gz(&repackaged_path).unwrap(),
+            vec![
+                "client".to_string(),
+                "manifest.json".to_string(),
+                "manifest.sig".to_string()
+            ]
+        );
         let extensions = enabled_client_extensions().unwrap();
         assert_eq!(extensions.len(), 1);
         assert_eq!(extensions[0].id, "example.weather");

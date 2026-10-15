@@ -96,6 +96,9 @@ fn is_open_path(path: &str, method: &str) -> bool {
         if path.starts_with("/api/clients/") && path.ends_with("/addons") {
             return true;
         }
+        if path.starts_with("/api/clients/") && path.ends_with("/package") {
+            return true;
+        }
         // The privileged client updater authenticates this read with the
         // enrolled per-client token in the handler.
         if path.starts_with("/api/clients/") && path.ends_with("/update-check") {

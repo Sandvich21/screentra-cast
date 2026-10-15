@@ -1152,6 +1152,7 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         )
         .route("/api/clients/{id}/config", get(get_client_config))
         .route("/api/clients/{id}/addons", get(get_client_addons))
+        .route("/api/clients/{id}/addons/{addon_id}/package", get(get_client_addon_package))
         .route("/api/clients/{id}/update-check", get(get_client_update_check))
         .route("/api/clients/{id}/theme", patch(set_client_theme))
         .route(
@@ -6667,6 +6668,39 @@ async fn get_client_addons(
         "client_api_version": "1",
         "addons": addons,
     })))
+}
+
+async fn get_client_addon_package(
+    State(repository): State<ClientRepository>,
+    Extension(auth): Extension<crate::auth::AuthState>,
+    headers: HeaderMap,
+    Path((id, addon_id)): Path<(String, String)>,
+) -> Result<Response, (StatusCode, String)> {
+    let authenticated_role = if let Some(token) = crate::auth::extract_token(&headers) {
+        auth.token_payload(&token)
+            .await
+            .and_then(|payload| payload.get("role").and_then(|role| role.as_str()).map(str::to_string))
+    } else {
+        None
+    };
+    if let Some(role) = authenticated_role {
+        if role != "admin" {
+            return Err((StatusCode::FORBIDDEN, "admin authority required".to_string()));
+        }
+    } else {
+        require_client_command_token(&repository, &id, &headers).await?;
+    }
+    let package = crate::addons::client_package(&addon_id).map_err(addon_error_response)?;
+    let mut response = Response::new(package.into());
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/gzip"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        axum::http::HeaderValue::from_static("attachment; filename=addon.tar.gz"),
+    );
+    Ok(response)
 }
 
 async fn get_client_config(
