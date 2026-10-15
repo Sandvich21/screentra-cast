@@ -228,6 +228,22 @@ pub fn save_client_status(
     fs::rename(temporary, path).map_err(io_error)
 }
 
+pub fn load_client_status(client_id: &str) -> Result<Option<serde_json::Value>, AddonError> {
+    let path = client_status_path(client_id)?;
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path).map_err(io_error)?;
+    if bytes.len() > 256 * 1024 {
+        return Err(AddonError::Invalid(
+            "Stored addon status is too large".to_string(),
+        ));
+    }
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| AddonError::Io(format!("Invalid stored addon status: {error}")))
+}
+
 fn addon_dir(id: &str) -> Result<PathBuf, AddonError> {
     validate_id(id)?;
     Ok(storage_dir().join(id))
@@ -848,6 +864,8 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_slice(&fs::read(entries[0].path()).unwrap()).unwrap();
         assert_eq!(saved["client_id"], "client-1");
+        let loaded = load_client_status("client-1").unwrap().unwrap();
+        assert_eq!(loaded["report"]["addons"][0]["state"], "verified_cached");
         if let Some(value) = old_data_root {
             unsafe {
                 std::env::set_var("SIGNAGE_DATA_DIR", value);

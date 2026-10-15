@@ -6664,10 +6664,12 @@ async fn get_client_addons(
         require_client_command_token(&repository, &id, &headers).await?;
     }
     let addons = crate::addons::enabled_client_extensions().map_err(addon_error_response)?;
+    let status = crate::addons::load_client_status(&id).map_err(addon_error_response)?;
     Ok(AxumJson(serde_json::json!({
         "client_id": id,
         "client_api_version": "1",
         "addons": addons,
+        "status": status,
     })))
 }
 
