@@ -333,22 +333,21 @@ pub async fn create_backup(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!(
-                "Failed to create tarball{}",
-                if stderr.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", stderr)
-                }
-            ),
-        ));
+        if !stderr.is_empty() {
+            log::error!("backup tar creation failed: {stderr}");
+        }
+        let _ = fs::remove_file(&full_path);
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
     }
 
-    let metadata =
-        fs::metadata(&full_path).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
-    let size = metadata.len();
+    let size = match fs::metadata(&full_path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
+            log::error!("inspect created backup failed: {error}");
+            let _ = fs::remove_file(&full_path);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
+        }
+    };
 
     let backup = Backup {
         id: id.clone(),
@@ -867,35 +866,45 @@ pub async fn upload_backup(
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
         let mut size = 0_u64;
         let mut field = field;
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid multipart upload".to_string()))?
-        {
+        loop {
+            let chunk = match field.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(error) => {
+                    drop(probe_file);
+                    let _ = tokio::fs::remove_file(&probe_path).await;
+                    log::warn!("backup multipart read failed: {error}");
+                    return Err((StatusCode::BAD_REQUEST, "Invalid multipart upload".to_string()));
+                }
+            };
             size = size.saturating_add(chunk.len() as u64);
             if size > MAX_BACKUP_UPLOAD_BYTES {
                 drop(probe_file);
                 let _ = tokio::fs::remove_file(&probe_path).await;
                 return Err((StatusCode::PAYLOAD_TOO_LARGE, "Backup upload is too large".to_string()));
             }
-            probe_file
-                .write_all(&chunk)
-                .await
-                .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+            if let Err(error) = probe_file.write_all(&chunk).await {
+                drop(probe_file);
+                let _ = tokio::fs::remove_file(&probe_path).await;
+                log::error!("write backup upload probe failed: {error}");
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
+            }
         }
-        probe_file
-            .flush()
-            .await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+        if let Err(error) = probe_file.flush().await {
+            drop(probe_file);
+            let _ = tokio::fs::remove_file(&probe_path).await;
+            log::error!("flush backup upload probe failed: {error}");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
+        }
         drop(probe_file);
 
         // Verify it parses as a tarball with `app/` and/or `data/` at top
         // before saving. Reject anything else.
         let top = match tar_top_level_entries(&probe_path) {
             Ok(t) => t,
-            Err(e) => {
+            Err(error) => {
                 let _ = fs::remove_file(&probe_path);
-                eprintln!("uploaded backup is not a valid tarball: {e}");
+                log::warn!("uploaded backup is not a valid tarball: {error}");
                 return Err((StatusCode::BAD_REQUEST, "Uploaded file is not a valid backup".to_string()));
             }
         };
@@ -910,7 +919,7 @@ pub async fn upload_backup(
         if postgres_backend {
             validate_postgres_archive(StdPath::new(&probe_path)).map_err(|error| {
                 let _ = fs::remove_file(&probe_path);
-                eprintln!("uploaded PostgreSQL backup failed validation: {error}");
+                log::warn!("uploaded PostgreSQL backup failed validation: {error}");
                 (
                     StatusCode::BAD_REQUEST,
                     "Uploaded PostgreSQL backup is missing or invalid".to_string(),
@@ -918,8 +927,11 @@ pub async fn upload_backup(
             })?;
         }
 
-        fs::rename(&probe_path, &full_path)
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+        if let Err(error) = fs::rename(&probe_path, &full_path) {
+            let _ = fs::remove_file(&probe_path);
+            log::error!("store uploaded backup failed: {error}");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
+        }
 
         // Register in DB so the operator can pick this backup for restore
         // via PUT /api/backups/{id}?confirm=true. NO auto-restore.
