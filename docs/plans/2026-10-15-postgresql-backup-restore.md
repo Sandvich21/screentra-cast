@@ -1,5 +1,7 @@
 # PostgreSQL Backup and Restore Implementation Plan
 
+> **Status:** Implemented and verified through HTTP-level disposable PostgreSQL create, upload, restore, and forced-failure rollback tests. The remaining trusted-service runtime work is intentionally out of scope.
+
 > **For Hermes:** Execute this plan in small vertical slices. Keep PostgreSQL credentials out of command-line arguments, logs, archives, and error responses.
 
 **Goal:** Add a database-native PostgreSQL backup/restore path that preserves core data, namespaced addon storage, and inert trusted-service metadata without presenting a filesystem-only archive as a complete backup.
@@ -64,7 +66,7 @@ Extract only into the existing staging directory. Require `data/postgresql.sql` 
 
 After moving the live data directory to its pre-restore location, create a pre-restore PostgreSQL dump there. Restore the staged SQL with `psql --set ON_ERROR_STOP=1` and a single transaction where supported. If database restore, filesystem placement, or service preparation fails, restore the pre-restore database dump and filesystem directories. Keep credentials out of the archive and response payload.
 
-After success, remove `data/postgresql.sql` from the live runtime data directory; keep only the rollback copy under the existing pre-restore retention directory.
+After success, remove both the restored `data/postgresql.sql` and the temporary pre-restore database dump. Filesystem pre-restore directories remain available through the existing operational rollback retention behavior.
 
 ### Task 6: PostgreSQL addon-storage verification
 
