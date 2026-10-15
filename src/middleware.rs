@@ -82,6 +82,12 @@ fn is_open_path(path: &str, method: &str) -> bool {
     {
         return true;
     }
+    if method == "POST"
+        && path.starts_with("/api/clients/")
+        && path.ends_with("/addons/status")
+    {
+        return true;
+    }
     // Player config fetches (read-only) are open so enrolled players still work
     // without a session. Player writes (assign layout, set command) stay gated.
     if method == "GET" && (path == "/uploads" || path.starts_with("/uploads/")) {

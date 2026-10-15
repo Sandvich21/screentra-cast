@@ -211,9 +211,10 @@ The player heartbeat now consumes that inventory using the enrolled client
 credential, downloads only when the cached version/digest is stale, verifies the
 package again against the pinned client addon public key at
 `/etc/screentra-cast/addon-signing.pub`, and stages it under the client data
-directory. Verification state is written to `cache/addon-status.json`. Staged
-modules are not executed or loaded yet; the renderer/runtime sandbox remains a
-separate gate.
+directory. Verification state is written to `cache/addon-status.json` and
+reported to the authenticated `POST /api/clients/{id}/addons/status` endpoint.
+The server stores a bounded per-client status snapshot. Staged modules are not
+executed or loaded yet; the renderer/runtime sandbox remains a separate gate.
 
 Signed client-extension packages can now be uploaded as a `.tar.gz` containing:
 

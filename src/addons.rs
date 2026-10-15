@@ -99,6 +99,28 @@ struct AddonState {
     installed_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientAddonStatus {
+    pub id: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    pub state: String,
+    #[serde(default)]
+    pub entrypoint: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientAddonStatusReport {
+    #[serde(default)]
+    pub at: Option<String>,
+    #[serde(default)]
+    pub addons: Vec<ClientAddonStatus>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum AddonError {
     Invalid(String),
@@ -121,6 +143,89 @@ impl std::fmt::Display for AddonError {
 fn storage_dir() -> PathBuf {
     let root = std::env::var("SIGNAGE_DATA_DIR").unwrap_or_else(|_| "/home/board/data".to_string());
     PathBuf::from(root).join("addons")
+}
+
+fn client_status_path(client_id: &str) -> Result<PathBuf, AddonError> {
+    if client_id.is_empty() || client_id.len() > 200 || client_id.chars().any(|ch| ch.is_control())
+    {
+        return Err(AddonError::Invalid("Invalid client id".to_string()));
+    }
+    let digest = Sha256::digest(client_id.as_bytes());
+    Ok(storage_dir()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("addon-client-status")
+        .join(format!("{:x}.json", digest)))
+}
+
+pub fn save_client_status(
+    client_id: &str,
+    report: ClientAddonStatusReport,
+) -> Result<(), AddonError> {
+    let path = client_status_path(client_id)?;
+    if report.at.as_deref().map_or(false, |value| value.len() > 64) {
+        return Err(AddonError::Invalid(
+            "Addon status timestamp is too long".to_string(),
+        ));
+    }
+    if report.addons.len() > 64 {
+        return Err(AddonError::Invalid(
+            "Addon status contains too many entries".to_string(),
+        ));
+    }
+    for addon in &report.addons {
+        validate_id(&addon.id)?;
+        if let Some(version) = addon.version.as_deref() {
+            validate_token(version, "Addon status version")?;
+        }
+        if !matches!(
+            addon.state.as_str(),
+            "verified" | "verified_cached" | "failed"
+        ) {
+            return Err(AddonError::Invalid(
+                "Unsupported addon client status".to_string(),
+            ));
+        }
+        if let Some(entrypoint) = addon.entrypoint.as_deref() {
+            validate_relative_client_path(entrypoint)?;
+        }
+        if addon
+            .error
+            .as_deref()
+            .map_or(false, |value| value.len() > 256)
+        {
+            return Err(AddonError::Invalid(
+                "Addon status error is too long".to_string(),
+            ));
+        }
+    }
+    if report
+        .error
+        .as_deref()
+        .map_or(false, |value| value.len() > 256)
+    {
+        return Err(AddonError::Invalid(
+            "Addon status error is too long".to_string(),
+        ));
+    }
+    let payload = serde_json::json!({
+        "client_id": client_id,
+        "received_at": chrono::Utc::now().to_rfc3339(),
+        "report": report,
+    });
+    let bytes = serde_json::to_vec_pretty(&payload).map_err(io_error)?;
+    if bytes.len() > 256 * 1024 {
+        return Err(AddonError::Invalid(
+            "Addon status payload is too large".to_string(),
+        ));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| AddonError::Io("Invalid addon status path".to_string()))?;
+    fs::create_dir_all(parent).map_err(io_error)?;
+    let temporary = parent.join(format!(".status-{}.tmp", Uuid::new_v4()));
+    fs::write(&temporary, bytes).map_err(io_error)?;
+    fs::rename(temporary, path).map_err(io_error)
 }
 
 fn addon_dir(id: &str) -> Result<PathBuf, AddonError> {
@@ -703,6 +808,57 @@ mod tests {
         assert!(validate_manifest(&value).is_err());
     }
 
+    #[test]
+    fn saves_bounded_client_status_snapshot() {
+        let _guard = STORAGE_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-cast-addon-status-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let data_root = root.join("data");
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_root);
+        }
+        save_client_status(
+            "client-1",
+            ClientAddonStatusReport {
+                at: Some("2026-10-15T12:00:00Z".to_string()),
+                addons: vec![ClientAddonStatus {
+                    id: "example.weather".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    state: "verified_cached".to_string(),
+                    entrypoint: Some("client/index.js".to_string()),
+                    error: None,
+                }],
+                error: None,
+            },
+        )
+        .unwrap();
+        let status_dir = data_root.join("addon-client-status");
+        let entries = fs::read_dir(status_dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(entries[0].path()).unwrap()).unwrap();
+        assert_eq!(saved["client_id"], "client-1");
+        if let Some(value) = old_data_root {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
     #[test]
     fn signed_client_package_round_trip_verifies_and_persists() {
         let _guard = STORAGE_TEST_LOCK

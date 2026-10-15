@@ -1760,6 +1760,23 @@ def sync_client_addons(server, client_id, cache_dir):
     return status
 
 
+def post_addon_status(server, client_id, status):
+    url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/addons/status'
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(status).encode('utf-8'),
+        headers={'Content-Type': 'application/json', **client_auth_headers()},
+        method='POST',
+    )
+    try:
+        with urlopen_ripley(request, timeout=10) as response:
+            return response.status == 200
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 404, 429):
+            return False
+        raise
+
+
 def poll_command(server, client_id, client_token):
     url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/command'
     try:
@@ -2004,6 +2021,10 @@ def main():
         fetch_all_displays(args.server, data['client_id'], args.cache_dir, len(data.get('displays') or []), args.display_config_pattern)
         fetch_admin_users(args.server, data['client_id'], args.cache_dir)
         addon_status = sync_client_addons(args.server, data['client_id'], args.cache_dir)
+        try:
+            post_addon_status(args.server, data['client_id'], addon_status)
+        except Exception as error:
+            print(f'addon status report failed: {error}', flush=True)
         if addon_status.get('addons') or addon_status.get('error'):
             print(f'addon sync: {json.dumps(addon_status, separators=(",", ":"))}', flush=True)
         assigned = cfg.get('assigned_layout_id') if cfg else None

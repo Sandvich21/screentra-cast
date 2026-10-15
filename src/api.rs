@@ -1,5 +1,5 @@
 use crate::backup_api;
-use crate::addons::{AddonError, AddonManifest, AddonRecord, AddonWidgetRegistration};
+use crate::addons::{AddonError, AddonManifest, AddonRecord, AddonWidgetRegistration, ClientAddonStatusReport};
 use crate::db::{ClientDisplayRegistration, ClientRegistration, Database};
 use crate::display::detect_displays;
 use crate::models::{
@@ -1152,6 +1152,7 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         )
         .route("/api/clients/{id}/config", get(get_client_config))
         .route("/api/clients/{id}/addons", get(get_client_addons))
+        .route("/api/clients/{id}/addons/status", post(post_client_addon_status))
         .route("/api/clients/{id}/addons/{addon_id}/package", get(get_client_addon_package))
         .route("/api/clients/{id}/update-check", get(get_client_update_check))
         .route("/api/clients/{id}/theme", patch(set_client_theme))
@@ -6668,6 +6669,32 @@ async fn get_client_addons(
         "client_api_version": "1",
         "addons": addons,
     })))
+}
+
+async fn post_client_addon_status(
+    State(_repository): State<ClientRepository>,
+    Extension(auth): Extension<crate::auth::AuthState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(report): Json<ClientAddonStatusReport>,
+) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    let authenticated_role = if let Some(token) = crate::auth::extract_token(&headers) {
+        auth.token_payload(&token)
+            .await
+            .and_then(|payload| payload.get("role").and_then(|role| role.as_str()).map(str::to_string))
+    } else {
+        None
+    };
+    if let Some(role) = authenticated_role {
+        if role != "admin" {
+            return Err((StatusCode::FORBIDDEN, "admin authority required".to_string()));
+        }
+    } else {
+        require_client_command_token(&_repository, &id, &headers).await?;
+    }
+    crate::addons::save_client_status(&id, report)
+        .map_err(addon_error_response)?;
+    Ok(AxumJson(serde_json::json!({"client_id": id, "saved": true})))
 }
 
 async fn get_client_addon_package(
