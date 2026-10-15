@@ -209,6 +209,7 @@ struct RestoreDryRunReport {
     backup_sha256: String,
     tarball_top_level_entries: Vec<String>,
     contains_core_database: bool,
+    contains_postgresql_dump: bool,
     contains_trusted_service_staging: bool,
     would_extract_to_install: bool,
     would_extract_to_data: bool,
@@ -322,6 +323,11 @@ pub async fn restore_backup(
         StdPath::new("data/signage.db"),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inspect tarball: {}", e)))?;
+    let contains_postgresql_dump = safe_archive::archive_contains_path(
+        StdPath::new(&backup_file_path),
+        StdPath::new("data/postgresql.sql"),
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inspect tarball: {}", e)))?;
     let contains_trusted_service_staging = safe_archive::archive_contains_path_prefix(
         StdPath::new(&backup_file_path),
         StdPath::new("data/trusted-services"),
@@ -358,6 +364,7 @@ pub async fn restore_backup(
         backup_sha256: sha.clone(),
         tarball_top_level_entries: top,
         contains_core_database,
+        contains_postgresql_dump,
         contains_trusted_service_staging,
         would_extract_to_install: would_app,
         would_extract_to_data: would_data,
@@ -1170,6 +1177,7 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(payload["status"], "dry_run");
         assert_eq!(payload["report"]["contains_core_database"], true);
+        assert_eq!(payload["report"]["contains_postgresql_dump"], false);
         assert_eq!(payload["report"]["contains_trusted_service_staging"], true);
         assert_eq!(payload["report"]["warnings"].as_array().unwrap().len(), 0);
 
