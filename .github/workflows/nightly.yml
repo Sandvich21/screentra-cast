@@ -97,7 +97,7 @@ jobs:
             -inkey "$RUNNER_TEMP/client-update-signing.pub" \
             -sigfile "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz.sig" \
             -in "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz"
-          sha256sum "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz" \
+          (cd "$RUNNER_TEMP" && sha256sum screentra-cast-player-client-bundle.tar.gz) \
             > "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz.sha256"
 
       - name: Publish the mutable Nightly prerelease
