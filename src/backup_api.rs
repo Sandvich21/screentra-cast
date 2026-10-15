@@ -149,7 +149,14 @@ async fn create_postgres_dump(output_path: &StdPath) -> Result<(), String> {
     let output = Command::new("pg_dump")
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .args(["--format=plain", "--no-owner", "--no-password", "--file"])
+        .args([
+            "--format=plain",
+            "--clean",
+            "--if-exists",
+            "--no-owner",
+            "--no-password",
+            "--file",
+        ])
         .arg(output_path)
         .envs(environment)
         .output()
@@ -445,6 +452,7 @@ pub async fn restore_backup(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "/opt/digital-signage".to_string());
     let data_dir = signage_data_dir();
+    let postgres_backend = matches!(&db, BackupMetadataRepository::Postgres(_));
     let (service_name, service_kind) = configured_service();
 
     let top = tar_top_level_entries(&backup_file_path)
@@ -492,7 +500,7 @@ pub async fn restore_backup(
             "tarball has no `data/signage.db` — addon storage cannot be restored".to_string(),
         );
     }
-    if matches!(&db, BackupMetadataRepository::Postgres(_)) && !contains_postgresql_dump {
+    if postgres_backend && !contains_postgresql_dump {
         warnings.push(
             "tarball has no `data/postgresql.sql` — PostgreSQL data cannot be restored".to_string(),
         );
@@ -536,7 +544,12 @@ pub async fn restore_backup(
         return Ok(resp);
     }
 
-    ensure_filesystem_backup_backend(&db)?;
+    if postgres_backend {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            "PostgreSQL database restore is not enabled yet".to_string(),
+        ));
+    }
 
     // === actual restore ===
     let started = std::time::Instant::now();
