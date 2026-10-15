@@ -363,9 +363,11 @@ pub async fn create_backup(
         size_bytes: size,
     };
 
-    db.insert_backup(&backup)
-        .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+    if let Err(error) = db.insert_backup(&backup).await {
+        let _ = fs::remove_file(&full_path);
+        log::error!("register created backup failed: {error}");
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
+    }
 
     Ok(AxumJson(backup))
 }
@@ -1055,6 +1057,8 @@ mod tests {
     };
     use flate2::{write::GzEncoder, Compression};
     use std::sync::{Mutex, OnceLock};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tar::{Builder, Header};
     use tower::ServiceExt;
 
@@ -1531,6 +1535,8 @@ mod tests {
         let backup: crate::models::Backup = serde_json::from_slice(&body).unwrap();
         let archive_path = std::path::Path::new(&backup.file_path);
         assert!(archive_path.is_file());
+        #[cfg(unix)]
+        assert_eq!(std::fs::metadata(archive_path).unwrap().permissions().mode() & 0o777, 0o600);
         assert!(safe_archive::archive_contains_path(archive_path, std::path::Path::new("app/server")).unwrap());
         assert!(safe_archive::archive_contains_path(archive_path, std::path::Path::new("data/signage.db")).unwrap());
         assert!(safe_archive::archive_contains_path_prefix(
@@ -1614,6 +1620,11 @@ mod tests {
         assert_eq!(backups.len(), 2);
         assert!(std::path::Path::new(&backups[0].file_path).is_file());
         assert!(std::path::Path::new(&backups[1].file_path).is_file());
+        #[cfg(unix)]
+        {
+            assert_eq!(std::fs::metadata(&backups[0].file_path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(std::fs::metadata(&backups[1].file_path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         assert_ne!(backups[0].file_path, backups[1].file_path);
         assert_eq!(backups[0].size_bytes, archive_bytes.len() as u64);
         assert_eq!(backups[1].size_bytes, archive_bytes.len() as u64);
