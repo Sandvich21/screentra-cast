@@ -934,9 +934,11 @@ pub async fn upload_backup(
             file_path: full_path.clone(),
             size_bytes: size as u64,
         };
-        db.insert_backup(&_backup)
-            .await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+        if let Err(error) = db.insert_backup(&_backup).await {
+            let _ = fs::remove_file(&full_path);
+            log::error!("register uploaded backup failed: {error}");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
+        }
 
         return Ok(axum::http::StatusCode::CREATED);
     }
