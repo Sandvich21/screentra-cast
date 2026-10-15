@@ -775,6 +775,33 @@ fn trusted_service_storage_dir() -> PathBuf {
     PathBuf::from(root).join("trusted-services")
 }
 
+fn verify_trusted_service_manifest_signature(
+    manifest_path: &Path,
+    signature_path: &Path,
+) -> Result<(), AddonError> {
+    let public_key = trusted_service_signing_public_key();
+    if !public_key.is_file() {
+        return Err(AddonError::Invalid(
+            "Trusted service signing public key is missing".to_string(),
+        ));
+    }
+    let result = Command::new("openssl")
+        .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
+        .arg(&public_key)
+        .args(["-sigfile"])
+        .arg(signature_path)
+        .args(["-in"])
+        .arg(manifest_path)
+        .output()
+        .map_err(io_error)?;
+    if !result.status.success() {
+        return Err(AddonError::Invalid(
+            "Trusted service manifest signature verification failed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_trusted_service_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
     if manifest.schema_version != 1 {
         return Err(AddonError::Invalid(
@@ -831,26 +858,7 @@ pub fn stage_trusted_service_manifest(
             "Trusted service manifest or signature is too large".to_string(),
         ));
     }
-    let public_key = trusted_service_signing_public_key();
-    if !public_key.is_file() {
-        return Err(AddonError::Invalid(
-            "Trusted service signing public key is missing".to_string(),
-        ));
-    }
-    let result = Command::new("openssl")
-        .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
-        .arg(&public_key)
-        .args(["-sigfile"])
-        .arg(signature_path)
-        .args(["-in"])
-        .arg(manifest_path)
-        .output()
-        .map_err(io_error)?;
-    if !result.status.success() {
-        return Err(AddonError::Invalid(
-            "Trusted service manifest signature verification failed".to_string(),
-        ));
-    }
+    verify_trusted_service_manifest_signature(manifest_path, signature_path)?;
     let manifest_bytes = fs::read(manifest_path).map_err(io_error)?;
     let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
     validate_trusted_service_manifest(&manifest)?;
@@ -890,7 +898,10 @@ pub fn stage_trusted_service_manifest(
 }
 
 fn read_trusted_service_stage(dir: &Path) -> Result<TrustedServiceStage, AddonError> {
-    let manifest_bytes = fs::read(dir.join(MANIFEST_FILE)).map_err(io_error)?;
+    let manifest_path = dir.join(MANIFEST_FILE);
+    let signature_path = dir.join("manifest.sig");
+    verify_trusted_service_manifest_signature(&manifest_path, &signature_path)?;
+    let manifest_bytes = fs::read(&manifest_path).map_err(io_error)?;
     let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
     validate_trusted_service_manifest(&manifest)?;
     let state_bytes = fs::read(dir.join(STATE_FILE)).map_err(io_error)?;
@@ -1276,6 +1287,9 @@ mod tests {
         let stages = list_trusted_service_stages().unwrap();
         assert_eq!(stages.len(), 1);
         assert_eq!(stages[0].manifest.id, "example.weather");
+        fs::write(staged_dir.join("manifest.json"), b"tampered").unwrap();
+        let error = list_trusted_service_stages().unwrap_err();
+        assert!(error.to_string().contains("signature verification failed"));
         remove_trusted_service_stage("example.weather").unwrap();
         remove_trusted_service_stage("example.weather").unwrap();
         assert!(list_trusted_service_stages().unwrap().is_empty());

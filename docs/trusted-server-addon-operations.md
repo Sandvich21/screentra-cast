@@ -18,6 +18,10 @@ removal operations are recorded as `trusted_service_stage_create` and
 staged manifest and signature; it cannot stop or delete a running service
 because no service can currently run.
 
+The listing path re-verifies each staged manifest against the trusted-service
+public key before returning metadata. A tampered or malformed staged directory
+fails closed instead of being reported as an active service.
+
 The validator checks the service metadata that would otherwise become an
 execution policy:
 
