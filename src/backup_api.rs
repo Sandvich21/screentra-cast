@@ -856,7 +856,8 @@ pub async fn upload_backup(
         if safe_name.is_empty() || safe_name.contains("..") {
             return Err((StatusCode::BAD_REQUEST, "Invalid backup filename".to_string()));
         }
-        let full_path = format!("{}/{}", backup_dir, safe_name);
+        let storage_name = format!("{}-{}", Uuid::new_v4(), safe_name);
+        let full_path = format!("{}/{}", backup_dir, storage_name);
 
         // Stream to a private temporary file rather than buffering an entire
         // multipart backup in memory. The limit is enforced while reading.
@@ -1515,6 +1516,20 @@ mod tests {
         body.extend_from_slice(&archive_bytes);
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
         let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/backups/upload")
+                    .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+                    .body(axum::body::Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let _ = to_bytes(response.into_body(), 1024).await.unwrap();
+        let second_response = app
             .oneshot(
                 Request::builder()
                     .method("PUT")
@@ -1525,8 +1540,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let status = response.status();
-        let _ = to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(second_response.status(), StatusCode::CREATED);
 
         if let Some(value) = old_data_dir {
             unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
@@ -1537,9 +1551,12 @@ mod tests {
         assert_eq!(status, StatusCode::CREATED);
         assert_eq!(std::fs::read(data_dir.join("signage.db")).unwrap(), b"existing database");
         let backups = db.list_backups().unwrap();
-        assert_eq!(backups.len(), 1);
+        assert_eq!(backups.len(), 2);
         assert!(std::path::Path::new(&backups[0].file_path).is_file());
+        assert!(std::path::Path::new(&backups[1].file_path).is_file());
+        assert_ne!(backups[0].file_path, backups[1].file_path);
         assert_eq!(backups[0].size_bytes, archive_bytes.len() as u64);
+        assert_eq!(backups[1].size_bytes, archive_bytes.len() as u64);
         let _ = std::fs::remove_dir_all(parent);
     }
 
