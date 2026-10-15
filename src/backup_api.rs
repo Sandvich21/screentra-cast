@@ -426,8 +426,6 @@ pub async fn restore_backup(
 ) -> Result<axum::http::Response<axum::body::Body>, (StatusCode, String)> {
     use axum::body::Body;
     use axum::http::{header, StatusCode as SC};
-
-    ensure_filesystem_backup_backend(&db)?;
     let backup_file_path = db
         .get_backup_file_path(&id)
         .await
@@ -494,6 +492,11 @@ pub async fn restore_backup(
             "tarball has no `data/signage.db` — addon storage cannot be restored".to_string(),
         );
     }
+    if matches!(&db, BackupMetadataRepository::Postgres(_)) && !contains_postgresql_dump {
+        warnings.push(
+            "tarball has no `data/postgresql.sql` — PostgreSQL data cannot be restored".to_string(),
+        );
+    }
     if !contains_trusted_service_staging {
         warnings.push(
             "tarball has no `data/trusted-services/` — staged trusted-service metadata will not be restored".to_string(),
@@ -532,6 +535,8 @@ pub async fn restore_backup(
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
         return Ok(resp);
     }
+
+    ensure_filesystem_backup_backend(&db)?;
 
     // === actual restore ===
     let started = std::time::Instant::now();
