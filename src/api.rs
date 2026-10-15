@@ -83,6 +83,15 @@ impl AddonStorageRepository {
             Self::Postgres(store) => store.delete_addon_storage(addon_id, storage_key).await,
         }
     }
+
+    async fn delete_namespace(&self, addon_id: &str) -> Result<u64, String> {
+        match self {
+            Self::Sqlite(db) => db
+                .delete_addon_storage_namespace(addon_id)
+                .map(|count| count as u64),
+            Self::Postgres(store) => store.delete_addon_storage_namespace(addon_id).await,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2056,11 +2065,16 @@ async fn disable_addon(
 }
 
 async fn delete_addon(
+    State(storage): State<AddonStorageRepository>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    crate::addons::remove(&id)
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(addon_error_response)
+    let deleted_storage = storage.delete_namespace(&id).await.map_err(|error| {
+        log::error!("addon storage cleanup failed before addon removal: {error}");
+        internal_server_error()
+    })?;
+    crate::addons::remove(&id).map_err(addon_error_response)?;
+    log::info!("removed addon id={} storage_rows={deleted_storage}", id);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn system_status() -> AxumJson<SystemStatus> {

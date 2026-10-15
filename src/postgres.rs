@@ -120,6 +120,17 @@ impl PostgresStore {
             .map_err(|error| format!("delete addon storage: {error}"))
     }
 
+    pub async fn delete_addon_storage_namespace(&self, addon_id: &str) -> Result<u64, String> {
+        crate::addons::validate_addon_storage_namespace(addon_id)?;
+        self.client
+            .execute(
+                "DELETE FROM addon_storage WHERE addon_id = $1",
+                &[&addon_id],
+            )
+            .await
+            .map_err(|error| format!("delete addon storage namespace: {error}"))
+    }
+
     pub async fn insert_backup(&self, backup: &Backup) -> Result<(), String> {
         self.client
             .execute(
@@ -3002,6 +3013,15 @@ mod tests {
             .set_addon_storage(&addon_id, "settings", second, "2026-10-15T00:01:00Z")
             .await
             .expect("upsert addon storage");
+        store
+            .set_addon_storage(&addon_id, "cache", "{\"count\":1}", "2026-10-15T00:02:00Z")
+            .await
+            .expect("insert second addon storage");
+        let other_addon_id = format!("test.other.{}", uuid::Uuid::new_v4());
+        store
+            .set_addon_storage(&other_addon_id, "settings", "{\"isolated\":true}", "2026-10-15T00:03:00Z")
+            .await
+            .expect("insert isolated addon storage");
         assert_eq!(
             store
                 .get_addon_storage(&addon_id, "settings")
@@ -3022,9 +3042,33 @@ mod tests {
                 .await
                 .expect("delete addon storage")
         );
-        assert!(!store
-            .delete_addon_storage(&addon_id, "settings")
-            .await
-            .expect("delete missing addon storage"));
+        assert_eq!(
+            store
+                .get_addon_storage(&other_addon_id, "settings")
+                .await
+                .expect("read retained addon storage"),
+            Some("{\"isolated\":true}".to_string())
+        );
+        assert_eq!(
+            store
+                .delete_addon_storage_namespace(&addon_id)
+                .await
+                .expect("delete addon namespace"),
+            1
+        );
+        assert_eq!(
+            store
+                .get_addon_storage(&addon_id, "cache")
+                .await
+                .expect("read deleted addon namespace"),
+            None
+        );
+        assert_eq!(
+            store
+                .delete_addon_storage_namespace(&addon_id)
+                .await
+                .expect("delete missing addon namespace"),
+            0
+        );
     }
 }

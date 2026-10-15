@@ -4056,6 +4056,16 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         Ok(deleted > 0)
     }
 
+    pub fn delete_addon_storage_namespace(&self, addon_id: &str) -> Result<usize, String> {
+        crate::addons::validate_addon_storage_namespace(addon_id)?;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM addon_storage WHERE addon_id = ?1",
+            params![addon_id],
+        )
+        .map_err(|e| e.to_string())
+    }
+
         /// Run SQLite VACUUM to reclaim space from dropped tables and deleted rows.
         /// VACUUM cannot run inside a transaction, so we wrap the lock acquisition
         /// in `tokio::task::spawn_blocking` to avoid holding the runtime's executor
@@ -4199,6 +4209,40 @@ mod tests {
         );
         assert!(db.delete_addon_storage("example.one", "settings").expect("delete addon storage"));
         assert!(!db.delete_addon_storage("example.one", "settings").expect("delete missing addon storage"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn addon_storage_namespace_cleanup_removes_only_target_addon() {
+        let path = unique_temp_path("addon-storage-cleanup");
+        let db = Database::open(&path).expect("open db");
+        db.set_addon_storage("example.one", "settings", "{\"enabled\":true}", "2026-10-15T00:00:00Z")
+            .expect("insert first addon storage");
+        db.set_addon_storage("example.one", "cache", "{\"count\":1}", "2026-10-15T00:00:00Z")
+            .expect("insert second addon storage");
+        db.set_addon_storage("example.two", "settings", "{\"enabled\":false}", "2026-10-15T00:00:00Z")
+            .expect("insert other addon storage");
+
+        assert_eq!(
+            db.delete_addon_storage_namespace("example.one")
+                .expect("delete addon namespace"),
+            2
+        );
+        assert_eq!(
+            db.get_addon_storage("example.one", "settings")
+                .expect("read deleted addon storage"),
+            None
+        );
+        assert_eq!(
+            db.get_addon_storage("example.two", "settings")
+                .expect("read retained addon storage"),
+            Some("{\"enabled\":false}".to_string())
+        );
+        assert_eq!(
+            db.delete_addon_storage_namespace("example.one")
+                .expect("delete missing addon namespace"),
+            0
+        );
         let _ = std::fs::remove_file(path);
     }
 
