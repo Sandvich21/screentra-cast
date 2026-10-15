@@ -1290,15 +1290,21 @@ can show enrolled player uptime and usage.
 """
 import argparse
 import hashlib
+import io
 import json
-import ssl
 import os
+import posixpath
+import re
+import shutil
+import ssl
 import socket
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 import importlib.util
 import sys as _sys
 _display_detect_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'screentra-display-detect.py')
@@ -1575,8 +1581,187 @@ def client_auth_headers(token=None):
     token = client_auth_token() if token is None else str(token).strip()
     return {'X-SCREENTRA-CLIENT-TOKEN': token} if token else {}
 
+
+ADDON_API_VERSION = '1'
+MAX_ADDON_PACKAGE_BYTES = 8 * 1024 * 1024
+MAX_ADDON_MEMBER_BYTES = 4 * 1024 * 1024
+ADDON_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+
+
+def addon_public_key_path():
+    return Path(os.environ.get(
+        'SCREENTRA_CAST_ADDON_SIGNING_PUBLIC_KEY',
+        '/etc/screentra-cast/addon-signing.pub',
+    ))
+
+
+def _safe_addon_member(name):
+    normalized = posixpath.normpath(name)
+    if normalized in ('.', '') or normalized.startswith('/') or normalized.startswith('../') or '/../' in normalized:
+        raise ValueError('addon package contains an unsafe path')
+    if normalized not in ('manifest.json', 'manifest.sig') and not normalized.startswith('client/'):
+        raise ValueError('addon package contains an unexpected member')
+    return normalized
+
+
+def _extract_verified_addon_package(package_bytes, expected):
+    if len(package_bytes) > MAX_ADDON_PACKAGE_BYTES:
+        raise ValueError('addon package exceeds the client limit')
+    staging = Path(tempfile.mkdtemp(prefix='.addon-verify-'))
+    try:
+        seen = set()
+        with tarfile.open(fileobj=io.BytesIO(package_bytes), mode='r:gz') as archive:
+            members = archive.getmembers()
+            if len(members) > 64:
+                raise ValueError('addon package contains too many members')
+            for member in members:
+                name = _safe_addon_member(member.name)
+                if name in seen:
+                    raise ValueError('addon package contains duplicate members')
+                seen.add(name)
+                if member.isdir():
+                    continue
+                if not member.isfile() or member.size > MAX_ADDON_MEMBER_BYTES:
+                    raise ValueError('addon package contains an unsupported or oversized file')
+                source = archive.extractfile(member)
+                if source is None:
+                    raise ValueError('addon package member cannot be read')
+                target = staging / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read(member.size + 1))
+                if target.stat().st_size != member.size:
+                    raise ValueError('addon package member size changed while reading')
+        manifest_path = staging / 'manifest.json'
+        signature_path = staging / 'manifest.sig'
+        if not manifest_path.is_file() or not signature_path.is_file():
+            raise ValueError('addon package is missing its manifest or signature')
+        manifest_bytes = manifest_path.read_bytes()
+        if len(manifest_bytes) > 256 * 1024:
+            raise ValueError('addon manifest is too large')
+        manifest = json.loads(manifest_bytes.decode('utf-8'))
+        if not isinstance(manifest, dict) or manifest.get('schema_version') != 1:
+            raise ValueError('unsupported addon manifest schema')
+        if manifest.get('kind') != 'client_extension' or manifest.get('client_api_version') != ADDON_API_VERSION:
+            raise ValueError('unsupported client addon API version or kind')
+        addon_id = manifest.get('id')
+        if not isinstance(addon_id, str) or not ADDON_ID_RE.fullmatch(addon_id):
+            raise ValueError('invalid addon id')
+        if addon_id != expected.get('id') or manifest.get('version') != expected.get('version'):
+            raise ValueError('addon package does not match the server inventory')
+        if manifest.get('server_entrypoint') is not None:
+            raise ValueError('client addon contains a server entrypoint')
+        entrypoint = manifest.get('client_entrypoint')
+        digest = manifest.get('client_sha256')
+        if not isinstance(entrypoint, str) or not entrypoint.startswith('client/'):
+            raise ValueError('invalid addon entrypoint')
+        if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', digest):
+            raise ValueError('invalid addon entrypoint digest')
+        if digest.lower() != str(expected.get('client_sha256', '')).lower():
+            raise ValueError('addon package digest does not match inventory')
+        client_path = staging / entrypoint
+        if not client_path.is_file() or hashlib.sha256(client_path.read_bytes()).hexdigest().lower() != digest.lower():
+            raise ValueError('addon entrypoint SHA-256 verification failed')
+        public_key = addon_public_key_path()
+        if not public_key.is_file():
+            raise ValueError('addon signing public key is unavailable')
+        result = subprocess.run(
+            ['openssl', 'pkeyutl', '-verify', '-rawin', '-pubin', '-inkey', str(public_key),
+             '-sigfile', str(signature_path), '-in', str(manifest_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise ValueError('addon manifest signature verification failed')
+        return staging, manifest, entrypoint
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def fetch_addon_bytes(server, client_id, addon_id):
+    url = (server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') +
+           '/addons/' + quote(addon_id, safe='') + '/package')
+    req = urllib.request.Request(url, headers=client_auth_headers())
+    with urlopen_ripley(req, timeout=20) as response:
+        package = response.read(MAX_ADDON_PACKAGE_BYTES + 1)
+    if len(package) > MAX_ADDON_PACKAGE_BYTES:
+        raise ValueError('addon package exceeds the client limit')
+    return package
+
+
+def sync_client_addons(server, client_id, cache_dir):
+    """Fetch and verify enabled addon packages without executing their code."""
+    status_path = Path(cache_dir) / 'addon-status.json'
+    status = {'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'addons': []}
+    try:
+        url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/addons'
+        req = urllib.request.Request(url, headers=client_auth_headers())
+        with urlopen_ripley(req, timeout=10) as response:
+            inventory = json.loads(response.read().decode('utf-8'))
+        addons = inventory.get('addons') if isinstance(inventory, dict) else None
+        if not isinstance(addons, list):
+            raise ValueError('server returned an invalid addon inventory')
+    except Exception as error:
+        status['error'] = str(error)[:256]
+        _atomic_write_text(status_path, json.dumps(status, indent=2))
+        return status
+    addon_root = Path(os.environ.get('RIPLEY_CLIENT_ADDONS_DIR', str(Path(cache_dir).parent / 'addons')))
+    addon_root.mkdir(parents=True, exist_ok=True)
+    for expected in addons:
+        item_status = {}
+        try:
+            if not isinstance(expected, dict) or not ADDON_ID_RE.fullmatch(str(expected.get('id', ''))):
+                raise ValueError('invalid addon inventory entry')
+            item_status.update({'id': expected.get('id'), 'version': expected.get('version')})
+            if expected.get('client_api_version') != ADDON_API_VERSION:
+                raise ValueError('unsupported addon API version')
+            if not expected.get('client_sha256'):
+                raise ValueError('addon inventory is missing its digest')
+            version = expected.get('version')
+            if not isinstance(version, str) or not version:
+                raise ValueError('addon inventory is missing its version')
+            target = addon_root / expected['id'] / version
+            active = _read_json_file(target.parent / 'active.json', {})
+            if not isinstance(active, dict):
+                active = {}
+            cached_entrypoint = active.get('entrypoint')
+            try:
+                if not isinstance(cached_entrypoint, str) or _safe_addon_member(cached_entrypoint) != cached_entrypoint or not cached_entrypoint.startswith('client/'):
+                    cached_entrypoint = None
+            except Exception:
+                cached_entrypoint = None
+            cached_file = target / cached_entrypoint if cached_entrypoint else None
+            if (active.get('id') == expected['id'] and active.get('version') == version and
+                    str(active.get('client_sha256', '')).lower() == str(expected['client_sha256']).lower() and
+                    cached_file is not None and cached_file.is_file() and
+                    hashlib.sha256(cached_file.read_bytes()).hexdigest().lower() == str(expected['client_sha256']).lower()):
+                item_status.update({'state': 'verified_cached', 'entrypoint': cached_entrypoint})
+                status['addons'].append(item_status)
+                continue
+            package = fetch_addon_bytes(server, client_id, expected['id'])
+            staging, manifest, entrypoint = _extract_verified_addon_package(package, expected)
+            target = addon_root / expected['id'] / manifest['version']
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                shutil.rmtree(target)
+            os.replace(staging, target)
+            _atomic_write_text(target.parent / 'active.json', json.dumps({
+                'id': manifest['id'], 'version': manifest['version'],
+                'client_sha256': manifest['client_sha256'],
+                'entrypoint': entrypoint,
+            }, indent=2))
+            item_status.update({'state': 'verified', 'entrypoint': entrypoint})
+        except Exception as error:
+            item_status.update({'state': 'failed', 'error': str(error)[:256]})
+        status['addons'].append(item_status)
+    _atomic_write_text(status_path, json.dumps(status, indent=2))
+    return status
+
+
 def poll_command(server, client_id, client_token):
-    url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command'
+    url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/command'
     try:
         req = urllib.request.Request(url, headers=client_auth_headers(client_token))
         with urlopen_ripley(req, timeout=5) as r:
@@ -1591,7 +1776,7 @@ def poll_command(server, client_id, client_token):
 
 
 def ack_command(server, client_id):
-    url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command/ack'
+    url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/command/ack'
     try:
         req = urllib.request.Request(url, headers=client_auth_headers(), method='POST')
         with urlopen_ripley(req, timeout=5) as r:
@@ -1630,7 +1815,7 @@ def read_command_result(cache_dir):
 
 
 def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='assigned-layout-display-{index}.json'):
-    url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/displays/' + str(display_index) + '/config'
+    url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/displays/' + str(display_index) + '/config'
     try:
         req = urllib.request.Request(url, headers=client_auth_headers())
         with urlopen_ripley(req, timeout=10) as r:
@@ -1678,7 +1863,7 @@ def fetch_admin_users(server, client_id, cache_dir):
     Server users are cached for authenticated local administration; without
     that cache the local admin login remains unprovisioned.
     """
-    url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/admin-users'
+    url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/admin-users'
     try:
         req = urllib.request.Request(url, headers=client_auth_headers())
         with urlopen_ripley(req, timeout=10) as r:
@@ -1818,6 +2003,9 @@ def main():
                 print(f'orientation restart failed: {e}', flush=True)
         fetch_all_displays(args.server, data['client_id'], args.cache_dir, len(data.get('displays') or []), args.display_config_pattern)
         fetch_admin_users(args.server, data['client_id'], args.cache_dir)
+        addon_status = sync_client_addons(args.server, data['client_id'], args.cache_dir)
+        if addon_status.get('addons') or addon_status.get('error'):
+            print(f'addon sync: {json.dumps(addon_status, separators=(",", ":"))}', flush=True)
         assigned = cfg.get('assigned_layout_id') if cfg else None
         cmd = poll_command(args.server, data['client_id'], client_auth_token())
         if cmd:

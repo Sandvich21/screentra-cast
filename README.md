@@ -207,7 +207,13 @@ returns enabled client-extension manifests; it does not expose package files or
 execute code. Client delivery, runtime sandboxing, staged rollout, and rollback
 remain separate implementation work. Authenticated package retrieval is
 available at `GET /api/clients/{id}/addons/{addon_id}/package`; it returns only
-the signed manifest, detached signature, and declared entrypoint.
+The player heartbeat now consumes that inventory using the enrolled client
+credential, downloads only when the cached version/digest is stale, verifies the
+package again against the pinned client addon public key at
+`/etc/screentra-cast/addon-signing.pub`, and stages it under the client data
+directory. Verification state is written to `cache/addon-status.json`. Staged
+modules are not executed or loaded yet; the renderer/runtime sandbox remains a
+separate gate.
 
 Signed client-extension packages can now be uploaded as a `.tar.gz` containing:
 
