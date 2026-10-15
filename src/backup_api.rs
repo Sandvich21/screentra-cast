@@ -1071,6 +1071,118 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a disposable PostgreSQL database supplied through SIGNAGE_DATABASE_URL"]
+    async fn postgres_http_backup_restore_round_trips_addon_state() {
+        let _guard = BACKUP_HTTP_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let parent = test_root("postgres-http");
+        let install_dir = parent.join("install");
+        let data_dir = parent.join("data");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(install_dir.join("server"), b"server binary").unwrap();
+        std::fs::write(data_dir.join("runtime.txt"), b"runtime data").unwrap();
+
+        let url = crate::postgres::configured_database_url().expect("SIGNAGE_DATABASE_URL");
+        let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .expect("connect to disposable PostgreSQL database");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        client
+            .execute(
+                "INSERT INTO addon_storage (addon_id, storage_key, value_json, updated_at)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (addon_id, storage_key) DO UPDATE SET value_json=EXCLUDED.value_json",
+                &[&"backup-http-probe", &"round_trip", &r#"{"value":"before"}"#, &"2026-10-15T00:00:00Z"],
+            )
+            .await
+            .expect("seed addon storage");
+        drop(client);
+
+        let store = crate::postgres::PostgresStore::connect()
+            .await
+            .expect("connect PostgreSQL metadata store");
+        let old_cwd = std::env::current_dir().unwrap();
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        std::env::set_current_dir(&install_dir).unwrap();
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &data_dir); }
+        let app = Router::new()
+            .route("/api/backups", post(create_backup))
+            .route("/api/backups/{id}", put(restore_backup))
+            .with_state(BackupMetadataRepository::Postgres(std::sync::Arc::new(store)));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/backups")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let backup: Backup = serde_json::from_slice(&body).unwrap();
+
+        let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .expect("reconnect PostgreSQL");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        client
+            .execute(
+                "UPDATE addon_storage SET value_json=$1 WHERE addon_id=$2 AND storage_key=$3",
+                &[&r#"{"value":"after"}"#, &"backup-http-probe", &"round_trip"],
+            )
+            .await
+            .expect("mutate addon storage");
+        drop(client);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/backups/{}?confirm=true", backup.id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .expect("reconnect restored PostgreSQL");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let value: String = client
+            .query_one(
+                "SELECT value_json FROM addon_storage WHERE addon_id=$1 AND storage_key=$2",
+                &[&"backup-http-probe", &"round_trip"],
+            )
+            .await
+            .expect("read restored addon storage")
+            .get(0);
+        assert_eq!(value, r#"{"value":"before"}"#);
+        assert!(!data_dir.join("postgresql.sql").exists());
+
+        std::env::set_current_dir(old_cwd).unwrap();
+        if let Some(value) = old_data_dir {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[tokio::test]
     async fn create_http_backup_contains_addon_related_data() {
         let _guard = BACKUP_HTTP_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
