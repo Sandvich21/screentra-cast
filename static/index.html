@@ -998,6 +998,14 @@
                             </div>
                         </div>
                         <div id="addons-list" class="backups-list"><p>Loading addons...</p></div>
+                        <div class="sys-card" style="padding:1rem 1.25rem; margin-top:1rem;">
+                            <div style="font-weight:600; margin-bottom:0.5rem;">Client extension status</div>
+                            <label for="addon-client-status-select" style="display:block; font-size:0.8rem; margin-bottom:0.35rem;">Client</label>
+                            <select id="addon-client-status-select" style="max-width:28rem; width:100%;">
+                                <option value="">Select an enrolled client</option>
+                            </select>
+                            <div id="addon-client-status" style="margin-top:0.75rem; font-size:0.82rem; color:var(--text-dim,#888);">Select a client to inspect its latest verified addon state.</div>
+                        </div>
                     </div>
                 </details>
 
@@ -1156,7 +1164,7 @@
 
     <script defer src="/js/auth.js?v=20261003004000"></script>
     <script defer src="/js/traffic-runtime.js?v=20261011140500-manual-traffic-closure-classification"></script>
-    <script defer src="/js/api.js?v=20261015-addon-manager-v2"></script>
+    <script defer src="/js/api.js?v=20261015-addon-manager-v3"></script>
     <script src="/js/filebrowser.js?v=1789404930"></script>
     
     <script src="/js/weather-icons.js?v=1791477110-alert-condition-icons"></script>
@@ -1179,7 +1187,7 @@
         </div>
     </div>
 
-<script defer src="/js/app.js?v=20261015-addon-manager-v2"></script>
+<script defer src="/js/app.js?v=20261015-addon-manager-v3"></script>
 
 <script src="/js/ripley-link-guard.js?v=1789404930"></script>
 </body>

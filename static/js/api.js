@@ -262,6 +262,12 @@ window.API = {
         return res.json();
     },
 
+    async getClientAddons(id) {
+        const res = await fetch(`/api/clients/${encodeURIComponent(id)}/addons`);
+        if (!res.ok) throw new Error(await res.text() || 'Failed to fetch client addon status');
+        return res.json();
+    },
+
     async installAddon(manifest) {
         const res = await fetch('/api/addons', {
             method: 'POST',

@@ -545,6 +545,7 @@ const App = {
 
             this.loadBackups();
             this.loadAddons();
+            this.loadAddonClientStatuses();
         } catch (e) {
             document.getElementById('system-info').innerHTML = `<p>Error: ${esc(e.message)}</p>`;
         }
@@ -861,6 +862,47 @@ const App = {
         } catch (e) {
             container.innerHTML = `<p>Error loading addons: ${esc(e.message)}</p>`;
         }
+    },
+    async loadAddonClientStatuses() {
+        const select = document.getElementById('addon-client-status-select');
+        const output = document.getElementById('addon-client-status');
+        if (!select || !output || select.dataset.wired === 'true') return;
+        select.dataset.wired = 'true';
+        try {
+            const clients = await API.getClients();
+            const enrolled = (clients || [])
+                .filter(client => client && client.enrolled === true && client.id)
+                .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+            select.innerHTML = '<option value="">Select an enrolled client</option>' + enrolled
+                .map(client => `<option value="${esc(client.id)}">${esc(client.name || client.id)}</option>`)
+                .join('');
+        } catch (e) {
+            output.textContent = 'Unable to load clients: ' + e.message;
+        }
+        select.onchange = async () => {
+            const clientId = select.value;
+            if (!clientId) {
+                output.textContent = 'Select a client to inspect its latest verified addon state.';
+                return;
+            }
+            output.textContent = 'Loading client addon status…';
+            try {
+                const payload = await API.getClientAddons(clientId);
+                const status = payload && payload.status;
+                const report = status && status.report;
+                const entries = report && Array.isArray(report.addons) ? report.addons : [];
+                if (!status || !report) {
+                    output.textContent = 'No addon status has been reported by this client.';
+                    return;
+                }
+                const rows = entries.length
+                    ? entries.map(entry => `<div style="display:flex; justify-content:space-between; gap:1rem; padding:0.35rem 0; border-bottom:1px solid var(--border,#333);"><span>${esc(entry.id || 'Unknown addon')}</span><strong>${esc(entry.state || 'unknown')}</strong></div>`).join('')
+                    : '<div>No client extensions are currently enabled.</div>';
+                output.innerHTML = `<div style="margin-bottom:0.5rem;">Last reported: ${esc(status.received_at || 'unknown')}</div>${rows}${report.error ? `<div style="margin-top:0.5rem; color:var(--danger,#e66);">${esc(report.error)}</div>` : ''}`;
+            } catch (e) {
+                output.textContent = 'Unable to load client addon status: ' + e.message;
+            }
+        };
     },
     wireAddonManager() {
         const button = document.getElementById('btn-addon-install');
