@@ -1,0 +1,142 @@
+name: Build nightly
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-release
+  cancel-in-progress: true
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the nightly source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        env:
+          SIGNAGE_GIT_COMMIT: ${{ github.sha }}
+          SIGNAGE_BUILD_TIME: ${{ github.run_started_at }}
+        run: cargo build --release
+
+      - name: Provision server signing key
+        env:
+          SERVER_UPDATE_SIGNING_KEY: ${{ secrets.SCREENTRA_CAST_SERVER_UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SERVER_UPDATE_SIGNING_KEY" || {
+            echo 'SCREENTRA_CAST_SERVER_UPDATE_SIGNING_KEY is not configured' >&2
+            exit 1
+          }
+          umask 077
+          printf '%s\n' "$SERVER_UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/server-update-signing.key"
+
+      - name: Build and verify signed server bundle
+        env:
+          SCREENTRA_CAST_UPDATE_SIGNING_KEY: ${{ runner.temp }}/server-update-signing.key
+        run: |
+          set -euo pipefail
+          cargo run --release -- --build-update-bundle "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" > "$RUNNER_TEMP/update-manifest.json"
+          test -s "$RUNNER_TEMP/screentra-cast-server-update.tar.gz"
+          tar -tzf "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" | grep -E '/(manifest.json|manifest.sig|signage|static/index.html)$'
+          if tar -tzf "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" | grep -q '/static/install/screentra-cast-signage-ca.crt'; then
+            echo 'server-local CA was included in the nightly update bundle' >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/verify-server"
+          tar -xzf "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" -C "$RUNNER_TEMP/verify-server"
+          openssl pkey -in "$RUNNER_TEMP/server-update-signing.key" -pubout -out "$RUNNER_TEMP/server-update-signing.pub"
+          BUNDLE_ROOT=$(find "$RUNNER_TEMP/verify-server" -mindepth 1 -maxdepth 1 -type d -print -quit)
+          openssl pkeyutl -verify -rawin -pubin -inkey "$RUNNER_TEMP/server-update-signing.pub" \
+            -sigfile "$BUNDLE_ROOT/manifest.sig" -in "$BUNDLE_ROOT/manifest.json"
+          sha256sum "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" > "$RUNNER_TEMP/server-update.sha256"
+
+      - name: Provision client signing key
+        env:
+          CLIENT_UPDATE_SIGNING_KEY: ${{ secrets.SCREENTRA_CAST_CLIENT_UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$CLIENT_UPDATE_SIGNING_KEY" || {
+            echo 'SCREENTRA_CAST_CLIENT_UPDATE_SIGNING_KEY is not configured' >&2
+            exit 1
+          }
+          umask 077
+          printf '%s\n' "$CLIENT_UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/client-update-signing.key"
+
+      - name: Build and verify signed player client bundle
+        env:
+          SCREENTRA_CAST_CLIENT_UPDATE_SIGNING_KEY: ${{ runner.temp }}/client-update-signing.key
+        run: |
+          set -euo pipefail
+          python3 tools/build-player-client-bundle.py \
+            --repo . \
+            --out "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz"
+          tar -tzf "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz" \
+            | grep -E '/(manifest.json|README.txt|payload/install/player-client.sh|payload/install/player-client.sh.sig|payload/install/screentra-cast-client-update.pub)$'
+          openssl pkeyutl -sign -rawin \
+            -inkey "$RUNNER_TEMP/client-update-signing.key" \
+            -in "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz" \
+            -out "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz.sig"
+          openssl pkey -in "$RUNNER_TEMP/client-update-signing.key" -pubout \
+            -out "$RUNNER_TEMP/client-update-signing.pub"
+          openssl pkeyutl -verify -rawin -pubin \
+            -inkey "$RUNNER_TEMP/client-update-signing.pub" \
+            -sigfile "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz.sig" \
+            -in "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz"
+          sha256sum "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz" \
+            > "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz.sha256"
+
+      - name: Publish the mutable Nightly prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git tag -f nightly "$GITHUB_SHA"
+          git push origin refs/tags/nightly --force
+          printf '%s\n' \
+            'Automated nightly build from the main branch.' \
+            '' \
+            'This build is untested and should not be used for production deployments.' \
+            '' \
+            "Source commit: $GITHUB_SHA" \
+            "Workflow run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            > "$RUNNER_TEMP/nightly-notes.md"
+          if gh release view nightly --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit nightly \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Screentra Cast Nightly" \
+              --notes-file "$RUNNER_TEMP/nightly-notes.md" \
+              --prerelease \
+              --target "$GITHUB_SHA"
+          else
+            gh release create nightly \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Screentra Cast Nightly" \
+              --notes-file "$RUNNER_TEMP/nightly-notes.md" \
+              --prerelease \
+              --target "$GITHUB_SHA"
+          fi
+          gh release upload nightly \
+            --repo "$GITHUB_REPOSITORY" \
+            "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" \
+            "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz" \
+            "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz.sig" \
+            "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz.sha256" \
+            --clobber
+          gh release view nightly --repo "$GITHUB_REPOSITORY" --json tagName,isPrerelease,targetCommitish,assets,url

@@ -14,7 +14,8 @@ updates.
 - **Validated server platform:** Debian 13 amd64
 - **Expected server platform:** Ubuntu Server amd64 with `apt` and `systemd`;
   validate the selected Ubuntu release before production use
-- **Current server release:** [`v0.1.3`](https://github.com/Sandvich21/screentra-cast/releases/tag/v0.1.3)
+- **Current stable server release:** [`v0.1.4`](https://github.com/Sandvich21/screentra-cast/releases/tag/v0.1.4)
+- **Nightly channel:** [`Nightly`](https://github.com/Sandvich21/screentra-cast/releases/tag/nightly) — current `main` branch, automatically rebuilt, and explicitly untested
 - **Appliance ISO:** does not work as of now. It is amd64/UEFI work in
   progress and is not included in releases until independent physical boot and
   installation validation is complete
@@ -39,7 +40,8 @@ The release installer verifies the SHA-256 checksums for the server binary,
 static archive, and installer bundle before installing them.
 
 ```bash
-RELEASE=v0.1.3
+# Stable, validated release. Use RELEASE=nightly only for testing current main.
+RELEASE=v0.1.4
 BASE="https://github.com/Sandvich21/screentra-cast/releases/download/$RELEASE"
 
 curl -fsSLo /tmp/screentra-cast-server-install.sh \
@@ -172,6 +174,13 @@ running server. The release workflow expects it in the GitHub Actions secret
 `SCREENTRA_CAST_SERVER_UPDATE_SIGNING_KEY`. The checkbox on the System page is
 off by default; enabling it opts the server into periodic stable-release checks
 and automatic installation/restart.
+
+The repository also publishes a mutable [`Nightly` prerelease](https://github.com/Sandvich21/screentra-cast/releases/tag/nightly)
+from `main`. It contains the signed server update bundle and prebuilt player
+client bundle from the current commit. The nightly release is rebuilt on pushes
+to `main` and on a daily schedule, so its assets may be replaced. It is for
+testing only; the server updater intentionally ignores prereleases and continues
+to use the stable release channel.
 
 Optional deployment overrides are:
 
