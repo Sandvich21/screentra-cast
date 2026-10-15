@@ -201,27 +201,26 @@ for the gated client-delivery phase; no custom client code is loaded yet.
 
 Unsigned executable server code and client JavaScript are rejected. A signed
 package is verified and stored, but it is not proof that a player has installed
-Client-facing inventory is available at `GET /api/clients/{id}/addons`. It
-requires the enrolled per-client token (or an administrator session) and only
-returns enabled client-extension manifests; it does not expose package files or
-execute code. Client delivery, runtime sandboxing, staged rollout, and rollback
-remain separate implementation work. Authenticated package retrieval is
+or activated it. Client-facing inventory is available at
+`GET /api/clients/{id}/addons`. It requires the enrolled per-client token (or an
+administrator session) and only returns enabled client-extension manifests; it
+does not expose package files or execute code. Authenticated package retrieval is
 available at `GET /api/clients/{id}/addons/{addon_id}/package`; it returns only
-The player heartbeat now consumes that inventory using the enrolled client
-credential, downloads only when the cached version/digest is stale, verifies the
-package again against the pinned client addon public key at
-`/etc/screentra-cast/addon-signing.pub`, and stages it under the client data
-directory. Verification state is written to `cache/addon-status.json` and
-reported to the authenticated `POST /api/clients/{id}/addons/status` endpoint.
-The authenticated client inventory response includes the current enabled addon
-manifests and the latest bounded status snapshot, when one has been reported.
-The System → Add-ons panel can inspect that status for enrolled clients without
-exposing client credentials or package contents. The player removes previously
-staged, inactive addon directories only after receiving a valid inventory that
-no longer lists them; malformed inventories do not trigger cleanup. This is
-staged-package removal, not runtime rollback, because client modules remain
-inert and are never loaded; the renderer/runtime sandbox remains a separate
-gate.
+the validated signed package members. The player heartbeat consumes that
+inventory using the enrolled client credential, downloads only when the cached
+version/digest is stale, verifies the package again against the pinned client
+addon public key at `/etc/screentra-cast/addon-signing.pub`, and stages it under
+the client data directory. Verification state is written to
+`cache/addon-status.json` and reported to the authenticated
+`POST /api/clients/{id}/addons/status` endpoint. The authenticated client
+inventory response includes the current enabled addon manifests and the latest
+bounded status snapshot, when one has been reported. The System → Add-ons panel
+can inspect that status for enrolled clients without exposing client credentials
+or package contents. The player removes previously staged, inactive addon
+directories only after receiving a valid inventory that no longer lists them;
+malformed inventories do not trigger cleanup. This is staged-package removal,
+not runtime rollback, because client modules remain inert and are never loaded;
+the renderer/runtime sandbox remains a separate gate.
 
 Signed client-extension packages can now be uploaded as a `.tar.gz` containing:
 
@@ -234,9 +233,10 @@ client/<entrypoint>.js
 The server verifies the detached Ed25519 signature against
 `/etc/screentra-cast/addon-signing.pub` (or the
 `SCREENTRA_CAST_ADDON_SIGNING_PUBKEY` override), validates the declared entrypoint
-SHA-256, and stores the package without executing it. Client-side verification,
-delivery to enrolled players, and runtime loading are still gated work; a valid
-upload is not yet proof that a player has installed or activated the extension.
+SHA-256, and stores the package without executing it. The runtime boundary and
+activation gates are documented in `docs/addon-runtime-contract.md`; that
+document is design-only and does not authorize execution. A valid upload is not
+proof that a player has installed or activated the extension.
 
 ## Player client installation and LAN adoption
 
