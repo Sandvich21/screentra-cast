@@ -81,8 +81,9 @@ execute addon code.
 When the PostgreSQL repository backend is selected, backup creation uses a
 `pg_dump` plain SQL dump stored in the archive as `data/postgresql.sql`. The dump
 is generated with credentials supplied only through the child-process
-environment and is removed after archive creation. PostgreSQL upload and restore
-still fail closed with HTTP `501 Not Implemented` until database-native
-validation, pre-restore rollback dumps, and restore handling are implemented.
-The server must not present a filesystem-only archive as a complete PostgreSQL
-backup.
+environment and is removed after archive creation. PostgreSQL uploads are accepted
+only when that exact dump member is present and passes native dump validation;
+filesystem-only archives are rejected with HTTP `400`. Confirmed PostgreSQL
+restore uses the validated dump, creates a pre-restore rollback dump, and restores
+filesystem state and database state with rollback attempts on failure. The server
+must not present a filesystem-only archive as a complete PostgreSQL backup.

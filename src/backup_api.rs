@@ -422,6 +422,20 @@ fn tar_top_level_entries(tarball: &str) -> Result<Vec<String>, String> {
     safe_archive::inspect_tar_gz(StdPath::new(tarball))
 }
 
+fn validate_postgres_archive(path: &StdPath) -> Result<(), String> {
+    let contains_dump = safe_archive::archive_contains_path(path, StdPath::new("data/postgresql.sql"))?;
+    if !contains_dump {
+        return Err("backup archive does not contain data/postgresql.sql".to_string());
+    }
+    let extraction_root = std::env::temp_dir().join(format!("screentra-pg-upload-{}", Uuid::new_v4()));
+    let result = (|| {
+        safe_archive::extract_tar_gz(path, &extraction_root, 0)?;
+        validate_postgres_dump_file(&extraction_root.join("data/postgresql.sql"))
+    })();
+    let _ = fs::remove_dir_all(&extraction_root);
+    result
+}
+
 async fn sha256_file(path: &str) -> Result<String, String> {
     let output = Command::new("sha256sum")
         .arg(path)
@@ -820,7 +834,7 @@ pub async fn upload_backup(
     State(db): State<AppState>,
     mut multipart: Multipart,
 ) -> Result<axum::http::StatusCode, (StatusCode, String)> {
-    ensure_filesystem_backup_backend(&db)?;
+    let postgres_backend = matches!(&db, BackupMetadataRepository::Postgres(_));
     let data_dir = signage_data_dir();
     let backup_dir = format!("{}/backups", data_dir);
     fs::create_dir_all(&backup_dir)
@@ -888,6 +902,17 @@ pub async fn upload_backup(
                 StatusCode::BAD_REQUEST,
                 "Uploaded backup has no app or data payload".to_string(),
             ));
+        }
+
+        if postgres_backend {
+            validate_postgres_archive(StdPath::new(&probe_path)).map_err(|error| {
+                let _ = fs::remove_file(&probe_path);
+                eprintln!("uploaded PostgreSQL backup failed validation: {error}");
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Uploaded PostgreSQL backup is missing or invalid".to_string(),
+                )
+            })?;
         }
 
         fs::rename(&probe_path, &full_path)
@@ -967,7 +992,7 @@ mod tests {
     };
     use flate2::{write::GzEncoder, Compression};
     use std::sync::{Mutex, OnceLock};
-    use tar::Builder;
+    use tar::{Builder, Header};
     use tower::ServiceExt;
 
     static BACKUP_HTTP_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1127,6 +1152,7 @@ mod tests {
         unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &data_dir); }
         let app = Router::new()
             .route("/api/backups", post(create_backup))
+            .route("/api/backups/upload", put(upload_backup))
             .route("/api/backups/{id}", put(restore_backup))
             .with_state(BackupMetadataRepository::Postgres(std::sync::Arc::new(store)));
         let response = app
@@ -1143,6 +1169,62 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let backup: Backup = serde_json::from_slice(&body).unwrap();
+        let archive_bytes = std::fs::read(&backup.file_path).unwrap();
+        let boundary = "postgres-native-upload";
+        let mut upload_body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"native.tar.gz\"\r\nContent-Type: application/gzip\r\n\r\n"
+        )
+        .into_bytes();
+        upload_body.extend_from_slice(&archive_bytes);
+        upload_body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/backups/upload")
+                    .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+                    .body(axum::body::Body::from(upload_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let mut filesystem_only = Vec::new();
+        {
+            let encoder = GzEncoder::new(&mut filesystem_only, Compression::default());
+            let mut archive = Builder::new(encoder);
+            let payload = b"filesystem-only";
+            let mut header = Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o600);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "data/runtime.txt", &payload[..])
+                .unwrap();
+            archive.into_inner().unwrap().finish().unwrap();
+        }
+        let boundary = "filesystem-only-upload";
+        let mut invalid_body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"filesystem.tar.gz\"\r\nContent-Type: application/gzip\r\n\r\n"
+        )
+        .into_bytes();
+        invalid_body.extend_from_slice(&filesystem_only);
+        invalid_body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/backups/upload")
+                    .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+                    .body(axum::body::Body::from(invalid_body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
             .await
