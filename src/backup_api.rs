@@ -957,6 +957,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backup_http_create_and_restore_round_trips_addon_state() {
+        let _guard = BACKUP_HTTP_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let parent = test_root("round-trip");
+        let install_dir = parent.join("install");
+        let data_dir = parent.join("data");
+        let trusted_dir = data_dir.join("trusted-services/example.weather");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::create_dir_all(&trusted_dir).unwrap();
+        std::fs::write(install_dir.join("server"), b"original server").unwrap();
+        std::fs::write(trusted_dir.join("manifest.json"), b"original manifest").unwrap();
+        std::fs::write(trusted_dir.join("manifest.sig"), b"original manifest signature").unwrap();
+        std::fs::write(trusted_dir.join("image.sig"), b"original image signature").unwrap();
+        std::fs::write(trusted_dir.join("state.json"), b"{\"state\":\"staged\"}").unwrap();
+
+        let signage_db_path = data_dir.join("signage.db");
+        let signage_db = crate::db::Database::open(signage_db_path.to_str().unwrap()).unwrap();
+        signage_db
+            .set_addon_storage(
+                "example.weather",
+                "settings",
+                "{\"units\":\"metric\"}",
+                "2026-10-15T00:00:00Z",
+            )
+            .unwrap();
+        drop(signage_db);
+
+        let metadata_db_path = parent.join("metadata.db");
+        let metadata_db = std::sync::Arc::new(
+            crate::db::Database::open(metadata_db_path.to_str().unwrap()).unwrap(),
+        );
+        let old_cwd = std::env::current_dir().unwrap();
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        let old_service_name = std::env::var_os("SIGNAGE_SERVICE_NAME");
+        let old_service_kind = std::env::var_os("SIGNAGE_SERVICE_KIND");
+        std::env::set_current_dir(&install_dir).unwrap();
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_dir);
+            std::env::set_var("SIGNAGE_SERVICE_NAME", "screentra-cast-test-no-such.service");
+            std::env::set_var("SIGNAGE_SERVICE_KIND", "user");
+        }
+
+        let create_app = Router::new()
+            .route("/api/backups", post(create_backup))
+            .with_state(BackupMetadataRepository::Sqlite(metadata_db.clone()));
+        let create_response = create_app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/backups")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create_response.status(), StatusCode::OK);
+        let backup: crate::models::Backup =
+            serde_json::from_slice(&to_bytes(create_response.into_body(), 1024 * 1024).await.unwrap())
+                .unwrap();
+
+        let mutated_db = crate::db::Database::open(signage_db_path.to_str().unwrap()).unwrap();
+        mutated_db
+            .delete_addon_storage_namespace("example.weather")
+            .unwrap();
+        drop(mutated_db);
+        std::fs::write(trusted_dir.join("manifest.json"), b"mutated manifest").unwrap();
+        std::fs::remove_file(trusted_dir.join("manifest.sig")).unwrap();
+        std::fs::remove_file(trusted_dir.join("image.sig")).unwrap();
+        std::fs::remove_file(trusted_dir.join("state.json")).unwrap();
+
+        let restore_app = Router::new()
+            .route("/api/backups/{id}", put(restore_backup))
+            .with_state(BackupMetadataRepository::Sqlite(metadata_db));
+        let restore_response = restore_app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/backups/{}?confirm=true", backup.id))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let restore_status = restore_response.status();
+        let restore_body = to_bytes(restore_response.into_body(), 1024 * 1024).await.unwrap();
+
+        std::env::set_current_dir(old_cwd).unwrap();
+        if let Some(value) = old_data_dir {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        if let Some(value) = old_service_name {
+            unsafe { std::env::set_var("SIGNAGE_SERVICE_NAME", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_SERVICE_NAME"); }
+        }
+        if let Some(value) = old_service_kind {
+            unsafe { std::env::set_var("SIGNAGE_SERVICE_KIND", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_SERVICE_KIND"); }
+        }
+
+        assert_eq!(
+            restore_status,
+            StatusCode::OK,
+            "body={}",
+            String::from_utf8_lossy(&restore_body)
+        );
+        let restored_db = crate::db::Database::open(signage_db_path.to_str().unwrap()).unwrap();
+        let storage = restored_db
+            .get_addon_storage("example.weather", "settings")
+            .unwrap()
+            .unwrap();
+        assert_eq!(storage, "{\"units\":\"metric\"}");
+        assert_eq!(
+            std::fs::read(trusted_dir.join("manifest.json")).unwrap(),
+            b"original manifest"
+        );
+        assert_eq!(
+            std::fs::read(trusted_dir.join("manifest.sig")).unwrap(),
+            b"original manifest signature"
+        );
+        assert_eq!(
+            std::fs::read(trusted_dir.join("image.sig")).unwrap(),
+            b"original image signature"
+        );
+        assert_eq!(
+            std::fs::read(trusted_dir.join("state.json")).unwrap(),
+            b"{\"state\":\"staged\"}"
+        );
+        assert!(!trusted_dir.join("active").exists());
+        let restore_payload: serde_json::Value = serde_json::from_slice(&restore_body).unwrap();
+        let pre_restore_dir = restore_payload["result"]["pre_restore_dir"].as_str().unwrap();
+        let _ = std::fs::remove_dir_all(pre_restore_dir);
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[tokio::test]
     async fn restore_http_dry_run_reports_addon_and_trusted_service_state() {
         let _guard = BACKUP_HTTP_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
