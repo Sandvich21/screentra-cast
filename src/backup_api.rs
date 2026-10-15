@@ -734,6 +734,21 @@ pub async fn restore_backup(
         }
     }
 
+    if postgres_backend {
+        let restored_backup = Backup {
+            id: id.clone(),
+            name: format!("Restored backup {}", &restored_at[..16]),
+            created_at: restored_at.clone(),
+            file_path: backup_file_path.clone(),
+            size_bytes: fs::metadata(&backup_file_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or_default(),
+        };
+        if let Err(error) = db.insert_backup(&restored_backup).await {
+            warnings.push(format!("backup metadata re-registration failed: {error}"));
+        }
+    }
+
     // Staging dir should now be empty (we moved app/ and data/ out).
     let _ = fs::remove_dir_all(&staging_root);
 
@@ -1172,6 +1187,15 @@ mod tests {
             .get(0);
         assert_eq!(value, r#"{"value":"before"}"#);
         assert!(!data_dir.join("postgresql.sql").exists());
+        let restored_store = crate::postgres::PostgresStore::connect()
+            .await
+            .expect("reconnect restored metadata store");
+        assert!(restored_store
+            .list_backups()
+            .await
+            .expect("list restored backups")
+            .iter()
+            .any(|item| item.id == backup.id));
 
         std::env::set_current_dir(old_cwd).unwrap();
         if let Some(value) = old_data_dir {
