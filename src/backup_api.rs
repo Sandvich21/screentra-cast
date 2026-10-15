@@ -271,7 +271,9 @@ pub async fn restore_backup(
     let backup_file_path = db
         .get_backup_file_path(&id)
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+        .map_err(|_| {
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
+        })?;
 
     if !StdPath::new(&backup_file_path).exists() {
         return Err((
@@ -296,7 +298,9 @@ pub async fn restore_backup(
         })?;
     let sha = sha256_file(&backup_file_path)
         .await
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+        .map_err(|_| {
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
+        })?;
 
     let contains_core_database = safe_archive::archive_contains_path(
         StdPath::new(&backup_file_path),
@@ -367,22 +371,18 @@ pub async fn restore_backup(
     let started = std::time::Instant::now();
     let restored_at = Utc::now().to_rfc3339();
 
-    // Stage the tarball OUTSIDE the install/data dirs so that renaming
-    // install_dir -> pre_restore_app doesn't leave us with a dangling
-    // staging_root path. /var/tmp survives reboots; on dev boxes without
-    // /var/tmp we fall back to $TMPDIR or `/tmp`.
+    // Stage the tarball OUTSIDE the install/data dirs but on the install
+    // directory's filesystem. The final directory swaps use rename(2), so
+    // choosing /var/tmp or $TMPDIR could cause EXDEV on split filesystems.
     let ts = chrono::Utc::now().timestamp_millis();
-    let staging_parent = std::env::var("TMPDIR")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            if StdPath::new("/var/tmp").exists() {
-                Some("/var/tmp".to_string())
-            } else {
-                Some("/tmp".to_string())
-            }
-        })
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Failed to determine staging parent".to_string()))?;
+    let staging_parent = StdPath::new(&install_dir)
+        .parent()
+        .map(|path| path.to_string_lossy().to_string())
+        .filter(|path| !path.is_empty())
+        .ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to determine staging parent".to_string(),
+        ))?;
     let staging_root = format!(
         "{}/ripley-restore-{}-{}",
         staging_parent,
@@ -400,7 +400,7 @@ pub async fn restore_backup(
     let extract_result = safe_archive::extract_tar_gz(
         StdPath::new(&backup_file_path),
         StdPath::new(&staging_root),
-        1,
+        0,
     );
     if let Err(error) = extract_result {
         log::warn!("backup restore archive rejected: {error}");
@@ -686,6 +686,102 @@ mod tests {
         header.set_mode(0o644);
         header.set_cksum();
         builder.append_data(&mut header, path, data).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_http_confirmed_swaps_install_and_data_safely() {
+        let _guard = BACKUP_HTTP_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let parent = test_root("confirmed");
+        let install_dir = parent.join("install");
+        let data_dir = parent.join("data");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(install_dir.join("old.txt"), b"old install").unwrap();
+        std::fs::write(data_dir.join("signage.db"), b"old database").unwrap();
+
+        let archive_path = parent.join("backup.tar.gz");
+        let archive_file = std::fs::File::create(&archive_path).unwrap();
+        let encoder = GzEncoder::new(archive_file, Compression::default());
+        let mut builder = Builder::new(encoder);
+        append_test_file(&mut builder, "app/restored.txt", b"restored install");
+        append_test_file(&mut builder, "data/signage.db", b"restored database");
+        append_test_file(
+            &mut builder,
+            "data/trusted-services/example.weather/manifest.json",
+            b"restored manifest",
+        );
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let db_path = parent.join("metadata.db");
+        let db = crate::db::Database::open(db_path.to_str().unwrap()).unwrap();
+        db.insert_backup(&crate::models::Backup {
+            id: "confirmed".to_string(),
+            name: "Confirmed".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            file_path: archive_path.to_string_lossy().to_string(),
+            size_bytes: std::fs::metadata(&archive_path).unwrap().len(),
+        })
+        .unwrap();
+
+        let old_cwd = std::env::current_dir().unwrap();
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        let old_service_name = std::env::var_os("SIGNAGE_SERVICE_NAME");
+        let old_service_kind = std::env::var_os("SIGNAGE_SERVICE_KIND");
+        std::env::set_current_dir(&install_dir).unwrap();
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_dir);
+            std::env::set_var("SIGNAGE_SERVICE_NAME", "screentra-cast-test-no-such.service");
+            std::env::set_var("SIGNAGE_SERVICE_KIND", "user");
+        }
+        let app = Router::new()
+            .route("/api/backups/{id}", put(restore_backup))
+            .with_state(BackupMetadataRepository::Sqlite(std::sync::Arc::new(db)));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/backups/confirmed?confirm=true")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+
+        std::env::set_current_dir(old_cwd).unwrap();
+        if let Some(value) = old_data_dir {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        if let Some(value) = old_service_name {
+            unsafe { std::env::set_var("SIGNAGE_SERVICE_NAME", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_SERVICE_NAME"); }
+        }
+        if let Some(value) = old_service_kind {
+            unsafe { std::env::set_var("SIGNAGE_SERVICE_KIND", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_SERVICE_KIND"); }
+        }
+
+        assert_eq!(status, StatusCode::OK, "body={}", String::from_utf8_lossy(&body));
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["status"], "restored");
+        assert_eq!(std::fs::read(install_dir.join("restored.txt")).unwrap(), b"restored install");
+        assert_eq!(std::fs::read(data_dir.join("signage.db")).unwrap(), b"restored database");
+        assert_eq!(
+            std::fs::read(data_dir.join("trusted-services/example.weather/manifest.json")).unwrap(),
+            b"restored manifest"
+        );
+        let pre_restore_dir = payload["result"]["pre_restore_dir"].as_str().unwrap();
+        assert!(std::path::Path::new(pre_restore_dir).is_dir());
+        let _ = std::fs::remove_dir_all(pre_restore_dir);
+        let _ = std::fs::remove_dir_all(parent);
     }
 
     #[tokio::test]
