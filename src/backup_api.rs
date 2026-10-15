@@ -827,10 +827,16 @@ pub async fn delete_backup(
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
 
-    // Delete the file if it exists (ignore error if already gone - idempotent delete)
-    let _ = fs::remove_file(&file_path);
+    // Delete the file if it exists. Preserve the database record when the
+    // filesystem refuses deletion so the operator can retry safely.
+    if let Err(error) = fs::remove_file(&file_path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            log::error!("delete backup file failed: {error}");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
+        }
+    }
 
-    // Always delete the database record
+    // Always delete the database record once the file is gone or already absent.
     db.delete_backup(&id)
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
