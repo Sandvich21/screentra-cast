@@ -825,6 +825,49 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_client_status_without_writing() {
+        let _guard = STORAGE_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-cast-addon-invalid-status-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let data_root = root.join("data");
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_root);
+        }
+        let result = save_client_status(
+            "client-1",
+            ClientAddonStatusReport {
+                at: None,
+                addons: vec![ClientAddonStatus {
+                    id: "../escape".to_string(),
+                    version: None,
+                    state: "active".to_string(),
+                    entrypoint: None,
+                    error: None,
+                }],
+                error: None,
+            },
+        );
+        assert!(result.is_err());
+        assert!(!data_root.join("addon-client-status").exists());
+        if let Some(value) = old_data_root {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
     fn saves_bounded_client_status_snapshot() {
         let _guard = STORAGE_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
