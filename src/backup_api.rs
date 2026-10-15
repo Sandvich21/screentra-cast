@@ -213,19 +213,6 @@ async fn restore_postgres_dump(input_path: &StdPath) -> Result<(), String> {
     Ok(())
 }
 
-fn ensure_filesystem_backup_backend(
-    repository: &BackupMetadataRepository,
-) -> Result<(), (StatusCode, String)> {
-    if matches!(repository, BackupMetadataRepository::Postgres(_)) {
-        return Err((
-            StatusCode::NOT_IMPLEMENTED,
-            "PostgreSQL upload and restore require a database-native restore path, which is not enabled yet"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
 pub async fn list_backups(
     State(db): State<AppState>,
 ) -> Result<AxumJson<Vec<Backup>>, (StatusCode, String)> {
