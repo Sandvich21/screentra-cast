@@ -77,6 +77,52 @@ pub fn inspect_tar_gz(path: &Path) -> Result<Vec<String>, String> {
     inspect_entries(&mut archive)
 }
 
+fn archive_contains_path_matching(
+    path: &Path,
+    wanted_path: &Path,
+    prefix: bool,
+) -> Result<bool, String> {
+    let wanted = normalized_components(wanted_path)?;
+    let file = File::open(path).map_err(|error| format!("open archive: {error}"))?;
+    let decoder = GzDecoder::new(file);
+    let mut archive = Archive::new(decoder);
+    let mut found = false;
+    for entry in archive
+        .entries()
+        .map_err(|error| format!("read archive entries: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("read archive entry: {error}"))?;
+        let entry_path = entry
+            .path()
+            .map_err(|error| format!("read archive path: {error}"))?
+            .into_owned();
+        let components = normalized_components(&entry_path)?;
+        validate_entry_type(entry.header().entry_type(), &entry_path)?;
+        let matches = if prefix {
+            components.len() >= wanted.len() && components[..wanted.len()] == wanted[..]
+        } else {
+            components == wanted
+        };
+        if matches {
+            found = true;
+        }
+    }
+    Ok(found)
+}
+
+/// Return whether a gzip-compressed tar archive contains an entry under a
+/// normalized path prefix. Entry paths are validated with the same safety
+/// policy as extraction.
+pub fn archive_contains_path_prefix(path: &Path, prefix: &Path) -> Result<bool, String> {
+    archive_contains_path_matching(path, prefix, true)
+}
+
+/// Return whether a gzip-compressed tar archive contains an exact normalized
+/// path. Entry paths are validated with the same safety policy as extraction.
+pub fn archive_contains_path(path: &Path, wanted: &Path) -> Result<bool, String> {
+    archive_contains_path_matching(path, wanted, false)
+}
+
 fn ensure_safe_parent(root: &Path, parent: &Path) -> Result<(), String> {
     let root_metadata =
         fs::symlink_metadata(root).map_err(|error| format!("inspect extraction root: {error}"))?;
@@ -228,6 +274,46 @@ mod tests {
         build(&mut builder);
         builder.into_inner().unwrap().finish().unwrap();
         path
+    }
+
+    #[test]
+    fn detects_nested_backup_state_prefixes() {
+        let archive = make_archive("backup-state", |builder| {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(1);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "data/addon_storage/widget/state.json", &b"x"[..])
+                .unwrap();
+            let mut header = tar::Header::new_gnu();
+            header.set_size(1);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    "data/trusted-services/example.weather/manifest.json",
+                    &b"x"[..],
+                )
+                .unwrap();
+        });
+        assert!(archive_contains_path_prefix(
+            &archive,
+            Path::new("data/addon_storage")
+        )
+        .unwrap());
+        assert!(archive_contains_path_prefix(
+            &archive,
+            Path::new("data/trusted-services")
+        )
+        .unwrap());
+        assert!(!archive_contains_path_prefix(
+            &archive,
+            Path::new("data/missing")
+        )
+        .unwrap());
+        let _ = fs::remove_file(archive);
     }
 
     #[test]

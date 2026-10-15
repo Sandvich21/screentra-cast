@@ -65,3 +65,14 @@ validator to accept the service kind:
 Until every gate exists, an apparently valid image reference remains metadata
 only. A successful manifest parse must never cause a registry request or code
 execution.
+
+## Backup and restore scope
+
+The existing backup archive captures the complete configured data directory,
+excluding only the backup tarball directory itself. Therefore namespaced
+`addon_storage` rows are preserved inside `data/signage.db`, while inert staged
+trusted-service metadata is preserved under `data/trusted-services/`. Restore
+dry-runs now report whether `data/signage.db` and
+`data/trusted-services/` are present and warn when either scope is absent.
+Restoring either scope does not activate a service, pull an image, or execute
+addon code.

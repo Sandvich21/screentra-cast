@@ -194,6 +194,8 @@ struct RestoreDryRunReport {
     service_kind: &'static str,
     backup_sha256: String,
     tarball_top_level_entries: Vec<String>,
+    contains_core_database: bool,
+    contains_trusted_service_staging: bool,
     would_extract_to_install: bool,
     would_extract_to_data: bool,
     would_restart_service: bool,
@@ -296,6 +298,17 @@ pub async fn restore_backup(
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
 
+    let contains_core_database = safe_archive::archive_contains_path(
+        StdPath::new(&backup_file_path),
+        StdPath::new("data/signage.db"),
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inspect tarball: {}", e)))?;
+    let contains_trusted_service_staging = safe_archive::archive_contains_path_prefix(
+        StdPath::new(&backup_file_path),
+        StdPath::new("data/trusted-services"),
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("inspect tarball: {}", e)))?;
+
     let mut warnings: Vec<String> = Vec::new();
     let would_app = top.iter().any(|e| e == "app");
     let would_data = top.iter().any(|e| e == "data");
@@ -307,6 +320,16 @@ pub async fn restore_backup(
         warnings
             .push("tarball has no `data/` top-level — data dir will not be restored".to_string());
     }
+    if !contains_core_database {
+        warnings.push(
+            "tarball has no `data/signage.db` — addon storage cannot be restored".to_string(),
+        );
+    }
+    if !contains_trusted_service_staging {
+        warnings.push(
+            "tarball has no `data/trusted-services/` — staged trusted-service metadata will not be restored".to_string(),
+        );
+    }
 
     let report = RestoreDryRunReport {
         install_dir: install_dir.clone(),
@@ -315,6 +338,8 @@ pub async fn restore_backup(
         service_kind,
         backup_sha256: sha.clone(),
         tarball_top_level_entries: top,
+        contains_core_database,
+        contains_trusted_service_staging,
         would_extract_to_install: would_app,
         would_extract_to_data: would_data,
         would_restart_service: true,
