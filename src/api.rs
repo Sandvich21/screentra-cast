@@ -2072,8 +2072,10 @@ async fn stage_trusted_service_manifest(
     fs::create_dir_all(&temp_dir).map_err(|_| internal_server_error())?;
     let manifest_path = temp_dir.join("manifest.json");
     let signature_path = temp_dir.join("manifest.sig");
+    let image_signature_path = temp_dir.join("image.sig");
     let mut seen_manifest = false;
     let mut seen_signature = false;
+    let mut seen_image_signature = false;
     let mut result = Ok(());
     while let Some(mut field) = multipart
         .next_field()
@@ -2087,6 +2089,7 @@ async fn stage_trusted_service_manifest(
         let (path, seen, limit) = match name {
             "manifest" => (&manifest_path, &mut seen_manifest, 1024 * 1024),
             "signature" => (&signature_path, &mut seen_signature, 64 * 1024),
+            "image_signature" => (&image_signature_path, &mut seen_image_signature, 64 * 1024),
             _ => {
                 result = Err((StatusCode::BAD_REQUEST, "Unknown trusted service upload field".to_string()));
                 break;
@@ -2116,11 +2119,18 @@ async fn stage_trusted_service_manifest(
         }
         file.flush().map_err(|_| internal_server_error())?;
     }
-    if result.is_ok() && (!seen_manifest || !seen_signature) {
-        result = Err((StatusCode::BAD_REQUEST, "Trusted service upload requires manifest and signature fields".to_string()));
+    if result.is_ok() && (!seen_manifest || !seen_signature || !seen_image_signature) {
+        result = Err((
+            StatusCode::BAD_REQUEST,
+            "Trusted service upload requires manifest, signature, and image_signature fields".to_string(),
+        ));
     }
     let staged = if result.is_ok() {
-        crate::addons::stage_trusted_service_manifest(&manifest_path, &signature_path)
+        crate::addons::stage_trusted_service_manifest(
+            &manifest_path,
+            &signature_path,
+            &image_signature_path,
+        )
             .map_err(addon_error_response)
             .map(Some)
     } else {

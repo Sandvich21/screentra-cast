@@ -802,6 +802,45 @@ fn verify_trusted_service_manifest_signature(
     Ok(())
 }
 
+fn trusted_service_image_signing_public_key() -> PathBuf {
+    std::env::var("SCREENTRA_CAST_TRUSTED_SERVICE_IMAGE_SIGNING_PUBKEY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/etc/screentra-cast/trusted-service-image-signing.pub"))
+}
+
+fn verify_trusted_service_image_signature(
+    image_digest: &str,
+    signature_path: &Path,
+) -> Result<(), AddonError> {
+    let public_key = trusted_service_image_signing_public_key();
+    if !public_key.is_file() {
+        return Err(AddonError::Invalid(
+            "Trusted service image signing public key is missing".to_string(),
+        ));
+    }
+    let digest_path = std::env::temp_dir().join(format!("screentra-trusted-image-digest-{}", Uuid::new_v4()));
+    let result = (|| {
+        fs::write(&digest_path, image_digest.as_bytes()).map_err(io_error)?;
+        let output = Command::new("openssl")
+            .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
+            .arg(&public_key)
+            .args(["-sigfile"])
+            .arg(signature_path)
+            .args(["-in"])
+            .arg(&digest_path)
+            .output()
+            .map_err(io_error)?;
+        if !output.status.success() {
+            return Err(AddonError::Invalid(
+                "Trusted service image signature verification failed".to_string(),
+            ));
+        }
+        Ok(())
+    })();
+    let _ = fs::remove_file(&digest_path);
+    result
+}
+
 fn validate_trusted_service_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
     if manifest.schema_version != 1 {
         return Err(AddonError::Invalid(
@@ -850,6 +889,7 @@ fn validate_trusted_service_manifest(manifest: &AddonManifest) -> Result<(), Add
 pub fn stage_trusted_service_manifest(
     manifest_path: &Path,
     signature_path: &Path,
+    image_signature_path: &Path,
 ) -> Result<TrustedServiceStage, AddonError> {
     let manifest_size = fs::metadata(manifest_path).map_err(io_error)?.len();
     let signature_size = fs::metadata(signature_path).map_err(io_error)?.len();
@@ -862,6 +902,19 @@ pub fn stage_trusted_service_manifest(
     let manifest_bytes = fs::read(manifest_path).map_err(io_error)?;
     let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
     validate_trusted_service_manifest(&manifest)?;
+    let image_signature_size = fs::metadata(image_signature_path).map_err(io_error)?.len();
+    if image_signature_size > 64 * 1024 {
+        return Err(AddonError::Invalid(
+            "Trusted service image signature is too large".to_string(),
+        ));
+    }
+    let image_digest = manifest
+        .trusted_service
+        .as_ref()
+        .expect("validated trusted service metadata")
+        .image_digest
+        .as_str();
+    verify_trusted_service_image_signature(image_digest, image_signature_path)?;
 
     let root = trusted_service_storage_dir();
     fs::create_dir_all(&root).map_err(io_error)?;
@@ -874,6 +927,7 @@ pub fn stage_trusted_service_manifest(
         fs::create_dir(&stage).map_err(io_error)?;
         fs::copy(manifest_path, stage.join(MANIFEST_FILE)).map_err(io_error)?;
         fs::copy(signature_path, stage.join("manifest.sig")).map_err(io_error)?;
+        fs::copy(image_signature_path, stage.join("image.sig")).map_err(io_error)?;
         let staged_at = chrono::Utc::now().to_rfc3339();
         fs::write(
             stage.join(STATE_FILE),
@@ -904,6 +958,13 @@ fn read_trusted_service_stage(dir: &Path) -> Result<TrustedServiceStage, AddonEr
     let manifest_bytes = fs::read(&manifest_path).map_err(io_error)?;
     let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
     validate_trusted_service_manifest(&manifest)?;
+    let image_digest = manifest
+        .trusted_service
+        .as_ref()
+        .expect("validated trusted service metadata")
+        .image_digest
+        .as_str();
+    verify_trusted_service_image_signature(image_digest, &dir.join("image.sig"))?;
     let state_bytes = fs::read(dir.join(STATE_FILE)).map_err(io_error)?;
     let state: serde_json::Value = serde_json::from_slice(&state_bytes).map_err(io_error)?;
     let state_name = state
@@ -1239,8 +1300,12 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let manifest_path = root.join("manifest.json");
         let signature_path = root.join("manifest.sig");
+        let image_signature_path = root.join("image.sig");
         let private_key = root.join("trusted-service-signing.key");
         let public_key = root.join("trusted-service-signing.pub");
+        let image_private_key = root.join("trusted-service-image-signing.key");
+        let image_public_key = root.join("trusted-service-image-signing.pub");
+        let image_digest_path = root.join("image-digest.txt");
         fs::write(
             &manifest_path,
             serde_json::to_vec_pretty(&trusted_manifest()).unwrap(),
@@ -1270,23 +1335,62 @@ mod tests {
             .status()
             .unwrap()
             .success());
+        let image_digest = trusted_manifest()
+            .trusted_service
+            .as_ref()
+            .unwrap()
+            .image_digest
+            .clone();
+        fs::write(&image_digest_path, image_digest.as_bytes()).unwrap();
+        assert!(Command::new("openssl")
+            .args(["genpkey", "-algorithm", "ED25519", "-out"])
+            .arg(&image_private_key)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("openssl")
+            .args(["pkey", "-in"])
+            .arg(&image_private_key)
+            .args(["-pubout", "-out"])
+            .arg(&image_public_key)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("openssl")
+            .args(["pkeyutl", "-sign", "-rawin", "-inkey"])
+            .arg(&image_private_key)
+            .args(["-in"])
+            .arg(&image_digest_path)
+            .args(["-out"])
+            .arg(&image_signature_path)
+            .status()
+            .unwrap()
+            .success());
         let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
         let old_public_key = std::env::var_os("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY");
+        let old_image_public_key = std::env::var_os("SCREENTRA_CAST_TRUSTED_SERVICE_IMAGE_SIGNING_PUBKEY");
         unsafe {
             std::env::set_var("SIGNAGE_DATA_DIR", &root.join("data"));
             std::env::set_var("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY", &public_key);
+            std::env::set_var("SCREENTRA_CAST_TRUSTED_SERVICE_IMAGE_SIGNING_PUBKEY", &image_public_key);
         }
-        let staged = stage_trusted_service_manifest(&manifest_path, &signature_path).unwrap();
+        let staged = stage_trusted_service_manifest(&manifest_path, &signature_path, &image_signature_path).unwrap();
         assert_eq!(staged.state, "staged");
         assert_eq!(staged.manifest.id, "example.weather");
         let staged_dir = root.join("data/trusted-services/example.weather");
         assert!(staged_dir.join("manifest.json").is_file());
         assert!(staged_dir.join("manifest.sig").is_file());
+        assert!(staged_dir.join("image.sig").is_file());
         assert!(!staged_dir.join("active").exists());
         assert!(list().unwrap().is_empty());
         let stages = list_trusted_service_stages().unwrap();
         assert_eq!(stages.len(), 1);
         assert_eq!(stages[0].manifest.id, "example.weather");
+        let image_signature_bytes = fs::read(staged_dir.join("image.sig")).unwrap();
+        fs::write(staged_dir.join("image.sig"), b"tampered").unwrap();
+        let error = list_trusted_service_stages().unwrap_err();
+        assert!(error.to_string().contains("image signature verification failed"));
+        fs::write(staged_dir.join("image.sig"), image_signature_bytes).unwrap();
         fs::write(staged_dir.join("manifest.json"), b"tampered").unwrap();
         let error = list_trusted_service_stages().unwrap_err();
         assert!(error.to_string().contains("signature verification failed"));
@@ -1303,6 +1407,11 @@ mod tests {
             unsafe { std::env::set_var("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY", value); }
         } else {
             unsafe { std::env::remove_var("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY"); }
+        }
+        if let Some(value) = old_image_public_key {
+            unsafe { std::env::set_var("SCREENTRA_CAST_TRUSTED_SERVICE_IMAGE_SIGNING_PUBKEY", value); }
+        } else {
+            unsafe { std::env::remove_var("SCREENTRA_CAST_TRUSTED_SERVICE_IMAGE_SIGNING_PUBKEY"); }
         }
         let _ = fs::remove_dir_all(root);
     }
@@ -1321,6 +1430,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let manifest_path = root.join("manifest.json");
         let signature_path = root.join("manifest.sig");
+        let image_signature_path = root.join("image.sig");
         let private_key = root.join("trusted-service-signing.key");
         let public_key = root.join("trusted-service-signing.pub");
         fs::write(
@@ -1359,7 +1469,7 @@ mod tests {
             std::env::set_var("SIGNAGE_DATA_DIR", &root.join("data"));
             std::env::set_var("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY", &public_key);
         }
-        let error = stage_trusted_service_manifest(&manifest_path, &signature_path).unwrap_err();
+        let error = stage_trusted_service_manifest(&manifest_path, &signature_path, &image_signature_path).unwrap_err();
         assert!(error.to_string().contains("signature verification failed"));
         assert!(!root.join("data/trusted-services").exists());
         if let Some(value) = old_data_root {

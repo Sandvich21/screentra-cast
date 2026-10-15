@@ -1,14 +1,18 @@
 # Trusted Server Addon Operations
 
 The current server also has a deliberately inert staging boundary for a
-separately signed service manifest. An administrator may submit multipart
-fields `manifest` and `signature` to
-`POST /api/addons/trusted-service/stage`. The signature is checked with the
-separate trusted-service public key at
+separately signed service manifest and image digest authorization. An
+administrator must submit multipart fields `manifest`, `signature`, and
+`image_signature` to `POST /api/addons/trusted-service/stage`. The manifest
+signature is checked with the separate trusted-service public key at
 `/etc/screentra-cast/trusted-service-signing.pub` or the
-`SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY` override. A valid submission is
-stored as `data/trusted-services/<addon-id>/` with state `staged`; it is not
-added to the ordinary addon registry, enabled, pulled, or executed.
+`SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY` override. The image signature
+covers the exact `image_digest` string and is checked with the separate image
+signing public key at `/etc/screentra-cast/trusted-service-image-signing.pub`
+or the `SCREENTRA_CAST_TRUSTED_SERVICE_IMAGE_SIGNING_PUBKEY` override. A valid
+submission is stored as `data/trusted-services/<addon-id>/` with state
+`staged`; it is not added to the ordinary addon registry, enabled, pulled, or
+executed.
 
 The staged records can be inspected or removed by an administrator with
 `GET /api/addons/trusted-service/staged` and
@@ -18,9 +22,10 @@ removal operations are recorded as `trusted_service_stage_create` and
 staged manifest and signature; it cannot stop or delete a running service
 because no service can currently run.
 
-The listing path re-verifies each staged manifest against the trusted-service
-public key before returning metadata. A tampered or malformed staged directory
-fails closed instead of being reported as an active service.
+The listing path re-verifies each staged manifest and its `image.sig` against
+the trusted-service and image public keys before returning metadata. A tampered
+or malformed staged directory fails closed instead of being reported as an
+active service.
 
 The validator checks the service metadata that would otherwise become an
 execution policy:
@@ -34,10 +39,10 @@ execution policy:
 - capabilities are bounded to the documented allowlist:
   `storage`, `read:clients`, `read:layouts`, and `client_extension`.
 
-These checks are defensive validation, not image verification. The current
-server does not pull from a registry, verify an OCI signature, create a
-container, mint a service credential, mount a volume, expose a gateway, or
-start a process.
+These checks are defensive validation plus detached image-digest signature
+verification, not OCI image verification. The current server does not pull
+from a registry, verify an OCI signature, create a container, mint a service
+credential, mount a volume, expose a gateway, or start a process.
 
 ## Required future activation gates
 

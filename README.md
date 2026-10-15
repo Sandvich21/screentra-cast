@@ -250,12 +250,17 @@ in `docs/trusted-server-addon-gateway.md` and its disabled staging and validatio
 rules are documented in `docs/trusted-server-addon-operations.md`, illustrated by
 `examples/addons/trusted-service/manifest.json`. The normal addon validator rejects
 that service kind. An administrator can separately stage a signed manifest through
-`POST /api/addons/trusted-service/stage`, but staging only stores inert metadata;
-staged records are admin-only at `GET /api/addons/trusted-service/staged` and
-can be removed with the matching `DELETE` route. Successful stage and removal
-operations are recorded in the audit log. The server does not expose a
-gateway, pull images, or start containers. A staged manifest is not proof that a
-player has installed or activated the extension.
+`POST /api/addons/trusted-service/stage`, supplying separately signed
+`manifest`, `signature`, and `image_signature` multipart fields. The manifest is
+checked with `/etc/screentra-cast/trusted-service-signing.pub`; `image_signature`
+covers the exact manifest `image_digest` and is checked with the separate
+`/etc/screentra-cast/trusted-service-image-signing.pub` key. Staging only stores
+inert metadata; staged records are admin-only at
+`GET /api/addons/trusted-service/staged` and can be removed with the matching
+`DELETE` route. Successful stage and removal operations are recorded in the
+audit log. The server does not expose a gateway, pull images, or start
+containers. A staged manifest is not proof that a player has installed or
+activated the extension.
 
 ## Player client installation and LAN adoption
 
