@@ -889,6 +889,73 @@ pub fn stage_trusted_service_manifest(
     result
 }
 
+fn read_trusted_service_stage(dir: &Path) -> Result<TrustedServiceStage, AddonError> {
+    let manifest_bytes = fs::read(dir.join(MANIFEST_FILE)).map_err(io_error)?;
+    let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
+    validate_trusted_service_manifest(&manifest)?;
+    let state_bytes = fs::read(dir.join(STATE_FILE)).map_err(io_error)?;
+    let state: serde_json::Value = serde_json::from_slice(&state_bytes).map_err(io_error)?;
+    let state_name = state
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| AddonError::Io("Staged trusted service state is invalid".to_string()))?;
+    let staged_at = state
+        .get("staged_at")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 64)
+        .ok_or_else(|| AddonError::Io("Staged trusted service timestamp is invalid".to_string()))?;
+    if state_name != "staged" {
+        return Err(AddonError::Io(
+            "Staged trusted service state is invalid".to_string(),
+        ));
+    }
+    Ok(TrustedServiceStage {
+        manifest,
+        state: state_name.to_string(),
+        staged_at: staged_at.to_string(),
+    })
+}
+
+pub fn list_trusted_service_stages() -> Result<Vec<TrustedServiceStage>, AddonError> {
+    let root = trusted_service_storage_dir();
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut stages = Vec::new();
+    for entry in fs::read_dir(&root).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if !entry.file_type().map_err(io_error)?.is_dir() {
+            continue;
+        }
+        validate_id(&name).map_err(|_| {
+            AddonError::Invalid("Invalid staged trusted service directory".to_string())
+        })?;
+        stages.push(read_trusted_service_stage(&entry.path())?);
+    }
+    stages.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
+    Ok(stages)
+}
+
+pub fn remove_trusted_service_stage(id: &str) -> Result<(), AddonError> {
+    validate_id(id)?;
+    let dir = trusted_service_storage_dir().join(id);
+    let metadata = match fs::symlink_metadata(&dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AddonError::Invalid(
+            "Invalid staged trusted service directory".to_string(),
+        ));
+    }
+    fs::remove_dir_all(dir).map_err(io_error)
+}
+
 fn addon_signing_public_key() -> PathBuf {
     std::env::var("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY")
         .map(PathBuf::from)
@@ -1206,6 +1273,13 @@ mod tests {
         assert!(staged_dir.join("manifest.sig").is_file());
         assert!(!staged_dir.join("active").exists());
         assert!(list().unwrap().is_empty());
+        let stages = list_trusted_service_stages().unwrap();
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0].manifest.id, "example.weather");
+        remove_trusted_service_stage("example.weather").unwrap();
+        remove_trusted_service_stage("example.weather").unwrap();
+        assert!(list_trusted_service_stages().unwrap().is_empty());
+        assert!(!staged_dir.exists());
         if let Some(value) = old_data_root {
             unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
         } else {

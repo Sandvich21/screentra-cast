@@ -1191,6 +1191,14 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             post(stage_trusted_service_manifest).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
         .route(
+            "/api/addons/trusted-service/staged",
+            get(list_trusted_service_stages),
+        )
+        .route(
+            "/api/addons/trusted-service/staged/{id}",
+            delete(remove_trusted_service_stage),
+        )
+        .route(
             "/api/addons/{addon_id}/storage/{storage_key}",
             get(get_addon_storage)
                 .put(set_addon_storage)
@@ -2001,6 +2009,25 @@ async fn list_addons() -> Result<AxumJson<Vec<AddonRecord>>, (StatusCode, String
 async fn list_addon_widget_types() -> Result<AxumJson<Vec<AddonWidgetRegistration>>, (StatusCode, String)> {
     crate::addons::enabled_widget_registrations()
         .map(AxumJson)
+        .map_err(addon_error_response)
+}
+
+async fn list_trusted_service_stages(
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+) -> Result<AxumJson<Vec<crate::addons::TrustedServiceStage>>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    crate::addons::list_trusted_service_stages()
+        .map(AxumJson)
+        .map_err(addon_error_response)
+}
+
+async fn remove_trusted_service_stage(
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    crate::addons::remove_trusted_service_stage(&id)
+        .map(|_| StatusCode::NO_CONTENT)
         .map_err(addon_error_response)
 }
 

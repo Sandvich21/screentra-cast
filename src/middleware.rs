@@ -352,6 +352,9 @@ fn required_capability(path: &str, method: &str) -> &'static str {
         }
         return "control_clients";
     }
+    if path.starts_with("/api/addons/trusted-service") {
+        return "manage_addons";
+    }
     if path == "/api/addons" || path.starts_with("/api/addons/") {
         return if is_unsafe_method(method) {
             "manage_addons"
@@ -576,6 +579,14 @@ mod authorization_tests {
         );
         assert_eq!(
             required_capability("/api/addons/example.storage/storage/settings", "DELETE"),
+            "manage_addons"
+        );
+        assert_eq!(
+            required_capability("/api/addons/trusted-service/staged", "GET"),
+            "manage_addons"
+        );
+        assert_eq!(
+            required_capability("/api/addons/trusted-service/staged/example", "DELETE"),
             "manage_addons"
         );
         assert!(!role_has_capability("viewer", "manage_addons"));

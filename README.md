@@ -251,9 +251,10 @@ rules are documented in `docs/trusted-server-addon-operations.md`, illustrated b
 `examples/addons/trusted-service/manifest.json`. The normal addon validator rejects
 that service kind. An administrator can separately stage a signed manifest through
 `POST /api/addons/trusted-service/stage`, but staging only stores inert metadata;
-the server does not expose a gateway, pull images, or start containers. A valid
-upload is not proof that a player has installed or activated
-the extension.
+staged records are admin-only at `GET /api/addons/trusted-service/staged` and
+can be removed with the matching `DELETE` route. The server does not expose a
+gateway, pull images, or start containers. A staged manifest is not proof that a
+player has installed or activated the extension.
 
 ## Player client installation and LAN adoption
 

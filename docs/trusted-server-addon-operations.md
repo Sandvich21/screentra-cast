@@ -10,8 +10,14 @@ separate trusted-service public key at
 stored as `data/trusted-services/<addon-id>/` with state `staged`; it is not
 added to the ordinary addon registry, enabled, pulled, or executed.
 
-Before returning the disabled-runtime error, the validator checks the service
-metadata that would otherwise become an execution policy:
+The staged records can be inspected or removed by an administrator with
+`GET /api/addons/trusted-service/staged` and
+`DELETE /api/addons/trusted-service/staged/<addon-id>`. Removal only deletes the
+inert staged manifest and signature; it cannot stop or delete a running service
+because no service can currently run.
+
+The validator checks the service metadata that would otherwise become an
+execution policy:
 
 - image references are bounded, non-empty, and contain no whitespace, URL
   schemes, path traversal, absolute paths, or malformed path components;
