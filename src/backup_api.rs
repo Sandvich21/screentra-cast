@@ -71,6 +71,13 @@ fn postgres_tool_environment_from_url(
     let host = parsed
         .host_str()
         .filter(|host| !host.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            parsed
+                .query_pairs()
+                .find(|(key, value)| key == "host" && !value.is_empty())
+                .map(|(_, value)| value.into_owned())
+        })
         .ok_or_else(|| "PostgreSQL database URL must include a host".to_string())?;
     let database = parsed
         .path()
@@ -180,6 +187,32 @@ async fn create_postgres_dump(output_path: &StdPath) -> Result<(), String> {
     Ok(())
 }
 
+async fn restore_postgres_dump(input_path: &StdPath) -> Result<(), String> {
+    validate_postgres_dump_file(input_path)?;
+    let database_url = crate::postgres::configured_database_url()?;
+    let environment = postgres_tool_environment_from_url(&database_url)?;
+    let output = Command::new("psql")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .args([
+            "--no-password",
+            "--no-psqlrc",
+            "--set",
+            "ON_ERROR_STOP=1",
+            "--single-transaction",
+            "--file",
+        ])
+        .arg(input_path)
+        .envs(environment)
+        .output()
+        .await
+        .map_err(|_| "Failed to start psql".to_string())?;
+    if !output.status.success() {
+        return Err("PostgreSQL restore failed".to_string());
+    }
+    Ok(())
+}
+
 fn ensure_filesystem_backup_backend(
     repository: &BackupMetadataRepository,
 ) -> Result<(), (StatusCode, String)> {
@@ -274,6 +307,8 @@ pub async fn create_backup(
         // Exclude old backups under data/ so each backup doesn't pack the
         // previous tarballs (~750 MB each, would explode size).
         .arg(format!("--exclude=./{}/backups", data_basename))
+        // The PostgreSQL-native dump is added separately below.
+        .arg(format!("--exclude=./{}/postgresql.sql", data_basename))
         // Transform: `./<install_basename>` -> `./app`, `./<data_basename>` -> `./data`.
         // Without the parent-cd trick above, the basenames don't appear in
         // archive paths and the transforms silently no-op.
@@ -379,6 +414,7 @@ struct RestoreResult {
     sha256_post: String,
     duration_ms: u64,
     pre_restore_dir: Option<String>,
+    pre_restore_database_dump: Option<String>,
     restored_at: String,
 }
 
@@ -544,13 +580,6 @@ pub async fn restore_backup(
         return Ok(resp);
     }
 
-    if postgres_backend {
-        return Err((
-            StatusCode::NOT_IMPLEMENTED,
-            "PostgreSQL database restore is not enabled yet".to_string(),
-        ));
-    }
-
     // === actual restore ===
     let started = std::time::Instant::now();
     let restored_at = Utc::now().to_rfc3339();
@@ -594,6 +623,41 @@ pub async fn restore_backup(
             "Invalid backup archive".to_string(),
         ));
     }
+
+    let postgres_dump_path = if postgres_backend {
+        let path = StdPath::new(&staging_root).join("data/postgresql.sql");
+        if !path.is_file() {
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "PostgreSQL backup is missing data/postgresql.sql".to_string(),
+            ));
+        }
+        if let Err(error) = validate_postgres_dump_file(&path) {
+            log::warn!("PostgreSQL backup dump rejected: {error}");
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err((StatusCode::BAD_REQUEST, "Invalid PostgreSQL dump".to_string()));
+        }
+        Some(path)
+    } else {
+        None
+    };
+    let postgres_rollback_path = if postgres_backend {
+        let path = StdPath::new(&staging_parent)
+            .join(format!("screentra-postgres-rollback-{ts}.sql"));
+        if let Err(error) = create_postgres_dump(&path).await {
+            log::error!("PostgreSQL rollback dump failed: {error}");
+            let _ = fs::remove_dir_all(&staging_root);
+            let _ = fs::remove_file(&path);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "PostgreSQL rollback dump failed".to_string(),
+            ));
+        }
+        Some(path)
+    } else {
+        None
+    };
 
     // Move existing install/data aside so the swap is atomic.
     let pre_restore_app = format!("{}.pre-restore-{}", install_dir, ts);
@@ -641,6 +705,35 @@ pub async fn restore_backup(
         ));
     }
 
+    if let Some(rollback_path) = postgres_rollback_path.as_ref() {
+        if let Some(dump_path) = postgres_dump_path.as_ref() {
+            let live_dump_path = StdPath::new(&data_dir).join(
+                dump_path
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("postgresql.sql")),
+            );
+            if let Err(error) = restore_postgres_dump(&live_dump_path).await {
+                log::error!("PostgreSQL restore failed after filesystem swap: {error}");
+                let _ = fs::remove_dir_all(&install_dir);
+                let _ = fs::remove_dir_all(&data_dir);
+                let _ = fs::rename(&pre_restore_app, &install_dir);
+                let _ = fs::rename(&pre_restore_data, &data_dir);
+                let rollback_error = restore_postgres_dump(rollback_path).await.err();
+                let _ = fs::remove_dir_all(&staging_root);
+                if rollback_error.is_some() {
+                    log::error!("PostgreSQL rollback restore failed");
+                }
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "PostgreSQL restore failed; filesystem rollback was attempted".to_string(),
+                ));
+            }
+            if let Err(error) = fs::remove_file(&live_dump_path) {
+                log::warn!("could not remove restored PostgreSQL dump: {error}");
+            }
+        }
+    }
+
     // Staging dir should now be empty (we moved app/ and data/ out).
     let _ = fs::remove_dir_all(&staging_root);
 
@@ -652,10 +745,13 @@ pub async fn restore_backup(
         warnings.push(format!("service restart failed: {}", e));
     }
 
-    // SHA256 of the new live signage.db (best-effort).
-    let post_sha = sha256_file(&format!("{}/signage.db", data_dir))
-        .await
-        .unwrap_or_default();
+    let post_sha = if postgres_backend {
+        String::new()
+    } else {
+        sha256_file(&format!("{}/signage.db", data_dir))
+            .await
+            .unwrap_or_default()
+    };
 
     let result = RestoreResult {
         status: "restored",
@@ -667,6 +763,9 @@ pub async fn restore_backup(
         sha256_post: post_sha,
         duration_ms: started.elapsed().as_millis() as u64,
         pre_restore_dir: Some(pre_restore_app),
+        pre_restore_database_dump: postgres_rollback_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
         restored_at,
     };
 
@@ -891,6 +990,14 @@ mod tests {
         assert!(postgres_tool_environment_from_url("sqlite:///tmp/signage.db").is_err());
         assert!(postgres_tool_environment_from_url("postgresql://user@/signage").is_err());
         assert!(postgres_tool_environment_from_url("postgresql://user@example.test").is_err());
+        let socket_environment = postgres_tool_environment_from_url(
+            "postgresql:///signage?host=%2Fvar%2Frun%2Fpostgresql",
+        )
+        .unwrap();
+        assert!(socket_environment.contains(&(
+            "PGHOST".to_string(),
+            "/var/run/postgresql".to_string()
+        )));
     }
     #[test]
     fn postgres_dump_validator_accepts_pg_dump_header() {
@@ -916,6 +1023,51 @@ mod tests {
             assert!(validate_postgres_dump_file(&path).is_err());
             std::fs::remove_file(path).unwrap();
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a disposable PostgreSQL database supplied through SIGNAGE_DATABASE_URL"]
+    async fn postgres_native_dump_restore_round_trips_addon_storage() {
+        let url = crate::postgres::configured_database_url().expect("SIGNAGE_DATABASE_URL");
+        let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+            .await
+            .expect("connect to disposable PostgreSQL database");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        client
+            .execute(
+                "INSERT INTO addon_storage (addon_id, storage_key, value_json, updated_at)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (addon_id, storage_key) DO UPDATE SET value_json=EXCLUDED.value_json",
+                &[&"backup-probe", &"round_trip", &r#"{"value":"before"}"#, &"2026-10-15T00:00:00Z"],
+            )
+            .await
+            .expect("seed addon storage");
+        let dump_path = test_root("postgres-native-round-trip");
+        create_postgres_dump(&dump_path)
+            .await
+            .expect("create PostgreSQL dump");
+        client
+            .execute(
+                "UPDATE addon_storage SET value_json=$1 WHERE addon_id=$2 AND storage_key=$3",
+                &[&r#"{""value"":""after""}"#, &"backup-probe", &"round_trip"],
+            )
+            .await
+            .expect("mutate addon storage");
+        restore_postgres_dump(&dump_path)
+            .await
+            .expect("restore PostgreSQL dump");
+        let value: String = client
+            .query_one(
+                "SELECT value_json FROM addon_storage WHERE addon_id=$1 AND storage_key=$2",
+                &[&"backup-probe", &"round_trip"],
+            )
+            .await
+            .expect("read restored addon storage")
+            .get(0);
+        assert_eq!(value, r#"{"value":"before"}"#);
+        std::fs::remove_file(dump_path).unwrap();
     }
 
     #[tokio::test]
