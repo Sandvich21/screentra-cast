@@ -256,6 +256,12 @@ window.API = {
         return res.json();
     },
 
+    async listAddonWidgetTypes() {
+        const res = await fetch('/api/addons/widget-types');
+        if (!res.ok) throw new Error('Failed to fetch addon widget types');
+        return res.json();
+    },
+
     async installAddon(manifest) {
         const res = await fetch('/api/addons', {
             method: 'POST',

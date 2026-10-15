@@ -14,6 +14,21 @@ const STATE_FILE: &str = "state.json";
 const MAX_ID_LEN: usize = 64;
 const MAX_NAME_LEN: usize = 80;
 const MAX_DESCRIPTION_LEN: usize = 500;
+const DECLARATIVE_RENDERERS: &[&str] = &[
+    "text",
+    "image",
+    "video",
+    "clock",
+    "date",
+    "weather",
+    "traffic",
+    "countdown",
+    "sound",
+    "embed",
+    "calendar",
+    "news",
+    "rectangle",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddonManifest {
@@ -50,6 +65,15 @@ pub struct AddonWidgetType {
     /// JSON-Schema-like object consumed by the editor in a later stage.
     #[serde(default)]
     pub schema: serde_json::Value,
+    /// Existing trusted renderer used by this declarative alias. This keeps
+    /// the first runtime phase code-free while still making an addon visible
+    /// in the editor and usable by the player.
+    #[serde(default)]
+    pub renderer_type: String,
+    #[serde(default)]
+    pub icon: String,
+    #[serde(default)]
+    pub default_props: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,8 +197,57 @@ pub fn validate_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
                 widget.id
             )));
         }
+        if !DECLARATIVE_RENDERERS.contains(&widget.renderer_type.as_str()) {
+            return Err(AddonError::Invalid(format!(
+                "Widget type '{}' must select a supported renderer_type",
+                widget.id
+            )));
+        }
+        if !widget.default_props.is_null() && !widget.default_props.is_object() {
+            return Err(AddonError::Invalid(format!(
+                "Widget type '{}' default_props must be a JSON object",
+                widget.id
+            )));
+        }
     }
     Ok(())
+}
+
+/// Flatten enabled declarative addons into the small registration contract
+/// consumed by the editor. The player continues using the selected trusted
+/// base renderer; no addon code is loaded at runtime in this phase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddonWidgetRegistration {
+    pub id: String,
+    pub addon_id: String,
+    pub addon_version: String,
+    pub name: String,
+    pub description: String,
+    pub renderer_type: String,
+    pub icon: String,
+    pub schema: serde_json::Value,
+    pub default_props: serde_json::Value,
+}
+
+pub fn enabled_widget_registrations() -> Result<Vec<AddonWidgetRegistration>, AddonError> {
+    let mut registrations = Vec::new();
+    for addon in list()?.into_iter().filter(|addon| addon.enabled) {
+        for widget in addon.manifest.widget_types {
+            registrations.push(AddonWidgetRegistration {
+                id: widget.id,
+                addon_id: addon.manifest.id.clone(),
+                addon_version: addon.manifest.version.clone(),
+                name: widget.name,
+                description: widget.description,
+                renderer_type: widget.renderer_type,
+                icon: widget.icon,
+                schema: widget.schema,
+                default_props: widget.default_props,
+            });
+        }
+    }
+    registrations.sort_by(|a, b| a.id.cmp(&b.id).then(a.addon_id.cmp(&b.addon_id)));
+    Ok(registrations)
 }
 
 fn io_error(error: impl std::fmt::Display) -> AddonError {
@@ -284,6 +357,9 @@ mod tests {
                 name: "Example Weather".to_string(),
                 description: String::new(),
                 schema: serde_json::json!({"type": "object"}),
+                renderer_type: "weather".to_string(),
+                icon: "🌤️".to_string(),
+                default_props: serde_json::json!({"units": "metric"}),
             }],
             permissions: Vec::new(),
             client_entrypoint: None,
@@ -300,6 +376,13 @@ mod tests {
     fn rejects_executable_manifest() {
         let mut value = manifest();
         value.kind = "client_widget".to_string();
+        assert!(validate_manifest(&value).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_renderer() {
+        let mut value = manifest();
+        value.widget_types[0].renderer_type = "arbitrary-code".to_string();
         assert!(validate_manifest(&value).is_err());
     }
 
@@ -327,6 +410,9 @@ mod tests {
         let installed = install(manifest()).unwrap();
         assert!(installed.enabled);
         assert_eq!(list().unwrap().len(), 1);
+        let registrations = enabled_widget_registrations().unwrap();
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(registrations[0].renderer_type, "weather");
         let disabled = set_enabled("example.weather", false).unwrap();
         assert!(!disabled.enabled);
         assert!(!list().unwrap()[0].enabled);

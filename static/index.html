@@ -986,10 +986,10 @@
                     <div class="sys-collapsible-body">
                         <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
                             <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.75rem;">
-                                The first addon phase validates and stores declarative manifests only. They are the foundation for future editor widget registration. Executable server code and client modules are intentionally rejected until signed delivery and sandboxing are implemented.
+                                The first addon phase validates and stores declarative manifests only. An enabled manifest may alias a trusted built-in renderer and appear in the layout editor palette. Executable server code and custom client modules are intentionally rejected until signed delivery and sandboxing are implemented.
                             </div>
                             <label for="addon-manifest-input" style="display:block; font-size:0.8rem; margin-bottom:0.35rem;">Addon manifest JSON</label>
-                            <textarea id="addon-manifest-input" rows="10" spellcheck="false" style="width:100%; box-sizing:border-box; font-family:monospace; font-size:0.78rem; margin-bottom:0.65rem;" placeholder='{"schema_version":1,"id":"example.weather","name":"Example Weather","version":"0.1.0","kind":"declarative","widget_types":[]}'></textarea>
+                            <textarea id="addon-manifest-input" rows="10" spellcheck="false" style="width:100%; box-sizing:border-box; font-family:monospace; font-size:0.78rem; margin-bottom:0.65rem;" placeholder='{"schema_version":1,"id":"example.weather","name":"Example Weather","version":"0.1.0","kind":"declarative","widget_types":[{"id":"forecast","name":"Forecast Alias","renderer_type":"weather","icon":"🌤️","default_props":{"units":"metric"}}]}'></textarea>
                             <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
                                 <button class="btn btn-primary" id="btn-addon-install" type="button">Install Manifest</button>
                                 <span id="addon-install-status" style="font-size:0.8rem; color:var(--text-dim,#888);"></span>
@@ -1158,7 +1158,7 @@
     <script src="/js/filebrowser.js?v=1789404930"></script>
     
     <script src="/js/weather-icons.js?v=1791477110-alert-condition-icons"></script>
-    <script src="/js/editor.js?v=20261011134500-manual-traffic-blocks"></script>
+    <script src="/js/editor.js?v=20261015-addon-widget-alias-v1"></script>
     <script src="/js/widget-schemas.js?v=1789404930"></script>
     <script src="/js/widget-template-editor.js?v=1789404930"></script>
     <!-- Layout Picker Modal for Layout Sets -->

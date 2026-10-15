@@ -1,5 +1,5 @@
 use crate::backup_api;
-use crate::addons::{AddonError, AddonManifest, AddonRecord};
+use crate::addons::{AddonError, AddonManifest, AddonRecord, AddonWidgetRegistration};
 use crate::db::{ClientDisplayRegistration, ClientRegistration, Database};
 use crate::display::detect_displays;
 use crate::models::{
@@ -1126,6 +1126,7 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         )
         .route("/api/system", get(system_status))
         .route("/api/addons", get(list_addons).post(install_addon))
+        .route("/api/addons/widget-types", get(list_addon_widget_types))
         .route("/api/addons/{id}/enable", post(enable_addon))
         .route("/api/addons/{id}/disable", post(disable_addon))
         .route("/api/addons/{id}", delete(delete_addon))
@@ -1844,6 +1845,12 @@ fn addon_error_response(error: AddonError) -> (StatusCode, String) {
 
 async fn list_addons() -> Result<AxumJson<Vec<AddonRecord>>, (StatusCode, String)> {
     crate::addons::list()
+        .map(AxumJson)
+        .map_err(addon_error_response)
+}
+
+async fn list_addon_widget_types() -> Result<AxumJson<Vec<AddonWidgetRegistration>>, (StatusCode, String)> {
+    crate::addons::enabled_widget_registrations()
         .map(AxumJson)
         .map_err(addon_error_response)
 }

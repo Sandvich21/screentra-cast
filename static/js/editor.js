@@ -12,6 +12,7 @@ const Editor = {
   currentLayoutId: null,
   selectedWidgetId: null,
   presetCache: {},          // widget_type -> [{id, name, props_json, is_builtin}]
+  addonWidgetTypes: [],      // enabled declarative addon registrations
   presetCacheAt: 0,
   dragState: null,
   resizeState: null,
@@ -349,7 +350,7 @@ const Editor = {
 
   async fetchAll() {
     const epoch = ++this._fetchEpoch;
-    await Promise.all([this.fetchLayouts(epoch), this.fetchFolders(epoch), this.fetchLayoutSets(epoch), this.fetchPresets(false, epoch)]);
+    await Promise.all([this.fetchLayouts(epoch), this.fetchFolders(epoch), this.fetchLayoutSets(epoch), this.fetchPresets(false, epoch), this.fetchAddonWidgetTypes(epoch)]);
     if (epoch !== this._fetchEpoch) return;
     // Refresh palette so the per-type preset selectors show up.
     if (this.el && this.el.palette) this.renderPalette();
@@ -545,6 +546,17 @@ const Editor = {
       } catch (_) {}
     }
     return this.presetCache;
+  },
+
+  async fetchAddonWidgetTypes(epoch = this._fetchEpoch) {
+    try {
+      const registrations = await API.listAddonWidgetTypes();
+      if (epoch !== this._fetchEpoch) return;
+      this.addonWidgetTypes = Array.isArray(registrations) ? registrations : [];
+    } catch (e) {
+      console.warn('fetchAddonWidgetTypes error', e);
+      this.addonWidgetTypes = [];
+    }
   },
 
   // Selected default preset per widget_type (persistent in localStorage).
@@ -860,7 +872,12 @@ const Editor = {
       { type: 'news', icon: '📰', label: 'News Ticker' },
       { type: 'rectangle', icon: '🟦', label: 'Shape' },
     ];
-    const widgets = mode === 'normal' ? normalWidgets : interactiveWidgets;
+    const widgets = mode === 'normal' ? normalWidgets.concat((this.addonWidgetTypes || []).map(addon => ({
+      type: `addon:${addon.addon_id}:${addon.id}`,
+      icon: addon.icon || '🧩',
+      label: addon.name,
+      addon,
+    }))) : interactiveWidgets;
     const note = mode === 'normal'
       ? 'Display/media widgets for normal layouts.'
       : 'Interactive touch widgets. Switch to Widgets for display/media widgets.';
@@ -1058,7 +1075,7 @@ const Editor = {
 
   renderLayoutWidget(w) {
     const sel = w.id === this.selectedWidgetId ? 'selected' : '';
-    const label = this.getWidgetLabel ? this.getWidgetLabel(w.type) : w.type;
+    const label = w.props?._addon_label || (this.getWidgetLabel ? this.getWidgetLabel(w.type) : w.type);
     const rotation = Math.max(-180, Math.min(180, Number.isFinite(Number(w.props?.rotation)) ? Number(w.props.rotation) : 0));
     const x = Math.max(0, Math.min(100, Number(w.x) || 0));
     const y = Math.max(0, Math.min(100, Number(w.y) || 0));
@@ -1856,6 +1873,11 @@ const Editor = {
     }
   },
 
+  _addonWidgetForType(type) {
+    const key = String(type || '');
+    return (this.addonWidgetTypes || []).find(addon => `addon:${addon.addon_id}:${addon.id}` === key) || null;
+  },
+
   addWidget(type, px, py) {
     // No current layout? Make one instead of failing silently.
     if (!this.currentLayout) {
@@ -1893,6 +1915,20 @@ const Editor = {
   // `interactive: true`, and the runtime client decides whether to wire
   // up input handlers based on that flag.
   makeLayoutWidget(type, id, x, y) {
+    const addon = this._addonWidgetForType(type);
+    if (addon) {
+      const widget = this.makeLayoutWidget(addon.renderer_type, id, x, y);
+      const defaultProps = addon.default_props && typeof addon.default_props === 'object' && !Array.isArray(addon.default_props) ? addon.default_props : {};
+      widget.props = {
+        ...widget.props,
+        ...defaultProps,
+        _addon_id: addon.addon_id,
+        _addon_type: addon.id,
+        _addon_version: addon.addon_version,
+        _addon_label: addon.name,
+      };
+      return widget;
+    }
     const base = { id, type, x, y, w: 30, h: 20, z: 1, props: {} };
     if (type === 'text') return { ...base, w: 40, h: 15, props: { content: 'text widget', font_size: 18, color: '#ffffff', font_family: 'sans-serif' } };
     if (type === 'image') return { ...base, w: 40, h: 30, props: { url: '', playlist: [], loop: true, shuffle: false, slide_duration: 10, alt: 'Image', fit: 'cover', radius: 0, radius_tl: 0, radius_tr: 0, radius_br: 0, radius_bl: 0 } };
