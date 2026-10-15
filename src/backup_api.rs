@@ -733,6 +733,7 @@ pub async fn restore_backup(
                 let _ = fs::rename(&pre_restore_app, &install_dir);
                 let _ = fs::rename(&pre_restore_data, &data_dir);
                 let rollback_error = restore_postgres_dump(rollback_path).await.err();
+                let _ = fs::remove_file(rollback_path);
                 let _ = fs::remove_dir_all(&staging_root);
                 if rollback_error.is_some() {
                     log::error!("PostgreSQL rollback restore failed");
@@ -745,6 +746,12 @@ pub async fn restore_backup(
             if let Err(error) = fs::remove_file(&live_dump_path) {
                 log::warn!("could not remove restored PostgreSQL dump: {error}");
             }
+        }
+    }
+
+    if let Some(rollback_path) = postgres_rollback_path.as_ref() {
+        if let Err(error) = fs::remove_file(rollback_path) {
+            warnings.push(format!("could not remove PostgreSQL rollback dump: {error}"));
         }
     }
 
@@ -1269,6 +1276,14 @@ mod tests {
             .get(0);
         assert_eq!(value, r#"{"value":"before"}"#);
         assert!(!data_dir.join("postgresql.sql").exists());
+        assert!(!parent
+            .read_dir()
+            .unwrap()
+            .any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("screentra-postgres-rollback-")));
         let restored_store = crate::postgres::PostgresStore::connect()
             .await
             .expect("reconnect restored metadata store");
@@ -1367,6 +1382,14 @@ mod tests {
         assert_eq!(std::fs::read(install_dir.join("server")).unwrap(), b"old server");
         assert_eq!(std::fs::read(data_dir.join("runtime.txt")).unwrap(), b"old runtime");
         assert!(!data_dir.join("postgresql.sql").exists());
+        assert!(!parent
+            .read_dir()
+            .unwrap()
+            .any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("screentra-postgres-rollback-")));
         assert!(!parent
             .read_dir()
             .unwrap()
