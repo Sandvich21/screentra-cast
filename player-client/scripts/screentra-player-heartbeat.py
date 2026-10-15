@@ -425,6 +425,11 @@ def sync_client_addons(server, client_id, cache_dir):
         return status
     addon_root = Path(os.environ.get('RIPLEY_CLIENT_ADDONS_DIR', str(Path(cache_dir).parent / 'addons')))
     addon_root.mkdir(parents=True, exist_ok=True)
+    desired_ids = {
+        str(expected['id']) for expected in addons
+        if isinstance(expected, dict) and ADDON_ID_RE.fullmatch(str(expected.get('id', '')))
+    }
+    inventory_ids_valid = len(desired_ids) == len(addons)
     for expected in addons:
         item_status = {}
         try:
@@ -472,6 +477,12 @@ def sync_client_addons(server, client_id, cache_dir):
         except Exception as error:
             item_status.update({'state': 'failed', 'error': str(error)[:256]})
         status['addons'].append(item_status)
+    if inventory_ids_valid:
+        for child in addon_root.iterdir():
+            if not child.is_dir() or not ADDON_ID_RE.fullmatch(child.name) or child.name in desired_ids:
+                continue
+            if (child / 'active.json').is_file():
+                shutil.rmtree(child)
     _atomic_write_text(status_path, json.dumps(status, indent=2))
     return status
 

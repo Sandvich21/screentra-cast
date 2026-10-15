@@ -213,8 +213,12 @@ package again against the pinned client addon public key at
 `/etc/screentra-cast/addon-signing.pub`, and stages it under the client data
 directory. Verification state is written to `cache/addon-status.json` and
 reported to the authenticated `POST /api/clients/{id}/addons/status` endpoint.
-The server stores a bounded per-client status snapshot. Staged modules are not
-executed or loaded yet; the renderer/runtime sandbox remains a separate gate.
+The server stores a bounded per-client status snapshot. The player removes
+previously staged, inactive addon directories only after receiving a valid
+inventory that no longer lists them; malformed inventories do not trigger
+cleanup. This is staged-package removal, not runtime rollback, because client
+modules remain inert and are never loaded; the renderer/runtime sandbox remains
+a separate gate.
 
 Signed client-extension packages can now be uploaded as a `.tar.gz` containing:
 
