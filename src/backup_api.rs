@@ -436,6 +436,12 @@ fn validate_postgres_archive(path: &StdPath) -> Result<(), String> {
     result
 }
 
+fn cleanup_postgres_rollback_dump(path: Option<&StdPath>) {
+    if let Some(path) = path {
+        let _ = fs::remove_file(path);
+    }
+}
+
 async fn sha256_file(path: &str) -> Result<String, String> {
     let output = Command::new("sha256sum")
         .arg(path)
@@ -678,6 +684,7 @@ pub async fn restore_backup(
     let pre_restore_data = format!("{}.pre-restore-{}", data_dir, ts);
     if let Err(e) = fs::rename(&install_dir, &pre_restore_app) {
         log::error!("backup restore install rename failed: {e}");
+        cleanup_postgres_rollback_dump(postgres_rollback_path.as_deref());
         let _ = fs::remove_dir_all(&staging_root);
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -686,6 +693,7 @@ pub async fn restore_backup(
     }
     if let Err(e) = fs::rename(&data_dir, &pre_restore_data) {
         log::error!("backup restore data rename failed: {e}");
+        cleanup_postgres_rollback_dump(postgres_rollback_path.as_deref());
         // Roll back the install rename.
         let _ = fs::rename(&pre_restore_app, &install_dir);
         let _ = fs::remove_dir_all(&staging_root);
@@ -697,6 +705,7 @@ pub async fn restore_backup(
 
     if let Err(e) = fs::rename(format!("{}/app", staging_root), &install_dir) {
         log::error!("backup restore app placement failed: {e}");
+        cleanup_postgres_rollback_dump(postgres_rollback_path.as_deref());
         // Rollback both renames + remove staging.
         let _ = fs::rename(&pre_restore_app, &install_dir);
         let _ = fs::rename(&pre_restore_data, &data_dir);
@@ -708,6 +717,7 @@ pub async fn restore_backup(
     }
     if let Err(e) = fs::rename(format!("{}/data", staging_root), &data_dir) {
         log::error!("backup restore data placement failed: {e}");
+        cleanup_postgres_rollback_dump(postgres_rollback_path.as_deref());
         // Rollback app placement, install rename, data rename.
         let _ = fs::remove_dir_all(&install_dir);
         let _ = fs::rename(&pre_restore_app, &install_dir);
