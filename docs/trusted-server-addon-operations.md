@@ -12,8 +12,10 @@ added to the ordinary addon registry, enabled, pulled, or executed.
 
 The staged records can be inspected or removed by an administrator with
 `GET /api/addons/trusted-service/staged` and
-`DELETE /api/addons/trusted-service/staged/<addon-id>`. Removal only deletes the
-inert staged manifest and signature; it cannot stop or delete a running service
+`DELETE /api/addons/trusted-service/staged/<addon-id>`. Successful stage and
+removal operations are recorded as `trusted_service_stage_create` and
+`trusted_service_stage_remove` audit events. Removal only deletes the inert
+staged manifest and signature; it cannot stop or delete a running service
 because no service can currently run.
 
 The validator checks the service metadata that would otherwise become an

@@ -1937,6 +1937,28 @@ fn require_addon_storage_admin(
     }
 }
 
+async fn audit_trusted_service_stage_event(
+    state: &RuntimeState,
+    principal: &crate::middleware::AuthenticatedPrincipal,
+    event_type: &str,
+    target: &str,
+    outcome: &str,
+    detail: Option<&str>,
+) {
+    let _ = state
+        .client_repository()
+        .record_audit_event(
+            Some(&principal.username),
+            Some(&principal.role),
+            event_type,
+            Some(target),
+            outcome,
+            detail,
+            &Utc::now().to_rfc3339(),
+        )
+        .await;
+}
+
 async fn get_addon_storage(
     State(repository): State<AddonStorageRepository>,
     Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
@@ -2022,18 +2044,30 @@ async fn list_trusted_service_stages(
 }
 
 async fn remove_trusted_service_stage(
+    State(state): State<RuntimeState>,
     Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     require_addon_storage_admin(&principal)?;
-    crate::addons::remove_trusted_service_stage(&id)
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(addon_error_response)
+    crate::addons::remove_trusted_service_stage(&id).map_err(addon_error_response)?;
+    audit_trusted_service_stage_event(
+        &state,
+        &principal,
+        "trusted_service_stage_remove",
+        &id,
+        "success",
+        None,
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn stage_trusted_service_manifest(
+    State(state): State<RuntimeState>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, AxumJson<crate::addons::TrustedServiceStage>), (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
     let temp_dir = std::env::temp_dir().join(format!("screentra-trusted-service-{}", Uuid::new_v4()));
     fs::create_dir_all(&temp_dir).map_err(|_| internal_server_error())?;
     let manifest_path = temp_dir.join("manifest.json");
@@ -2094,9 +2128,17 @@ async fn stage_trusted_service_manifest(
     };
     let _ = fs::remove_dir_all(&temp_dir);
     result?;
-    staged?
-        .map(|stage| (StatusCode::CREATED, AxumJson(stage)))
-        .ok_or_else(|| internal_server_error())
+    let stage = staged?.ok_or_else(internal_server_error)?;
+    audit_trusted_service_stage_event(
+        &state,
+        &principal,
+        "trusted_service_stage_create",
+        &stage.manifest.id,
+        "success",
+        None,
+    )
+    .await;
+    Ok((StatusCode::CREATED, AxumJson(stage)))
 }
 
 async fn upload_addon_package(
@@ -9186,6 +9228,47 @@ mod tests {
         .await
         .expect_err("deleted addon storage should be absent");
         assert_eq!(missing.0, StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn trusted_service_stage_removal_is_audited() {
+        let db_path = std::env::temp_dir().join(format!("screentra-trusted-stage-audit-{}.db", Uuid::new_v4()));
+        let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open test database"));
+        let state = RuntimeState::sqlite(db);
+        let admin = crate::middleware::AuthenticatedPrincipal {
+            username: "stage-admin".to_string(),
+            role: "admin".to_string(),
+        };
+        let root = std::env::temp_dir().join(format!("screentra-trusted-stage-root-{}", Uuid::new_v4()));
+        let old_data_root = std::env::var("SIGNAGE_DATA_DIR").ok();
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &root); }
+        let stage_id = format!("missing.{}", Uuid::new_v4().simple());
+
+        let removed = remove_trusted_service_stage(
+            State(state.clone()),
+            Extension(admin.clone()),
+            Path(stage_id.clone()),
+        )
+        .await
+        .expect("admin should be allowed to remove a staged service");
+        assert_eq!(removed, StatusCode::NO_CONTENT);
+
+        let events = state
+            .client_repository()
+            .list_audit_events(10)
+            .await
+            .expect("audit listing should succeed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "trusted_service_stage_remove");
+        assert_eq!(events[0].target.as_deref(), Some(stage_id.as_str()));
+        assert_eq!(events[0].outcome, "success");
+        if let Some(value) = old_data_root {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_file(db_path);
     }
 
