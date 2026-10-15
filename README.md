@@ -195,10 +195,17 @@ user to confirm the discovered server (or select one when several are present),
 and stores the CA before making HTTPS requests. Remote HTTP discovery is
 rejected.
 
-The first heartbeat registers the new client as a pending candidate. An
-administrator adopts it from **Connected Clients**. Repeating the installer on
-additional displays follows the same flow; no server address needs to be typed.
-For unattended or routed-network installs, the explicit override remains:
+The first heartbeat registers the new client as a **pending adoption** candidate.
+The display shows a six-digit pairing code on its no-layout screen, and the
+matching code appears on the candidate card in **Connected Clients**. The user
+confirms that the physical display and server card show the same code before an
+administrator clicks **Adopt Client**. The code is only a physical-confirmation
+value; it is not a client password or long-term credential.
+
+After the code is confirmed, an administrator adopts the candidate from
+**Connected Clients**. Repeating the installer on additional displays follows
+the same flow; no server address needs to be typed. For unattended or
+routed-network installs, the explicit override remains:
 
 ```bash
 SCREENTRA_SERVER_URL=https://server.example:3000 \

@@ -358,6 +358,13 @@
           </div>
           <div class="k" id="assignedLayout">No layout assigned</div>
         </div>
+        <div class="row" style="grid-column: span 2">
+          <div>
+            <div class="k">Pairing code</div>
+            <div class="v" id="pairingCode" style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 24px; letter-spacing: .18em;">—</div>
+          </div>
+          <div class="k">Confirm this code on the server before adoption</div>
+        </div>
       </div>
 
       <div class="touchline" id="touchline">
@@ -416,6 +423,7 @@
         $('serverUrl').textContent = s.server_url || '—';
         $('hostname').textContent  = s.hostname || '—';
         $('clientId').textContent  = s.client_id || '—';
+        $('pairingCode').textContent = s.pairing_code || '—';
         const adminUrl = s.admin_url || (s.lan_ip ? ('http://' + s.lan_ip + ':3910/') : 'http://11.1.1.54:3910/');
         const adminUrlEl = $('adminUrl');
         if (adminUrlEl) adminUrlEl.textContent = adminUrl;

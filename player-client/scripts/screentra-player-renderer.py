@@ -26,6 +26,12 @@ MAX_REQUEST_BODY_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
 
 
+def client_pairing_code(client_id):
+    """Return the short physical-confirmation code for a client ID."""
+    digest = hashlib.sha256(b'screentra-cast-pairing-v1\0' + str(client_id).encode('utf-8')).digest()
+    return f'{int.from_bytes(digest[:4], "big") % 1_000_000:06d}'
+
+
 def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')

@@ -1289,6 +1289,7 @@ Posts system metrics to the Screentra Cast signage server so the Connected Clien
 can show enrolled player uptime and usage.
 """
 import argparse
+import hashlib
 import json
 import ssl
 import os
@@ -1310,6 +1311,12 @@ detect_displays = _mod.detect_displays
 from pathlib import Path
 
 MAX_JSON_FILE_BYTES = 1 << 20
+
+
+def client_pairing_code(client_id):
+    """Return the short physical-confirmation code for a client ID."""
+    digest = hashlib.sha256(b'screentra-cast-pairing-v1\0' + str(client_id).encode('utf-8')).digest()
+    return f'{int.from_bytes(digest[:4], "big") % 1_000_000:06d}'
 
 
 def _read_json_file(path: Path, default):
@@ -1492,6 +1499,7 @@ def payload(args):
         'client_installed': True,
         'identity_source': 'persistent_client_id',
         'client_id': client_id,
+        'pairing_code': client_pairing_code(client_id),
         'hostname': args.name or hostname,
         'address': local_ip(),
         'role': args.role,
@@ -1837,6 +1845,7 @@ def main():
                 'at': _dt.now(_tz.utc).isoformat(),
                 'connection': 'online' if status == 200 else 'offline',
                 'assigned_layout_id': assigned,
+                'pairing_code': client_pairing_code(data['client_id']),
             }
             Path(args.cache_dir).mkdir(parents=True, exist_ok=True)
             (Path(args.cache_dir) / 'last-heartbeat.json').write_text(__import__('json').dumps(status_payload))
@@ -2216,6 +2225,13 @@ cat > "$INSTALL_DIR/no-layout.html" <<'PY_NOLAYOUT'
           </div>
           <div class="k" id="assignedLayout">No layout assigned</div>
         </div>
+        <div class="row" style="grid-column: span 2">
+          <div>
+            <div class="k">Pairing code</div>
+            <div class="v" id="pairingCode" style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 24px; letter-spacing: .18em;">—</div>
+          </div>
+          <div class="k">Confirm this code on the server before adoption</div>
+        </div>
       </div>
 
       <div class="touchline" id="touchline">
@@ -2274,6 +2290,7 @@ cat > "$INSTALL_DIR/no-layout.html" <<'PY_NOLAYOUT'
         $('serverUrl').textContent = s.server_url || '—';
         $('hostname').textContent  = s.hostname || '—';
         $('clientId').textContent  = s.client_id || '—';
+        $('pairingCode').textContent = s.pairing_code || '—';
         const adminUrl = s.admin_url || (s.lan_ip ? ('http://' + s.lan_ip + ':3910/') : 'http://11.1.1.54:3910/');
         const adminUrlEl = $('adminUrl');
         if (adminUrlEl) adminUrlEl.textContent = adminUrl;
@@ -3086,6 +3103,12 @@ from pathlib import Path
 
 MAX_REQUEST_BODY_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
+
+
+def client_pairing_code(client_id):
+    """Return the short physical-confirmation code for a client ID."""
+    digest = hashlib.sha256(b'screentra-cast-pairing-v1\0' + str(client_id).encode('utf-8')).digest()
+    return f'{int.from_bytes(digest[:4], "big") % 1_000_000:06d}'
 
 
 def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:

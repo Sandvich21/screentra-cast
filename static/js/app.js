@@ -4786,15 +4786,16 @@ document.addEventListener('DOMContentLoaded', () => App.init());
         </div>`;
       }
       return `<div class="client-card ${esc(c.status).replace(/\s+/g,'-')} ${enrolled?'enrolled':'candidate'}" data-client-id="${esc(c.id)}">
-            <div class="client-card-kicker"><span>CLIENT</span></div>
+            <div class="client-card-kicker"><span>${enrolled ? 'CLIENT' : 'PENDING ADOPTION'}</span></div>
         <div class="client-main">
           <div class="client-identity"><div>
             <div class="client-name">${esc(c.name)}</div>
             <div class="client-sub">${esc(c.address)} ${c.version ? '· v'+esc(c.version) : ''}</div>
           </div></div>
         </div>
+        ${!enrolled ? `<div class="client-pairing-code"><span>PAIRING CODE</span><strong>${esc(c.pairing_code || '—')}</strong><small>Confirm this matches the code shown on the device.</small></div>` : ''}
         <div class="client-last-seen">Last seen: ${esc(c.last_seen)}</div>
-        ${enrolled ? '<div class="client-card-footer"><span>DEVICE DETAILS</span><span>Click card to inspect displays and controls →</span></div>' : `<div class="client-action-row"><button type="button" class="btn btn-primary btn-sm client-adopt" data-client-id="${esc(c.id)}">Adopt Client</button></div><div class="client-action-hint">This client is waiting for administrator adoption.</div>`}
+        ${enrolled ? '<div class="client-card-footer"><span>DEVICE DETAILS</span><span>Click card to inspect displays and controls →</span></div>' : `<div class="client-action-row"><button type="button" class="btn btn-primary btn-sm client-adopt" data-client-id="${esc(c.id)}">Adopt Client</button><button type="button" class="btn btn-danger btn-sm client-reject" data-client-id="${esc(c.id)}">Reject</button></div><div class="client-action-hint">Confirm the pairing code on the device before adopting it.</div>`}
       </div>`;
     }).join('');
     list.querySelectorAll('.virtual-client-copy').forEach(btn => {
@@ -4839,6 +4840,25 @@ document.addEventListener('DOMContentLoaded', () => App.init());
           btn.textContent = 'Adopt Client';
           if (typeof App.setStatus === 'function') App.setStatus('Adoption failed: ' + error.message, true);
           else alert('Adoption failed: ' + error.message);
+        }
+      });
+    });
+    list.querySelectorAll('.client-reject').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const clientId = btn.dataset.clientId;
+        if (!clientId) return;
+        if (typeof App.confirm === 'function' && !await App.confirm('Reject pending client?', 'This removes the unadopted candidate from the server.')) return;
+        btn.disabled = true;
+        try {
+          const response = await fetch(`/api/clients/${encodeURIComponent(clientId)}`, { method: 'DELETE' });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+          await App.loadConnectedClients(false);
+        } catch (error) {
+          btn.disabled = false;
+          if (typeof App.setStatus === 'function') App.setStatus('Reject failed: ' + error.message, true);
+          else alert('Reject failed: ' + error.message);
         }
       });
     });

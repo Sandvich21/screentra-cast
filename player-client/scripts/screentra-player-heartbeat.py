@@ -5,6 +5,7 @@ Posts system metrics to the Screentra Cast signage server so the Connected Clien
 can show enrolled player uptime and usage.
 """
 import argparse
+import hashlib
 import json
 import ssl
 import os
@@ -26,6 +27,12 @@ detect_displays = _mod.detect_displays
 from pathlib import Path
 
 MAX_JSON_FILE_BYTES = 1 << 20
+
+
+def client_pairing_code(client_id):
+    """Return the short physical-confirmation code for a client ID."""
+    digest = hashlib.sha256(b'screentra-cast-pairing-v1\0' + str(client_id).encode('utf-8')).digest()
+    return f'{int.from_bytes(digest[:4], "big") % 1_000_000:06d}'
 
 
 def _read_json_file(path: Path, default):
@@ -208,6 +215,7 @@ def payload(args):
         'client_installed': True,
         'identity_source': 'persistent_client_id',
         'client_id': client_id,
+        'pairing_code': client_pairing_code(client_id),
         'hostname': args.name or hostname,
         'address': local_ip(),
         'role': args.role,
@@ -553,6 +561,7 @@ def main():
                 'at': _dt.now(_tz.utc).isoformat(),
                 'connection': 'online' if status == 200 else 'offline',
                 'assigned_layout_id': assigned,
+                'pairing_code': client_pairing_code(data['client_id']),
             }
             Path(args.cache_dir).mkdir(parents=True, exist_ok=True)
             (Path(args.cache_dir) / 'last-heartbeat.json').write_text(__import__('json').dumps(status_payload))

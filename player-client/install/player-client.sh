@@ -3112,13 +3112,14 @@ def _nl_status():
     client_id = cid_path.read_text().strip() if cid_path.exists() else None
     server_url = srv_path.read_text().strip() if srv_path.exists() else 'unknown'
     last_path = Handler.cache_dir / 'last-heartbeat.json'
-    last_seen = connection = last_layout = None
+    last_seen = connection = last_layout = pairing_code = None
     if last_path.exists():
         try:
             last = _read_json_file(last_path, {})
             last_seen = last.get('at')
             connection = last.get('connection', 'offline')
             last_layout = last.get('assigned_layout_id')
+            pairing_code = last.get('pairing_code')
         except Exception:
             pass
     disp_path = Handler.cache_dir / f'display-{int(os.environ.get("RIPLEY_DISPLAY_INDEX", "0"))}.json'
@@ -3162,6 +3163,7 @@ def _nl_status():
         'screentra_client_client': True,
         'client_installed': True,
         'client_id': client_id,
+        'pairing_code': pairing_code or (client_pairing_code(client_id) if client_id else None),
         'identity_source': 'persistent_client_id',
         'server_url': server_url,
         'hostname': socket.gethostname() if 'socket' in dir() else os.uname().nodename,

@@ -568,6 +568,10 @@ html[data-theme="classic"] {
 .client-card.offline, .client-card.stale, .client-card.seen { border-color:var(--border,#233); opacity:1; }
 .client-card.candidate { border-style:dashed; }
 .client-action-hint { margin-top:.55rem; color:var(--accent-yellow); font-size:.78rem; }
+.client-pairing-code { display:grid; grid-template-columns:auto auto; align-items:baseline; gap:.2rem .65rem; margin-top:.65rem; padding:.6rem .7rem; border:1px solid var(--status-stale-border); border-radius:8px; background:var(--status-stale-bg); }
+.client-pairing-code span { color:var(--status-stale-text); font-size:.68rem; font-weight:800; letter-spacing:.08em; }
+.client-pairing-code strong { color:var(--status-stale-text); font:700 1.35rem ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.16em; }
+.client-pairing-code small { grid-column:1 / -1; color:var(--text-dim,#888); font-size:.72rem; }
 
 @media (max-width: 900px) {
   .client-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }

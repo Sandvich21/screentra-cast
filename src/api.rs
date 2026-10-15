@@ -6155,6 +6155,7 @@ async fn delete_user(
 #[derive(Debug, Serialize)]
 struct ConnectedClientInfo {
     id: String,
+    pairing_code: String,
     name: String,
     address: String,
     role: String,
@@ -6177,6 +6178,17 @@ struct ConnectedClientInfo {
     touch_binding: Option<serde_json::Value>,
     theme: Option<String>,
     is_virtual: bool,
+}
+
+/// Short physical-confirmation code shared by the server card and the client
+/// display. It is a correlation value, not a credential.
+fn client_pairing_code(client_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"screentra-cast-pairing-v1\0");
+    hasher.update(client_id.as_bytes());
+    let digest = hasher.finalize();
+    let value = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1_000_000;
+    format!("{value:06}")
 }
 
 #[derive(Debug, Deserialize)]
@@ -8289,6 +8301,7 @@ fn collect_connected_clients_from_rows(rows: Vec<RegisteredClientRow>, run_searc
     let mut clients: Vec<ConnectedClientInfo> = if show_server {
         vec![ConnectedClientInfo {
             id: format!("server-{}", local.hostname),
+            pairing_code: client_pairing_code(&format!("server-{}", local.hostname)),
             name: local.hostname.clone(),
             address: local_ip().unwrap_or_else(|| "127.0.0.1".to_string()),
             role: "Server / Local Player".to_string(),
@@ -8381,6 +8394,7 @@ fn load_registered_clients_from_rows(rows: Vec<RegisteredClientRow>) -> Vec<Conn
             } else {
                 client_status_from_last_seen(&last_seen)
             },
+            pairing_code: client_pairing_code(&id),
             id,
             name,
             address,
@@ -8496,6 +8510,11 @@ fn discover_ripley_client_candidates() -> Vec<ConnectedClientInfo> {
                     .or_else(|| status.get("display_connector").and_then(|v| v.as_str()))
                     .unwrap_or("display");
                 out.push(ConnectedClientInfo {
+                    pairing_code: status
+                        .get("pairing_code")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| client_pairing_code(&client_id)),
                     id: client_id,
                     name: format!("{} · {} {}", hostname, display_label, display_index),
                     address: ip.clone(),
@@ -8629,6 +8648,15 @@ mod tests {
         assert!(repository_backend_from_value(Some("POSTGRES"))
             .expect_err("unknown backend must fail closed")
             .contains("exactly 'postgres' or 'sqlite'"));
+    }
+
+    #[test]
+    fn client_pairing_code_is_stable_six_digits_and_id_specific() {
+        let first = client_pairing_code("client-a");
+        assert_eq!(first, client_pairing_code("client-a"));
+        assert_eq!(first.len(), 6);
+        assert!(first.bytes().all(|byte| byte.is_ascii_digit()));
+        assert_ne!(first, client_pairing_code("client-b"));
     }
 
     #[test]
