@@ -663,7 +663,7 @@ mod tests {
     use axum::{
         body::to_bytes,
         http::{Request, StatusCode},
-        routing::put,
+        routing::{post, put},
         Router,
     };
     use flate2::{write::GzEncoder, Compression};
@@ -686,6 +686,69 @@ mod tests {
         header.set_mode(0o644);
         header.set_cksum();
         builder.append_data(&mut header, path, data).unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_http_backup_contains_addon_related_data() {
+        let _guard = BACKUP_HTTP_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let parent = test_root("create");
+        let install_dir = parent.join("install");
+        let data_dir = parent.join("data");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::create_dir_all(data_dir.join("trusted-services/example.weather")).unwrap();
+        std::fs::write(install_dir.join("server"), b"server binary").unwrap();
+        std::fs::write(data_dir.join("signage.db"), b"sqlite with addon_storage").unwrap();
+        std::fs::write(
+            data_dir.join("trusted-services/example.weather/manifest.json"),
+            b"staged manifest",
+        )
+        .unwrap();
+
+        let db_path = parent.join("metadata.db");
+        let db = crate::db::Database::open(db_path.to_str().unwrap()).unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        std::env::set_current_dir(&install_dir).unwrap();
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &data_dir); }
+        let app = Router::new()
+            .route("/api/backups", post(create_backup))
+            .with_state(BackupMetadataRepository::Sqlite(std::sync::Arc::new(db)));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/backups")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+
+        std::env::set_current_dir(old_cwd).unwrap();
+        if let Some(value) = old_data_dir {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+
+        assert_eq!(status, StatusCode::OK, "body={}", String::from_utf8_lossy(&body));
+        let backup: crate::models::Backup = serde_json::from_slice(&body).unwrap();
+        let archive_path = std::path::Path::new(&backup.file_path);
+        assert!(archive_path.is_file());
+        assert!(safe_archive::archive_contains_path(archive_path, std::path::Path::new("app/server")).unwrap());
+        assert!(safe_archive::archive_contains_path(archive_path, std::path::Path::new("data/signage.db")).unwrap());
+        assert!(safe_archive::archive_contains_path_prefix(
+            archive_path,
+            std::path::Path::new("data/trusted-services"),
+        )
+        .unwrap());
+        assert_eq!(backup.size_bytes, std::fs::metadata(archive_path).unwrap().len());
+        let _ = std::fs::remove_dir_all(parent);
     }
 
     #[tokio::test]
