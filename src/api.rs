@@ -1187,6 +1187,10 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             post(upload_addon_package).layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
         )
         .route(
+            "/api/addons/trusted-service/stage",
+            post(stage_trusted_service_manifest).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
+        .route(
             "/api/addons/{addon_id}/storage/{storage_key}",
             get(get_addon_storage)
                 .put(set_addon_storage)
@@ -1998,6 +2002,74 @@ async fn list_addon_widget_types() -> Result<AxumJson<Vec<AddonWidgetRegistratio
     crate::addons::enabled_widget_registrations()
         .map(AxumJson)
         .map_err(addon_error_response)
+}
+
+async fn stage_trusted_service_manifest(
+    mut multipart: Multipart,
+) -> Result<(StatusCode, AxumJson<crate::addons::TrustedServiceStage>), (StatusCode, String)> {
+    let temp_dir = std::env::temp_dir().join(format!("screentra-trusted-service-{}", Uuid::new_v4()));
+    fs::create_dir_all(&temp_dir).map_err(|_| internal_server_error())?;
+    let manifest_path = temp_dir.join("manifest.json");
+    let signature_path = temp_dir.join("manifest.sig");
+    let mut seen_manifest = false;
+    let mut seen_signature = false;
+    let mut result = Ok(());
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Unable to read trusted service upload".to_string()))?
+    {
+        let Some(name) = field.name() else {
+            result = Err((StatusCode::BAD_REQUEST, "Trusted service upload fields must be named".to_string()));
+            break;
+        };
+        let (path, seen, limit) = match name {
+            "manifest" => (&manifest_path, &mut seen_manifest, 1024 * 1024),
+            "signature" => (&signature_path, &mut seen_signature, 64 * 1024),
+            _ => {
+                result = Err((StatusCode::BAD_REQUEST, "Unknown trusted service upload field".to_string()));
+                break;
+            }
+        };
+        if *seen {
+            result = Err((StatusCode::BAD_REQUEST, "Trusted service upload field repeated".to_string()));
+            break;
+        }
+        *seen = true;
+        let mut file = fs::File::create(path).map_err(|_| internal_server_error())?;
+        let mut total = 0usize;
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Unable to read trusted service upload".to_string()))?
+        {
+            total = total.saturating_add(chunk.len());
+            if total > limit {
+                result = Err((StatusCode::BAD_REQUEST, "Trusted service upload field is too large".to_string()));
+                break;
+            }
+            file.write_all(&chunk).map_err(|_| internal_server_error())?;
+        }
+        if result.is_err() {
+            break;
+        }
+        file.flush().map_err(|_| internal_server_error())?;
+    }
+    if result.is_ok() && (!seen_manifest || !seen_signature) {
+        result = Err((StatusCode::BAD_REQUEST, "Trusted service upload requires manifest and signature fields".to_string()));
+    }
+    let staged = if result.is_ok() {
+        crate::addons::stage_trusted_service_manifest(&manifest_path, &signature_path)
+            .map_err(addon_error_response)
+            .map(Some)
+    } else {
+        Ok(None)
+    };
+    let _ = fs::remove_dir_all(&temp_dir);
+    result?;
+    staged?
+        .map(|stage| (StatusCode::CREATED, AxumJson(stage)))
+        .ok_or_else(|| internal_server_error())
 }
 
 async fn upload_addon_package(

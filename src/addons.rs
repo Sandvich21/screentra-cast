@@ -757,6 +757,138 @@ pub fn remove(id: &str) -> Result<(), AddonError> {
     fs::remove_dir_all(dir).map_err(io_error)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustedServiceStage {
+    pub manifest: AddonManifest,
+    pub state: String,
+    pub staged_at: String,
+}
+
+fn trusted_service_signing_public_key() -> PathBuf {
+    std::env::var("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/etc/screentra-cast/trusted-service-signing.pub"))
+}
+
+fn trusted_service_storage_dir() -> PathBuf {
+    let root = std::env::var("SIGNAGE_DATA_DIR").unwrap_or_else(|_| "/home/board/data".to_string());
+    PathBuf::from(root).join("trusted-services")
+}
+
+fn validate_trusted_service_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
+    if manifest.schema_version != 1 {
+        return Err(AddonError::Invalid(
+            "Unsupported addon manifest schema_version; expected 1".to_string(),
+        ));
+    }
+    validate_id(&manifest.id)?;
+    if manifest.name.trim().is_empty() || manifest.name.len() > MAX_NAME_LEN {
+        return Err(AddonError::Invalid(
+            "Addon name must be 1-80 characters".to_string(),
+        ));
+    }
+    if manifest.description.len() > MAX_DESCRIPTION_LEN {
+        return Err(AddonError::Invalid(
+            "Addon description must be at most 500 characters".to_string(),
+        ));
+    }
+    validate_token(&manifest.version, "Addon version")?;
+    if manifest.kind != "trusted_server_service" {
+        return Err(AddonError::Invalid(
+            "Trusted service manifest kind is invalid".to_string(),
+        ));
+    }
+    let service = manifest.trusted_service.as_ref().ok_or_else(|| {
+        AddonError::Invalid("trusted_server_service requires trusted_service metadata".to_string())
+    })?;
+    validate_trusted_service_spec(service)?;
+    if manifest.client_entrypoint.is_some()
+        || manifest.server_entrypoint.is_some()
+        || manifest.client_sha256.is_some()
+        || manifest.client_api_version.is_some()
+    {
+        return Err(AddonError::Invalid(
+            "Trusted service manifests cannot contain executable client/server entrypoints"
+                .to_string(),
+        ));
+    }
+    if !manifest.widget_types.is_empty() {
+        return Err(AddonError::Invalid(
+            "Trusted service manifests cannot declare renderer widgets".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn stage_trusted_service_manifest(
+    manifest_path: &Path,
+    signature_path: &Path,
+) -> Result<TrustedServiceStage, AddonError> {
+    let manifest_size = fs::metadata(manifest_path).map_err(io_error)?.len();
+    let signature_size = fs::metadata(signature_path).map_err(io_error)?.len();
+    if manifest_size > 1024 * 1024 || signature_size > 64 * 1024 {
+        return Err(AddonError::Invalid(
+            "Trusted service manifest or signature is too large".to_string(),
+        ));
+    }
+    let public_key = trusted_service_signing_public_key();
+    if !public_key.is_file() {
+        return Err(AddonError::Invalid(
+            "Trusted service signing public key is missing".to_string(),
+        ));
+    }
+    let result = Command::new("openssl")
+        .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
+        .arg(&public_key)
+        .args(["-sigfile"])
+        .arg(signature_path)
+        .args(["-in"])
+        .arg(manifest_path)
+        .output()
+        .map_err(io_error)?;
+    if !result.status.success() {
+        return Err(AddonError::Invalid(
+            "Trusted service manifest signature verification failed".to_string(),
+        ));
+    }
+    let manifest_bytes = fs::read(manifest_path).map_err(io_error)?;
+    let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
+    validate_trusted_service_manifest(&manifest)?;
+
+    let root = trusted_service_storage_dir();
+    fs::create_dir_all(&root).map_err(io_error)?;
+    let target = root.join(&manifest.id);
+    if target.exists() {
+        return Err(AddonError::AlreadyInstalled);
+    }
+    let stage = root.join(format!(".stage-{}", Uuid::new_v4()));
+    let result = (|| {
+        fs::create_dir(&stage).map_err(io_error)?;
+        fs::copy(manifest_path, stage.join(MANIFEST_FILE)).map_err(io_error)?;
+        fs::copy(signature_path, stage.join("manifest.sig")).map_err(io_error)?;
+        let staged_at = chrono::Utc::now().to_rfc3339();
+        fs::write(
+            stage.join(STATE_FILE),
+            serde_json::to_vec(&serde_json::json!({
+                "state": "staged",
+                "staged_at": &staged_at,
+            }))
+            .map_err(io_error)?,
+        )
+        .map_err(io_error)?;
+        fs::rename(&stage, &target).map_err(io_error)?;
+        Ok(TrustedServiceStage {
+            manifest,
+            state: "staged".to_string(),
+            staged_at,
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&stage);
+    }
+    result
+}
+
 fn addon_signing_public_key() -> PathBuf {
     std::env::var("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY")
         .map(PathBuf::from)
@@ -997,6 +1129,162 @@ mod tests {
         });
         let error = validate_manifest(&value).unwrap_err().to_string();
         assert!(error.contains("trusted service capability"));
+    }
+
+    fn trusted_manifest() -> AddonManifest {
+        let mut value = manifest();
+        value.kind = "trusted_server_service".to_string();
+        value.permissions = vec!["storage".to_string()];
+        value.trusted_service = Some(TrustedServerServiceSpec {
+            image: "registry.example/air-quality".to_string(),
+            image_digest: "sha256:".to_string() + &"a".repeat(64),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.air-quality".to_string(),
+            api_namespace: "example.air-quality".to_string(),
+            client_extension_id: Some("example.air-quality.client".to_string()),
+        });
+        value.widget_types.clear();
+        value
+    }
+
+    #[test]
+    fn signed_trusted_service_manifest_stages_without_activation() {
+        let _guard = STORAGE_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-trusted-service-stage-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let manifest_path = root.join("manifest.json");
+        let signature_path = root.join("manifest.sig");
+        let private_key = root.join("trusted-service-signing.key");
+        let public_key = root.join("trusted-service-signing.pub");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&trusted_manifest()).unwrap(),
+        )
+        .unwrap();
+        assert!(Command::new("openssl")
+            .args(["genpkey", "-algorithm", "ED25519", "-out"])
+            .arg(&private_key)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("openssl")
+            .args(["pkey", "-in"])
+            .arg(&private_key)
+            .args(["-pubout", "-out"])
+            .arg(&public_key)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("openssl")
+            .args(["pkeyutl", "-sign", "-rawin", "-inkey"])
+            .arg(&private_key)
+            .args(["-in"])
+            .arg(&manifest_path)
+            .args(["-out"])
+            .arg(&signature_path)
+            .status()
+            .unwrap()
+            .success());
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        let old_public_key = std::env::var_os("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root.join("data"));
+            std::env::set_var("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY", &public_key);
+        }
+        let staged = stage_trusted_service_manifest(&manifest_path, &signature_path).unwrap();
+        assert_eq!(staged.state, "staged");
+        assert_eq!(staged.manifest.id, "example.weather");
+        let staged_dir = root.join("data/trusted-services/example.weather");
+        assert!(staged_dir.join("manifest.json").is_file());
+        assert!(staged_dir.join("manifest.sig").is_file());
+        assert!(!staged_dir.join("active").exists());
+        assert!(list().unwrap().is_empty());
+        if let Some(value) = old_data_root {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        if let Some(value) = old_public_key {
+            unsafe { std::env::set_var("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY", value); }
+        } else {
+            unsafe { std::env::remove_var("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY"); }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tampered_trusted_service_manifest_is_not_staged() {
+        let _guard = STORAGE_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-trusted-service-tamper-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let manifest_path = root.join("manifest.json");
+        let signature_path = root.join("manifest.sig");
+        let private_key = root.join("trusted-service-signing.key");
+        let public_key = root.join("trusted-service-signing.pub");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&trusted_manifest()).unwrap(),
+        )
+        .unwrap();
+        assert!(Command::new("openssl")
+            .args(["genpkey", "-algorithm", "ED25519", "-out"])
+            .arg(&private_key)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("openssl")
+            .args(["pkey", "-in"])
+            .arg(&private_key)
+            .args(["-pubout", "-out"])
+            .arg(&public_key)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("openssl")
+            .args(["pkeyutl", "-sign", "-rawin", "-inkey"])
+            .arg(&private_key)
+            .args(["-in"])
+            .arg(&manifest_path)
+            .args(["-out"])
+            .arg(&signature_path)
+            .status()
+            .unwrap()
+            .success());
+        fs::write(&manifest_path, b"tampered").unwrap();
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        let old_public_key = std::env::var_os("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root.join("data"));
+            std::env::set_var("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY", &public_key);
+        }
+        let error = stage_trusted_service_manifest(&manifest_path, &signature_path).unwrap_err();
+        assert!(error.to_string().contains("signature verification failed"));
+        assert!(!root.join("data/trusted-services").exists());
+        if let Some(value) = old_data_root {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        if let Some(value) = old_public_key {
+            unsafe { std::env::set_var("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY", value); }
+        } else {
+            unsafe { std::env::remove_var("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY"); }
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

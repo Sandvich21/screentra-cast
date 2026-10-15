@@ -1,13 +1,14 @@
 # Trusted Server Addon Operations
 
-This document describes the current **disabled** staging boundary for trusted
-server addon manifests. It does not authorize container execution.
-
-## Current behavior
-
-The addon manager accepts declarative manifests and signed client-extension
-packages only. A manifest with `kind=trusted_server_service` is rejected before
-installation, image pull, process creation, or network access.
+The current server also has a deliberately inert staging boundary for a
+separately signed service manifest. An administrator may submit multipart
+fields `manifest` and `signature` to
+`POST /api/addons/trusted-service/stage`. The signature is checked with the
+separate trusted-service public key at
+`/etc/screentra-cast/trusted-service-signing.pub` or the
+`SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY` override. A valid submission is
+stored as `data/trusted-services/<addon-id>/` with state `staged`; it is not
+added to the ordinary addon registry, enabled, pulled, or executed.
 
 Before returning the disabled-runtime error, the validator checks the service
 metadata that would otherwise become an execution policy:

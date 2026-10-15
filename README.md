@@ -248,9 +248,11 @@ authorize execution. The separate trusted server-container contract is
 `docs/trusted-server-addon-contract.md`; the future service boundary is specified
 in `docs/trusted-server-addon-gateway.md` and its disabled staging and validation
 rules are documented in `docs/trusted-server-addon-operations.md`, illustrated by
-`examples/addons/trusted-service/manifest.json`. The current validator rejects
-that service kind and does not expose a gateway, pull images, or start
-containers. A valid upload is not proof that a player has installed or activated
+`examples/addons/trusted-service/manifest.json`. The normal addon validator rejects
+that service kind. An administrator can separately stage a signed manifest through
+`POST /api/addons/trusted-service/stage`, but staging only stores inert metadata;
+the server does not expose a gateway, pull images, or start containers. A valid
+upload is not proof that a player has installed or activated
 the extension.
 
 ## Player client installation and LAN adoption
