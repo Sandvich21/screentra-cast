@@ -340,6 +340,12 @@ pub async fn create_backup(
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
     }
 
+    if let Err(error) = restrict_backup_file(StdPath::new(&full_path)) {
+        log::error!("restrict created backup permissions failed: {error}");
+        let _ = fs::remove_file(&full_path);
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
+    }
+
     let size = match fs::metadata(&full_path) {
         Ok(metadata) => metadata.len(),
         Err(error) => {
@@ -362,6 +368,20 @@ pub async fn create_backup(
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
 
     Ok(AxumJson(backup))
+}
+
+fn restrict_backup_file(path: &StdPath) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)
+            .map_err(|error| format!("inspect backup permissions: {error}"))?
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(path, permissions)
+            .map_err(|error| format!("restrict backup permissions: {error}"))?;
+    }
+    Ok(())
 }
 
 fn signage_data_dir() -> String {
@@ -912,6 +932,11 @@ pub async fn upload_backup(
             return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
         }
         drop(probe_file);
+        if let Err(error) = restrict_backup_file(StdPath::new(&probe_path)) {
+            log::error!("restrict uploaded backup permissions failed: {error}");
+            let _ = fs::remove_file(&probe_path);
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
+        }
 
         // Verify it parses as a tarball with `app/` and/or `data/` at top
         // before saving. Reject anything else.
