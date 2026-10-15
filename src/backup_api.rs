@@ -60,6 +60,46 @@ impl BackupMetadataRepository {
     }
 }
 
+fn postgres_tool_environment_from_url(
+    database_url: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let parsed = url::Url::parse(database_url).map_err(|_| "Invalid PostgreSQL database URL".to_string())?;
+    if parsed.scheme() != "postgres" && parsed.scheme() != "postgresql" {
+        return Err("PostgreSQL database URL is required".to_string());
+    }
+    let host = parsed
+        .host_str()
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| "PostgreSQL database URL must include a host".to_string())?;
+    let database = parsed
+        .path()
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .filter(|database| !database.is_empty())
+        .ok_or_else(|| "PostgreSQL database URL must include a database name".to_string())?;
+    let decode = |value: &str| {
+        urlencoding::decode(value)
+            .map(|decoded| decoded.into_owned())
+            .map_err(|_| "Invalid percent-encoding in PostgreSQL database URL".to_string())
+    };
+    let mut environment = vec![
+        ("PGHOST".to_string(), host.to_string()),
+        (
+            "PGPORT".to_string(),
+            parsed.port().unwrap_or(5432).to_string(),
+        ),
+        ("PGDATABASE".to_string(), decode(database)?),
+    ];
+    if !parsed.username().is_empty() {
+        environment.push(("PGUSER".to_string(), decode(parsed.username())?));
+    }
+    if let Some(password) = parsed.password() {
+        environment.push(("PGPASSWORD".to_string(), decode(password)?));
+    }
+    Ok(environment)
+}
+
 fn ensure_filesystem_backup_backend(
     repository: &BackupMetadataRepository,
 ) -> Result<(), (StatusCode, String)> {
@@ -711,6 +751,25 @@ mod tests {
         builder.append_data(&mut header, path, data).unwrap();
     }
 
+    #[test]
+    fn postgres_tool_environment_passes_credentials_via_environment() {
+        let environment = postgres_tool_environment_from_url(
+            "postgresql://backup%20user:secret%20password@example.test:5544/signage%20db",
+        )
+        .unwrap();
+        assert!(environment.contains(&("PGHOST".to_string(), "example.test".to_string())));
+        assert!(environment.contains(&("PGPORT".to_string(), "5544".to_string())));
+        assert!(environment.contains(&("PGUSER".to_string(), "backup user".to_string())));
+        assert!(environment.contains(&("PGPASSWORD".to_string(), "secret password".to_string())));
+        assert!(environment.contains(&("PGDATABASE".to_string(), "signage db".to_string())));
+    }
+
+    #[test]
+    fn postgres_tool_environment_rejects_non_postgres_or_incomplete_urls() {
+        assert!(postgres_tool_environment_from_url("sqlite:///tmp/signage.db").is_err());
+        assert!(postgres_tool_environment_from_url("postgresql://user@/signage").is_err());
+        assert!(postgres_tool_environment_from_url("postgresql://user@example.test").is_err());
+    }
     #[tokio::test]
     async fn create_http_backup_contains_addon_related_data() {
         let _guard = BACKUP_HTTP_TEST_LOCK
