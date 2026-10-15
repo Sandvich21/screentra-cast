@@ -245,10 +245,12 @@ SHA-256, and stores the package without executing it. The future client runtime
 boundary and activation gates are documented in
 `docs/addon-runtime-contract.md`; that document is design-only and does not
 authorize execution. The separate trusted server-container contract is
-`docs/trusted-server-addon-contract.md` and illustrated by
-`examples/addons/trusted-service/manifest.json`; the current validator rejects
-that service kind and does not pull or start containers. A valid upload is not
-proof that a player has installed or activated the extension.
+`docs/trusted-server-addon-contract.md`; the future service boundary is specified
+in `docs/trusted-server-addon-gateway.md` and illustrated by
+`examples/addons/trusted-service/manifest.json`. The current validator rejects
+that service kind and does not expose a gateway, pull images, or start
+containers. A valid upload is not proof that a player has installed or activated
+the extension.
 
 ## Player client installation and LAN adoption
 
