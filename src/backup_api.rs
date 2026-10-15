@@ -654,6 +654,110 @@ pub async fn download_backup(
         .header("Content-Length", metadata.len().to_string())
         .body(body)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
-
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::to_bytes,
+        http::{Request, StatusCode},
+        routing::put,
+        Router,
+    };
+    use flate2::{write::GzEncoder, Compression};
+    use std::sync::{Mutex, OnceLock};
+    use tar::Builder;
+    use tower::ServiceExt;
+
+    static BACKUP_HTTP_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn test_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "screentra-backup-http-{label}-{}",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    fn append_test_file(builder: &mut Builder<GzEncoder<std::fs::File>>, path: &str, data: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, path, data).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_http_dry_run_reports_addon_and_trusted_service_state() {
+        let _guard = BACKUP_HTTP_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = test_root("dry-run");
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let archive_path = root.join("backup.tar.gz");
+        let archive_file = std::fs::File::create(&archive_path).unwrap();
+        let encoder = GzEncoder::new(archive_file, Compression::default());
+        let mut builder = Builder::new(encoder);
+        append_test_file(&mut builder, "app/server", b"binary");
+        append_test_file(&mut builder, "data/signage.db", b"sqlite");
+        append_test_file(
+            &mut builder,
+            "data/trusted-services/example.weather/manifest.json",
+            b"manifest",
+        );
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let db_path = root.join("metadata.db");
+        let db = crate::db::Database::open(db_path.to_str().unwrap()).unwrap();
+        db.insert_backup(&crate::models::Backup {
+            id: "dry-run".to_string(),
+            name: "Dry run".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            file_path: archive_path.to_string_lossy().to_string(),
+            size_bytes: std::fs::metadata(&archive_path).unwrap().len(),
+        })
+        .unwrap();
+
+        let old_cwd = std::env::current_dir().unwrap();
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        std::env::set_current_dir(&root).unwrap();
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_dir);
+        }
+        let app = Router::new()
+            .route("/api/backups/{id}", put(restore_backup))
+            .with_state(BackupMetadataRepository::Sqlite(std::sync::Arc::new(db)));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/backups/dry-run?dry_run=true")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["status"], "dry_run");
+        assert_eq!(payload["report"]["contains_core_database"], true);
+        assert_eq!(payload["report"]["contains_trusted_service_staging"], true);
+        assert_eq!(payload["report"]["warnings"].as_array().unwrap().len(), 0);
+
+        std::env::set_current_dir(old_cwd).unwrap();
+        if let Some(value) = old_data_dir {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
