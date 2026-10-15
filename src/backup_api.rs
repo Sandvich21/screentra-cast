@@ -814,6 +814,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upload_http_rejects_invalid_archive_without_registering_it() {
+        let _guard = BACKUP_HTTP_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let parent = test_root("upload-invalid");
+        let data_dir = parent.join("data");
+        let backup_dir = data_dir.join("backups");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        let db_path = parent.join("metadata.db");
+        let db = std::sync::Arc::new(crate::db::Database::open(db_path.to_str().unwrap()).unwrap());
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &data_dir); }
+        let app = Router::new()
+            .route("/api/backups/upload", put(upload_backup))
+            .with_state(BackupMetadataRepository::Sqlite(db.clone()));
+        let boundary = "invalid-backup-boundary";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"invalid.tar.gz\"\r\nContent-Type: application/gzip\r\n\r\nnot a tarball\r\n--{boundary}--\r\n"
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/backups/upload")
+                    .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let _ = to_bytes(response.into_body(), 1024).await.unwrap();
+
+        if let Some(value) = old_data_dir {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(db.list_backups().unwrap().is_empty());
+        assert!(std::fs::read_dir(&backup_dir).unwrap().next().is_none());
+        let _ = std::fs::remove_dir_all(parent);
+    }
+
+    #[tokio::test]
     async fn restore_http_confirmed_swaps_install_and_data_safely() {
         let _guard = BACKUP_HTTP_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
