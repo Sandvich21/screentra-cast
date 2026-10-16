@@ -81,9 +81,8 @@ without restoring an activation marker. Runtime coverage also rejects disabled
 activation records before planning or starting and rejects repeated stops for a
 stopped activation handle.
 
-Remaining lifecycle work is rollback-preservation coverage for controlled
-storage/audit state and broader uninstall cleanup coverage for runtime records
-and staged metadata. Keep `scripts/probe-trusted-service-postgres-permissions.sh`
-in the backend gate. Keep the database gate and execution disabled until those
-results and the final fail-closed boundary review are complete. Only then
+Remaining lifecycle work is broader uninstall cleanup coverage for runtime
+records and staged metadata. Keep `scripts/probe-trusted-service-postgres-permissions.sh`
+in the backend gate. Keep the database gate and execution disabled until that
+result and the final fail-closed boundary review are complete. Only then
 should a rootless OCI backend be considered.

@@ -1405,6 +1405,22 @@ mod tests {
             )
             .await
             .expect("seed addon storage");
+        client
+            .execute(
+                "INSERT INTO audit_events (actor, role, event_type, target, outcome, detail, occurred_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                &[
+                    &Some("trusted-service"),
+                    &Some("service"),
+                    &"trusted_service_database",
+                    &Some("restore-failure-probe"),
+                    &"succeeded",
+                    &Some("activation_instance=activation-1;operation=put"),
+                    &"2026-10-15T00:00:01Z",
+                ],
+            )
+            .await
+            .expect("seed audit event");
         drop(client);
 
         let archive_path = backup_dir.join("restore-failure.tar.gz");
@@ -1480,6 +1496,22 @@ mod tests {
             .expect("read rolled-back addon storage")
             .get(0);
         assert_eq!(value, r#"{"value":"safe"}"#);
+        let audit_exists: bool = client
+            .query_one(
+                "SELECT EXISTS(
+                    SELECT 1 FROM audit_events
+                    WHERE event_type=$1 AND target=$2 AND detail=$3
+                )",
+                &[
+                    &"trusted_service_database",
+                    &Some("restore-failure-probe"),
+                    &Some("activation_instance=activation-1;operation=put"),
+                ],
+            )
+            .await
+            .expect("read rolled-back audit event")
+            .get(0);
+        assert!(audit_exists, "controlled storage audit must survive rollback");
 
         std::env::set_current_dir(old_cwd).unwrap();
         if let Some(value) = old_data_dir {
