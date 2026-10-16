@@ -2302,6 +2302,14 @@ async fn delete_addon(
         log::error!("addon storage cleanup failed before addon removal: {error}");
         internal_server_error()
     })?;
+    crate::trusted_service_runtime::remove(&id).map_err(|error| {
+        log::error!("trusted service runtime cleanup failed before addon removal: {error}");
+        internal_server_error()
+    })?;
+    crate::addons::remove_trusted_service_stage(&id).map_err(|error| {
+        log::error!("trusted service staging cleanup failed before addon removal: {error}");
+        internal_server_error()
+    })?;
     crate::addons::remove(&id).map_err(addon_error_response)?;
     log::info!("removed addon id={} storage_rows={deleted_storage}", id);
     Ok(StatusCode::NO_CONTENT)
@@ -10016,6 +10024,8 @@ mod audit_validation_tests {
         let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
         unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &data_dir); }
         let addon_id = format!("example.delete.{}", Uuid::new_v4().simple());
+        let staged_dir = data_dir.join("trusted-services").join(&addon_id);
+        let runtime_dir = data_dir.join("trusted-service-runtime").join(&addon_id);
         let manifest = AddonManifest {
             schema_version: 1,
             id: addon_id.clone(),
@@ -10034,6 +10044,10 @@ mod audit_validation_tests {
             client_api_version: None,
         };
         crate::addons::install(manifest).expect("install test addon");
+        std::fs::create_dir_all(&staged_dir).unwrap();
+        std::fs::write(staged_dir.join("state.json"), b"staged").unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::write(runtime_dir.join("runtime.json"), b"inert").unwrap();
         let db_path = data_dir.join("signage.db");
         let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open storage database"));
         db.set_addon_storage(&addon_id, "settings", "{\"enabled\":true}", "2026-10-15T00:00:00Z")
@@ -10043,6 +10057,8 @@ mod audit_validation_tests {
             .expect("addon removal should succeed");
         assert_eq!(removed, StatusCode::NO_CONTENT);
         assert_eq!(db.get_addon_storage(&addon_id, "settings").unwrap(), None);
+        assert!(!staged_dir.exists());
+        assert!(!runtime_dir.exists());
         assert!(!crate::addons::list().unwrap().iter().any(|record| record.manifest.id == addon_id));
         if let Some(value) = old_data_dir {
             unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }

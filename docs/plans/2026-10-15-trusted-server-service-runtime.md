@@ -81,8 +81,7 @@ without restoring an activation marker. Runtime coverage also rejects disabled
 activation records before planning or starting and rejects repeated stops for a
 stopped activation handle.
 
-Remaining lifecycle work is broader uninstall cleanup coverage for runtime
-records and staged metadata. Keep `scripts/probe-trusted-service-postgres-permissions.sh`
-in the backend gate. Keep the database gate and execution disabled until that
-result and the final fail-closed boundary review are complete. Only then
-should a rootless OCI backend be considered.
+Remaining work for this phase is the final fail-closed boundary review.
+Keep `scripts/probe-trusted-service-postgres-permissions.sh` in the backend
+gate. Keep the database gate and execution disabled until that review is
+complete. Only then should a rootless OCI backend be considered.
