@@ -257,10 +257,16 @@ covers the exact manifest `image_digest` and is checked with the separate
 `/etc/screentra-cast/trusted-service-image-signing.pub` key. Staging only stores
 inert metadata; staged records are admin-only at
 `GET /api/addons/trusted-service/staged` and can be removed with the matching
-`DELETE` route. Successful stage and removal operations are recorded in the
-audit log. The server does not expose a gateway, pull images, or start
-containers. A staged manifest is not proof that a player has installed or
-activated the extension.
+`DELETE` route. The Phase 1 runtime boundary records explicit approval separately
+from staging: administrators can approve with
+`POST /api/addons/trusted-service/staged/{id}/approve`, inspect inert runtime
+records with `GET /api/addons/trusted-service/runtime`, and disable an approval
+with `POST /api/addons/trusted-service/runtime/{id}/disable`. Approval never
+starts a service; execution, credentials, database access, gateway access, and
+resource policy remain disabled. Successful stage, approval, disable, and
+removal operations are recorded in the audit log. The server does not expose a
+gateway, pull images, or start containers. A staged or approved manifest is not
+proof that a player has installed or activated the extension.
 
 ## Player client installation and LAN adoption
 

@@ -988,6 +988,24 @@ fn read_trusted_service_stage(dir: &Path) -> Result<TrustedServiceStage, AddonEr
     })
 }
 
+pub fn get_trusted_service_stage(id: &str) -> Result<TrustedServiceStage, AddonError> {
+    validate_id(id)?;
+    let dir = trusted_service_storage_dir().join(id);
+    let metadata = fs::symlink_metadata(&dir).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            AddonError::NotFound
+        } else {
+            io_error(error)
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AddonError::Invalid(
+            "Invalid staged trusted service directory".to_string(),
+        ));
+    }
+    read_trusted_service_stage(&dir)
+}
+
 pub fn list_trusted_service_stages() -> Result<Vec<TrustedServiceStage>, AddonError> {
     let root = trusted_service_storage_dir();
     if !root.exists() {

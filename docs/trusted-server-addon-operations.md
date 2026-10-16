@@ -27,6 +27,23 @@ the trusted-service and image public keys before returning metadata. A tampered
 or malformed staged directory fails closed instead of being reported as an
 active service.
 
+## Phase 1 runtime records
+
+The first runtime phase adds a separate, inert record namespace at
+`data/trusted-service-runtime/<addon-id>/runtime.json`. An administrator may
+approve a currently staged service with
+`POST /api/addons/trusted-service/staged/<addon-id>/approve`, inspect approval
+records with `GET /api/addons/trusted-service/runtime`, and disable an approval
+with `POST /api/addons/trusted-service/runtime/<addon-id>/disable`.
+
+Approval is not activation. The record stores the signed manifest identity,
+admin approver, activation instance, declared capabilities, and explicit
+execution gates. The execution backend, credential broker, database boundary,
+controlled gateway, and resource policy gates remain false. `execution_enabled`
+is hard-coded false, and these endpoints do not pull images, create containers,
+issue credentials, expose ports, or execute code. Removing staged metadata also
+removes its inert runtime record.
+
 The validator checks the service metadata that would otherwise become an
 execution policy:
 

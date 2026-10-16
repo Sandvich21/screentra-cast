@@ -1,0 +1,430 @@
+//! Fail-closed runtime records for trusted server services.
+//!
+//! This module is deliberately a supervisor boundary, not a container runtime.
+//! It records explicit administrative intent and the checks required before a
+//! service could ever execute. No function in this module starts a process,
+//! pulls an image, creates a credential, opens a port, or connects to a DB.
+
+use crate::addons::{self, AddonError, TrustedServiceStage};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+use uuid::Uuid;
+
+const RUNTIME_DIR: &str = "trusted-service-runtime";
+const RUNTIME_FILE: &str = "runtime.json";
+const RUNTIME_RECORD_VERSION: u32 = 1;
+
+/// This is a compile-time safety marker for the first runtime phase.
+/// It must remain false until a separately reviewed execution backend exists.
+pub const EXECUTION_ENABLED: bool = false;
+
+#[derive(Debug)]
+pub enum RuntimeError {
+    Invalid(String),
+    NotFound,
+    Conflict(String),
+    Io(String),
+}
+
+impl std::fmt::Display for RuntimeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(message) => write!(formatter, "{message}"),
+            Self::NotFound => write!(formatter, "Trusted service runtime record not found"),
+            Self::Conflict(message) => write!(formatter, "{message}"),
+            Self::Io(message) => write!(
+                formatter,
+                "Trusted service runtime storage error: {message}"
+            ),
+        }
+    }
+}
+
+impl From<AddonError> for RuntimeError {
+    fn from(error: AddonError) -> Self {
+        match error {
+            AddonError::NotFound => Self::NotFound,
+            AddonError::Invalid(message) => Self::Invalid(message),
+            AddonError::AlreadyInstalled => Self::Conflict(error.to_string()),
+            AddonError::Io(message) => Self::Io(message),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivationGate {
+    pub name: String,
+    pub passed: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrustedServiceRuntimeRecord {
+    pub record_version: u32,
+    pub addon_id: String,
+    pub addon_version: String,
+    pub image: String,
+    pub image_digest: String,
+    pub capabilities: Vec<String>,
+    pub storage_namespace: String,
+    pub api_namespace: String,
+    pub activation_instance: String,
+    pub state: String,
+    pub approved_by: Option<String>,
+    pub approved_at: Option<String>,
+    pub updated_at: String,
+    pub execution_enabled: bool,
+    pub gates: Vec<ActivationGate>,
+    pub last_error: Option<String>,
+}
+
+fn storage_root() -> PathBuf {
+    let root = std::env::var("SIGNAGE_DATA_DIR").unwrap_or_else(|_| "/home/board/data".to_string());
+    PathBuf::from(root).join(RUNTIME_DIR)
+}
+
+fn record_dir(addon_id: &str) -> Result<PathBuf, RuntimeError> {
+    addons::validate_addon_storage_namespace(addon_id).map_err(RuntimeError::Invalid)?;
+    Ok(storage_root().join(addon_id))
+}
+
+fn record_path(addon_id: &str) -> Result<PathBuf, RuntimeError> {
+    Ok(record_dir(addon_id)?.join(RUNTIME_FILE))
+}
+
+fn ensure_runtime_directory(addon_id: &str) -> Result<PathBuf, RuntimeError> {
+    let root = storage_root();
+    fs::create_dir_all(&root).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    let root_metadata =
+        fs::symlink_metadata(&root).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(RuntimeError::Invalid(
+            "Invalid trusted service runtime root".to_string(),
+        ));
+    }
+    let directory = record_dir(addon_id)?;
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
+            RuntimeError::Invalid("Invalid trusted service runtime directory".to_string()),
+        ),
+        Ok(_) => Ok(directory),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&directory).map_err(|error| RuntimeError::Io(error.to_string()))?;
+            Ok(directory)
+        }
+        Err(error) => Err(RuntimeError::Io(error.to_string())),
+    }
+}
+
+fn validate_approver(approver: &str) -> Result<(), RuntimeError> {
+    if approver.is_empty()
+        || approver.len() > 128
+        || approver.chars().any(|character| character.is_control())
+    {
+        return Err(RuntimeError::Invalid(
+            "Invalid trusted service approver".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn activation_gates() -> Vec<ActivationGate> {
+    vec![
+        ActivationGate {
+            name: "manifest_signature".to_string(),
+            passed: true,
+            reason: "staged manifest was re-verified before approval".to_string(),
+        },
+        ActivationGate {
+            name: "image_signature".to_string(),
+            passed: true,
+            reason: "staged image digest signature was re-verified before approval".to_string(),
+        },
+        ActivationGate {
+            name: "administrator_approval".to_string(),
+            passed: true,
+            reason: "explicit administrator approval recorded".to_string(),
+        },
+        ActivationGate {
+            name: "execution_backend".to_string(),
+            passed: false,
+            reason: "trusted service execution backend is not enabled".to_string(),
+        },
+        ActivationGate {
+            name: "credential_broker".to_string(),
+            passed: false,
+            reason: "service credential broker is not implemented".to_string(),
+        },
+        ActivationGate {
+            name: "database_boundary".to_string(),
+            passed: false,
+            reason: "service database boundary is not implemented".to_string(),
+        },
+        ActivationGate {
+            name: "controlled_gateway".to_string(),
+            passed: false,
+            reason: "controlled internal gateway is not enabled".to_string(),
+        },
+        ActivationGate {
+            name: "resource_policy".to_string(),
+            passed: false,
+            reason: "container resource and network policy is not implemented".to_string(),
+        },
+    ]
+}
+
+fn write_atomic(path: &Path, value: &TrustedServiceRuntimeRecord) -> Result<(), RuntimeError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| RuntimeError::Io("Runtime record parent is missing".to_string()))?;
+    fs::create_dir_all(parent).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    let temporary = parent.join(format!(".runtime-{}.tmp", Uuid::new_v4()));
+    let bytes =
+        serde_json::to_vec_pretty(value).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    let result = (|| {
+        fs::write(&temporary, bytes).map_err(|error| RuntimeError::Io(error.to_string()))?;
+        fs::rename(&temporary, path).map_err(|error| RuntimeError::Io(error.to_string()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn read_record(path: &Path) -> Result<TrustedServiceRuntimeRecord, RuntimeError> {
+    let bytes = fs::read(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RuntimeError::NotFound
+        } else {
+            RuntimeError::Io(error.to_string())
+        }
+    })?;
+    let record: TrustedServiceRuntimeRecord = serde_json::from_slice(&bytes).map_err(|_| {
+        RuntimeError::Invalid("Trusted service runtime record is invalid".to_string())
+    })?;
+    if record.record_version != RUNTIME_RECORD_VERSION
+        || record.addon_id.is_empty()
+        || record.activation_instance.is_empty()
+        || !matches!(record.state.as_str(), "approved" | "disabled")
+        || record.execution_enabled
+    {
+        return Err(RuntimeError::Invalid(
+            "Trusted service runtime record is invalid".to_string(),
+        ));
+    }
+    Ok(record)
+}
+
+fn record_from_stage(stage: &TrustedServiceStage, approver: &str) -> TrustedServiceRuntimeRecord {
+    let service = stage
+        .manifest
+        .trusted_service
+        .as_ref()
+        .expect("validated trusted service stage");
+    let now = Utc::now().to_rfc3339();
+    TrustedServiceRuntimeRecord {
+        record_version: RUNTIME_RECORD_VERSION,
+        addon_id: stage.manifest.id.clone(),
+        addon_version: stage.manifest.version.clone(),
+        image: service.image.clone(),
+        image_digest: service.image_digest.clone(),
+        capabilities: service.capabilities.clone(),
+        storage_namespace: service.storage_namespace.clone(),
+        api_namespace: service.api_namespace.clone(),
+        activation_instance: Uuid::new_v4().to_string(),
+        state: "approved".to_string(),
+        approved_by: Some(approver.to_string()),
+        approved_at: Some(now.clone()),
+        updated_at: now,
+        execution_enabled: EXECUTION_ENABLED,
+        gates: activation_gates(),
+        last_error: None,
+    }
+}
+
+/// Approve a staged service without activating it.
+pub fn approve(
+    addon_id: &str,
+    approver: &str,
+) -> Result<TrustedServiceRuntimeRecord, RuntimeError> {
+    validate_approver(approver)?;
+    let stage = addons::get_trusted_service_stage(addon_id)?;
+    ensure_runtime_directory(addon_id)?;
+    let path = record_path(addon_id)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(RuntimeError::Invalid(
+                "Invalid trusted service runtime record".to_string(),
+            ));
+        }
+        Ok(_) => {
+            let existing = read_record(&path)?;
+            if existing.state == "approved" {
+                return Ok(existing);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(RuntimeError::Io(error.to_string())),
+    }
+    let record = record_from_stage(&stage, approver);
+    write_atomic(&path, &record)?;
+    Ok(record)
+}
+
+/// Disable an approval record. No process stop is attempted in this phase.
+pub fn disable(addon_id: &str) -> Result<TrustedServiceRuntimeRecord, RuntimeError> {
+    let path = record_path(addon_id)?;
+    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RuntimeError::NotFound
+        } else {
+            RuntimeError::Io(error.to_string())
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(RuntimeError::Invalid(
+            "Invalid trusted service runtime record".to_string(),
+        ));
+    }
+    let mut record = read_record(&path)?;
+    record.state = "disabled".to_string();
+    record.execution_enabled = false;
+    record.updated_at = Utc::now().to_rfc3339();
+    write_atomic(&path, &record)?;
+    Ok(record)
+}
+
+pub fn list() -> Result<Vec<TrustedServiceRuntimeRecord>, RuntimeError> {
+    let root = storage_root();
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let root_metadata =
+        fs::symlink_metadata(&root).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(RuntimeError::Invalid(
+            "Invalid trusted service runtime root".to_string(),
+        ));
+    }
+    let mut records = Vec::new();
+    for entry in fs::read_dir(&root).map_err(|error| RuntimeError::Io(error.to_string()))? {
+        let entry = entry.map_err(|error| RuntimeError::Io(error.to_string()))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if !entry
+            .file_type()
+            .map_err(|error| RuntimeError::Io(error.to_string()))?
+            .is_dir()
+        {
+            return Err(RuntimeError::Invalid(
+                "Invalid trusted service runtime directory".to_string(),
+            ));
+        }
+        let record = read_record(&entry.path().join(RUNTIME_FILE))?;
+        if record.addon_id != name {
+            return Err(RuntimeError::Invalid(
+                "Trusted service runtime identity mismatch".to_string(),
+            ));
+        }
+        records.push(record);
+    }
+    records.sort_by(|left, right| left.addon_id.cmp(&right.addon_id));
+    Ok(records)
+}
+
+/// Remove only the inert runtime record associated with staged metadata.
+pub fn remove(addon_id: &str) -> Result<(), RuntimeError> {
+    let directory = record_dir(addon_id)?;
+    match fs::symlink_metadata(&directory) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(RuntimeError::Invalid(
+                    "Invalid trusted service runtime directory".to_string(),
+                ));
+            }
+            fs::remove_dir_all(directory).map_err(|error| RuntimeError::Io(error.to_string()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RuntimeError::Io(error.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn activation_gates_are_fail_closed() {
+        let _guard = TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        assert!(!EXECUTION_ENABLED);
+        let gates = activation_gates();
+        assert!(gates
+            .iter()
+            .any(|gate| gate.name == "execution_backend" && !gate.passed));
+        assert!(gates
+            .iter()
+            .any(|gate| gate.name == "credential_broker" && !gate.passed));
+        assert!(gates
+            .iter()
+            .any(|gate| gate.name == "database_boundary" && !gate.passed));
+        assert!(gates
+            .iter()
+            .any(|gate| gate.name == "controlled_gateway" && !gate.passed));
+    }
+
+    #[test]
+    fn runtime_record_round_trip_rejects_execution_enabled_records() {
+        let _guard = TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        let root = std::env::temp_dir().join(format!("screentra-runtime-test-{}", Uuid::new_v4()));
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        let path = root
+            .join(RUNTIME_DIR)
+            .join("example.service")
+            .join(RUNTIME_FILE);
+        let record = TrustedServiceRuntimeRecord {
+            record_version: RUNTIME_RECORD_VERSION,
+            addon_id: "example.service".to_string(),
+            addon_version: "1.0.0".to_string(),
+            image: "registry.example/service".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.service".to_string(),
+            api_namespace: "example.service".to_string(),
+            activation_instance: Uuid::new_v4().to_string(),
+            state: "approved".to_string(),
+            approved_by: Some("admin".to_string()),
+            approved_at: Some(Utc::now().to_rfc3339()),
+            updated_at: Utc::now().to_rfc3339(),
+            execution_enabled: false,
+            gates: activation_gates(),
+            last_error: None,
+        };
+        write_atomic(&path, &record).unwrap();
+        assert_eq!(read_record(&path).unwrap(), record);
+        let mut unsafe_record = record;
+        unsafe_record.execution_enabled = true;
+        write_atomic(&path, &unsafe_record).unwrap();
+        assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
+        let _ = fs::remove_dir_all(&root);
+        if let Some(value) = old_data_root {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+    }
+}

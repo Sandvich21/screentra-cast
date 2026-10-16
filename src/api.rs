@@ -1199,6 +1199,18 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             delete(remove_trusted_service_stage),
         )
         .route(
+            "/api/addons/trusted-service/staged/{id}/approve",
+            post(approve_trusted_service),
+        )
+        .route(
+            "/api/addons/trusted-service/runtime",
+            get(list_trusted_service_runtime),
+        )
+        .route(
+            "/api/addons/trusted-service/runtime/{id}/disable",
+            post(disable_trusted_service),
+        )
+        .route(
             "/api/addons/{addon_id}/storage/{storage_key}",
             get(get_addon_storage)
                 .put(set_addon_storage)
@@ -1924,6 +1936,21 @@ fn addon_error_response(error: AddonError) -> (StatusCode, String) {
     }
 }
 
+fn trusted_service_runtime_error_response(
+    error: crate::trusted_service_runtime::RuntimeError,
+) -> (StatusCode, String) {
+    use crate::trusted_service_runtime::RuntimeError;
+    match error {
+        RuntimeError::Invalid(message) => (StatusCode::BAD_REQUEST, message),
+        RuntimeError::Conflict(message) => (StatusCode::CONFLICT, message),
+        RuntimeError::NotFound => (StatusCode::NOT_FOUND, error.to_string()),
+        RuntimeError::Io(message) => {
+            log::error!("Trusted service runtime storage failure: {message}");
+            internal_server_error()
+        }
+    }
+}
+
 fn require_addon_storage_admin(
     principal: &crate::middleware::AuthenticatedPrincipal,
 ) -> Result<(), (StatusCode, String)> {
@@ -2043,12 +2070,63 @@ async fn list_trusted_service_stages(
         .map_err(addon_error_response)
 }
 
+async fn list_trusted_service_runtime(
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+) -> Result<AxumJson<Vec<crate::trusted_service_runtime::TrustedServiceRuntimeRecord>>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    crate::trusted_service_runtime::list()
+        .map(AxumJson)
+        .map_err(trusted_service_runtime_error_response)
+}
+
+async fn approve_trusted_service(
+    State(state): State<RuntimeState>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    Path(id): Path<String>,
+) -> Result<AxumJson<crate::trusted_service_runtime::TrustedServiceRuntimeRecord>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    let record = crate::trusted_service_runtime::approve(&id, &principal.username)
+        .map_err(trusted_service_runtime_error_response)?;
+    audit_trusted_service_stage_event(
+        &state,
+        &principal,
+        "trusted_service_approval",
+        &id,
+        "success",
+        None,
+    )
+    .await;
+    Ok(AxumJson(record))
+}
+
+async fn disable_trusted_service(
+    State(state): State<RuntimeState>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    Path(id): Path<String>,
+) -> Result<AxumJson<crate::trusted_service_runtime::TrustedServiceRuntimeRecord>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    let record = crate::trusted_service_runtime::disable(&id)
+        .map_err(trusted_service_runtime_error_response)?;
+    audit_trusted_service_stage_event(
+        &state,
+        &principal,
+        "trusted_service_disable",
+        &id,
+        "success",
+        None,
+    )
+    .await;
+    Ok(AxumJson(record))
+}
+
 async fn remove_trusted_service_stage(
     State(state): State<RuntimeState>,
     Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     require_addon_storage_admin(&principal)?;
+    crate::trusted_service_runtime::remove(&id)
+        .map_err(trusted_service_runtime_error_response)?;
     crate::addons::remove_trusted_service_stage(&id).map_err(addon_error_response)?;
     audit_trusted_service_stage_event(
         &state,
