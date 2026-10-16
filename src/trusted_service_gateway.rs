@@ -60,6 +60,41 @@ pub fn decode_connection_hello(
     Ok(hello)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GatewayPeerCredentials {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GatewayPeerPolicy {
+    expected_uid: u32,
+    expected_gid: u32,
+}
+
+impl GatewayPeerPolicy {
+    pub fn new(expected_uid: u32, expected_gid: u32) -> Result<Self, String> {
+        if expected_uid == 0 || expected_gid == 0 {
+            return Err("Gateway peer policy cannot allow root credentials".to_string());
+        }
+        Ok(Self {
+            expected_uid,
+            expected_gid,
+        })
+    }
+
+    pub fn validate(&self, peer: GatewayPeerCredentials) -> Result<(), String> {
+        if peer.uid == 0
+            || peer.gid == 0
+            || peer.uid != self.expected_uid
+            || peer.gid != self.expected_gid
+        {
+            return Err("Gateway peer credentials are not permitted".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GatewayRequestEnvelope {
     pub addon_id: String,
@@ -502,10 +537,11 @@ mod tests {
     use super::{
         decode_connection_hello, decode_request, encode_connection_hello, encode_request,
         encode_response, validate_connection_hello, GatewayActivationBinding,
-        GatewayActivationState, GatewayConnectionHello, GatewayOperationBudget, GatewayRateLimiter,
-        GatewayReplayGuard, GatewayRequestAdmission, GatewayRequestEnvelope, GatewaySession,
-        GatewayStorageOperation, GATEWAY_PROTOCOL_VERSION, MAX_OPERATIONS_PER_CONNECTION,
-        MAX_REQUESTS_PER_ACTIVATION, MAX_TRACKED_ACTIVATIONS,
+        GatewayActivationState, GatewayConnectionHello, GatewayOperationBudget,
+        GatewayPeerCredentials, GatewayPeerPolicy, GatewayRateLimiter, GatewayReplayGuard,
+        GatewayRequestAdmission, GatewayRequestEnvelope, GatewaySession, GatewayStorageOperation,
+        GATEWAY_PROTOCOL_VERSION, MAX_OPERATIONS_PER_CONNECTION, MAX_REQUESTS_PER_ACTIVATION,
+        MAX_TRACKED_ACTIVATIONS,
     };
     use crate::trusted_service_database::{
         DatabaseResponse, TrustedServiceDatabaseContract, MAX_REQUEST_BYTES,
@@ -530,6 +566,34 @@ mod tests {
                 value_json: "{\"enabled\":true}".to_string(),
             },
         }
+    }
+
+    #[test]
+    fn peer_policy_requires_exact_non_root_credentials() {
+        let policy = GatewayPeerPolicy::new(1000, 1001).expect("non-root policy should be valid");
+        policy
+            .validate(GatewayPeerCredentials {
+                uid: 1000,
+                gid: 1001,
+            })
+            .expect("matching peer credentials should be accepted");
+        assert!(policy
+            .validate(GatewayPeerCredentials {
+                uid: 1002,
+                gid: 1001
+            })
+            .is_err());
+        assert!(policy
+            .validate(GatewayPeerCredentials {
+                uid: 1000,
+                gid: 1002
+            })
+            .is_err());
+        assert!(policy
+            .validate(GatewayPeerCredentials { uid: 0, gid: 1001 })
+            .is_err());
+        assert!(GatewayPeerPolicy::new(0, 1001).is_err());
+        assert!(GatewayPeerPolicy::new(1000, 0).is_err());
     }
 
     #[test]

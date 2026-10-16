@@ -40,6 +40,11 @@ never placed in manifests, logs, client payloads, backups, or error responses.
 Disablement revokes the credential before or while stopping the service.
 Restart does not broaden capabilities or change the bound namespace.
 
+The current contract-only peer policy separately requires an exact configured
+non-root UID/GID pair and rejects root or mismatched credentials. It defines the
+validation rule only; no Unix socket listener or OS peer-credential acquisition
+exists yet.
+
 ## Capability routing
 
 Every operation is mapped to an explicit capability. Unknown operations and
@@ -62,14 +67,16 @@ to other addon namespaces.
 The gateway must enforce all of the following before dispatching an operation:
 
 1. authenticate and validate the service credential;
-2. verify the activation is enabled and not revoked;
-3. match the requested operation to the manifest capability;
-4. derive and validate the addon namespace from the credential;
-5. enforce bounded request body, query, and response sizes;
-6. apply an operation timeout and cancellation on disconnect;
-7. reject unknown fields where the operation has a fixed schema;
-8. redact credentials and secret-bearing fields from logs;
-9. return stable error classes without backend, filesystem, or SQL details.
+2. validate the OS-level Unix peer credentials against the exact configured
+   non-root UID/GID policy;
+3. verify the activation is enabled and not revoked;
+4. match the requested operation to the manifest capability;
+5. derive and validate the addon namespace from the credential;
+6. enforce bounded request body, query, and response sizes;
+7. apply an operation timeout and cancellation on disconnect;
+8. reject unknown fields where the operation has a fixed schema;
+9. redact credentials and secret-bearing fields from logs;
+10. return stable error classes without backend, filesystem, or SQL details.
 
 Payloads use JSON with explicit versioning. A future envelope may use this
 shape:
