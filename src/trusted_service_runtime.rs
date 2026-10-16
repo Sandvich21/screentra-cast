@@ -8,7 +8,6 @@
 use crate::addons::{self, AddonError, TrustedServiceStage};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -358,6 +357,44 @@ pub fn remove(addon_id: &str) -> Result<(), RuntimeError> {
     }
 }
 
+pub const TRUSTED_SERVICE_CAPABILITIES: &[&str] = &[
+    "storage",
+    "read:clients",
+    "read:layouts",
+    "client_extension",
+];
+
+fn validate_capabilities(capabilities: &[String]) -> Result<(), RuntimeError> {
+    if capabilities.len() > TRUSTED_SERVICE_CAPABILITIES.len() {
+        return Err(RuntimeError::Invalid(
+            "Trusted service declares too many capabilities".to_string(),
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for capability in capabilities {
+        if !TRUSTED_SERVICE_CAPABILITIES.contains(&capability.as_str()) {
+            return Err(RuntimeError::Invalid(
+                "Trusted service declares an unsupported capability".to_string(),
+            ));
+        }
+        if !seen.insert(capability) {
+            return Err(RuntimeError::Invalid(
+                "Trusted service declares a duplicate capability".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_capability_binding(record: &TrustedServiceRuntimeRecord) -> Result<(), RuntimeError> {
+    validate_capabilities(&record.capabilities)?;
+    addons::validate_addon_storage_namespace(&record.storage_namespace)
+        .map_err(RuntimeError::Invalid)?;
+    addons::validate_addon_storage_namespace(&record.api_namespace)
+        .map_err(RuntimeError::Invalid)?;
+    Ok(())
+}
+
 /// Immutable launch data passed across the supervisor/runtime boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeLaunchRequest {
@@ -365,6 +402,9 @@ pub struct RuntimeLaunchRequest {
     pub activation_instance: String,
     pub image: String,
     pub image_digest: String,
+    pub capabilities: Vec<String>,
+    pub storage_namespace: String,
+    pub api_namespace: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -412,6 +452,7 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
     pub fn activation_plan(
         record: &TrustedServiceRuntimeRecord,
     ) -> Result<ActivationPlan, RuntimeError> {
+        validate_capability_binding(record)?;
         if record.state != "approved" {
             return Err(RuntimeError::Blocked(
                 "Trusted service is not approved for activation".to_string(),
@@ -450,6 +491,9 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
             activation_instance: record.activation_instance.clone(),
             image: record.image.clone(),
             image_digest: record.image_digest.clone(),
+            capabilities: record.capabilities.clone(),
+            storage_namespace: record.storage_namespace.clone(),
+            api_namespace: record.api_namespace.clone(),
         })
     }
 
@@ -501,6 +545,11 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
                 "Fake runtime launch request is invalid".to_string(),
             ));
         }
+        validate_capabilities(&request.capabilities)?;
+        addons::validate_addon_storage_namespace(&request.storage_namespace)
+            .map_err(RuntimeError::Invalid)?;
+        addons::validate_addon_storage_namespace(&request.api_namespace)
+            .map_err(RuntimeError::Invalid)?;
         if self.running.contains_key(&request.activation_instance) {
             return Err(RuntimeError::Conflict(
                 "Fake runtime activation is already running".to_string(),
@@ -622,6 +671,9 @@ mod tests {
             activation_instance: "activation-1".to_string(),
             image: "registry.example/service".to_string(),
             image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.service".to_string(),
+            api_namespace: "example.service".to_string(),
         };
         let handle = harness
             .supervisor
@@ -677,6 +729,19 @@ mod tests {
             gates: activation_gates(),
             last_error: None,
         }
+    }
+
+    #[test]
+    fn supervisor_rejects_unbound_capabilities_before_runtime_start() {
+        let mut harness = DisposableRuntimeHarness::new();
+        let mut record = test_record();
+        record.capabilities.push("read:secrets".to_string());
+        let error = harness
+            .supervisor
+            .activate(&record)
+            .expect_err("unknown capabilities must fail closed");
+        assert!(matches!(error, RuntimeError::Invalid(_)));
+        assert!(harness.supervisor.runtime().actions().is_empty());
     }
 
     #[test]

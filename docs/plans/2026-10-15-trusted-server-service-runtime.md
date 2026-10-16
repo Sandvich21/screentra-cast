@@ -33,6 +33,9 @@ trait and harness are the current working-tree changes:
   marker files; it never starts a host process or contacts a registry.
 - `DisposableRuntimeHarness` creates and removes an isolated temporary runtime
   root for integration tests.
+- The supervisor binds the addon identity, declared capability allowlist, API
+  namespace, and storage namespace into the future launch request; unknown or
+  duplicate capabilities are rejected before any runtime call.
 
 ## Explicitly out of scope
 
