@@ -432,6 +432,18 @@ impl GatewayRequestAdmission {
         Ok(decoded)
     }
 
+    pub fn admit_frame(
+        &mut self,
+        bytes: &[u8],
+        binding: &GatewayActivationBinding,
+        now: Instant,
+    ) -> Result<Option<(DecodedGatewayRequest, usize)>, String> {
+        let Some((payload, consumed)) = decode_gateway_frame(bytes, MAX_REQUEST_BYTES)? else {
+            return Ok(None);
+        };
+        Ok(Some((self.admit(&payload, binding, now)?, consumed)))
+    }
+
     pub fn retire_activation(&mut self, binding: &GatewayActivationBinding) -> Result<(), String> {
         self.rate_limiter.retire(&binding.contract)?;
         self.replay_guard.retire(&binding.contract)?;
@@ -488,6 +500,20 @@ impl GatewaySession {
         }
         self.budget.take_at(now)?;
         self.admission.admit(bytes, &self.binding, now)
+    }
+
+    pub fn admit_frame(
+        &mut self,
+        bytes: &[u8],
+        now: Instant,
+    ) -> Result<Option<(DecodedGatewayRequest, usize)>, String> {
+        if !self.established {
+            return Err("Gateway connection hello is required".to_string());
+        }
+        let Some((payload, consumed)) = decode_gateway_frame(bytes, MAX_REQUEST_BYTES)? else {
+            return Ok(None);
+        };
+        Ok(Some((self.admit(&payload, now)?, consumed)))
     }
 
     pub fn retire(&mut self) -> Result<(), String> {
@@ -796,6 +822,19 @@ mod tests {
             .expect("response frame should decode");
         assert_eq!(response, DatabaseResponse::Written);
         assert_eq!(consumed, response_frame.len());
+    }
+
+    #[test]
+    fn framed_admission_waits_for_complete_payload_before_consuming_budget() {
+        let frame = encode_request_frame(&request()).expect("request frame should encode");
+        let mut admission = GatewayRequestAdmission::new();
+        assert_eq!(admission.admit_frame(&frame[..3], &binding(), Instant::now()).unwrap(), None);
+        let (decoded, consumed) = admission
+            .admit_frame(&frame, &binding(), Instant::now())
+            .unwrap()
+            .expect("complete request frame should be admitted");
+        assert_eq!(decoded.request_id, "request-1");
+        assert_eq!(consumed, frame.len());
     }
 
     #[test]
