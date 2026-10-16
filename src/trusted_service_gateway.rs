@@ -186,6 +186,7 @@ pub fn decode_request(
 
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub const MAX_OPERATIONS_PER_CONNECTION: u32 = 100;
+pub const MAX_REQUEST_DURATION: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "response", rename_all = "snake_case")]
@@ -220,14 +221,29 @@ pub fn encode_response(response: &DatabaseResponse) -> Result<Vec<u8>, String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GatewayOperationBudget {
     used: u32,
+    deadline: Instant,
 }
 
 impl GatewayOperationBudget {
     pub fn new() -> Self {
-        Self { used: 0 }
+        Self::new_at(Instant::now())
+    }
+
+    pub fn new_at(started_at: Instant) -> Self {
+        Self {
+            used: 0,
+            deadline: started_at + MAX_REQUEST_DURATION,
+        }
     }
 
     pub fn take(&mut self) -> Result<(), String> {
+        self.take_at(Instant::now())
+    }
+
+    pub fn take_at(&mut self, now: Instant) -> Result<(), String> {
+        if now >= self.deadline {
+            return Err("Gateway request deadline exceeded".to_string());
+        }
         if self.used >= MAX_OPERATIONS_PER_CONNECTION {
             return Err("Gateway operation budget exceeded".to_string());
         }
@@ -322,6 +338,16 @@ mod tests {
                 .expect("budget should allow configured operations");
         }
         assert!(budget.take().is_err());
+    }
+
+    #[test]
+    fn rejects_operations_after_bounded_request_deadline() {
+        let start = Instant::now();
+        let mut budget = GatewayOperationBudget::new_at(start);
+        budget
+            .take_at(start)
+            .expect("operation should be accepted before deadline");
+        assert!(budget.take_at(start + Duration::from_secs(6)).is_err());
     }
 
     #[test]
