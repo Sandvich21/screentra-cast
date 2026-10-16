@@ -764,6 +764,8 @@ pub struct TrustedServiceStage {
     pub staged_at: String,
 }
 
+const MAX_TRUSTED_SERVICE_STAGES: usize = 1_024;
+
 fn trusted_service_signing_public_key() -> PathBuf {
     std::env::var("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY")
         .map(PathBuf::from)
@@ -1044,6 +1046,11 @@ pub fn list_trusted_service_stages() -> Result<Vec<TrustedServiceStage>, AddonEr
     let mut stages = Vec::new();
     for entry in fs::read_dir(&root).map_err(io_error)? {
         let entry = entry.map_err(io_error)?;
+        if stages.len() >= MAX_TRUSTED_SERVICE_STAGES {
+            return Err(AddonError::Invalid(
+                "Too many trusted service stages".to_string(),
+            ));
+        }
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with('.') {
             continue;
