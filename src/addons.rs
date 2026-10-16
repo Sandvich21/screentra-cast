@@ -361,6 +361,14 @@ pub(crate) fn validate_trusted_service_image_reference(image: &str) -> Result<()
             component.is_empty()
                 || component == "."
                 || component == ".."
+                || component
+                    .bytes()
+                    .next()
+                    .map_or(true, |byte| !byte.is_ascii_alphanumeric())
+                || component
+                    .bytes()
+                    .last()
+                    .map_or(true, |byte| !byte.is_ascii_alphanumeric())
                 || component.starts_with(':')
                 || component.ends_with(':')
         })
@@ -1284,6 +1292,8 @@ mod tests {
             "registry/service:tag",
             "registry.example/.",
             "registry.example/Weather",
+            "registry.example/-service",
+            "registry.example/service-",
         ] {
             assert!(validate_trusted_service_image_reference(image).is_err(), "{image}");
         }
