@@ -211,13 +211,43 @@ impl std::fmt::Display for AddonError {
     }
 }
 
+fn data_dir() -> PathBuf {
+    std::env::var("SIGNAGE_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/home/board/data"))
+}
+
+fn checked_data_dir(create: bool) -> Result<Option<PathBuf>, AddonError> {
+    let root = data_dir();
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
+            AddonError::Invalid("Invalid addon data directory".to_string()),
+        ),
+        Ok(_) => Ok(Some(root)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            fs::create_dir_all(&root).map_err(io_error)?;
+            let metadata = fs::symlink_metadata(&root).map_err(io_error)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(AddonError::Invalid(
+                    "Invalid addon data directory".to_string(),
+                ));
+            }
+            Ok(Some(root))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
 fn storage_dir() -> PathBuf {
-    let root = std::env::var("SIGNAGE_DATA_DIR").unwrap_or_else(|_| "/home/board/data".to_string());
-    PathBuf::from(root).join("addons")
+    data_dir().join("addons")
 }
 
 fn checked_addon_storage_dir(create: bool) -> Result<Option<PathBuf>, AddonError> {
-    let root = storage_dir();
+    let Some(data_root) = checked_data_dir(create)? else {
+        return Ok(None);
+    };
+    let root = data_root.join("addons");
     match fs::symlink_metadata(&root) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
             AddonError::Invalid("Invalid addon storage directory".to_string()),
@@ -255,6 +285,7 @@ pub fn save_client_status(
     client_id: &str,
     report: ClientAddonStatusReport,
 ) -> Result<(), AddonError> {
+    let _ = checked_data_dir(true)?;
     let path = client_status_path(client_id)?;
     if report.at.as_deref().map_or(false, |value| value.len() > 64) {
         return Err(AddonError::Invalid(
@@ -322,6 +353,7 @@ pub fn save_client_status(
 }
 
 pub fn load_client_status(client_id: &str) -> Result<Option<serde_json::Value>, AddonError> {
+    let _ = checked_data_dir(false)?;
     let path = client_status_path(client_id)?;
     if !path.is_file() {
         return Ok(None);
@@ -2158,6 +2190,17 @@ mod tests {
         assert!(error.to_string().contains("Invalid addon directory"));
         assert!(target.is_dir());
         assert!(addon_path.is_symlink());
+        let data_target = root.join("data-target");
+        let data_link = root.join("data-link");
+        fs::create_dir_all(&data_target).unwrap();
+        symlink(&data_target, &data_link).unwrap();
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_link);
+        }
+        assert!(list().is_err());
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
         if let Some(value) = old_data_root {
             unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
         } else {
