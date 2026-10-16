@@ -99,6 +99,28 @@ contain raw database rows, SQL text, connection strings, internal paths, or
 service credentials. Event delivery is at-least-once; consumers must treat
 `request_id` as an idempotency key where the operation can mutate state.
 
+## Current contract-only frame codec
+
+The pure gateway contract now defines a stream-safe frame shape for a future Unix
+transport. Each frame consists of a four-byte unsigned big-endian payload length
+followed by exactly that many JSON payload bytes. The length excludes the four-byte
+header. A decoder must return an incomplete result when the header or payload is
+partial, reject lengths above the applicable 64 KiB request or response limit, and
+consume only one complete frame so additional frames can remain buffered.
+
+The typed wrappers are:
+
+- connection hello frame — protocol version `1`, addon ID, activation instance;
+- request frame — request ID, `storage` capability, activation-bound typed storage
+  operation;
+- response frame — value, written, deleted, or bounded entries result.
+
+These functions are contract-only. There is still no Unix socket listener, OS peer
+credential acquisition, connection loop, or runtime caller. Framing does not
+constitute authentication; peer credentials, hello binding, activation state,
+replay protection, rate limits, deadlines, and audit behavior remain mandatory
+before a future transport can dispatch a request.
+
 ## Storage operations
 
 Storage operations use the core-owned namespaced storage contract already
