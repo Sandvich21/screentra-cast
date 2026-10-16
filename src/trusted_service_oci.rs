@@ -53,6 +53,48 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
+pub fn build_rootless_argv(
+    runtime_name: &str,
+    spec: &OciLaunchSpec,
+) -> Result<Vec<String>, String> {
+    validate_oci_launch_spec(spec)?;
+    if !SUPPORTED_ROOTLESS_RUNTIMES.contains(&runtime_name) {
+        return Err("unsupported rootless runtime".to_string());
+    }
+    let mut argv = vec![runtime_name.to_string(), "run".to_string()];
+    argv.extend([
+        "--rm".to_string(),
+        format!("--name={}", container_name(spec)),
+        "--network=none".to_string(),
+        "--read-only".to_string(),
+        "--cap-drop=ALL".to_string(),
+        "--security-opt=no-new-privileges".to_string(),
+        format!("--pids-limit={}", spec.resources.pids),
+        format!("--memory={}", spec.resources.memory_bytes),
+        format!(
+            "--cpus={}.{:03}",
+            spec.resources.cpu_millis / 1_000,
+            spec.resources.cpu_millis % 1_000
+        ),
+        format!("{}@{}", spec.image, spec.image_digest),
+    ]);
+    argv.extend(spec.command.iter().cloned());
+    Ok(argv)
+}
+
+fn container_name(spec: &OciLaunchSpec) -> String {
+    let mut name = format!("screentra-{}-{}", spec.addon_id, spec.activation_instance)
+        .chars()
+        .map(|ch| if ch == '.' || ch == '_' { '-' } else { ch })
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+        .take(63)
+        .collect::<String>();
+    if name.is_empty() {
+        name = "screentra-addon".to_string();
+    }
+    name
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OciLaunchPolicy {
     pub rootless: bool,
@@ -95,7 +137,10 @@ pub fn validate_oci_launch_spec(spec: &OciLaunchSpec) -> Result<(), String> {
         || spec.image.len() > 512
         || spec.image.contains(':')
         || spec.image.contains('@')
-        || spec.image.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+        || spec
+            .image
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control())
     {
         return Err("OCI image must be an immutable untagged reference".to_string());
     }
@@ -103,7 +148,11 @@ pub fn validate_oci_launch_spec(spec: &OciLaunchSpec) -> Result<(), String> {
         .image_digest
         .strip_prefix("sha256:")
         .ok_or_else(|| "OCI image digest must use lowercase sha256".to_string())?;
-    if digest.len() != 64 || !digest.chars().all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()) {
+    if digest.len() != 64
+        || !digest
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+    {
         return Err("OCI image digest must be lowercase sha256".to_string());
     }
     if spec.storage_namespace != spec.addon_id || spec.api_namespace != spec.addon_id {
@@ -124,12 +173,18 @@ pub fn validate_oci_launch_spec(spec: &OciLaunchSpec) -> Result<(), String> {
         || spec.command.iter().any(|part| {
             part.is_empty()
                 || part.chars().any(|ch| ch.is_control())
-                || matches!(part.as_str(), "sh" | "bash" | "dash" | "/bin/sh" | "/bin/bash" | "-c" | "-lc")
+                || matches!(
+                    part.as_str(),
+                    "sh" | "bash" | "dash" | "/bin/sh" | "/bin/bash" | "-c" | "-lc"
+                )
         })
     {
         return Err("OCI command must not invoke a shell".to_string());
     }
-    if !spec.environment.is_empty() || !spec.host_mounts.is_empty() || !spec.published_ports.is_empty() {
+    if !spec.environment.is_empty()
+        || !spec.host_mounts.is_empty()
+        || !spec.published_ports.is_empty()
+    {
         return Err("OCI launch spec exposes a forbidden host boundary".to_string());
     }
     if !spec.policy.rootless
@@ -159,8 +214,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        probe_oci_runtime, validate_oci_launch_spec, OciLaunchPolicy, OciLaunchSpec,
-        OciResourceLimits,
+        build_rootless_argv, probe_oci_runtime, validate_oci_launch_spec, OciLaunchPolicy,
+        OciLaunchSpec, OciResourceLimits,
     };
 
     fn safe_spec() -> OciLaunchSpec {
@@ -223,7 +278,9 @@ mod tests {
         assert!(validate_oci_launch_spec(&shell).is_err());
 
         let mut environment = safe_spec();
-        environment.environment.push(("TOKEN".to_string(), "secret".to_string()));
+        environment
+            .environment
+            .push(("TOKEN".to_string(), "secret".to_string()));
         assert!(validate_oci_launch_spec(&environment).is_err());
     }
 
@@ -238,6 +295,23 @@ mod tests {
         assert!(validate_oci_launch_spec(&invalid).is_err());
     }
 
+    #[test]
+    fn builds_fixed_rootless_argv_without_shell_or_host_boundaries() {
+        let args = build_rootless_argv("podman", &safe_spec()).expect("argv should validate");
+        assert_eq!(args.first().map(String::as_str), Some("podman"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--network=none", "--read-only"]));
+        assert!(args.iter().any(|arg| arg == "--cap-drop=ALL"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--security-opt=no-new-privileges"));
+        assert!(args.iter().any(|arg| arg == "registry.example/weather@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert_eq!(args.last().map(String::as_str), Some("/service"));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "-c" || arg == "--volume" || arg == "-v"));
+    }
     #[test]
     fn missing_oci_runtime_is_blocked_without_fallback() {
         let report = probe_oci_runtime(Path::new("/definitely/missing/screentra-oci-runtime"));

@@ -71,6 +71,15 @@ reports missing or non-executable paths as blocked, and always keeps
 `can_start` false while OCI capability probing is disabled. It does not search
 PATH, invoke a command, fall back to a host process, or contact a registry.
 
+A fixed-argument builder is also present for the future supervisor. It emits
+only the selected supported runtime, `run`, immutable `image@digest`,
+`--network=none`, read-only root filesystem, dropped capabilities,
+no-new-privileges, bounded memory/CPU/PIDs, a deterministic container name,
+and the validated service argv. The builder returns an argument vector and
+never invokes it; gateway mounts, credentials, image pulls, and process
+execution remain unavailable.
+
+
 ## Required future activation gates
 
 A future implementation must add all of the following before changing the
