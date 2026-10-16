@@ -883,6 +883,9 @@ mod tests {
             .expect("request frame should be admitted after hello");
         assert_eq!(decoded_request.request_id, "request-1");
         assert_eq!(consumed, request_frame.len());
+        session.retire().expect("session should retire");
+        assert!(session.admit_frame(&request_frame, Instant::now()).is_err());
+        assert!(session.accept_hello_frame(&frame, peer).is_err());
     }
 
     #[test]
