@@ -1346,6 +1346,13 @@ mod tests {
             .expect("fake runtime start");
         let mut replacement = test_record();
         replacement.activation_instance = "activation-new".to_string();
+        let plan = harness
+            .supervisor
+            .replacement_plan(&handle, &replacement)
+            .expect("running old activation should produce a replacement plan");
+        assert_eq!(plan.old_activation_instance, "activation-old");
+        assert_eq!(plan.new_activation_instance, "activation-new");
+        assert!(!plan.can_start);
         harness
             .supervisor
             .deactivate(&handle)
