@@ -255,6 +255,14 @@ fn record_from_stage(
             "Trusted service stage is not pending approval".to_string(),
         ));
     }
+    if stage.staged_at.is_empty()
+        || stage.staged_at.len() > 64
+        || chrono::DateTime::parse_from_rfc3339(&stage.staged_at).is_err()
+    {
+        return Err(RuntimeError::Invalid(
+            "Trusted service stage timestamp is invalid".to_string(),
+        ));
+    }
     let service = stage.manifest.trusted_service.as_ref().ok_or_else(|| {
         RuntimeError::Invalid("Trusted service stage lacks service metadata".to_string())
     })?;
@@ -1336,6 +1344,12 @@ mod tests {
         invalid_state.state = "approved".to_string();
         assert!(matches!(
             record_from_stage(&invalid_state, "admin"),
+            Err(RuntimeError::Invalid(_))
+        ));
+        let mut invalid_timestamp = stage;
+        invalid_timestamp.staged_at = "not-a-timestamp".to_string();
+        assert!(matches!(
+            record_from_stage(&invalid_timestamp, "admin"),
             Err(RuntimeError::Invalid(_))
         ));
     }
