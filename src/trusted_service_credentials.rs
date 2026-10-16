@@ -71,12 +71,18 @@ impl CredentialScope {
 /// Opaque broker metadata. It is deliberately not a bearer token or secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialLease {
+    pub addon_id: String,
+    pub activation_instance: String,
     pub lease_id: String,
     pub expires_at: String,
 }
 
 impl CredentialLease {
     pub fn validate(&self) -> Result<(), CredentialError> {
+        crate::addons::validate_addon_storage_namespace(&self.addon_id)
+            .map_err(CredentialError::Invalid)?;
+        crate::addons::validate_addon_storage_namespace(&self.activation_instance)
+            .map_err(CredentialError::Invalid)?;
         if self.lease_id.is_empty()
             || self.lease_id.len() > 128
             || !self.lease_id.chars().all(|character| {
@@ -92,6 +98,18 @@ impl CredentialLease {
         {
             return Err(CredentialError::Invalid(
                 "Invalid trusted service credential lease metadata".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn binds_scope(&self, scope: &CredentialScope) -> Result<(), CredentialError> {
+        self.validate()?;
+        scope.validate()?;
+        if self.addon_id != scope.addon_id || self.activation_instance != scope.activation_instance
+        {
+            return Err(CredentialError::Invalid(
+                "Credential lease identity does not match scope".to_string(),
             ));
         }
         Ok(())
@@ -220,6 +238,8 @@ mod tests {
     #[test]
     fn credential_lease_metadata_is_bounded_and_non_secret_shaped() {
         let valid = CredentialLease {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
             lease_id: "lease-1".to_string(),
             expires_at: "2030-01-01T00:00:00Z".to_string(),
         };
@@ -242,6 +262,8 @@ mod tests {
             Err(CredentialError::Invalid(_))
         ));
         let invalid_timestamp = CredentialLease {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
             lease_id: "lease-2".to_string(),
             expires_at: "not-a-timestamp".to_string(),
         };
@@ -252,8 +274,30 @@ mod tests {
     }
 
     #[test]
+    fn credential_lease_is_bound_to_addon_and_activation_scope() {
+        let lease = CredentialLease {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
+            lease_id: "lease-1".to_string(),
+            expires_at: "2030-01-01T00:00:00Z".to_string(),
+        };
+        lease
+            .binds_scope(&scope())
+            .expect("matching lease scope should pass");
+
+        let mut wrong = scope();
+        wrong.activation_instance = "activation-2".to_string();
+        assert!(matches!(
+            lease.binds_scope(&wrong),
+            Err(CredentialError::Invalid(_))
+        ));
+    }
+
+    #[test]
     fn credential_lease_expiry_must_be_in_the_future() {
         let lease = CredentialLease {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
             lease_id: "lease-1".to_string(),
             expires_at: "2030-01-01T00:00:00Z".to_string(),
         };
@@ -271,6 +315,8 @@ mod tests {
     fn disabled_broker_never_accepts_a_revoke_as_activation() {
         let mut broker = DisabledCredentialBroker;
         let lease = CredentialLease {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
             lease_id: "lease-1".to_string(),
             expires_at: "2030-01-01T00:00:00Z".to_string(),
         };
