@@ -366,6 +366,8 @@ pub struct OciRegistryPolicy {
 }
 
 pub fn validate_oci_image_registry(image: &str, policy: &OciRegistryPolicy) -> Result<(), String> {
+    crate::addons::validate_trusted_service_image_reference(image)
+        .map_err(|_| "OCI image reference is invalid".to_string())?;
     if policy.allowed_registries.is_empty()
         || policy.allowed_registries.len() > MAX_OCI_ALLOWED_REGISTRIES
         || policy.allowed_registries.iter().any(|registry| {
@@ -526,6 +528,7 @@ mod tests {
         assert!(validate_oci_image_registry("registry.example/../weather", &policy).is_err());
         assert!(validate_oci_image_registry("registry.example/weather:latest", &policy).is_err());
         assert!(validate_oci_image_registry("registry.example/weather image", &policy).is_err());
+        assert!(validate_oci_image_registry("registry.example/weather!", &policy).is_err());
 
         let invalid_policy = OciRegistryPolicy {
             allowed_registries: BTreeSet::from(["Registry.Example".to_string()]),
