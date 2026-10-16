@@ -22,6 +22,14 @@ explicitly granted to its contract; it never receives a database URL, password,
 Unix socket path, SQLite file path, PostgreSQL superuser role, or unrestricted
 connection handle.
 
+Addon IDs, activation-instance IDs, and storage namespaces all use the same
+canonical namespace validator: 1–128 ASCII bytes, beginning with an ASCII
+letter or digit, followed only by ASCII letters, digits, `.`, `_`, or `-`.
+Whitespace, control characters, slash/backslash separators, traversal components,
+and empty values are rejected before contract validation or backend access.
+Audit records use the same validator; they do not provide a broader identity
+format merely because they are metadata.
+
 ## Boundary modes
 
 ### SQLite: core-owned storage API only
