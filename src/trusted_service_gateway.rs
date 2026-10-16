@@ -355,6 +355,11 @@ impl GatewaySession {
         self.budget.take_at(now)?;
         self.admission.admit(bytes, &self.binding, now)
     }
+
+    pub fn retire(&mut self) -> Result<(), String> {
+        self.established = false;
+        self.admission.retire_activation(&self.binding)
+    }
 }
 
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -584,6 +589,11 @@ mod tests {
         assert!(session
             .admit(&second_request, start + Duration::from_secs(6))
             .is_err());
+        session
+            .retire()
+            .expect("session retirement should clean admission state");
+        assert!(!session.is_established());
+        assert!(session.admit(&request_bytes, start).is_err());
     }
 
     #[test]
