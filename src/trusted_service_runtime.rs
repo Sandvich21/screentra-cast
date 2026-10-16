@@ -731,9 +731,9 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
                 "Runtime handle is not bound to the running addon".to_string(),
             ));
         }
-        self.running.remove(&handle.activation_instance);
         fs::remove_file(running_marker_path(&self.root, handle))
             .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        self.running.remove(&handle.activation_instance);
         self.terminal.insert(
             handle.activation_instance.clone(),
             (handle.clone(), RuntimeStatus::Stopped),
@@ -791,9 +791,9 @@ impl FakeTrustedServiceRuntime {
                 "Runtime handle is not bound to the running addon".to_string(),
             ));
         }
-        self.running.remove(&handle.activation_instance);
         fs::remove_file(running_marker_path(&self.root, handle))
             .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        self.running.remove(&handle.activation_instance);
         self.terminal.insert(
             handle.activation_instance.clone(),
             (handle.clone(), status),
@@ -1145,6 +1145,37 @@ mod tests {
         assert!(second_marker.is_file());
         second.stop(&second_handle).expect("second runtime stop");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn runtime_cleanup_failure_preserves_running_state() {
+        let mut harness = DisposableRuntimeHarness::new();
+        let request = RuntimeLaunchRequest {
+            addon_id: "example.service".to_string(),
+            activation_instance: "cleanup-failure".to_string(),
+            image: "registry.example/service".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.service".to_string(),
+            api_namespace: "example.service".to_string(),
+            launch_profile: test_launch_profile(),
+        };
+        let handle = harness
+            .supervisor
+            .runtime_mut()
+            .start(&request)
+            .expect("fake runtime start");
+        fs::remove_file(running_marker_path(&harness.root, &handle))
+            .expect("remove marker to simulate cleanup failure");
+        assert!(matches!(
+            harness.supervisor.runtime_mut().stop(&handle),
+            Err(RuntimeError::Io(_))
+        ));
+        assert_eq!(
+            harness.supervisor.runtime().status(&handle).unwrap(),
+            RuntimeStatus::Running
+        );
+        assert_eq!(harness.supervisor.runtime().actions().len(), 1);
     }
 
     #[test]
