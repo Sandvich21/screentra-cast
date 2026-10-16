@@ -15,6 +15,29 @@ pub enum GatewayStorageOperation {
     List { prefix: String, limit: u32 },
 }
 
+pub const GATEWAY_PROTOCOL_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GatewayConnectionHello {
+    pub protocol_version: u16,
+    pub addon_id: String,
+    pub activation_instance: String,
+}
+
+pub fn validate_connection_hello(
+    hello: &GatewayConnectionHello,
+    binding: &GatewayActivationBinding,
+) -> Result<(), String> {
+    binding.validate()?;
+    if hello.protocol_version != GATEWAY_PROTOCOL_VERSION
+        || hello.addon_id != binding.contract.addon_id
+        || hello.activation_instance != binding.contract.activation_instance
+    {
+        return Err("Gateway connection identity is not permitted".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GatewayRequestEnvelope {
     pub addon_id: String,
@@ -404,9 +427,10 @@ impl GatewayRequestEnvelope {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_request, encode_request, encode_response, GatewayActivationBinding,
-        GatewayActivationState, GatewayOperationBudget, GatewayRateLimiter, GatewayReplayGuard,
-        GatewayRequestAdmission, GatewayRequestEnvelope, GatewayStorageOperation,
+        decode_request, encode_request, encode_response, validate_connection_hello,
+        GatewayActivationBinding, GatewayActivationState, GatewayConnectionHello,
+        GatewayOperationBudget, GatewayRateLimiter, GatewayReplayGuard, GatewayRequestAdmission,
+        GatewayRequestEnvelope, GatewayStorageOperation, GATEWAY_PROTOCOL_VERSION,
         MAX_OPERATIONS_PER_CONNECTION, MAX_REQUESTS_PER_ACTIVATION, MAX_TRACKED_ACTIVATIONS,
     };
     use crate::trusted_service_database::{
@@ -432,6 +456,34 @@ mod tests {
                 value_json: "{\"enabled\":true}".to_string(),
             },
         }
+    }
+
+    #[test]
+    fn validates_connection_hello_before_request_admission() {
+        let valid = GatewayConnectionHello {
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            addon_id: "example.weather".to_string(),
+            activation_instance: "activation-1".to_string(),
+        };
+        validate_connection_hello(&valid, &binding()).expect("hello should match binding");
+
+        let mut wrong_identity = valid.clone();
+        wrong_identity.addon_id = "example.other".to_string();
+        assert!(validate_connection_hello(&wrong_identity, &binding()).is_err());
+        let mut wrong_version = valid;
+        wrong_version.protocol_version += 1;
+        assert!(validate_connection_hello(&wrong_version, &binding()).is_err());
+        let mut inactive = binding();
+        inactive.state = GatewayActivationState::Stopped;
+        assert!(validate_connection_hello(
+            &GatewayConnectionHello {
+                protocol_version: GATEWAY_PROTOCOL_VERSION,
+                addon_id: "example.weather".to_string(),
+                activation_instance: "activation-1".to_string(),
+            },
+            &inactive,
+        )
+        .is_err());
     }
 
     #[test]

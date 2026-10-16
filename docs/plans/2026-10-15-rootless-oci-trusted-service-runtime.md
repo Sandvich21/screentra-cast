@@ -75,7 +75,7 @@ Build only a dry-run launch description until the runtime probe is available. Do
 
 ## Task 4: Add isolated storage and gateway boundaries
 
-**Status:** Bounded typed gateway frame contract is complete, including 64 KiB request/response caps with pre-serialization response-size checks, a 5-second request deadline contract, a 100-operation budget, active/stopped/disabled/replaced activation binding, a single admission path that binds decoded requests to bounded per-activation rate and replay checks without charging rejected replays, lifecycle retirement of replaced activation state, and duplicate request-ID rejection; Unix listener, authentication transport, and runtime wiring remain disabled.
+**Status:** Bounded typed gateway frame contract is complete, including a versioned connection-identity hello check, 64 KiB request/response caps with pre-serialization response-size checks, a 5-second request deadline contract, a 100-operation budget, active/stopped/disabled/replaced activation binding, a single admission path that binds decoded requests to bounded per-activation rate and replay checks without charging rejected replays, lifecycle retirement of replaced activation state, and duplicate request-ID rejection; Unix listener, peer authentication transport, and runtime wiring remain disabled.
 
 **Files:**
 - Create: `src/trusted_service_gateway.rs`
