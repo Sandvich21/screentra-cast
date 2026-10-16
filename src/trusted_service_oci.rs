@@ -78,13 +78,20 @@ pub fn probe_oci_runtime(path: &Path) -> OciRuntimeProbeReport {
         .and_then(|value| value.to_str())
         .map(str::to_string);
     let mut blocked_by = Vec::new();
+    if !path.is_absolute() {
+        blocked_by.push("runtime path must be absolute".to_string());
+    }
     if !runtime_name
         .as_deref()
         .is_some_and(|name| SUPPORTED_ROOTLESS_RUNTIMES.contains(&name))
     {
         blocked_by.push("unsupported rootless runtime".to_string());
     }
-    let executable_present = path.is_file() && is_executable(path);
+    let executable_present = path.is_absolute()
+        && path
+            .symlink_metadata()
+            .map(is_regular_executable)
+            .unwrap_or(false);
     if !executable_present {
         blocked_by.push("runtime executable unavailable".to_string());
     }
@@ -99,18 +106,15 @@ pub fn probe_oci_runtime(path: &Path) -> OciRuntimeProbeReport {
     }
 }
 
-fn is_executable(path: &Path) -> bool {
+fn is_regular_executable(metadata: std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return path
-            .metadata()
-            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false);
+        return metadata.file_type().is_file() && metadata.permissions().mode() & 0o111 != 0;
     }
     #[cfg(not(unix))]
     {
-        path.is_file()
+        metadata.file_type().is_file()
     }
 }
 
@@ -589,5 +593,12 @@ mod tests {
             .blocked_by
             .iter()
             .any(|reason| reason == "runtime executable unavailable"));
+
+        let relative = probe_oci_runtime(Path::new("podman"));
+        assert!(!relative.executable_present);
+        assert!(relative
+            .blocked_by
+            .iter()
+            .any(|reason| reason == "runtime path must be absolute"));
     }
 }
