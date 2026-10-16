@@ -127,6 +127,41 @@ pub fn encode_request(request: &GatewayRequestEnvelope) -> Result<Vec<u8>, Strin
     Ok(bytes)
 }
 
+const GATEWAY_FRAME_LENGTH_BYTES: usize = 4;
+
+pub fn encode_gateway_frame(payload: &[u8], maximum_bytes: usize) -> Result<Vec<u8>, String> {
+    if payload.len() > maximum_bytes || payload.len() > u32::MAX as usize {
+        return Err("Gateway frame is too large".to_string());
+    }
+    let mut frame = Vec::with_capacity(GATEWAY_FRAME_LENGTH_BYTES + payload.len());
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(payload);
+    Ok(frame)
+}
+
+pub fn decode_gateway_frame(
+    bytes: &[u8],
+    maximum_bytes: usize,
+) -> Result<Option<(Vec<u8>, usize)>, String> {
+    if bytes.len() < GATEWAY_FRAME_LENGTH_BYTES {
+        return Ok(None);
+    }
+    let frame_len = u32::from_be_bytes(bytes[..GATEWAY_FRAME_LENGTH_BYTES].try_into().unwrap()) as usize;
+    if frame_len > maximum_bytes {
+        return Err("Gateway frame is too large".to_string());
+    }
+    let total_len = GATEWAY_FRAME_LENGTH_BYTES
+        .checked_add(frame_len)
+        .ok_or_else(|| "Gateway frame is too large".to_string())?;
+    if bytes.len() < total_len {
+        return Ok(None);
+    }
+    Ok(Some((
+        bytes[GATEWAY_FRAME_LENGTH_BYTES..total_len].to_vec(),
+        total_len,
+    )))
+}
+
 fn validate_request_id(request_id: &str) -> Result<(), String> {
     if request_id.is_empty()
         || request_id.len() > 128
@@ -556,8 +591,9 @@ impl GatewayRequestEnvelope {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_connection_hello, decode_request, encode_connection_hello, encode_request,
-        encode_response, validate_connection_hello, GatewayActivationBinding,
+        decode_connection_hello, decode_gateway_frame, decode_request, encode_connection_hello,
+        encode_gateway_frame, encode_request, encode_response, validate_connection_hello,
+        GatewayActivationBinding,
         GatewayActivationState, GatewayConnectionHello, GatewayOperationBudget,
         GatewayPeerCredentials, GatewayPeerPolicy, GatewayRateLimiter, GatewayReplayGuard,
         GatewayRequestAdmission, GatewayRequestEnvelope, GatewaySession, GatewayStorageOperation,
@@ -650,6 +686,21 @@ mod tests {
             &inactive,
         )
         .is_err());
+    }
+
+    #[test]
+    fn gateway_frame_codec_bounds_and_handles_partial_frames() {
+        let frame = encode_gateway_frame(b"hello", 16).expect("frame should encode");
+        assert_eq!(decode_gateway_frame(&frame[..2], 16).unwrap(), None);
+        let mut partial = frame[..frame.len() - 1].to_vec();
+        assert_eq!(decode_gateway_frame(&partial, 16).unwrap(), None);
+        partial.push(*frame.last().unwrap());
+        let (payload, consumed) = decode_gateway_frame(&partial, 16).unwrap().unwrap();
+        assert_eq!(payload, b"hello");
+        assert_eq!(consumed, frame.len());
+        assert!(encode_gateway_frame(&[0u8; 17], 16).is_err());
+        let oversized_length = (17u32).to_be_bytes();
+        assert!(decode_gateway_frame(&oversized_length, 16).is_err());
     }
 
     #[test]
