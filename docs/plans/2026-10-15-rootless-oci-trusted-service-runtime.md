@@ -75,7 +75,7 @@ Build only a dry-run launch description until the runtime probe is available. Do
 
 ## Task 4: Add isolated storage and gateway boundaries
 
-**Status:** Bounded typed gateway frame contract is complete, including a versioned and bounded connection-identity hello codec with a session gate before request admission, a session-enforced 5-second request deadline and 100-operation budget, terminal session retirement that closes admission, prevents re-establishment and re-handshake, and clears activation state, a contract-only exact non-root peer UID/GID/PID policy rebound for each transport process, 64 KiB request/response caps with pre-serialization response-size checks, active/stopped/disabled/replaced activation binding, a single admission path that binds decoded requests to bounded per-activation rate and replay checks without charging rejected replays, lifecycle retirement of replaced activation state, and duplicate request-ID rejection; Unix listener, OS peer-credential acquisition, and runtime wiring remain disabled.
+**Status:** Bounded typed gateway framing is complete, including four-byte big-endian length-prefix parsing, partial-frame handling, versioned and bounded connection-identity hello encoding, typed request/response wrappers, response pre-serialization size checks, session-enforced peer validation before hello decoding, 5-second request deadlines, 100-operation budgets, terminal session retirement, active/stopped/disabled/replaced activation binding, and framed hello-to-request admission coverage. Unix listener, OS peer-credential acquisition, and runtime wiring remain disabled.
 
 **Files:**
 - Create: `src/trusted_service_gateway.rs`
