@@ -616,6 +616,20 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
         })
     }
 
+    pub fn replacement_plan(
+        &self,
+        old_handle: &RuntimeHandle,
+        record: &TrustedServiceRuntimeRecord,
+    ) -> Result<ActivationReplacementPlan, RuntimeError> {
+        let status = self.runtime.status(old_handle)?;
+        if status != RuntimeStatus::Running {
+            return Err(RuntimeError::Blocked(
+                "Activation replacement requires a running old activation".to_string(),
+            ));
+        }
+        Self::activation_replacement_plan(old_handle, record)
+    }
+
     pub fn activate(
         &mut self,
         record: &TrustedServiceRuntimeRecord,
@@ -1280,6 +1294,36 @@ mod tests {
             Err(RuntimeError::NotFound)
         ));
         assert_eq!(harness.supervisor.runtime().actions().len(), 2);
+    }
+
+    #[test]
+    fn supervisor_replacement_requires_a_running_old_handle() {
+        let mut harness = DisposableRuntimeHarness::new();
+        let request = RuntimeLaunchRequest {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-old".to_string(),
+            image: "registry.example/service".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.service".to_string(),
+            api_namespace: "example.service".to_string(),
+            launch_profile: test_launch_profile(),
+        };
+        let handle = harness
+            .supervisor
+            .runtime_mut()
+            .start(&request)
+            .expect("fake runtime start");
+        let mut replacement = test_record();
+        replacement.activation_instance = "activation-new".to_string();
+        harness
+            .supervisor
+            .deactivate(&handle)
+            .expect("old activation stop");
+        assert!(matches!(
+            harness.supervisor.replacement_plan(&handle, &replacement),
+            Err(RuntimeError::Blocked(_))
+        ));
     }
 
     #[test]
