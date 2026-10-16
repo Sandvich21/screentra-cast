@@ -166,8 +166,10 @@ fn decode_gateway_frame(
     if bytes.len() < GATEWAY_FRAME_LENGTH_BYTES {
         return Ok(None);
     }
-    let frame_len =
-        u32::from_be_bytes(bytes[..GATEWAY_FRAME_LENGTH_BYTES].try_into().unwrap()) as usize;
+    let header: [u8; GATEWAY_FRAME_LENGTH_BYTES] = bytes[..GATEWAY_FRAME_LENGTH_BYTES]
+        .try_into()
+        .map_err(|_| "Gateway frame header is invalid".to_string())?;
+    let frame_len = u32::from_be_bytes(header) as usize;
     if frame_len > maximum_bytes {
         return Err("Gateway frame is too large".to_string());
     }
