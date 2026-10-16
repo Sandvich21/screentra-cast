@@ -75,9 +75,9 @@ trait and harness are the current working-tree changes:
 
 ## Next phase after this plan
 
-Implement the controlled gateway adapters and disposable probes for the contract:
-SQLite namespaced API round-trip first, then PostgreSQL per-addon schema/role
-permission isolation. Keep the database gate and execution disabled until both
-backends, audit behavior, backup/restore, uninstall cleanup, and cross-namespace
-negative tests are verified. Only then should a rootless OCI backend be
-considered.
+Complete lifecycle integration around the non-service-facing adapters: extend
+backup/restore and uninstall coverage for controlled storage and inert runtime
+metadata, add rollback and stopped/disabled identity negative tests, and run the
+required PostgreSQL per-addon schema/role permission probe. Keep the database
+gate and execution disabled until those results are reviewed. Only then should a
+rootless OCI backend be considered.
