@@ -748,6 +748,54 @@ mod tests {
     }
 
     #[test]
+    fn disabled_activation_records_cannot_plan_or_start() {
+        let mut harness = DisposableRuntimeHarness::new();
+        let mut record = test_record();
+        record.state = "disabled".to_string();
+        let plan_error =
+            TrustedServiceSupervisor::<FakeTrustedServiceRuntime>::activation_plan(&record)
+                .expect_err("disabled records must not produce an activation plan");
+        assert!(matches!(plan_error, RuntimeError::Blocked(_)));
+        let start_error = harness
+            .supervisor
+            .activate(&record)
+            .expect_err("disabled records must not start");
+        assert!(matches!(start_error, RuntimeError::Blocked(_)));
+        assert!(harness.supervisor.runtime().actions().is_empty());
+    }
+
+    #[test]
+    fn stopped_activation_handles_cannot_be_stopped_again() {
+        let mut harness = DisposableRuntimeHarness::new();
+        let request = RuntimeLaunchRequest {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-stop-once".to_string(),
+            image: "registry.example/service".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.service".to_string(),
+            api_namespace: "example.service".to_string(),
+        };
+        let handle = harness
+            .supervisor
+            .runtime_mut()
+            .start(&request)
+            .expect("fake runtime start");
+        harness
+            .supervisor
+            .deactivate(&handle)
+            .expect("first stop should succeed");
+        assert_eq!(
+            harness.supervisor.runtime().status(&handle).unwrap(),
+            RuntimeStatus::Stopped
+        );
+        assert!(matches!(
+            harness.supervisor.deactivate(&handle),
+            Err(RuntimeError::NotFound)
+        ));
+    }
+
+    #[test]
     fn activation_plan_is_not_a_runtime_start_request() {
         let record = test_record();
         let plan = TrustedServiceSupervisor::<FakeTrustedServiceRuntime>::activation_plan(&record)
