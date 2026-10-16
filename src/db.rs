@@ -4043,6 +4043,44 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         .map_err(|e| e.to_string())
     }
 
+    pub fn list_addon_storage(
+        &self,
+        addon_id: &str,
+        prefix: &str,
+        limit: u32,
+    ) -> Result<Vec<(String, String)>, String> {
+        crate::addons::validate_addon_storage_namespace(addon_id)?;
+        if prefix.len() > crate::addons::MAX_ADDON_STORAGE_KEY_BYTES
+            || prefix.chars().any(|ch| ch.is_control() || ch == '/')
+        {
+            return Err("Invalid addon storage key prefix".to_string());
+        }
+        if limit == 0 || limit > 1_000 {
+            return Err("Invalid addon storage list limit".to_string());
+        }
+        let pattern = format!(
+            "{}%",
+            prefix
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut statement = conn
+            .prepare(
+                "SELECT storage_key, value_json FROM addon_storage
+                 WHERE addon_id = ?1 AND storage_key LIKE ?2 ESCAPE '\\'
+                 ORDER BY storage_key LIMIT ?3",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map(params![addon_id, pattern, limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
+
     pub fn delete_addon_storage(&self, addon_id: &str, storage_key: &str) -> Result<bool, String> {
         crate::addons::validate_addon_storage_namespace(addon_id)?;
         crate::addons::validate_addon_storage_key(storage_key)?;

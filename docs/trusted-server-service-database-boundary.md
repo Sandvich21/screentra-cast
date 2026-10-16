@@ -141,5 +141,8 @@ following are required:
 9. supervisor, credential, network, filesystem, and resource gates enabled
    only after the preceding evidence is reviewed.
 
-Until these gates pass, `TrustedServiceDatabaseContract` is validation metadata
-only and `EXECUTION_ENABLED` remains `false`.
+The contract is validation metadata only. A non-service-facing SQLite adapter
+now exercises typed namespaced operations through core-owned `addon_storage`
+methods, but it is not wired to any runtime, HTTP route, container, credential,
+or service gateway. PostgreSQL schema/role access remains unimplemented, and the
+`database_boundary` activation gate remains false.

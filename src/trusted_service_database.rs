@@ -7,8 +7,11 @@
 //! remain disabled until the supervisor gate is enabled.
 
 use crate::addons;
+use crate::db::Database;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_VALUE_BYTES: usize = 64 * 1024;
@@ -179,6 +182,11 @@ impl TrustedServiceDatabaseContract {
 
         match self.boundary {
             DatabaseBoundaryKind::CoreStorageApi => {
+                if self.storage_namespace != self.addon_id {
+                    return Err(DatabaseContractError::Invalid(
+                        "Core storage API namespace must match addon identity".to_string(),
+                    ));
+                }
                 if self.postgres_schema.is_some() || self.postgres_role.is_some() {
                     return Err(DatabaseContractError::Invalid(
                         "Core storage API cannot carry PostgreSQL identity".to_string(),
@@ -244,7 +252,7 @@ impl DatabaseOperation {
                 Ok(())
             }
             Self::List { prefix, limit } => {
-                validate_key(prefix)?;
+                validate_prefix(prefix)?;
                 if *limit == 0 || *limit > contract.max_rows_per_request {
                     return Err(DatabaseContractError::Invalid(
                         "Trusted service database list limit is invalid".to_string(),
@@ -254,6 +262,20 @@ impl DatabaseOperation {
             }
         }
     }
+}
+
+fn validate_prefix(prefix: &str) -> Result<(), DatabaseContractError> {
+    if prefix.len() > MAX_VALUE_BYTES || prefix.contains('/') || prefix.contains('\\') {
+        return Err(DatabaseContractError::Invalid(
+            "Invalid trusted service database prefix".to_string(),
+        ));
+    }
+    if prefix.chars().any(|character| character.is_control()) {
+        return Err(DatabaseContractError::Invalid(
+            "Invalid trusted service database prefix".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_key(key: &str) -> Result<(), DatabaseContractError> {
@@ -287,6 +309,89 @@ impl DatabaseRequest {
             return Err(DatabaseContractError::IdentityMismatch);
         }
         self.operation.validate(contract)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatabaseResponse {
+    Value(Option<String>),
+    Written,
+    Deleted(bool),
+    Entries(Vec<(String, String)>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatabaseGatewayError {
+    Contract(DatabaseContractError),
+    Storage(String),
+}
+
+impl fmt::Display for DatabaseGatewayError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Contract(error) => write!(formatter, "{error}"),
+            Self::Storage(_) => write!(formatter, "Trusted service database operation failed"),
+        }
+    }
+}
+
+/// SQLite implementation of the controlled boundary. It exposes only the
+/// existing core-owned addon_storage methods; it never exposes a connection,
+/// filesystem path, SQL string, or database file to the caller.
+#[derive(Clone)]
+pub(crate) struct TrustedServiceSqliteGateway {
+    db: Arc<Database>,
+    contract: TrustedServiceDatabaseContract,
+}
+
+impl TrustedServiceSqliteGateway {
+    pub(crate) fn new(
+        db: Arc<Database>,
+        contract: TrustedServiceDatabaseContract,
+    ) -> Result<Self, DatabaseGatewayError> {
+        contract
+            .validate()
+            .map_err(DatabaseGatewayError::Contract)?;
+        if contract.boundary != DatabaseBoundaryKind::CoreStorageApi {
+            return Err(DatabaseGatewayError::Contract(
+                DatabaseContractError::Unsupported(
+                    "SQLite gateway requires the core storage API boundary".to_string(),
+                ),
+            ));
+        }
+        Ok(Self { db, contract })
+    }
+
+    pub(crate) async fn handle(
+        &self,
+        request: DatabaseRequest,
+    ) -> Result<DatabaseResponse, DatabaseGatewayError> {
+        request
+            .validate_against(&self.contract)
+            .map_err(DatabaseGatewayError::Contract)?;
+        let addon_id = &self.contract.storage_namespace;
+        match request.operation {
+            DatabaseOperation::Get { key } => self
+                .db
+                .get_addon_storage(addon_id, &key)
+                .map(DatabaseResponse::Value)
+                .map_err(DatabaseGatewayError::Storage),
+            DatabaseOperation::Put { key, value_json } => self
+                .db
+                .set_addon_storage(addon_id, &key, &value_json, &Utc::now().to_rfc3339())
+                .map(|()| DatabaseResponse::Written)
+                .map_err(DatabaseGatewayError::Storage),
+            DatabaseOperation::Delete { key } => self
+                .db
+                .delete_addon_storage(addon_id, &key)
+                .map(DatabaseResponse::Deleted)
+                .map_err(DatabaseGatewayError::Storage),
+            DatabaseOperation::List { prefix, limit } => self
+                .db
+                .list_addon_storage(addon_id, &prefix, limit)
+                .map(DatabaseResponse::Entries)
+                .map_err(DatabaseGatewayError::Storage),
+        }
     }
 }
 
@@ -383,5 +488,155 @@ mod tests {
             },
         };
         assert!(invalid_limit.validate_against(&contract).is_err());
+    }
+
+    #[tokio::test]
+    async fn sqlite_gateway_round_trip_is_namespaced_and_identity_bound() {
+        let path = std::env::temp_dir().join(format!(
+            "screentra-service-db-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let db =
+            Arc::new(Database::open(path.to_str().expect("database path")).expect("open database"));
+        db.set_addon_storage(
+            "other.service",
+            "private",
+            r#"{"owner":"other"}"#,
+            "2026-10-15T00:00:00Z",
+        )
+        .expect("seed other namespace");
+        let gateway =
+            TrustedServiceSqliteGateway::new(db.clone(), sqlite_contract()).expect("gateway");
+
+        let put = DatabaseRequest {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
+            operation: DatabaseOperation::Put {
+                key: "state".to_string(),
+                value_json: r#"{"owner":"example"}"#.to_string(),
+            },
+        };
+        assert_eq!(
+            gateway.handle(put).await.unwrap(),
+            DatabaseResponse::Written
+        );
+        for (key, value) in [
+            ("state_extra", r#"{"owner":"example"}"#),
+            ("stateXextra", r#"{"owner":"example"}"#),
+        ] {
+            assert_eq!(
+                gateway
+                    .handle(DatabaseRequest {
+                        addon_id: "example.service".to_string(),
+                        activation_instance: "activation-1".to_string(),
+                        operation: DatabaseOperation::Put {
+                            key: key.to_string(),
+                            value_json: value.to_string(),
+                        },
+                    })
+                    .await
+                    .unwrap(),
+                DatabaseResponse::Written
+            );
+        }
+        assert_eq!(
+            gateway
+                .handle(DatabaseRequest {
+                    addon_id: "example.service".to_string(),
+                    activation_instance: "activation-1".to_string(),
+                    operation: DatabaseOperation::Get {
+                        key: "state".to_string(),
+                    },
+                })
+                .await
+                .unwrap(),
+            DatabaseResponse::Value(Some(r#"{"owner":"example"}"#.to_string()))
+        );
+        assert_eq!(
+            gateway
+                .handle(DatabaseRequest {
+                    addon_id: "example.service".to_string(),
+                    activation_instance: "activation-1".to_string(),
+                    operation: DatabaseOperation::List {
+                        prefix: "".to_string(),
+                        limit: 10,
+                    },
+                })
+                .await
+                .unwrap(),
+            DatabaseResponse::Entries(vec![
+                ("state".to_string(), r#"{"owner":"example"}"#.to_string(),),
+                (
+                    "stateXextra".to_string(),
+                    r#"{"owner":"example"}"#.to_string(),
+                ),
+                (
+                    "state_extra".to_string(),
+                    r#"{"owner":"example"}"#.to_string(),
+                ),
+            ])
+        );
+        assert_eq!(
+            gateway
+                .handle(DatabaseRequest {
+                    addon_id: "example.service".to_string(),
+                    activation_instance: "activation-1".to_string(),
+                    operation: DatabaseOperation::List {
+                        prefix: "state_".to_string(),
+                        limit: 10,
+                    },
+                })
+                .await
+                .unwrap(),
+            DatabaseResponse::Entries(vec![(
+                "state_extra".to_string(),
+                r#"{"owner":"example"}"#.to_string(),
+            ),])
+        );
+        let wrong_identity = gateway
+            .handle(DatabaseRequest {
+                addon_id: "other.service".to_string(),
+                activation_instance: "activation-1".to_string(),
+                operation: DatabaseOperation::Get {
+                    key: "private".to_string(),
+                },
+            })
+            .await
+            .expect_err("cross-addon request must be rejected");
+        assert!(matches!(
+            wrong_identity,
+            DatabaseGatewayError::Contract(DatabaseContractError::IdentityMismatch)
+        ));
+        assert_eq!(
+            db.get_addon_storage("other.service", "private").unwrap(),
+            Some(r#"{"owner":"other"}"#.to_string())
+        );
+        assert_eq!(
+            gateway
+                .handle(DatabaseRequest {
+                    addon_id: "example.service".to_string(),
+                    activation_instance: "activation-1".to_string(),
+                    operation: DatabaseOperation::Delete {
+                        key: "state".to_string(),
+                    },
+                })
+                .await
+                .unwrap(),
+            DatabaseResponse::Deleted(true)
+        );
+        assert!(
+            gateway
+                .handle(DatabaseRequest {
+                    addon_id: "example.service".to_string(),
+                    activation_instance: "activation-1".to_string(),
+                    operation: DatabaseOperation::Get {
+                        key: "state".to_string(),
+                    },
+                })
+                .await
+                .unwrap()
+                == DatabaseResponse::Value(None)
+        );
+        let _ = std::fs::remove_file(path);
     }
 }
