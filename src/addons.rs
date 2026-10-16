@@ -787,14 +787,21 @@ fn trusted_service_storage_dir() -> PathBuf {
 
 fn checked_trusted_service_storage_dir(create: bool) -> Result<Option<PathBuf>, AddonError> {
     let root = trusted_service_storage_dir();
-    if create {
-        fs::create_dir_all(&root).map_err(io_error)?;
-    }
     match fs::symlink_metadata(&root) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
             AddonError::Invalid("Invalid trusted service storage directory".to_string()),
         ),
         Ok(_) => Ok(Some(root)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            fs::create_dir_all(&root).map_err(io_error)?;
+            let metadata = fs::symlink_metadata(&root).map_err(io_error)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(AddonError::Invalid(
+                    "Invalid trusted service storage directory".to_string(),
+                ));
+            }
+            Ok(Some(root))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io_error(error)),
     }
