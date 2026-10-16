@@ -251,6 +251,27 @@ pub struct OciLaunchSpec {
     pub resources: OciResourceLimits,
 }
 
+fn is_shell_command(part: &str) -> bool {
+    let executable = Path::new(part)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(part);
+    matches!(
+        executable,
+        "sh" | "bash"
+            | "dash"
+            | "zsh"
+            | "ksh"
+            | "fish"
+            | "csh"
+            | "tcsh"
+            | "pwsh"
+            | "powershell"
+            | "cmd"
+            | "cmd.exe"
+    )
+}
+
 pub fn validate_oci_launch_spec(spec: &OciLaunchSpec) -> Result<(), String> {
     crate::addons::validate_addon_storage_namespace(&spec.addon_id)?;
     crate::addons::validate_addon_storage_namespace(&spec.activation_instance)
@@ -303,10 +324,8 @@ pub fn validate_oci_launch_spec(spec: &OciLaunchSpec) -> Result<(), String> {
         || spec.command.iter().any(|part| {
             part.is_empty()
                 || part.chars().any(|ch| ch.is_control())
-                || matches!(
-                    part.as_str(),
-                    "sh" | "bash" | "dash" | "/bin/sh" | "/bin/bash" | "-c" | "-lc"
-                )
+                || is_shell_command(part)
+                || matches!(part.as_str(), "-c" | "-lc")
         })
     {
         return Err("OCI command must not invoke a shell".to_string());
@@ -562,6 +581,10 @@ mod tests {
         let mut shell = safe_spec();
         shell.command = vec!["/bin/sh".to_string(), "-c".to_string(), "run".to_string()];
         assert!(validate_oci_launch_spec(&shell).is_err());
+
+        let mut alternate_shell = safe_spec();
+        alternate_shell.command = vec!["/bin/zsh".to_string()];
+        assert!(validate_oci_launch_spec(&alternate_shell).is_err());
 
         let mut environment = safe_spec();
         environment
