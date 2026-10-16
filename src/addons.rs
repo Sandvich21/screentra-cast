@@ -1269,6 +1269,17 @@ mod tests {
     }
 
     #[test]
+    fn validates_trusted_service_image_contracts() {
+        assert!(validate_trusted_service_image_reference("registry.example/service").is_ok());
+        for image in ["service", "/registry/service", "registry//service", "registry/service:tag"] {
+            assert!(validate_trusted_service_image_reference(image).is_err(), "{image}");
+        }
+        assert!(validate_trusted_service_image_digest(&format!("sha256:{}", "a".repeat(64))).is_ok());
+        assert!(validate_trusted_service_image_digest(&format!("sha256:{}", "A".repeat(64))).is_err());
+        assert!(validate_trusted_service_image_digest("sha256:short").is_err());
+    }
+
+    #[test]
     fn validates_addon_storage_bounds_and_json() {
         assert!(validate_addon_storage_namespace("example.weather").is_ok());
         assert!(validate_addon_storage_namespace("../escape").is_err());
