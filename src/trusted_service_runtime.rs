@@ -640,8 +640,8 @@ pub struct FakeTrustedServiceRuntime {
     root: PathBuf,
     actions: Vec<FakeRuntimeAction>,
     running: BTreeMap<String, RuntimeHandle>,
-    known: BTreeSet<String>,
-    terminal: BTreeMap<String, RuntimeStatus>,
+    known: BTreeMap<String, RuntimeHandle>,
+    terminal: BTreeMap<String, (RuntimeHandle, RuntimeStatus)>,
 }
 
 #[cfg(test)]
@@ -651,7 +651,7 @@ impl FakeTrustedServiceRuntime {
             root,
             actions: Vec::new(),
             running: BTreeMap::new(),
-            known: BTreeSet::new(),
+            known: BTreeMap::new(),
             terminal: BTreeMap::new(),
         }
     }
@@ -700,7 +700,8 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
             request.addon_id.as_bytes(),
         )
         .map_err(|error| RuntimeError::Io(error.to_string()))?;
-        self.known.insert(handle.activation_instance.clone());
+        self.known
+            .insert(handle.activation_instance.clone(), handle.clone());
         self.terminal.remove(&handle.activation_instance);
         self.running
             .insert(handle.activation_instance.clone(), handle.clone());
@@ -725,8 +726,10 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
         self.running.remove(&handle.activation_instance);
         fs::remove_file(self.root.join("running").join(&handle.activation_instance))
             .map_err(|error| RuntimeError::Io(error.to_string()))?;
-        self.terminal
-            .insert(handle.activation_instance.clone(), RuntimeStatus::Stopped);
+        self.terminal.insert(
+            handle.activation_instance.clone(),
+            (handle.clone(), RuntimeStatus::Stopped),
+        );
         self.actions
             .push(FakeRuntimeAction::Stop(handle.activation_instance.clone()));
         Ok(())
@@ -744,9 +747,19 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
                 ));
             }
             Ok(RuntimeStatus::Running)
-        } else if let Some(status) = self.terminal.get(&handle.activation_instance) {
+        } else if let Some((terminal_handle, status)) = self.terminal.get(&handle.activation_instance) {
+            if terminal_handle.addon_id != handle.addon_id {
+                return Err(RuntimeError::Conflict(
+                    "Runtime handle is not bound to the terminal addon".to_string(),
+                ));
+            }
             Ok(*status)
-        } else if self.known.contains(&handle.activation_instance) {
+        } else if let Some(known_handle) = self.known.get(&handle.activation_instance) {
+            if known_handle.addon_id != handle.addon_id {
+                return Err(RuntimeError::Conflict(
+                    "Runtime handle is not bound to the known addon".to_string(),
+                ));
+            }
             Ok(RuntimeStatus::Stopped)
         } else {
             Err(RuntimeError::NotFound)
@@ -773,8 +786,10 @@ impl FakeTrustedServiceRuntime {
         self.running.remove(&handle.activation_instance);
         fs::remove_file(self.root.join("running").join(&handle.activation_instance))
             .map_err(|error| RuntimeError::Io(error.to_string()))?;
-        self.terminal
-            .insert(handle.activation_instance.clone(), status);
+        self.terminal.insert(
+            handle.activation_instance.clone(),
+            (handle.clone(), status),
+        );
         self.actions.push(action);
         Ok(())
     }
@@ -1099,7 +1114,15 @@ mod tests {
             Err(RuntimeError::Conflict(_))
         ));
         assert!(harness.root.join("running").join("activation-bound").exists());
-        assert_eq!(harness.supervisor.runtime().actions().len(), 1);
+        harness
+            .supervisor
+            .deactivate(&handle)
+            .expect("bound runtime handle should stop");
+        assert!(matches!(
+            harness.supervisor.runtime().status(&forged),
+            Err(RuntimeError::Conflict(_))
+        ));
+        assert_eq!(harness.supervisor.runtime().actions().len(), 2);
     }
 
     #[test]
