@@ -141,8 +141,8 @@ impl GatewayReplayGuard {
         Self::default()
     }
 
-    pub fn accept(
-        &mut self,
+    pub fn check(
+        &self,
         binding: &GatewayActivationBinding,
         request_id: &str,
     ) -> Result<(), String> {
@@ -152,14 +152,32 @@ impl GatewayReplayGuard {
             binding.contract.addon_id.clone(),
             binding.contract.activation_instance.clone(),
         );
-        let ids = self.accepted.entry(key).or_default();
+        let Some(ids) = self.accepted.get(&key) else {
+            return Ok(());
+        };
         if ids.contains(request_id) {
             return Err("Gateway request was already accepted".to_string());
         }
         if ids.len() >= MAX_REQUEST_IDS_PER_ACTIVATION {
             return Err("Gateway replay state is full".to_string());
         }
-        ids.insert(request_id.to_string());
+        Ok(())
+    }
+
+    pub fn accept(
+        &mut self,
+        binding: &GatewayActivationBinding,
+        request_id: &str,
+    ) -> Result<(), String> {
+        self.check(binding, request_id)?;
+        let key = (
+            binding.contract.addon_id.clone(),
+            binding.contract.activation_instance.clone(),
+        );
+        self.accepted
+            .entry(key)
+            .or_default()
+            .insert(request_id.to_string());
         Ok(())
     }
 }
@@ -219,6 +237,7 @@ impl GatewayRequestAdmission {
         now: Instant,
     ) -> Result<DecodedGatewayRequest, String> {
         let decoded = decode_request_with_id(bytes, binding)?;
+        self.replay_guard.check(binding, &decoded.request_id)?;
         self.rate_limiter.check(binding, now)?;
         self.replay_guard.accept(binding, &decoded.request_id)?;
         Ok(decoded)
@@ -448,6 +467,20 @@ mod tests {
         assert_eq!(decoded.request_id, "request-1");
         assert_eq!(decoded.database_request.activation_instance, "activation-1");
         assert!(admission.admit(&bytes, &binding(), start).is_err());
+        for index in 2..=60 {
+            let mut next = request();
+            next.request_id = format!("request-{index}");
+            let next_bytes = encode_request(&next).expect("request should encode");
+            admission
+                .admit(&next_bytes, &binding(), start)
+                .expect("duplicate rejection must not consume rate capacity");
+        }
+        let mut exhausted = request();
+        exhausted.request_id = "request-61".to_string();
+        let exhausted_bytes = encode_request(&exhausted).expect("request should encode");
+        assert!(admission
+            .admit(&exhausted_bytes, &binding(), start)
+            .is_err());
 
         let mut inactive = binding();
         inactive.state = GatewayActivationState::Stopped;
