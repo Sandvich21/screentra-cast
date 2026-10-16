@@ -245,14 +245,15 @@ fn read_record(path: &Path) -> Result<TrustedServiceRuntimeRecord, RuntimeError>
     Ok(record)
 }
 
-fn record_from_stage(stage: &TrustedServiceStage, approver: &str) -> TrustedServiceRuntimeRecord {
-    let service = stage
-        .manifest
-        .trusted_service
-        .as_ref()
-        .expect("validated trusted service stage");
+fn record_from_stage(
+    stage: &TrustedServiceStage,
+    approver: &str,
+) -> Result<TrustedServiceRuntimeRecord, RuntimeError> {
+    let service = stage.manifest.trusted_service.as_ref().ok_or_else(|| {
+        RuntimeError::Invalid("Trusted service stage lacks service metadata".to_string())
+    })?;
     let now = Utc::now().to_rfc3339();
-    TrustedServiceRuntimeRecord {
+    Ok(TrustedServiceRuntimeRecord {
         record_version: RUNTIME_RECORD_VERSION,
         addon_id: stage.manifest.id.clone(),
         addon_version: stage.manifest.version.clone(),
@@ -270,7 +271,7 @@ fn record_from_stage(stage: &TrustedServiceStage, approver: &str) -> TrustedServ
         execution_enabled: EXECUTION_ENABLED,
         gates: activation_gates(),
         last_error: None,
-    }
+    })
 }
 
 /// Approve a staged service without activating it.
@@ -297,7 +298,7 @@ pub fn approve(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(RuntimeError::Io(error.to_string())),
     }
-    let record = record_from_stage(&stage, approver);
+    let record = record_from_stage(&stage, approver)?;
     write_atomic(&path, &record)?;
     Ok(record)
 }
@@ -1259,6 +1260,35 @@ mod tests {
             Err(RuntimeError::Conflict(_))
         ));
         assert_eq!(harness.supervisor.runtime().actions().len(), 2);
+    }
+
+    #[test]
+    fn malformed_stage_metadata_returns_error_instead_of_panicking() {
+        let stage = TrustedServiceStage {
+            manifest: addons::AddonManifest {
+                schema_version: 1,
+                id: "example.service".to_string(),
+                name: "Example".to_string(),
+                description: String::new(),
+                version: "1.0.0".to_string(),
+                kind: "trusted_server_service".to_string(),
+                min_server_version: None,
+                min_client_version: None,
+                widget_types: Vec::new(),
+                permissions: Vec::new(),
+                client_entrypoint: None,
+                server_entrypoint: None,
+                trusted_service: None,
+                client_sha256: None,
+                client_api_version: None,
+            },
+            state: "staged".to_string(),
+            staged_at: Utc::now().to_rfc3339(),
+        };
+        assert!(matches!(
+            record_from_stage(&stage, "admin"),
+            Err(RuntimeError::Invalid(_))
+        ));
     }
 
     #[test]

@@ -85,6 +85,8 @@ preventing missing or conflicting records from satisfying a required gate
 accidentally. A composed approval validator can additionally require the
 explicit registry policy before any future image transport; this remains
 contract-only.
+Approval conversion also fails closed if staged metadata lacks trusted-service data; malformed staged records return an error rather than triggering a process panic.
+
 The approved runtime record now also persists the complete manifest launch profile:
 explicit shell-free service argv, bounded resource limits, mandatory isolation
 policy, and the exact controlled gateway endpoint. Runtime-record reads and
