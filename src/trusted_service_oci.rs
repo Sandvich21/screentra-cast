@@ -285,6 +285,18 @@ pub fn validate_oci_image_registry(image: &str, policy: &OciRegistryPolicy) -> R
                 || registry.contains(':')
                 || registry.contains('@')
                 || registry.contains("..")
+                || registry.starts_with('.')
+                || registry.ends_with('.')
+                || registry.starts_with('-')
+                || registry.ends_with('-')
+                || registry.split('.').any(|label| {
+                    label.is_empty()
+                        || label.starts_with('-')
+                        || label.ends_with('-')
+                        || !label
+                            .chars()
+                            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+                })
                 || registry
                     .chars()
                     .any(|character| character.is_whitespace() || character.is_control())
@@ -374,6 +386,13 @@ mod tests {
             allowed_registries: BTreeSet::from(["Registry.Example".to_string()]),
         };
         assert!(validate_oci_image_registry("registry.example/weather", &invalid_policy).is_err());
+
+        let malformed_policy = OciRegistryPolicy {
+            allowed_registries: BTreeSet::from(["registry!.example".to_string()]),
+        };
+        assert!(
+            validate_oci_image_registry("registry.example/weather", &malformed_policy).is_err()
+        );
     }
 
     #[test]
