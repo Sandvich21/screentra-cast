@@ -360,6 +360,11 @@ pub fn validate_oci_image_registry(image: &str, policy: &OciRegistryPolicy) -> R
     if repository.is_empty()
         || repository.starts_with('/')
         || repository.contains("//")
+        || repository.contains(':')
+        || repository.contains('@')
+        || repository
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
         || repository
             .split('/')
             .any(|part| part == "." || part == "..")
@@ -473,6 +478,8 @@ mod tests {
         assert!(validate_oci_image_registry("docker.io/weather", &policy).is_err());
         assert!(validate_oci_image_registry("weather", &policy).is_err());
         assert!(validate_oci_image_registry("registry.example/../weather", &policy).is_err());
+        assert!(validate_oci_image_registry("registry.example/weather:latest", &policy).is_err());
+        assert!(validate_oci_image_registry("registry.example/weather image", &policy).is_err());
 
         let invalid_policy = OciRegistryPolicy {
             allowed_registries: BTreeSet::from(["Registry.Example".to_string()]),
