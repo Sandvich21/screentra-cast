@@ -99,6 +99,10 @@ rate limiter allows 60 requests per 60-second window with bounded tracked
 activation state. These are pure limits; there is still no socket listener or
 production request loop.
 
+Each frame also requires a bounded, character-restricted request ID. The
+contract-only replay guard rejects duplicate IDs per activation and bounds
+stored replay state; it rejects inactive bindings before recording anything.
+
 A fixed-argument builder is also present for the future supervisor. It emits
 only the selected supported runtime, `run`, immutable `image@digest`,
 `--network=none`, read-only root filesystem, dropped capabilities,

@@ -3,7 +3,7 @@ use crate::trusted_service_database::{
     MAX_REQUEST_BYTES,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -19,16 +19,30 @@ pub enum GatewayStorageOperation {
 pub struct GatewayRequestEnvelope {
     pub addon_id: String,
     pub activation_instance: String,
+    pub request_id: String,
     pub capability: String,
     pub operation: GatewayStorageOperation,
 }
 
 pub fn encode_request(request: &GatewayRequestEnvelope) -> Result<Vec<u8>, String> {
+    validate_request_id(&request.request_id)?;
     let bytes = serde_json::to_vec(request).map_err(|_| "Invalid gateway request".to_string())?;
     if bytes.len() > MAX_REQUEST_BYTES {
         return Err("Gateway request is too large".to_string());
     }
     Ok(bytes)
+}
+
+fn validate_request_id(request_id: &str) -> Result<(), String> {
+    if request_id.is_empty()
+        || request_id.len() > 128
+        || !request_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+    {
+        return Err("Gateway request ID is invalid".to_string());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +129,40 @@ impl GatewayRateLimiter {
         Ok(())
     }
 }
+pub const MAX_REQUEST_IDS_PER_ACTIVATION: usize = 1_024;
+
+#[derive(Debug, Default)]
+pub struct GatewayReplayGuard {
+    accepted: BTreeMap<(String, String), BTreeSet<String>>,
+}
+
+impl GatewayReplayGuard {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn accept(
+        &mut self,
+        binding: &GatewayActivationBinding,
+        request_id: &str,
+    ) -> Result<(), String> {
+        binding.validate()?;
+        validate_request_id(request_id)?;
+        let key = (
+            binding.contract.addon_id.clone(),
+            binding.contract.activation_instance.clone(),
+        );
+        let ids = self.accepted.entry(key).or_default();
+        if ids.contains(request_id) {
+            return Err("Gateway request was already accepted".to_string());
+        }
+        if ids.len() >= MAX_REQUEST_IDS_PER_ACTIVATION {
+            return Err("Gateway replay state is full".to_string());
+        }
+        ids.insert(request_id.to_string());
+        Ok(())
+    }
+}
 pub fn decode_request(
     bytes: &[u8],
     binding: &GatewayActivationBinding,
@@ -125,6 +173,7 @@ pub fn decode_request(
     }
     let envelope: GatewayRequestEnvelope =
         serde_json::from_slice(bytes).map_err(|_| "Invalid gateway request".to_string())?;
+    validate_request_id(&envelope.request_id)?;
     if envelope.capability != "storage" {
         return Err("Gateway capability is not permitted".to_string());
     }
@@ -211,8 +260,9 @@ impl GatewayRequestEnvelope {
 mod tests {
     use super::{
         decode_request, encode_request, encode_response, GatewayActivationBinding,
-        GatewayActivationState, GatewayOperationBudget, GatewayRateLimiter, GatewayRequestEnvelope,
-        GatewayStorageOperation, MAX_OPERATIONS_PER_CONNECTION, MAX_REQUESTS_PER_ACTIVATION,
+        GatewayActivationState, GatewayOperationBudget, GatewayRateLimiter, GatewayReplayGuard,
+        GatewayRequestEnvelope, GatewayStorageOperation, MAX_OPERATIONS_PER_CONNECTION,
+        MAX_REQUESTS_PER_ACTIVATION,
     };
     use crate::trusted_service_database::{
         DatabaseResponse, TrustedServiceDatabaseContract, MAX_REQUEST_BYTES,
@@ -230,6 +280,7 @@ mod tests {
         GatewayRequestEnvelope {
             addon_id: "example.weather".to_string(),
             activation_instance: "activation-1".to_string(),
+            request_id: "request-1".to_string(),
             capability: "storage".to_string(),
             operation: GatewayStorageOperation::Put {
                 key: "state".to_string(),
@@ -285,6 +336,21 @@ mod tests {
             inactive.state = state;
             assert!(decode_request(&bytes, &inactive).is_err());
         }
+    }
+    #[test]
+    fn rejects_invalid_and_duplicate_request_ids() {
+        let mut invalid = request();
+        invalid.request_id = "request id".to_string();
+        assert!(encode_request(&invalid).is_err());
+
+        let mut guard = GatewayReplayGuard::new();
+        guard
+            .accept(&binding(), "request-1")
+            .expect("first request ID should be accepted");
+        assert!(guard.accept(&binding(), "request-1").is_err());
+        let mut inactive = binding();
+        inactive.state = GatewayActivationState::Stopped;
+        assert!(guard.accept(&inactive, "request-2").is_err());
     }
     #[test]
     fn rate_limits_each_active_activation_and_resets_after_window() {
