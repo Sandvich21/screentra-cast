@@ -518,8 +518,10 @@ impl GatewaySession {
         if !self.established {
             return Err("Gateway connection hello is required".to_string());
         }
+        self.budget.check_at(now)?;
+        let decoded = self.admission.admit(bytes, &self.binding, now)?;
         self.budget.take_at(now)?;
-        self.admission.admit(bytes, &self.binding, now)
+        Ok(decoded)
     }
 
     pub fn admit_frame(
@@ -661,13 +663,18 @@ impl GatewayOperationBudget {
     }
 
     pub fn take_at(&mut self, now: Instant) -> Result<(), String> {
+        self.check_at(now)?;
+        self.used += 1;
+        Ok(())
+    }
+
+    fn check_at(&self, now: Instant) -> Result<(), String> {
         if now >= self.deadline {
             return Err("Gateway request deadline exceeded".to_string());
         }
         if self.used >= MAX_OPERATIONS_PER_CONNECTION {
             return Err("Gateway operation budget exceeded".to_string());
         }
-        self.used += 1;
         Ok(())
     }
 }
@@ -933,6 +940,30 @@ mod tests {
             .expect("complete request frame should be admitted");
         assert_eq!(decoded.request_id, "request-1");
         assert_eq!(consumed, frame.len());
+    }
+
+    #[test]
+    fn session_rejects_invalid_requests_without_consuming_operation_budget() {
+        let hello = GatewayConnectionHello {
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            addon_id: "example.weather".to_string(),
+            activation_instance: "activation-1".to_string(),
+        };
+        let hello_bytes = encode_connection_hello(&hello).expect("hello should encode");
+        let peer = GatewayPeerCredentials::from_os_credentials(1000, 1001, 42);
+        let peer_policy =
+            GatewayPeerPolicy::new(1000, 1001, 42).expect("peer policy should be valid");
+        let start = Instant::now();
+        let mut session = GatewaySession::new(binding(), peer_policy);
+        session
+            .accept_hello(&hello_bytes, peer)
+            .expect("hello should establish session");
+
+        for _ in 0..MAX_OPERATIONS_PER_CONNECTION {
+            assert!(session.admit(b"not-json", start).is_err());
+        }
+        let request_bytes = encode_request(&request()).expect("request should encode");
+        assert!(session.admit(&request_bytes, start).is_ok());
     }
 
     #[test]
