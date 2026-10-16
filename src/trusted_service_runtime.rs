@@ -468,6 +468,11 @@ impl RuntimeLaunchRequest {
         record: &TrustedServiceRuntimeRecord,
     ) -> Result<Self, RuntimeError> {
         validate_runtime_record_contract(record)?;
+        if record.execution_enabled != EXECUTION_ENABLED {
+            return Err(RuntimeError::Invalid(
+                "Trusted service execution flag does not match the runtime boundary".to_string(),
+            ));
+        }
         if record.state != "approved" {
             return Err(RuntimeError::Blocked(
                 "Trusted service is not approved for activation".to_string(),
@@ -818,6 +823,13 @@ mod tests {
         assert!(matches!(
             RuntimeLaunchRequest::from_approved_record(&disabled),
             Err(RuntimeError::Blocked(_))
+        ));
+
+        let mut mismatched_execution = test_record();
+        mismatched_execution.execution_enabled = true;
+        assert!(matches!(
+            RuntimeLaunchRequest::from_approved_record(&mismatched_execution),
+            Err(RuntimeError::Invalid(_))
         ));
     }
 
