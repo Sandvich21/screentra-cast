@@ -1,5 +1,6 @@
 use crate::trusted_service_database::{
-    DatabaseOperation, DatabaseRequest, TrustedServiceDatabaseContract, MAX_REQUEST_BYTES,
+    DatabaseOperation, DatabaseRequest, DatabaseResponse, TrustedServiceDatabaseContract,
+    MAX_REQUEST_BYTES,
 };
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +48,58 @@ pub fn decode_request(
     Ok(request)
 }
 
+pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+pub const MAX_OPERATIONS_PER_CONNECTION: u32 = 100;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "response", rename_all = "snake_case")]
+pub enum GatewayResponseEnvelope {
+    Value { value_json: Option<String> },
+    Written,
+    Deleted { deleted: bool },
+    Entries { entries: Vec<(String, String)> },
+}
+
+pub fn encode_response(response: &DatabaseResponse) -> Result<Vec<u8>, String> {
+    let envelope = match response {
+        DatabaseResponse::Value(value_json) => GatewayResponseEnvelope::Value {
+            value_json: value_json.clone(),
+        },
+        DatabaseResponse::Written => GatewayResponseEnvelope::Written,
+        DatabaseResponse::Deleted(deleted) => {
+            GatewayResponseEnvelope::Deleted { deleted: *deleted }
+        }
+        DatabaseResponse::Entries(entries) => GatewayResponseEnvelope::Entries {
+            entries: entries.clone(),
+        },
+    };
+    let bytes =
+        serde_json::to_vec(&envelope).map_err(|_| "Invalid gateway response".to_string())?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err("Gateway response is too large".to_string());
+    }
+    Ok(bytes)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GatewayOperationBudget {
+    used: u32,
+}
+
+impl GatewayOperationBudget {
+    pub fn new() -> Self {
+        Self { used: 0 }
+    }
+
+    pub fn take(&mut self) -> Result<(), String> {
+        if self.used >= MAX_OPERATIONS_PER_CONNECTION {
+            return Err("Gateway operation budget exceeded".to_string());
+        }
+        self.used += 1;
+        Ok(())
+    }
+}
+
 impl GatewayRequestEnvelope {
     fn into_database_request(self) -> DatabaseRequest {
         let operation = match self.operation {
@@ -69,8 +122,13 @@ impl GatewayRequestEnvelope {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_request, encode_request, GatewayRequestEnvelope, GatewayStorageOperation};
-    use crate::trusted_service_database::{TrustedServiceDatabaseContract, MAX_REQUEST_BYTES};
+    use super::{
+        decode_request, encode_request, encode_response, GatewayOperationBudget,
+        GatewayRequestEnvelope, GatewayStorageOperation, MAX_OPERATIONS_PER_CONNECTION,
+    };
+    use crate::trusted_service_database::{
+        DatabaseResponse, TrustedServiceDatabaseContract, MAX_REQUEST_BYTES,
+    };
 
     fn contract() -> TrustedServiceDatabaseContract {
         TrustedServiceDatabaseContract::core_storage_api("example.weather", "activation-1")
@@ -107,6 +165,20 @@ mod tests {
         wrong_identity.activation_instance = "activation-2".to_string();
         let bytes = encode_request(&wrong_identity).expect("envelope should encode");
         assert!(decode_request(&bytes, &contract()).is_err());
+    }
+
+    #[test]
+    fn bounds_responses_and_connection_operations() {
+        let oversized = DatabaseResponse::Value(Some("x".repeat(70 * 1024)));
+        assert!(encode_response(&oversized).is_err());
+
+        let mut budget = GatewayOperationBudget::new();
+        for _ in 0..MAX_OPERATIONS_PER_CONNECTION {
+            budget
+                .take()
+                .expect("budget should allow configured operations");
+        }
+        assert!(budget.take().is_err());
     }
 
     #[test]

@@ -80,6 +80,9 @@ database boundary. The OCI contract permits only the container-side endpoint
 not implemented. It has no listener, Unix socket, host port, credential
 transport, or runtime caller; decoding validates before any backend adapter
 could be reached.
+Response encoding is bounded to 64 KiB, and the contract-only operation budget
+allows at most 100 operations per future connection. These are pure limits;
+there is still no socket listener or production request loop.
 
 A fixed-argument builder is also present for the future supervisor. It emits
 only the selected supported runtime, `run`, immutable `image@digest`,
