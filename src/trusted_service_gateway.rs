@@ -38,6 +38,28 @@ pub fn validate_connection_hello(
     Ok(())
 }
 
+pub fn encode_connection_hello(hello: &GatewayConnectionHello) -> Result<Vec<u8>, String> {
+    let bytes =
+        serde_json::to_vec(hello).map_err(|_| "Invalid gateway connection hello".to_string())?;
+    if bytes.len() > MAX_REQUEST_BYTES {
+        return Err("Gateway connection hello is too large".to_string());
+    }
+    Ok(bytes)
+}
+
+pub fn decode_connection_hello(
+    bytes: &[u8],
+    binding: &GatewayActivationBinding,
+) -> Result<GatewayConnectionHello, String> {
+    if bytes.len() > MAX_REQUEST_BYTES {
+        return Err("Gateway connection hello is too large".to_string());
+    }
+    let hello: GatewayConnectionHello = serde_json::from_slice(bytes)
+        .map_err(|_| "Invalid gateway connection hello".to_string())?;
+    validate_connection_hello(&hello, binding)?;
+    Ok(hello)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GatewayRequestEnvelope {
     pub addon_id: String,
@@ -427,11 +449,12 @@ impl GatewayRequestEnvelope {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_request, encode_request, encode_response, validate_connection_hello,
-        GatewayActivationBinding, GatewayActivationState, GatewayConnectionHello,
-        GatewayOperationBudget, GatewayRateLimiter, GatewayReplayGuard, GatewayRequestAdmission,
-        GatewayRequestEnvelope, GatewayStorageOperation, GATEWAY_PROTOCOL_VERSION,
-        MAX_OPERATIONS_PER_CONNECTION, MAX_REQUESTS_PER_ACTIVATION, MAX_TRACKED_ACTIVATIONS,
+        decode_connection_hello, decode_request, encode_connection_hello, encode_request,
+        encode_response, validate_connection_hello, GatewayActivationBinding,
+        GatewayActivationState, GatewayConnectionHello, GatewayOperationBudget, GatewayRateLimiter,
+        GatewayReplayGuard, GatewayRequestAdmission, GatewayRequestEnvelope,
+        GatewayStorageOperation, GATEWAY_PROTOCOL_VERSION, MAX_OPERATIONS_PER_CONNECTION,
+        MAX_REQUESTS_PER_ACTIVATION, MAX_TRACKED_ACTIVATIONS,
     };
     use crate::trusted_service_database::{
         DatabaseResponse, TrustedServiceDatabaseContract, MAX_REQUEST_BYTES,
@@ -465,6 +488,11 @@ mod tests {
             addon_id: "example.weather".to_string(),
             activation_instance: "activation-1".to_string(),
         };
+        let hello_bytes = encode_connection_hello(&valid).expect("hello should encode");
+        assert_eq!(
+            decode_connection_hello(&hello_bytes, &binding()).expect("hello should decode"),
+            valid
+        );
         validate_connection_hello(&valid, &binding()).expect("hello should match binding");
 
         let mut wrong_identity = valid.clone();
@@ -473,6 +501,12 @@ mod tests {
         let mut wrong_version = valid;
         wrong_version.protocol_version += 1;
         assert!(validate_connection_hello(&wrong_version, &binding()).is_err());
+        let oversized = GatewayConnectionHello {
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            addon_id: "x".repeat(MAX_REQUEST_BYTES),
+            activation_instance: "activation-1".to_string(),
+        };
+        assert!(encode_connection_hello(&oversized).is_err());
         let mut inactive = binding();
         inactive.state = GatewayActivationState::Stopped;
         assert!(validate_connection_hello(
