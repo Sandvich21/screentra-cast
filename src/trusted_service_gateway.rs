@@ -127,6 +127,17 @@ impl GatewayRateLimiter {
         state.requests += 1;
         Ok(())
     }
+
+    fn retire(&mut self, contract: &TrustedServiceDatabaseContract) -> Result<(), String> {
+        contract
+            .validate()
+            .map_err(|_| "Gateway activation contract is not permitted".to_string())?;
+        self.entries.remove(&(
+            contract.addon_id.clone(),
+            contract.activation_instance.clone(),
+        ));
+        Ok(())
+    }
 }
 pub const MAX_REQUEST_IDS_PER_ACTIVATION: usize = 1_024;
 pub const MAX_TRACKED_ACTIVATIONS: usize = 1_024;
@@ -181,6 +192,17 @@ impl GatewayReplayGuard {
             .entry(key)
             .or_default()
             .insert(request_id.to_string());
+        Ok(())
+    }
+
+    fn retire(&mut self, contract: &TrustedServiceDatabaseContract) -> Result<(), String> {
+        contract
+            .validate()
+            .map_err(|_| "Gateway activation contract is not permitted".to_string())?;
+        self.accepted.remove(&(
+            contract.addon_id.clone(),
+            contract.activation_instance.clone(),
+        ));
         Ok(())
     }
 }
@@ -244,6 +266,12 @@ impl GatewayRequestAdmission {
         self.rate_limiter.check(binding, now)?;
         self.replay_guard.accept(binding, &decoded.request_id)?;
         Ok(decoded)
+    }
+
+    pub fn retire_activation(&mut self, binding: &GatewayActivationBinding) -> Result<(), String> {
+        self.rate_limiter.retire(&binding.contract)?;
+        self.replay_guard.retire(&binding.contract)?;
+        Ok(())
     }
 }
 
@@ -551,6 +579,23 @@ mod tests {
         let mut inactive = binding();
         inactive.state = GatewayActivationState::Stopped;
         assert!(admission.admit(&bytes, &inactive, start).is_err());
+    }
+
+    #[test]
+    fn retires_rate_and_replay_state_for_replaced_activations() {
+        let bytes = encode_request(&request()).expect("request should encode");
+        let start = Instant::now();
+        let mut admission = GatewayRequestAdmission::new();
+        admission
+            .admit(&bytes, &binding(), start)
+            .expect("request should be admitted");
+
+        let mut stopped = binding();
+        stopped.state = GatewayActivationState::Replaced;
+        admission
+            .retire_activation(&stopped)
+            .expect("replaced activation state should be retired");
+        assert!(admission.admit(&bytes, &binding(), start).is_ok());
     }
 
     #[test]
