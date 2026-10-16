@@ -213,7 +213,7 @@ impl TrustedServiceDatabaseContract {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub enum DatabaseOperation {
     Get { key: String },
     Put { key: String, value_json: String },
@@ -441,7 +441,7 @@ fn validate_key(key: &str) -> Result<(), DatabaseContractError> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DatabaseRequest {
     pub addon_id: String,
     pub activation_instance: String,
@@ -456,6 +456,16 @@ impl DatabaseRequest {
         contract.validate()?;
         if !contract.binds_identity(&self.addon_id, &self.activation_instance) {
             return Err(DatabaseContractError::IdentityMismatch);
+        }
+        let request_bytes = serde_json::to_vec(self).map_err(|_| {
+            DatabaseContractError::Invalid(
+                "Trusted service database request cannot be encoded".to_string(),
+            )
+        })?;
+        if request_bytes.len() > contract.max_request_bytes {
+            return Err(DatabaseContractError::Invalid(
+                "Trusted service database request is too large".to_string(),
+            ));
         }
         self.operation.validate(contract)
     }
@@ -954,6 +964,24 @@ mod tests {
         assert!(matches!(
             wrong_instance.validate_against(&contract),
             Err(DatabaseContractError::IdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn database_requests_reject_oversized_encoded_envelopes() {
+        let contract = sqlite_contract();
+        let request = DatabaseRequest {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
+            operation: DatabaseOperation::Put {
+                key: "state".to_string(),
+                value_json: format!("\"{}\"", "x".repeat(MAX_VALUE_BYTES - 2)),
+            },
+        };
+        assert!(matches!(
+            request.validate_against(&contract),
+            Err(DatabaseContractError::Invalid(message))
+                if message == "Trusted service database request is too large"
         ));
     }
 
