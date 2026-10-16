@@ -94,6 +94,16 @@ pub fn validate_oci_launch_spec_against_record(
     }
     validate_oci_launch_spec(spec)
 }
+
+pub fn validate_oci_launch_spec_against_record_with_registry_policy(
+    spec: &OciLaunchSpec,
+    record: &TrustedServiceRuntimeRecord,
+    registry_policy: &OciRegistryPolicy,
+) -> Result<(), String> {
+    validate_oci_launch_spec_against_record(spec, record)?;
+    validate_oci_image_registry(&spec.image, registry_policy)
+}
+
 pub fn build_rootless_argv(
     runtime_name: &str,
     spec: &OciLaunchSpec,
