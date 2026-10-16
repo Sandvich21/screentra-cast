@@ -22,6 +22,8 @@ pub fn validate_oci_activation_gates(gates: &[ActivationGate]) -> Result<(), Str
         gate.name.is_empty()
             || gate.name.len() > 128
             || gate.name.chars().any(|character| character.is_control())
+            || gate.reason.len() > 512
+            || gate.reason.chars().any(|character| character.is_control())
             || !REQUIRED_OCI_ACTIVATION_GATES.contains(&gate.name.as_str())
             || !seen.insert(&gate.name)
     }) {
@@ -415,6 +417,10 @@ mod tests {
             reason: "unexpected".to_string(),
         });
         assert!(validate_oci_activation_gates(&unknown).is_err());
+
+        let mut malformed_reason = complete.clone();
+        malformed_reason[0].reason = "bad\nreason".to_string();
+        assert!(validate_oci_activation_gates(&malformed_reason).is_err());
 
         let mut incomplete = complete;
         incomplete[0].passed = false;
