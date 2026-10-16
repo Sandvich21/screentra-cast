@@ -50,7 +50,7 @@ execution policy. Persisted runtime records are revalidated on every read and
 before activation planning; malformed identities, namespaces, image references,
 digests, capabilities, approval metadata, or gate records fail closed.
 
-- image references are bounded, non-empty, and contain no whitespace, URL
+- image references are bounded, qualified, immutable, and contain no whitespace, URL
   schemes, path traversal, absolute paths, or malformed path components;
 - the image is paired with an exact lowercase `sha256:` digest containing 64
   hexadecimal characters;

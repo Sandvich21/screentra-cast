@@ -255,17 +255,8 @@ pub fn validate_oci_launch_spec(spec: &OciLaunchSpec) -> Result<(), String> {
     crate::addons::validate_addon_storage_namespace(&spec.addon_id)?;
     crate::addons::validate_addon_storage_namespace(&spec.activation_instance)
         .map_err(|_| "Invalid activation instance".to_string())?;
-    if spec.image.is_empty()
-        || spec.image.len() > 512
-        || spec.image.contains(':')
-        || spec.image.contains('@')
-        || spec
-            .image
-            .chars()
-            .any(|ch| ch.is_whitespace() || ch.is_control())
-    {
-        return Err("OCI image must be an immutable untagged reference".to_string());
-    }
+    crate::addons::validate_trusted_service_image_reference(&spec.image)
+        .map_err(|_| "OCI image must be a qualified immutable reference".to_string())?;
     let digest = spec
         .image_digest
         .strip_prefix("sha256:")
@@ -544,6 +535,14 @@ mod tests {
         let mut mutable = safe_spec();
         mutable.image = "registry.example/weather:latest".to_string();
         assert!(validate_oci_launch_spec(&mutable).is_err());
+
+        let mut unqualified = safe_spec();
+        unqualified.image = "weather".to_string();
+        assert!(validate_oci_launch_spec(&unqualified).is_err());
+
+        let mut absolute = safe_spec();
+        absolute.image = "/registry.example/weather".to_string();
+        assert!(validate_oci_launch_spec(&absolute).is_err());
 
         let mut uppercase = safe_spec();
         uppercase.image_digest = format!("sha256:{}", "A".repeat(64));

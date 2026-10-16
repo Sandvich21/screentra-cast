@@ -992,6 +992,26 @@ mod tests {
             .expect_err("disabled execution must fail closed");
         assert!(matches!(error, RuntimeError::Blocked(_)));
         assert!(harness.supervisor.runtime().actions().is_empty());
+
+        let mut all_gates_passed = test_record();
+        all_gates_passed
+            .gates
+            .iter_mut()
+            .for_each(|gate| gate.passed = true);
+        let plan = TrustedServiceSupervisor::<FakeTrustedServiceRuntime>::activation_plan(
+            &all_gates_passed,
+        )
+        .expect("valid gate records should produce a blocked plan");
+        assert!(!plan.can_start);
+        assert!(plan
+            .blocked_by
+            .iter()
+            .any(|gate| gate == "execution_backend"));
+        assert!(matches!(
+            harness.supervisor.activate(&all_gates_passed),
+            Err(RuntimeError::Blocked(_))
+        ));
+        assert!(harness.supervisor.runtime().actions().is_empty());
     }
 
     fn test_record() -> TrustedServiceRuntimeRecord {
