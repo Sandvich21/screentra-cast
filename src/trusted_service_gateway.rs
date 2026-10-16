@@ -326,6 +326,7 @@ pub struct GatewaySession {
     admission: GatewayRequestAdmission,
     budget: GatewayOperationBudget,
     established: bool,
+    retired: bool,
 }
 
 impl GatewaySession {
@@ -335,10 +336,14 @@ impl GatewaySession {
             admission: GatewayRequestAdmission::new(),
             budget: GatewayOperationBudget::new(),
             established: false,
+            retired: false,
         }
     }
 
     pub fn accept_hello(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if self.retired {
+            return Err("Gateway session is retired".to_string());
+        }
         decode_connection_hello(bytes, &self.binding)?;
         self.established = true;
         Ok(())
@@ -358,6 +363,7 @@ impl GatewaySession {
 
     pub fn retire(&mut self) -> Result<(), String> {
         self.established = false;
+        self.retired = true;
         self.admission.retire_activation(&self.binding)
     }
 }
@@ -593,6 +599,7 @@ mod tests {
             .retire()
             .expect("session retirement should clean admission state");
         assert!(!session.is_established());
+        assert!(session.accept_hello(&hello_bytes).is_err());
         assert!(session.admit(&request_bytes, start).is_err());
     }
 
