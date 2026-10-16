@@ -43,6 +43,8 @@ impl CredentialScope {
         }
         crate::addons::validate_addon_storage_namespace(&self.addon_id)
             .map_err(CredentialError::Invalid)?;
+        crate::addons::validate_addon_storage_namespace(&self.activation_instance)
+            .map_err(CredentialError::Invalid)?;
         if self.capabilities.len() > 8
             || self
                 .capabilities
@@ -173,6 +175,13 @@ mod tests {
 
         invalid = scope();
         invalid.addon_id = "../outside".to_string();
+        assert!(matches!(
+            invalid.validate(),
+            Err(CredentialError::Invalid(_))
+        ));
+
+        invalid = scope();
+        invalid.activation_instance = "../activation".to_string();
         assert!(matches!(
             invalid.validate(),
             Err(CredentialError::Invalid(_))
