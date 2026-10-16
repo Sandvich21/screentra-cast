@@ -87,6 +87,12 @@ database boundary. The OCI contract permits only the container-side endpoint
 not implemented. It has no listener, Unix socket, host port, credential
 transport, or runtime caller; decoding validates before any backend adapter
 could be reached.
+Gateway requests are now bound to an explicit activation state. Only `Active`
+bindings may decode a request; stopped, disabled, and replaced activations are
+rejected before parsing can reach a backend adapter. The binding still carries
+the validated addon/activation database contract, so identity and lifecycle
+checks cannot be omitted by a future socket loop.
+
 Response encoding is bounded to 64 KiB, and the contract-only operation budget
 allows at most 100 operations per future connection. These are pure limits;
 there is still no socket listener or production request loop.

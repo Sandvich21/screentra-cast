@@ -29,10 +29,43 @@ pub fn encode_request(request: &GatewayRequestEnvelope) -> Result<Vec<u8>, Strin
     Ok(bytes)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayActivationState {
+    Active,
+    Stopped,
+    Disabled,
+    Replaced,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayActivationBinding {
+    pub contract: TrustedServiceDatabaseContract,
+    pub state: GatewayActivationState,
+}
+
+impl GatewayActivationBinding {
+    pub fn new(contract: TrustedServiceDatabaseContract) -> Self {
+        Self {
+            contract,
+            state: GatewayActivationState::Active,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.state != GatewayActivationState::Active {
+            return Err("Gateway activation is not active".to_string());
+        }
+        self.contract
+            .validate()
+            .map_err(|_| "Gateway activation contract is not permitted".to_string())
+    }
+}
+
 pub fn decode_request(
     bytes: &[u8],
-    contract: &TrustedServiceDatabaseContract,
+    binding: &GatewayActivationBinding,
 ) -> Result<DatabaseRequest, String> {
+    binding.validate()?;
     if bytes.len() > MAX_REQUEST_BYTES {
         return Err("Gateway request is too large".to_string());
     }
@@ -43,7 +76,7 @@ pub fn decode_request(
     }
     let request = envelope.into_database_request();
     request
-        .validate_against(contract)
+        .validate_against(&binding.contract)
         .map_err(|_| "Gateway request is not permitted".to_string())?;
     Ok(request)
 }
@@ -123,8 +156,9 @@ impl GatewayRequestEnvelope {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_request, encode_request, encode_response, GatewayOperationBudget,
-        GatewayRequestEnvelope, GatewayStorageOperation, MAX_OPERATIONS_PER_CONNECTION,
+        decode_request, encode_request, encode_response, GatewayActivationBinding,
+        GatewayActivationState, GatewayOperationBudget, GatewayRequestEnvelope,
+        GatewayStorageOperation, MAX_OPERATIONS_PER_CONNECTION,
     };
     use crate::trusted_service_database::{
         DatabaseResponse, TrustedServiceDatabaseContract, MAX_REQUEST_BYTES,
@@ -134,6 +168,9 @@ mod tests {
         TrustedServiceDatabaseContract::core_storage_api("example.weather", "activation-1")
     }
 
+    fn binding() -> GatewayActivationBinding {
+        GatewayActivationBinding::new(contract())
+    }
     fn request() -> GatewayRequestEnvelope {
         GatewayRequestEnvelope {
             addon_id: "example.weather".to_string(),
@@ -149,7 +186,7 @@ mod tests {
     #[test]
     fn round_trips_bounded_typed_storage_request() {
         let bytes = encode_request(&request()).expect("request should encode");
-        let decoded = decode_request(&bytes, &contract()).expect("request should decode");
+        let decoded = decode_request(&bytes, &binding()).expect("request should decode");
         assert_eq!(decoded.addon_id, "example.weather");
         assert_eq!(decoded.activation_instance, "activation-1");
     }
@@ -159,12 +196,12 @@ mod tests {
         let mut wrong_capability = request();
         wrong_capability.capability = "read:clients".to_string();
         let bytes = encode_request(&wrong_capability).expect("envelope should encode");
-        assert!(decode_request(&bytes, &contract()).is_err());
+        assert!(decode_request(&bytes, &binding()).is_err());
 
         let mut wrong_identity = request();
         wrong_identity.activation_instance = "activation-2".to_string();
         let bytes = encode_request(&wrong_identity).expect("envelope should encode");
-        assert!(decode_request(&bytes, &contract()).is_err());
+        assert!(decode_request(&bytes, &binding()).is_err());
     }
 
     #[test]
@@ -182,8 +219,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_stopped_disabled_and_replaced_activation_bindings() {
+        let bytes = encode_request(&request()).expect("request should encode");
+        for state in [
+            GatewayActivationState::Stopped,
+            GatewayActivationState::Disabled,
+            GatewayActivationState::Replaced,
+        ] {
+            let mut inactive = binding();
+            inactive.state = state;
+            assert!(decode_request(&bytes, &inactive).is_err());
+        }
+    }
+    #[test]
     fn rejects_oversized_frames_without_parsing_them() {
         let bytes = vec![b' '; MAX_REQUEST_BYTES + 1];
-        assert!(decode_request(&bytes, &contract()).is_err());
+        assert!(decode_request(&bytes, &binding()).is_err());
     }
 }
