@@ -62,8 +62,15 @@ pub fn decode_connection_hello(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GatewayPeerCredentials {
-    pub uid: u32,
-    pub gid: u32,
+    uid: u32,
+    gid: u32,
+}
+
+impl GatewayPeerCredentials {
+    /// Constructed by a future OS-backed transport adapter, never from a frame.
+    pub(crate) fn from_os_credentials(uid: u32, gid: u32) -> Self {
+        Self { uid, gid }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -579,25 +586,16 @@ mod tests {
     fn peer_policy_requires_exact_non_root_credentials() {
         let policy = GatewayPeerPolicy::new(1000, 1001).expect("non-root policy should be valid");
         policy
-            .validate(GatewayPeerCredentials {
-                uid: 1000,
-                gid: 1001,
-            })
+            .validate(GatewayPeerCredentials::from_os_credentials(1000, 1001))
             .expect("matching peer credentials should be accepted");
         assert!(policy
-            .validate(GatewayPeerCredentials {
-                uid: 1002,
-                gid: 1001
-            })
+            .validate(GatewayPeerCredentials::from_os_credentials(1002, 1001))
             .is_err());
         assert!(policy
-            .validate(GatewayPeerCredentials {
-                uid: 1000,
-                gid: 1002
-            })
+            .validate(GatewayPeerCredentials::from_os_credentials(1000, 1002))
             .is_err());
         assert!(policy
-            .validate(GatewayPeerCredentials { uid: 0, gid: 1001 })
+            .validate(GatewayPeerCredentials::from_os_credentials(0, 1001))
             .is_err());
         assert!(GatewayPeerPolicy::new(0, 1001).is_err());
         assert!(GatewayPeerPolicy::new(1000, 0).is_err());
@@ -651,10 +649,7 @@ mod tests {
             activation_instance: "activation-1".to_string(),
         };
         let hello_bytes = encode_connection_hello(&hello).expect("hello should encode");
-        let peer = GatewayPeerCredentials {
-            uid: 1000,
-            gid: 1001,
-        };
+        let peer = GatewayPeerCredentials::from_os_credentials(1000, 1001);
         let peer_policy = GatewayPeerPolicy::new(1000, 1001).expect("peer policy should be valid");
         let start = Instant::now();
         let mut session = GatewaySession::new(binding(), peer_policy);
@@ -662,10 +657,7 @@ mod tests {
         assert!(session
             .accept_hello(
                 &hello_bytes,
-                GatewayPeerCredentials {
-                    uid: 1002,
-                    gid: 1001,
-                },
+                GatewayPeerCredentials::from_os_credentials(1002, 1001),
             )
             .is_err());
         assert!(!session.is_established());
