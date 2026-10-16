@@ -460,6 +460,7 @@ pub struct RuntimeLaunchRequest {
     pub capabilities: Vec<String>,
     pub storage_namespace: String,
     pub api_namespace: String,
+    pub launch_profile: addons::TrustedServiceLaunchProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -582,6 +583,7 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
             capabilities: record.capabilities.clone(),
             storage_namespace: record.storage_namespace.clone(),
             api_namespace: record.api_namespace.clone(),
+            launch_profile: record.launch_profile.clone(),
         })
     }
 
@@ -639,6 +641,8 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
             ));
         }
         validate_capabilities(&request.capabilities)?;
+        addons::validate_trusted_service_launch_profile(&request.launch_profile)
+            .map_err(|error| RuntimeError::Invalid(error.to_string()))?;
         addons::validate_addon_storage_namespace(&request.addon_id)
             .map_err(RuntimeError::Invalid)?;
         addons::validate_addon_storage_namespace(&request.activation_instance)
@@ -869,7 +873,16 @@ mod tests {
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.service".to_string(),
             api_namespace: "example.service".to_string(),
+            launch_profile: test_launch_profile(),
         };
+        assert_eq!(request.launch_profile, test_launch_profile());
+        let mut malformed_profile = request.clone();
+        malformed_profile.launch_profile.gateway_socket_path = "/tmp/host.sock".to_string();
+        assert!(matches!(
+            harness.supervisor.runtime_mut().start(&malformed_profile),
+            Err(RuntimeError::Invalid(_))
+        ));
+        assert!(!harness.root.join("running").join("activation-1").exists());
         let mut malformed_digest = request.clone();
         malformed_digest.image_digest = "sha256:ABC".to_string();
         assert!(matches!(
@@ -922,6 +935,7 @@ mod tests {
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.service".to_string(),
             api_namespace: "example.service".to_string(),
+            launch_profile: test_launch_profile(),
         };
         let handle = harness
             .supervisor
@@ -1110,6 +1124,7 @@ mod tests {
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.service".to_string(),
             api_namespace: "example.service".to_string(),
+            launch_profile: test_launch_profile(),
         };
         let handle = harness
             .supervisor
