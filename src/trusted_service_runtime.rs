@@ -428,6 +428,11 @@ fn validate_capability_binding(record: &TrustedServiceRuntimeRecord) -> Result<(
 fn validate_runtime_record_contract(
     record: &TrustedServiceRuntimeRecord,
 ) -> Result<(), RuntimeError> {
+    if record.execution_enabled != EXECUTION_ENABLED {
+        return Err(RuntimeError::Invalid(
+            "Trusted service execution flag does not match the runtime boundary".to_string(),
+        ));
+    }
     addons::validate_addon_storage_namespace(&record.addon_id).map_err(RuntimeError::Invalid)?;
     addons::validate_addon_storage_namespace(&record.activation_instance)
         .map_err(RuntimeError::Invalid)?;
@@ -464,9 +469,7 @@ pub struct RuntimeLaunchRequest {
 }
 
 impl RuntimeLaunchRequest {
-    fn from_approved_record(
-        record: &TrustedServiceRuntimeRecord,
-    ) -> Result<Self, RuntimeError> {
+    fn from_approved_record(record: &TrustedServiceRuntimeRecord) -> Result<Self, RuntimeError> {
         validate_runtime_record_contract(record)?;
         if record.execution_enabled != EXECUTION_ENABLED {
             return Err(RuntimeError::Invalid(
@@ -603,7 +606,8 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
                 plan.blocked_by.join(", ")
             )));
         }
-        self.runtime.start(&RuntimeLaunchRequest::from_approved_record(record)?)
+        self.runtime
+            .start(&RuntimeLaunchRequest::from_approved_record(record)?)
     }
 
     pub fn deactivate(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
