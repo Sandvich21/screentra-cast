@@ -65,6 +65,12 @@ privileges/default-deny-network policy, and bounded resources. It does not
 select a runtime, invoke a process, pull an image, or change the disabled
 execution gate.
 
+The launch contract also has an approval-binding validator. It requires the
+approved state, approver, every named activation gate, exact record identity,
+image, digest, capabilities, and namespaces before a launch spec can be used;
+with the current `EXECUTION_ENABLED = false` and incomplete gates it always
+rejects.
+
 A runtime preflight report also exists for the explicitly selected executable.
 It accepts only the named rootless runtime families (`podman` or `nerdctl`),
 reports missing or non-executable paths as blocked, and always keeps

@@ -1,3 +1,4 @@
+use crate::trusted_service_runtime::{TrustedServiceRuntimeRecord, EXECUTION_ENABLED};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -53,6 +54,46 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
+pub fn validate_oci_launch_spec_against_record(
+    spec: &OciLaunchSpec,
+    record: &TrustedServiceRuntimeRecord,
+) -> Result<(), String> {
+    if !EXECUTION_ENABLED || record.state != "approved" || !record.execution_enabled {
+        return Err("Trusted service execution is disabled".to_string());
+    }
+    if record.approved_by.is_none()
+        || ![
+            "manifest_signature",
+            "image_signature",
+            "administrator_approval",
+            "execution_backend",
+            "credential_broker",
+            "database_boundary",
+            "controlled_gateway",
+            "resource_policy",
+        ]
+        .iter()
+        .all(|required| {
+            record
+                .gates
+                .iter()
+                .any(|gate| gate.name == *required && gate.passed)
+        })
+    {
+        return Err("Trusted service activation gates are incomplete".to_string());
+    }
+    if spec.addon_id != record.addon_id
+        || spec.activation_instance != record.activation_instance
+        || spec.image != record.image
+        || spec.image_digest != record.image_digest
+        || spec.capabilities != record.capabilities
+        || spec.storage_namespace != record.storage_namespace
+        || spec.api_namespace != record.api_namespace
+    {
+        return Err("OCI launch spec does not match the approved activation".to_string());
+    }
+    validate_oci_launch_spec(spec)
+}
 pub fn build_rootless_argv(
     runtime_name: &str,
     spec: &OciLaunchSpec,
@@ -218,8 +259,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        build_rootless_argv, probe_oci_runtime, validate_oci_launch_spec, OciLaunchPolicy,
-        OciLaunchSpec, OciResourceLimits,
+        build_rootless_argv, probe_oci_runtime, validate_oci_launch_spec,
+        validate_oci_launch_spec_against_record, OciLaunchPolicy, OciLaunchSpec, OciResourceLimits,
+        TrustedServiceRuntimeRecord,
     };
 
     fn safe_spec() -> OciLaunchSpec {
@@ -320,6 +362,28 @@ mod tests {
         assert!(!args
             .iter()
             .any(|arg| arg == "-c" || arg == "--volume" || arg == "-v"));
+    }
+    #[test]
+    fn approved_record_binding_still_respects_disabled_execution_gate() {
+        let record = TrustedServiceRuntimeRecord {
+            record_version: 1,
+            addon_id: "example.weather".to_string(),
+            addon_version: "1.0.0".to_string(),
+            image: "registry.example/weather".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.weather".to_string(),
+            api_namespace: "example.weather".to_string(),
+            activation_instance: "activation-1".to_string(),
+            state: "approved".to_string(),
+            approved_by: Some("admin".to_string()),
+            approved_at: Some("2026-10-15T00:00:00Z".to_string()),
+            updated_at: "2026-10-15T00:00:00Z".to_string(),
+            execution_enabled: false,
+            gates: Vec::new(),
+            last_error: None,
+        };
+        assert!(validate_oci_launch_spec_against_record(&safe_spec(), &record).is_err());
     }
     #[test]
     fn missing_oci_runtime_is_blocked_without_fallback() {
