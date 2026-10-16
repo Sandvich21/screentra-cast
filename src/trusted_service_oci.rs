@@ -1,8 +1,40 @@
-use crate::trusted_service_runtime::{TrustedServiceRuntimeRecord, EXECUTION_ENABLED};
+use crate::trusted_service_runtime::{
+    ActivationGate, TrustedServiceRuntimeRecord, EXECUTION_ENABLED,
+};
 use std::collections::BTreeSet;
 use std::path::Path;
 
 pub const SUPPORTED_ROOTLESS_RUNTIMES: &[&str] = &["podman", "nerdctl"];
+pub const REQUIRED_OCI_ACTIVATION_GATES: &[&str] = &[
+    "manifest_signature",
+    "image_signature",
+    "administrator_approval",
+    "execution_backend",
+    "credential_broker",
+    "database_boundary",
+    "controlled_gateway",
+    "resource_policy",
+];
+
+pub fn validate_oci_activation_gates(gates: &[ActivationGate]) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    if gates.iter().any(|gate| {
+        gate.name.is_empty()
+            || gate.name.len() > 128
+            || gate.name.chars().any(|character| character.is_control())
+            || !seen.insert(&gate.name)
+    }) {
+        return Err("OCI activation gates are malformed or duplicated".to_string());
+    }
+    if REQUIRED_OCI_ACTIVATION_GATES.iter().any(|required| {
+        !gates
+            .iter()
+            .any(|gate| gate.name == *required && gate.passed)
+    }) {
+        return Err("Trusted service activation gates are incomplete".to_string());
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OciRuntimeProbeReport {
@@ -61,25 +93,7 @@ pub fn validate_oci_launch_spec_against_record(
     if !EXECUTION_ENABLED || record.state != "approved" || !record.execution_enabled {
         return Err("Trusted service execution is disabled".to_string());
     }
-    if record.approved_by.is_none()
-        || ![
-            "manifest_signature",
-            "image_signature",
-            "administrator_approval",
-            "execution_backend",
-            "credential_broker",
-            "database_boundary",
-            "controlled_gateway",
-            "resource_policy",
-        ]
-        .iter()
-        .all(|required| {
-            record
-                .gates
-                .iter()
-                .any(|gate| gate.name == *required && gate.passed)
-        })
-    {
+    if record.approved_by.is_none() || validate_oci_activation_gates(&record.gates).is_err() {
         return Err("Trusted service activation gates are incomplete".to_string());
     }
     if spec.addon_id != record.addon_id
@@ -329,9 +343,11 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        build_rootless_argv, probe_oci_runtime, validate_oci_image_registry,
-        validate_oci_launch_spec, validate_oci_launch_spec_against_record, OciLaunchPolicy,
-        OciLaunchSpec, OciRegistryPolicy, OciResourceLimits, TrustedServiceRuntimeRecord,
+        build_rootless_argv, probe_oci_runtime, validate_oci_activation_gates,
+        validate_oci_image_registry, validate_oci_launch_spec,
+        validate_oci_launch_spec_against_record, ActivationGate, OciLaunchPolicy, OciLaunchSpec,
+        OciRegistryPolicy, OciResourceLimits, TrustedServiceRuntimeRecord,
+        REQUIRED_OCI_ACTIVATION_GATES,
     };
 
     fn safe_spec() -> OciLaunchSpec {
@@ -369,6 +385,31 @@ mod tests {
     #[test]
     fn accepts_immutable_rootless_launch_spec() {
         validate_oci_launch_spec(&safe_spec()).expect("safe OCI spec should validate");
+    }
+
+    #[test]
+    fn activation_gate_validation_rejects_duplicates_and_incomplete_passes() {
+        let complete = REQUIRED_OCI_ACTIVATION_GATES
+            .iter()
+            .map(|name| ActivationGate {
+                name: (*name).to_string(),
+                passed: true,
+                reason: "verified".to_string(),
+            })
+            .collect::<Vec<_>>();
+        validate_oci_activation_gates(&complete).expect("complete gates should pass");
+
+        let mut duplicate = complete.clone();
+        duplicate.push(ActivationGate {
+            name: "image_signature".to_string(),
+            passed: false,
+            reason: "conflict".to_string(),
+        });
+        assert!(validate_oci_activation_gates(&duplicate).is_err());
+
+        let mut incomplete = complete;
+        incomplete[0].passed = false;
+        assert!(validate_oci_activation_gates(&incomplete).is_err());
     }
 
     #[test]
