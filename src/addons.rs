@@ -340,7 +340,7 @@ const TRUSTED_SERVICE_CAPABILITIES: &[&str] = &[
     "client_extension",
 ];
 
-pub fn validate_trusted_service_image_digest(digest: &str) -> Result<(), String> {
+pub(crate) fn validate_trusted_service_image_digest(digest: &str) -> Result<(), String> {
     if digest.len() != "sha256:".len() + 64
         || !digest.starts_with("sha256:")
         || !digest["sha256:".len()..]
