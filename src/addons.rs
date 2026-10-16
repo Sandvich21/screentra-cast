@@ -1275,7 +1275,13 @@ mod tests {
     #[test]
     fn validates_trusted_service_image_contracts() {
         assert!(validate_trusted_service_image_reference("registry.example/service").is_ok());
-        for image in ["service", "/registry/service", "registry//service", "registry/service:tag"] {
+        for image in [
+            "service",
+            "/registry/service",
+            "registry//service",
+            "registry/service:tag",
+            "registry.example/.",
+        ] {
             assert!(validate_trusted_service_image_reference(image).is_err(), "{image}");
         }
         assert!(validate_trusted_service_image_digest(&format!("sha256:{}", "a".repeat(64))).is_ok());
