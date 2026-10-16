@@ -1,10 +1,7 @@
-//! Contract-only database boundary for trusted server services.
-//!
-//! This module deliberately contains policy and validation, not a database
-//! adapter. No trusted service can use this contract to obtain a SQLite file,
-//! a PostgreSQL URL, a raw SQL channel, or a core-table handle. A future
-//! adapter must implement the contract behind an authenticated gateway and
-//! remain disabled until the supervisor gate is enabled.
+//! Contract, validation, and non-service-facing adapters are defined here. No
+//! trusted service can use these adapters to obtain a SQLite file, a PostgreSQL
+//! URL, a raw SQL channel, or a core-table handle. Future runtime wiring must
+//! remain behind an authenticated gateway and disabled supervisor gate.
 
 use crate::addons;
 use crate::db::Database;
@@ -748,6 +745,51 @@ mod tests {
                 .await
                 .expect("get through PostgreSQL gateway"),
             DatabaseResponse::Value(Some(r#"{"owner":"gateway"}"#.to_string()))
+        );
+        assert_eq!(
+            gateway
+                .handle(DatabaseRequest {
+                    addon_id: addon_id.clone(),
+                    activation_instance: "activation-1".to_string(),
+                    operation: DatabaseOperation::Put {
+                        key: "state_extra".to_string(),
+                        value_json: r#"{"owner":"gateway"}"#.to_string(),
+                    },
+                })
+                .await
+                .expect("put wildcard probe key through PostgreSQL gateway"),
+            DatabaseResponse::Written
+        );
+        assert_eq!(
+            gateway
+                .handle(DatabaseRequest {
+                    addon_id: addon_id.clone(),
+                    activation_instance: "activation-1".to_string(),
+                    operation: DatabaseOperation::Put {
+                        key: "stateXextra".to_string(),
+                        value_json: r#"{"owner":"gateway"}"#.to_string(),
+                    },
+                })
+                .await
+                .expect("put wildcard collision key through PostgreSQL gateway"),
+            DatabaseResponse::Written
+        );
+        assert_eq!(
+            gateway
+                .handle(DatabaseRequest {
+                    addon_id: addon_id.clone(),
+                    activation_instance: "activation-1".to_string(),
+                    operation: DatabaseOperation::List {
+                        prefix: "state_".to_string(),
+                        limit: 10,
+                    },
+                })
+                .await
+                .expect("list through PostgreSQL gateway"),
+            DatabaseResponse::Entries(vec![(
+                "state_extra".to_string(),
+                r#"{"owner":"gateway"}"#.to_string(),
+            ),])
         );
         assert_eq!(
             gateway
