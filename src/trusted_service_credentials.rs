@@ -96,6 +96,24 @@ impl CredentialLease {
         }
         Ok(())
     }
+
+    pub fn validate_at(
+        &self,
+        now: chrono::DateTime<chrono::FixedOffset>,
+    ) -> Result<(), CredentialError> {
+        self.validate()?;
+        let expires_at = chrono::DateTime::parse_from_rfc3339(&self.expires_at).map_err(|_| {
+            CredentialError::Invalid(
+                "Invalid trusted service credential lease metadata".to_string(),
+            )
+        })?;
+        if expires_at <= now {
+            return Err(CredentialError::Invalid(
+                "Trusted service credential lease is expired".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub trait TrustedServiceCredentialBroker {
@@ -229,6 +247,22 @@ mod tests {
         };
         assert!(matches!(
             invalid_timestamp.validate(),
+            Err(CredentialError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn credential_lease_expiry_must_be_in_the_future() {
+        let lease = CredentialLease {
+            lease_id: "lease-1".to_string(),
+            expires_at: "2030-01-01T00:00:00Z".to_string(),
+        };
+        lease
+            .validate_at(chrono::DateTime::parse_from_rfc3339("2029-12-31T23:59:59Z").unwrap())
+            .expect("future lease should pass");
+        assert!(matches!(
+            lease
+                .validate_at(chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z").unwrap()),
             Err(CredentialError::Invalid(_))
         ));
     }
