@@ -240,6 +240,7 @@ fn read_record(path: &Path) -> Result<TrustedServiceRuntimeRecord, RuntimeError>
             "Trusted service runtime record is invalid".to_string(),
         ));
     }
+    validate_runtime_record_contract(&record)?;
     Ok(record)
 }
 
@@ -422,6 +423,29 @@ fn validate_capability_binding(record: &TrustedServiceRuntimeRecord) -> Result<(
     Ok(())
 }
 
+fn validate_runtime_record_contract(
+    record: &TrustedServiceRuntimeRecord,
+) -> Result<(), RuntimeError> {
+    addons::validate_addon_storage_namespace(&record.addon_id).map_err(RuntimeError::Invalid)?;
+    addons::validate_addon_storage_namespace(&record.activation_instance)
+        .map_err(RuntimeError::Invalid)?;
+    if record.storage_namespace != record.addon_id || record.api_namespace != record.addon_id {
+        return Err(RuntimeError::Invalid(
+            "Trusted service runtime namespaces are not bound to the addon".to_string(),
+        ));
+    }
+    validate_capability_binding(record)?;
+    addons::validate_trusted_service_image_reference(&record.image)
+        .map_err(RuntimeError::Invalid)?;
+    addons::validate_trusted_service_image_digest(&record.image_digest)
+        .map_err(RuntimeError::Invalid)?;
+    crate::trusted_service_oci::validate_oci_activation_gate_records(&record.gates)
+        .map_err(RuntimeError::Invalid)?;
+    crate::trusted_service_oci::validate_oci_approval_metadata(record)
+        .map_err(RuntimeError::Invalid)?;
+    Ok(())
+}
+
 /// Immutable launch data passed across the supervisor/runtime boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeLaunchRequest {
@@ -489,7 +513,7 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
     pub fn activation_plan(
         record: &TrustedServiceRuntimeRecord,
     ) -> Result<ActivationPlan, RuntimeError> {
-        validate_capability_binding(record)?;
+        validate_runtime_record_contract(record)?;
         if record.state != "approved" {
             return Err(RuntimeError::Blocked(
                 "Trusted service is not approved for activation".to_string(),
@@ -770,6 +794,27 @@ mod tests {
         unsafe_record.execution_enabled = true;
         write_atomic(&path, &unsafe_record).unwrap();
         assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn persisted_runtime_records_reject_invalid_launch_contract_fields() {
+        let root = std::env::temp_dir().join(format!(
+            "screentra-runtime-record-contract-{}",
+            Uuid::new_v4()
+        ));
+        let path = root.join("example.service").join(RUNTIME_FILE);
+        let mut invalid = test_record();
+        invalid.image = "service".to_string();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_atomic(&path, &invalid).unwrap();
+        assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
+
+        invalid = test_record();
+        invalid.capabilities = vec!["read:secrets".to_string()];
+        write_atomic(&path, &invalid).unwrap();
+        assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
+
         let _ = fs::remove_dir_all(&root);
     }
 

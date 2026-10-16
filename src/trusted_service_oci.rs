@@ -21,7 +21,7 @@ pub const REQUIRED_OCI_ACTIVATION_GATES: &[&str] = &[
     "resource_policy",
 ];
 
-pub fn validate_oci_activation_gates(gates: &[ActivationGate]) -> Result<(), String> {
+pub fn validate_oci_activation_gate_records(gates: &[ActivationGate]) -> Result<(), String> {
     let mut seen = BTreeSet::new();
     if gates.iter().any(|gate| {
         gate.name.is_empty()
@@ -35,6 +35,11 @@ pub fn validate_oci_activation_gates(gates: &[ActivationGate]) -> Result<(), Str
     }) {
         return Err("OCI activation gates are malformed or duplicated".to_string());
     }
+    Ok(())
+}
+
+pub fn validate_oci_activation_gates(gates: &[ActivationGate]) -> Result<(), String> {
+    validate_oci_activation_gate_records(gates)?;
     if REQUIRED_OCI_ACTIVATION_GATES.iter().any(|required| {
         !gates
             .iter()

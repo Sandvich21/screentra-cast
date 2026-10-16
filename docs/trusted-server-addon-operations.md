@@ -46,7 +46,9 @@ interface exists separately but its default implementation rejects issuance and
 revocation. Removing staged metadata also removes its inert runtime record.
 
 The validator checks the service metadata that would otherwise become an
-execution policy:
+execution policy. Persisted runtime records are revalidated on every read and
+before activation planning; malformed identities, namespaces, image references,
+digests, capabilities, approval metadata, or gate records fail closed.
 
 - image references are bounded, non-empty, and contain no whitespace, URL
   schemes, path traversal, absolute paths, or malformed path components;
