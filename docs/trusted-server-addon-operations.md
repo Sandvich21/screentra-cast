@@ -93,9 +93,11 @@ rejected before parsing can reach a backend adapter. The binding still carries
 the validated addon/activation database contract, so identity and lifecycle
 checks cannot be omitted by a future socket loop.
 
-Response encoding is bounded to 64 KiB, and the contract-only operation budget
-allows at most 100 operations per future connection. These are pure limits;
-there is still no socket listener or production request loop.
+Response encoding is bounded to 64 KiB, the contract-only operation budget
+allows at most 100 operations per future connection, and the activation
+rate limiter allows 60 requests per 60-second window with bounded tracked
+activation state. These are pure limits; there is still no socket listener or
+production request loop.
 
 A fixed-argument builder is also present for the future supervisor. It emits
 only the selected supported runtime, `run`, immutable `image@digest`,

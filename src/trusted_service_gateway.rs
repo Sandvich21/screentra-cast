@@ -3,6 +3,8 @@ use crate::trusted_service_database::{
     MAX_REQUEST_BYTES,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case")]
@@ -61,6 +63,58 @@ impl GatewayActivationBinding {
     }
 }
 
+pub const MAX_REQUESTS_PER_ACTIVATION: u32 = 60;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+const MAX_TRACKED_ACTIVATIONS: usize = 1_024;
+
+#[derive(Debug, Clone, Copy)]
+struct RateState {
+    window_started: Instant,
+    requests: u32,
+}
+
+#[derive(Debug, Default)]
+pub struct GatewayRateLimiter {
+    entries: BTreeMap<(String, String), RateState>,
+}
+
+impl GatewayRateLimiter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn check(
+        &mut self,
+        binding: &GatewayActivationBinding,
+        now: Instant,
+    ) -> Result<(), String> {
+        binding.validate()?;
+        let key = (
+            binding.contract.addon_id.clone(),
+            binding.contract.activation_instance.clone(),
+        );
+        if !self.entries.contains_key(&key) && self.entries.len() >= MAX_TRACKED_ACTIVATIONS {
+            return Err("Gateway activation rate-limit state is full".to_string());
+        }
+        let state = self.entries.entry(key).or_insert(RateState {
+            window_started: now,
+            requests: 0,
+        });
+        if now
+            .checked_duration_since(state.window_started)
+            .unwrap_or_default()
+            >= RATE_WINDOW
+        {
+            state.window_started = now;
+            state.requests = 0;
+        }
+        if state.requests >= MAX_REQUESTS_PER_ACTIVATION {
+            return Err("Gateway activation rate limit exceeded".to_string());
+        }
+        state.requests += 1;
+        Ok(())
+    }
+}
 pub fn decode_request(
     bytes: &[u8],
     binding: &GatewayActivationBinding,
@@ -157,12 +211,13 @@ impl GatewayRequestEnvelope {
 mod tests {
     use super::{
         decode_request, encode_request, encode_response, GatewayActivationBinding,
-        GatewayActivationState, GatewayOperationBudget, GatewayRequestEnvelope,
-        GatewayStorageOperation, MAX_OPERATIONS_PER_CONNECTION,
+        GatewayActivationState, GatewayOperationBudget, GatewayRateLimiter, GatewayRequestEnvelope,
+        GatewayStorageOperation, MAX_OPERATIONS_PER_CONNECTION, MAX_REQUESTS_PER_ACTIVATION,
     };
     use crate::trusted_service_database::{
         DatabaseResponse, TrustedServiceDatabaseContract, MAX_REQUEST_BYTES,
     };
+    use std::time::{Duration, Instant};
 
     fn contract() -> TrustedServiceDatabaseContract {
         TrustedServiceDatabaseContract::core_storage_api("example.weather", "activation-1")
@@ -230,6 +285,24 @@ mod tests {
             inactive.state = state;
             assert!(decode_request(&bytes, &inactive).is_err());
         }
+    }
+    #[test]
+    fn rate_limits_each_active_activation_and_resets_after_window() {
+        let mut limiter = GatewayRateLimiter::new();
+        let start = Instant::now();
+        for _ in 0..MAX_REQUESTS_PER_ACTIVATION {
+            limiter
+                .check(&binding(), start)
+                .expect("request should be within rate limit");
+        }
+        assert!(limiter.check(&binding(), start).is_err());
+        assert!(limiter
+            .check(&binding(), start + Duration::from_secs(60))
+            .is_ok());
+
+        let mut inactive = binding();
+        inactive.state = GatewayActivationState::Stopped;
+        assert!(limiter.check(&inactive, start).is_err());
     }
     #[test]
     fn rejects_oversized_frames_without_parsing_them() {
