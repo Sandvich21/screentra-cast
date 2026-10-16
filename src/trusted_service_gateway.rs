@@ -163,10 +163,16 @@ impl GatewayReplayGuard {
         Ok(())
     }
 }
-pub fn decode_request(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedGatewayRequest {
+    pub request_id: String,
+    pub database_request: DatabaseRequest,
+}
+
+fn decode_request_with_id(
     bytes: &[u8],
     binding: &GatewayActivationBinding,
-) -> Result<DatabaseRequest, String> {
+) -> Result<DecodedGatewayRequest, String> {
     binding.validate()?;
     if bytes.len() > MAX_REQUEST_BYTES {
         return Err("Gateway request is too large".to_string());
@@ -177,11 +183,46 @@ pub fn decode_request(
     if envelope.capability != "storage" {
         return Err("Gateway capability is not permitted".to_string());
     }
-    let request = envelope.into_database_request();
-    request
+    let request_id = envelope.request_id.clone();
+    let database_request = envelope.into_database_request();
+    database_request
         .validate_against(&binding.contract)
         .map_err(|_| "Gateway request is not permitted".to_string())?;
-    Ok(request)
+    Ok(DecodedGatewayRequest {
+        request_id,
+        database_request,
+    })
+}
+
+pub fn decode_request(
+    bytes: &[u8],
+    binding: &GatewayActivationBinding,
+) -> Result<DatabaseRequest, String> {
+    Ok(decode_request_with_id(bytes, binding)?.database_request)
+}
+
+#[derive(Debug, Default)]
+pub struct GatewayRequestAdmission {
+    rate_limiter: GatewayRateLimiter,
+    replay_guard: GatewayReplayGuard,
+}
+
+impl GatewayRequestAdmission {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn admit(
+        &mut self,
+        bytes: &[u8],
+        binding: &GatewayActivationBinding,
+        now: Instant,
+    ) -> Result<DecodedGatewayRequest, String> {
+        let decoded = decode_request_with_id(bytes, binding)?;
+        self.rate_limiter.check(binding, now)?;
+        self.replay_guard.accept(binding, &decoded.request_id)?;
+        Ok(decoded)
+    }
 }
 
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
@@ -277,8 +318,8 @@ mod tests {
     use super::{
         decode_request, encode_request, encode_response, GatewayActivationBinding,
         GatewayActivationState, GatewayOperationBudget, GatewayRateLimiter, GatewayReplayGuard,
-        GatewayRequestEnvelope, GatewayStorageOperation, MAX_OPERATIONS_PER_CONNECTION,
-        MAX_REQUESTS_PER_ACTIVATION,
+        GatewayRequestAdmission, GatewayRequestEnvelope, GatewayStorageOperation,
+        MAX_OPERATIONS_PER_CONNECTION, MAX_REQUESTS_PER_ACTIVATION,
     };
     use crate::trusted_service_database::{
         DatabaseResponse, TrustedServiceDatabaseContract, MAX_REQUEST_BYTES,
@@ -396,6 +437,23 @@ mod tests {
         inactive.state = GatewayActivationState::Stopped;
         assert!(limiter.check(&inactive, start).is_err());
     }
+    #[test]
+    fn admission_binds_rate_limit_and_replay_checks_to_decoded_request() {
+        let bytes = encode_request(&request()).expect("request should encode");
+        let start = Instant::now();
+        let mut admission = GatewayRequestAdmission::new();
+        let decoded = admission
+            .admit(&bytes, &binding(), start)
+            .expect("first request should be admitted");
+        assert_eq!(decoded.request_id, "request-1");
+        assert_eq!(decoded.database_request.activation_instance, "activation-1");
+        assert!(admission.admit(&bytes, &binding(), start).is_err());
+
+        let mut inactive = binding();
+        inactive.state = GatewayActivationState::Stopped;
+        assert!(admission.admit(&bytes, &inactive, start).is_err());
+    }
+
     #[test]
     fn rejects_oversized_frames_without_parsing_them() {
         let bytes = vec![b' '; MAX_REQUEST_BYTES + 1];
