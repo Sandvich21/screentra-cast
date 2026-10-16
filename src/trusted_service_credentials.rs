@@ -45,27 +45,30 @@ impl CredentialScope {
             .map_err(CredentialError::Invalid)?;
         crate::addons::validate_addon_storage_namespace(&self.activation_instance)
             .map_err(CredentialError::Invalid)?;
-        if self.capabilities.len() > 8
-            || self
-                .capabilities
-                .iter()
-                .any(|capability| capability.is_empty() || capability.len() > 64)
-        {
-            return Err(CredentialError::Invalid(
-                "Invalid trusted service credential scope".to_string(),
-            ));
-        }
-        let mut capabilities = BTreeSet::new();
-        if self.capabilities.iter().any(|capability| {
-            !SUPPORTED_CREDENTIAL_CAPABILITIES.contains(&capability.as_str())
-                || !capabilities.insert(capability)
-        }) {
-            return Err(CredentialError::Invalid(
-                "Invalid trusted service credential scope".to_string(),
-            ));
-        }
-        Ok(())
+        validate_capabilities(&self.capabilities)
     }
+}
+
+fn validate_capabilities(capabilities: &[String]) -> Result<(), CredentialError> {
+    if capabilities.len() > 8
+        || capabilities
+            .iter()
+            .any(|capability| capability.is_empty() || capability.len() > 64)
+    {
+        return Err(CredentialError::Invalid(
+            "Invalid trusted service credential scope".to_string(),
+        ));
+    }
+    let mut capabilities_seen = BTreeSet::new();
+    if capabilities.iter().any(|capability| {
+        !SUPPORTED_CREDENTIAL_CAPABILITIES.contains(&capability.as_str())
+            || !capabilities_seen.insert(capability)
+    }) {
+        return Err(CredentialError::Invalid(
+            "Invalid trusted service credential scope".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Opaque broker metadata. It is deliberately not a bearer token or secret.
@@ -73,6 +76,7 @@ impl CredentialScope {
 pub struct CredentialLease {
     pub addon_id: String,
     pub activation_instance: String,
+    pub capabilities: Vec<String>,
     pub lease_id: String,
     pub expires_at: String,
 }
@@ -100,16 +104,23 @@ impl CredentialLease {
                 "Invalid trusted service credential lease metadata".to_string(),
             ));
         }
+        validate_capabilities(&self.capabilities).map_err(|_| {
+            CredentialError::Invalid(
+                "Invalid trusted service credential lease metadata".to_string(),
+            )
+        })?;
         Ok(())
     }
 
     pub fn binds_scope(&self, scope: &CredentialScope) -> Result<(), CredentialError> {
         self.validate()?;
         scope.validate()?;
-        if self.addon_id != scope.addon_id || self.activation_instance != scope.activation_instance
+        if self.addon_id != scope.addon_id
+            || self.activation_instance != scope.activation_instance
+            || self.capabilities != scope.capabilities
         {
             return Err(CredentialError::Invalid(
-                "Credential lease identity does not match scope".to_string(),
+                "Credential lease scope does not match".to_string(),
             ));
         }
         Ok(())
@@ -240,6 +251,7 @@ mod tests {
         let valid = CredentialLease {
             addon_id: "example.service".to_string(),
             activation_instance: "activation-1".to_string(),
+            capabilities: vec!["storage".to_string()],
             lease_id: "lease-1".to_string(),
             expires_at: "2030-01-01T00:00:00Z".to_string(),
         };
@@ -264,6 +276,7 @@ mod tests {
         let invalid_timestamp = CredentialLease {
             addon_id: "example.service".to_string(),
             activation_instance: "activation-1".to_string(),
+            capabilities: vec!["storage".to_string()],
             lease_id: "lease-2".to_string(),
             expires_at: "not-a-timestamp".to_string(),
         };
@@ -278,6 +291,7 @@ mod tests {
         let lease = CredentialLease {
             addon_id: "example.service".to_string(),
             activation_instance: "activation-1".to_string(),
+            capabilities: vec!["storage".to_string()],
             lease_id: "lease-1".to_string(),
             expires_at: "2030-01-01T00:00:00Z".to_string(),
         };
@@ -291,6 +305,13 @@ mod tests {
             lease.binds_scope(&wrong),
             Err(CredentialError::Invalid(_))
         ));
+
+        let mut broader = scope();
+        broader.capabilities.push("read:clients".to_string());
+        assert!(matches!(
+            lease.binds_scope(&broader),
+            Err(CredentialError::Invalid(_))
+        ));
     }
 
     #[test]
@@ -298,6 +319,7 @@ mod tests {
         let lease = CredentialLease {
             addon_id: "example.service".to_string(),
             activation_instance: "activation-1".to_string(),
+            capabilities: vec!["storage".to_string()],
             lease_id: "lease-1".to_string(),
             expires_at: "2030-01-01T00:00:00Z".to_string(),
         };
@@ -317,6 +339,7 @@ mod tests {
         let lease = CredentialLease {
             addon_id: "example.service".to_string(),
             activation_instance: "activation-1".to_string(),
+            capabilities: vec!["storage".to_string()],
             lease_id: "lease-1".to_string(),
             expires_at: "2030-01-01T00:00:00Z".to_string(),
         };
