@@ -603,11 +603,7 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
     fn start(&mut self, request: &RuntimeLaunchRequest) -> Result<RuntimeHandle, RuntimeError> {
         if request.addon_id.is_empty()
             || request.activation_instance.is_empty()
-            || request.image_digest.len() != "sha256:".len() + 64
-            || !request.image_digest.starts_with("sha256:")
-            || !request.image_digest["sha256:".len()..]
-                .chars()
-                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+            || addons::validate_trusted_service_image_digest(&request.image_digest).is_err()
         {
             return Err(RuntimeError::Invalid(
                 "Fake runtime launch request is invalid".to_string(),

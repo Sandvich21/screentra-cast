@@ -340,6 +340,18 @@ const TRUSTED_SERVICE_CAPABILITIES: &[&str] = &[
     "client_extension",
 ];
 
+pub fn validate_trusted_service_image_digest(digest: &str) -> Result<(), String> {
+    if digest.len() != "sha256:".len() + 64
+        || !digest.starts_with("sha256:")
+        || !digest["sha256:".len()..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+    {
+        return Err("Invalid trusted service image digest".to_string());
+    }
+    Ok(())
+}
+
 fn validate_trusted_service_spec(spec: &TrustedServerServiceSpec) -> Result<(), AddonError> {
     if spec.image.is_empty()
         || spec.image.len() > 255
@@ -367,16 +379,7 @@ fn validate_trusted_service_spec(spec: &TrustedServerServiceSpec) -> Result<(), 
             "Invalid trusted service image reference".to_string(),
         ));
     }
-    if spec.image_digest.len() != "sha256:".len() + 64
-        || !spec.image_digest.starts_with("sha256:")
-        || !spec.image_digest["sha256:".len()..]
-            .chars()
-            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
-    {
-        return Err(AddonError::Invalid(
-            "Invalid trusted service image digest".to_string(),
-        ));
-    }
+    validate_trusted_service_image_digest(&spec.image_digest).map_err(AddonError::Invalid)?;
     validate_id(&spec.storage_namespace).map_err(|_| {
         AddonError::Invalid("Invalid trusted service storage namespace".to_string())
     })?;
