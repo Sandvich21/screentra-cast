@@ -54,7 +54,7 @@ Verify with focused runtime tests, then commit the contract separately.
 - Test: `src/trusted_service_oci.rs`
 - Modify: `docs/plans/2026-10-15-rootless-oci-trusted-service-runtime.md`
 
-Write failing tests for runtime discovery and policy validation. Configuration must name one supported rootless runtime explicitly; never search arbitrary PATH entries and never invoke a shell. Probe version, rootless operation, user-namespace support, cgroup/resource support, network isolation, read-only rootfs support, and seccomp/no-new-privileges support.
+Write failing tests for runtime discovery and policy validation. Configuration must name one supported rootless runtime explicitly; never search arbitrary PATH entries and never invoke a shell. Probe version, rootless operation, user-namespace support, cgroup/resource support, network isolation, read-only rootfs support, and seccomp/no-new-privileges support. The configured executable path must be absolute, regular, non-symlink, and free of symlinked ancestor directories.
 
 A missing executable or failed probe returns a blocked gate, not a fallback to host-process execution. Keep production wiring disabled and return a structured preflight report.
 

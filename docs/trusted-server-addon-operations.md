@@ -100,7 +100,8 @@ profile data before marker creation; no runtime process is started.
 A runtime preflight report also exists for the explicitly selected executable.
 It accepts only the named rootless runtime families (`podman` or `nerdctl`),
 requires an explicitly configured absolute regular executable path, rejects
-symlinked or relative paths, reports missing or non-executable paths as blocked,
+symlinked final paths and symlinked ancestor directories, rejects relative paths,
+reports missing or non-executable paths as blocked,
 and always keeps `can_start` false while OCI capability probing is disabled. It
 does not search PATH, invoke a command, fall back to a host process, or contact
 a registry.

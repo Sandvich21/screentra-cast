@@ -3,6 +3,7 @@ use crate::trusted_service_runtime::{
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::Path;
 
 pub const SUPPORTED_ROOTLESS_RUNTIMES: &[&str] = &["podman", "nerdctl"];
@@ -103,7 +104,12 @@ pub fn probe_oci_runtime(path: &Path) -> OciRuntimeProbeReport {
     {
         blocked_by.push("unsupported rootless runtime".to_string());
     }
+    let contains_symlink = path.is_absolute() && path_contains_symlink(path);
+    if contains_symlink {
+        blocked_by.push("runtime path contains a symlink".to_string());
+    }
     let executable_present = path.is_absolute()
+        && !contains_symlink
         && path
             .symlink_metadata()
             .map(is_regular_executable)
@@ -120,6 +126,14 @@ pub fn probe_oci_runtime(path: &Path) -> OciRuntimeProbeReport {
         can_start: false,
         blocked_by,
     }
+}
+
+fn path_contains_symlink(path: &Path) -> bool {
+    path.ancestors().any(|ancestor| {
+        fs::symlink_metadata(ancestor)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+    })
 }
 
 fn is_regular_executable(metadata: std::fs::Metadata) -> bool {
@@ -443,14 +457,15 @@ pub fn validate_oci_image_registry(image: &str, policy: &OciRegistryPolicy) -> R
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::fs;
     use std::path::Path;
+    use uuid::Uuid;
 
     use super::{
-        build_rootless_argv, container_name, probe_oci_runtime,
+        build_rootless_argv, container_name, launch_profile_matches, probe_oci_runtime,
         validate_oci_activation_gate_records, validate_oci_activation_gates,
         validate_oci_approval_metadata, validate_oci_image_registry, validate_oci_launch_spec,
-        validate_oci_launch_spec_against_record, launch_profile_matches, ActivationGate,
-        OciLaunchPolicy, OciLaunchSpec,
+        validate_oci_launch_spec_against_record, ActivationGate, OciLaunchPolicy, OciLaunchSpec,
         OciRegistryPolicy, OciResourceLimits, TrustedServiceRuntimeRecord,
         MAX_OCI_ALLOWED_REGISTRIES, MAX_OCI_COMMAND_ARGS, MAX_OCI_COMMAND_PART_BYTES,
         REQUIRED_OCI_ACTIVATION_GATES,
@@ -698,7 +713,8 @@ mod tests {
             api_namespace: "example.weather".to_string(),
             launch_profile: crate::addons::TrustedServiceLaunchProfile {
                 command: vec!["/service".to_string()],
-                gateway_socket_path: crate::trusted_service_gateway::GATEWAY_SOCKET_PATH.to_string(),
+                gateway_socket_path: crate::trusted_service_gateway::GATEWAY_SOCKET_PATH
+                    .to_string(),
                 rootless: true,
                 non_root: true,
                 network_disabled: true,
@@ -749,5 +765,30 @@ mod tests {
             .blocked_by
             .iter()
             .any(|reason| reason == "runtime path must be absolute"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_probe_rejects_symlinked_parent_paths() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = std::env::temp_dir().join(format!("screentra-oci-probe-{}", Uuid::new_v4()));
+        let real_dir = root.join("real");
+        let symlink_dir = root.join("link");
+        let executable = real_dir.join("podman");
+        fs::create_dir_all(&real_dir).expect("temporary runtime directory should be created");
+        fs::write(&executable, b"not executed").expect("temporary runtime should be created");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("temporary runtime should be executable");
+        symlink(&real_dir, &symlink_dir).expect("runtime parent symlink should be created");
+
+        let report = probe_oci_runtime(&symlink_dir.join("podman"));
+        assert!(!report.executable_present);
+        assert!(!report.can_start);
+        assert!(report
+            .blocked_by
+            .iter()
+            .any(|reason| reason == "runtime path contains a symlink"));
+        fs::remove_dir_all(root).expect("temporary runtime fixture should be removed");
     }
 }
