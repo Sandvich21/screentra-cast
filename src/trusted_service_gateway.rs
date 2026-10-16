@@ -320,6 +320,40 @@ impl GatewayRequestAdmission {
     }
 }
 
+#[derive(Debug)]
+pub struct GatewaySession {
+    binding: GatewayActivationBinding,
+    admission: GatewayRequestAdmission,
+    established: bool,
+}
+
+impl GatewaySession {
+    pub fn new(binding: GatewayActivationBinding) -> Self {
+        Self {
+            binding,
+            admission: GatewayRequestAdmission::new(),
+            established: false,
+        }
+    }
+
+    pub fn accept_hello(&mut self, bytes: &[u8]) -> Result<(), String> {
+        decode_connection_hello(bytes, &self.binding)?;
+        self.established = true;
+        Ok(())
+    }
+
+    pub fn is_established(&self) -> bool {
+        self.established
+    }
+
+    pub fn admit(&mut self, bytes: &[u8], now: Instant) -> Result<DecodedGatewayRequest, String> {
+        if !self.established {
+            return Err("Gateway connection hello is required".to_string());
+        }
+        self.admission.admit(bytes, &self.binding, now)
+    }
+}
+
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub const MAX_OPERATIONS_PER_CONNECTION: u32 = 100;
 pub const MAX_REQUEST_DURATION: Duration = Duration::from_secs(5);
@@ -452,7 +486,7 @@ mod tests {
         decode_connection_hello, decode_request, encode_connection_hello, encode_request,
         encode_response, validate_connection_hello, GatewayActivationBinding,
         GatewayActivationState, GatewayConnectionHello, GatewayOperationBudget, GatewayRateLimiter,
-        GatewayReplayGuard, GatewayRequestAdmission, GatewayRequestEnvelope,
+        GatewayReplayGuard, GatewayRequestAdmission, GatewayRequestEnvelope, GatewaySession,
         GatewayStorageOperation, GATEWAY_PROTOCOL_VERSION, MAX_OPERATIONS_PER_CONNECTION,
         MAX_REQUESTS_PER_ACTIVATION, MAX_TRACKED_ACTIVATIONS,
     };
@@ -518,6 +552,27 @@ mod tests {
             &inactive,
         )
         .is_err());
+    }
+
+    #[test]
+    fn session_requires_valid_hello_before_admitting_requests() {
+        let request_bytes = encode_request(&request()).expect("request should encode");
+        let hello = GatewayConnectionHello {
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            addon_id: "example.weather".to_string(),
+            activation_instance: "activation-1".to_string(),
+        };
+        let hello_bytes = encode_connection_hello(&hello).expect("hello should encode");
+        let start = Instant::now();
+        let mut session = GatewaySession::new(binding());
+        assert!(session.admit(&request_bytes, start).is_err());
+        assert!(session.accept_hello(br#"{"protocol_version":0}"#).is_err());
+        assert!(!session.is_established());
+        session
+            .accept_hello(&hello_bytes)
+            .expect("valid hello should establish session");
+        assert!(session.is_established());
+        assert!(session.admit(&request_bytes, start).is_ok());
     }
 
     #[test]
