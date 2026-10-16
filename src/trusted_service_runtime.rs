@@ -8,7 +8,9 @@
 use crate::addons::{self, AddonError, TrustedServiceStage};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;

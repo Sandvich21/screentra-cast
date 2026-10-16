@@ -1,0 +1,140 @@
+//! Credential isolation boundary for trusted server services.
+//!
+//! The first runtime phase does not mint or transport service secrets. This
+//! module defines the future broker contract while the default implementation
+//! fails closed. Lease metadata is intentionally not a credential value and is
+//! never persisted in runtime records, manifests, backups, or client payloads.
+
+use std::fmt;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialScope {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub capabilities: Vec<String>,
+}
+
+impl CredentialScope {
+    pub fn validate(&self) -> Result<(), CredentialError> {
+        if self.addon_id.is_empty()
+            || self.addon_id.len() > 64
+            || self
+                .addon_id
+                .chars()
+                .any(|character| character.is_control())
+            || self.activation_instance.is_empty()
+            || self.activation_instance.len() > 128
+            || self
+                .activation_instance
+                .chars()
+                .any(|character| character.is_control())
+        {
+            return Err(CredentialError::Invalid(
+                "Invalid trusted service credential scope".to_string(),
+            ));
+        }
+        if self.capabilities.len() > 8
+            || self
+                .capabilities
+                .iter()
+                .any(|capability| capability.is_empty() || capability.len() > 64)
+        {
+            return Err(CredentialError::Invalid(
+                "Invalid trusted service credential scope".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Opaque broker metadata. It is deliberately not a bearer token or secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialLease {
+    pub lease_id: String,
+    pub expires_at: String,
+}
+
+pub trait TrustedServiceCredentialBroker {
+    fn issue(&mut self, scope: &CredentialScope) -> Result<CredentialLease, CredentialError>;
+    fn revoke(&mut self, lease: &CredentialLease) -> Result<(), CredentialError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialError {
+    Invalid(String),
+    Blocked(String),
+    NotFound,
+}
+
+impl fmt::Display for CredentialError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid(message) => write!(formatter, "{message}"),
+            Self::Blocked(message) => write!(formatter, "{message}"),
+            Self::NotFound => write!(formatter, "Credential lease not found"),
+        }
+    }
+}
+
+/// Default broker. It cannot issue, store, or revoke a service credential.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DisabledCredentialBroker;
+
+impl TrustedServiceCredentialBroker for DisabledCredentialBroker {
+    fn issue(&mut self, _scope: &CredentialScope) -> Result<CredentialLease, CredentialError> {
+        Err(CredentialError::Blocked(
+            "Trusted service credential issuance is not enabled".to_string(),
+        ))
+    }
+
+    fn revoke(&mut self, _lease: &CredentialLease) -> Result<(), CredentialError> {
+        Err(CredentialError::Blocked(
+            "Trusted service credential revocation is not enabled".to_string(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scope() -> CredentialScope {
+        CredentialScope {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
+            capabilities: vec!["storage".to_string()],
+        }
+    }
+
+    #[test]
+    fn disabled_broker_fails_closed_without_issuing_a_credential() {
+        let mut broker = DisabledCredentialBroker;
+        let error = broker
+            .issue(&scope())
+            .expect_err("credential issuance must remain disabled");
+        assert!(matches!(error, CredentialError::Blocked(_)));
+    }
+
+    #[test]
+    fn credential_scope_rejects_control_characters() {
+        let mut invalid = scope();
+        invalid.activation_instance.push('\n');
+        assert!(matches!(
+            invalid.validate(),
+            Err(CredentialError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn disabled_broker_never_accepts_a_revoke_as_activation() {
+        let mut broker = DisabledCredentialBroker;
+        let lease = CredentialLease {
+            lease_id: "lease-1".to_string(),
+            expires_at: "2030-01-01T00:00:00Z".to_string(),
+        };
+        assert!(matches!(
+            broker.revoke(&lease),
+            Err(CredentialError::Blocked(_))
+        ));
+    }
+}

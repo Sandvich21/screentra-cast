@@ -41,8 +41,9 @@ admin approver, activation instance, declared capabilities, and explicit
 execution gates. The execution backend, credential broker, database boundary,
 controlled gateway, and resource policy gates remain false. `execution_enabled`
 is hard-coded false, and these endpoints do not pull images, create containers,
-issue credentials, expose ports, or execute code. Removing staged metadata also
-removes its inert runtime record.
+issue credentials, expose ports, or execute code. The credential-broker
+interface exists separately but its default implementation rejects issuance and
+revocation. Removing staged metadata also removes its inert runtime record.
 
 The validator checks the service metadata that would otherwise become an
 execution policy:

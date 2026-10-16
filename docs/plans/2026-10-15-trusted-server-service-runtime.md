@@ -36,6 +36,8 @@ trait and harness are the current working-tree changes:
 - The supervisor binds the addon identity, declared capability allowlist, API
   namespace, and storage namespace into the future launch request; unknown or
   duplicate capabilities are rejected before any runtime call.
+- A disabled-by-default credential-broker trait now defines opaque lease
+  metadata without exposing, persisting, or transporting credential values.
 
 ## Explicitly out of scope
 

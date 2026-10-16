@@ -18,6 +18,7 @@ mod safe_archive;
 mod screenshot;
 mod system;
 mod traffic;
+mod trusted_service_credentials;
 mod trusted_service_runtime;
 mod version;
 
