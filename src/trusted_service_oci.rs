@@ -1,4 +1,57 @@
 use std::collections::BTreeSet;
+use std::path::Path;
+
+pub const SUPPORTED_ROOTLESS_RUNTIMES: &[&str] = &["podman", "nerdctl"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciRuntimeProbeReport {
+    pub runtime_name: Option<String>,
+    pub executable_present: bool,
+    pub can_start: bool,
+    pub blocked_by: Vec<String>,
+}
+
+pub fn probe_oci_runtime(path: &Path) -> OciRuntimeProbeReport {
+    let runtime_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_string);
+    let mut blocked_by = Vec::new();
+    if !runtime_name
+        .as_deref()
+        .is_some_and(|name| SUPPORTED_ROOTLESS_RUNTIMES.contains(&name))
+    {
+        blocked_by.push("unsupported rootless runtime".to_string());
+    }
+    let executable_present = path.is_file() && is_executable(path);
+    if !executable_present {
+        blocked_by.push("runtime executable unavailable".to_string());
+    }
+    // Capability probing and execution remain intentionally disabled until the
+    // separately reviewed OCI supervisor, gateway, and resource policy exist.
+    blocked_by.push("OCI capability probe is not enabled".to_string());
+    OciRuntimeProbeReport {
+        runtime_name,
+        executable_present,
+        can_start: false,
+        blocked_by,
+    }
+}
+
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return path
+            .metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OciLaunchPolicy {
@@ -103,7 +156,12 @@ pub fn validate_oci_launch_spec(spec: &OciLaunchSpec) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_oci_launch_spec, OciLaunchPolicy, OciLaunchSpec, OciResourceLimits};
+    use std::path::Path;
+
+    use super::{
+        probe_oci_runtime, validate_oci_launch_spec, OciLaunchPolicy, OciLaunchSpec,
+        OciResourceLimits,
+    };
 
     fn safe_spec() -> OciLaunchSpec {
         OciLaunchSpec {
@@ -178,5 +236,16 @@ mod tests {
         let mut invalid = safe_spec();
         invalid.activation_instance = "../other".to_string();
         assert!(validate_oci_launch_spec(&invalid).is_err());
+    }
+
+    #[test]
+    fn missing_oci_runtime_is_blocked_without_fallback() {
+        let report = probe_oci_runtime(Path::new("/definitely/missing/screentra-oci-runtime"));
+        assert!(!report.executable_present);
+        assert!(!report.can_start);
+        assert!(report
+            .blocked_by
+            .iter()
+            .any(|reason| reason == "runtime executable unavailable"));
     }
 }

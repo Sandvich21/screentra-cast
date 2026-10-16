@@ -65,6 +65,12 @@ privileges/default-deny-network policy, and bounded resources. It does not
 select a runtime, invoke a process, pull an image, or change the disabled
 execution gate.
 
+A runtime preflight report also exists for the explicitly selected executable.
+It accepts only the named rootless runtime families (`podman` or `nerdctl`),
+reports missing or non-executable paths as blocked, and always keeps
+`can_start` false while OCI capability probing is disabled. It does not search
+PATH, invoke a command, fall back to a host process, or contact a registry.
+
 ## Required future activation gates
 
 A future implementation must add all of the following before changing the
