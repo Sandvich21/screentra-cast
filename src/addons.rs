@@ -775,6 +775,25 @@ fn trusted_service_storage_dir() -> PathBuf {
     PathBuf::from(root).join("trusted-services")
 }
 
+fn validate_trusted_service_file(
+    path: &Path,
+    maximum_bytes: u64,
+    description: &str,
+) -> Result<(), AddonError> {
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AddonError::Invalid(format!(
+            "Trusted service {description} is not a regular file"
+        )));
+    }
+    if metadata.len() > maximum_bytes {
+        return Err(AddonError::Invalid(format!(
+            "Trusted service {description} is too large"
+        )));
+    }
+    Ok(())
+}
+
 fn verify_trusted_service_manifest_signature(
     manifest_path: &Path,
     signature_path: &Path,
@@ -891,23 +910,13 @@ pub fn stage_trusted_service_manifest(
     signature_path: &Path,
     image_signature_path: &Path,
 ) -> Result<TrustedServiceStage, AddonError> {
-    let manifest_size = fs::metadata(manifest_path).map_err(io_error)?.len();
-    let signature_size = fs::metadata(signature_path).map_err(io_error)?.len();
-    if manifest_size > 1024 * 1024 || signature_size > 64 * 1024 {
-        return Err(AddonError::Invalid(
-            "Trusted service manifest or signature is too large".to_string(),
-        ));
-    }
+    validate_trusted_service_file(manifest_path, 1024 * 1024, "manifest")?;
+    validate_trusted_service_file(signature_path, 64 * 1024, "manifest signature")?;
     verify_trusted_service_manifest_signature(manifest_path, signature_path)?;
     let manifest_bytes = fs::read(manifest_path).map_err(io_error)?;
     let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
     validate_trusted_service_manifest(&manifest)?;
-    let image_signature_size = fs::metadata(image_signature_path).map_err(io_error)?.len();
-    if image_signature_size > 64 * 1024 {
-        return Err(AddonError::Invalid(
-            "Trusted service image signature is too large".to_string(),
-        ));
-    }
+    validate_trusted_service_file(image_signature_path, 64 * 1024, "image signature")?;
     let image_digest = manifest
         .trusted_service
         .as_ref()
@@ -954,6 +963,12 @@ pub fn stage_trusted_service_manifest(
 fn read_trusted_service_stage(dir: &Path) -> Result<TrustedServiceStage, AddonError> {
     let manifest_path = dir.join(MANIFEST_FILE);
     let signature_path = dir.join("manifest.sig");
+    let image_signature_path = dir.join("image.sig");
+    let state_path = dir.join(STATE_FILE);
+    validate_trusted_service_file(&manifest_path, 1024 * 1024, "manifest")?;
+    validate_trusted_service_file(&signature_path, 64 * 1024, "manifest signature")?;
+    validate_trusted_service_file(&image_signature_path, 64 * 1024, "image signature")?;
+    validate_trusted_service_file(&state_path, 64 * 1024, "state")?;
     verify_trusted_service_manifest_signature(&manifest_path, &signature_path)?;
     let manifest_bytes = fs::read(&manifest_path).map_err(io_error)?;
     let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
@@ -964,8 +979,8 @@ fn read_trusted_service_stage(dir: &Path) -> Result<TrustedServiceStage, AddonEr
         .expect("validated trusted service metadata")
         .image_digest
         .as_str();
-    verify_trusted_service_image_signature(image_digest, &dir.join("image.sig"))?;
-    let state_bytes = fs::read(dir.join(STATE_FILE)).map_err(io_error)?;
+    verify_trusted_service_image_signature(image_digest, &image_signature_path)?;
+    let state_bytes = fs::read(&state_path).map_err(io_error)?;
     let state: serde_json::Value = serde_json::from_slice(&state_bytes).map_err(io_error)?;
     let state_name = state
         .get("state")
@@ -1430,6 +1445,30 @@ mod tests {
             unsafe { std::env::set_var("SCREENTRA_CAST_TRUSTED_SERVICE_IMAGE_SIGNING_PUBKEY", value); }
         } else {
             unsafe { std::env::remove_var("SCREENTRA_CAST_TRUSTED_SERVICE_IMAGE_SIGNING_PUBKEY"); }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn trusted_service_persisted_files_reject_symlinks_and_oversize() {
+        let root = std::env::temp_dir().join(format!(
+            "screentra-trusted-service-file-bounds-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("artifact");
+        fs::write(&path, b"small").unwrap();
+        validate_trusted_service_file(&path, 64, "artifact").unwrap();
+        fs::write(&path, vec![0u8; 65]).unwrap();
+        assert!(validate_trusted_service_file(&path, 64, "artifact").is_err());
+
+        #[cfg(unix)]
+        {
+            let target = root.join("target");
+            fs::write(&target, b"small").unwrap();
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            assert!(validate_trusted_service_file(&path, 64, "artifact").is_err());
         }
         let _ = fs::remove_dir_all(root);
     }
