@@ -356,7 +356,11 @@ pub(crate) fn validate_trusted_service_image_reference(image: &str) -> Result<()
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | ':'))
         || image.split('/').any(|component| {
-            component.is_empty() || component.starts_with(':') || component.ends_with(':')
+            component.is_empty()
+                || component == "."
+                || component == ".."
+                || component.starts_with(':')
+                || component.ends_with(':')
         })
     {
         return Err("Invalid trusted service image reference".to_string());

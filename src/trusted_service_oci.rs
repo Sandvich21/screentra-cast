@@ -566,6 +566,10 @@ mod tests {
         absolute.image = "/registry.example/weather".to_string();
         assert!(validate_oci_launch_spec(&absolute).is_err());
 
+        let mut dot_component = safe_spec();
+        dot_component.image = "registry.example/.".to_string();
+        assert!(validate_oci_launch_spec(&dot_component).is_err());
+
         let mut uppercase = safe_spec();
         uppercase.image_digest = format!("sha256:{}", "A".repeat(64));
         assert!(validate_oci_launch_spec(&uppercase).is_err());
