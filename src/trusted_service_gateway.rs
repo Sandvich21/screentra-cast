@@ -554,6 +554,29 @@ pub fn encode_response(response: &DatabaseResponse) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+pub fn decode_response(bytes: &[u8]) -> Result<DatabaseResponse, String> {
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err("Gateway response is too large".to_string());
+    }
+    let envelope: GatewayResponseEnvelope =
+        serde_json::from_slice(bytes).map_err(|_| "Invalid gateway response".to_string())?;
+    Ok(match envelope {
+        GatewayResponseEnvelope::Value { value_json } => DatabaseResponse::Value(value_json),
+        GatewayResponseEnvelope::Written => DatabaseResponse::Written,
+        GatewayResponseEnvelope::Deleted { deleted } => DatabaseResponse::Deleted(deleted),
+        GatewayResponseEnvelope::Entries { entries } => DatabaseResponse::Entries(entries),
+    })
+}
+
+pub fn decode_response_frame(
+    bytes: &[u8],
+) -> Result<Option<(DatabaseResponse, usize)>, String> {
+    let Some((payload, consumed)) = decode_gateway_frame(bytes, MAX_RESPONSE_BYTES)? else {
+        return Ok(None);
+    };
+    Ok(Some((decode_response(&payload)?, consumed)))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GatewayOperationBudget {
     used: u32,
@@ -613,13 +636,14 @@ mod tests {
     use super::{
         decode_connection_hello, decode_gateway_frame, decode_request, decode_request_frame,
         encode_connection_hello, encode_gateway_frame, encode_request, encode_request_frame,
-        encode_response, encode_response_frame, validate_connection_hello,
+        decode_response_frame, encode_response, encode_response_frame,
+        validate_connection_hello,
         GatewayActivationBinding,
         GatewayActivationState, GatewayConnectionHello, GatewayOperationBudget,
         GatewayPeerCredentials, GatewayPeerPolicy, GatewayRateLimiter, GatewayReplayGuard,
         GatewayRequestAdmission, GatewayRequestEnvelope, GatewaySession, GatewayStorageOperation,
         GATEWAY_PROTOCOL_VERSION, MAX_OPERATIONS_PER_CONNECTION, MAX_REQUESTS_PER_ACTIVATION,
-        MAX_RESPONSE_BYTES, MAX_TRACKED_ACTIVATIONS,
+        MAX_TRACKED_ACTIVATIONS,
     };
     use crate::trusted_service_database::{
         DatabaseResponse, TrustedServiceDatabaseContract, MAX_REQUEST_BYTES,
@@ -735,9 +759,11 @@ mod tests {
         assert_eq!(consumed, frame.len());
         let response_frame = encode_response_frame(&DatabaseResponse::Written)
             .expect("response frame should encode");
-        assert!(decode_gateway_frame(&response_frame, MAX_RESPONSE_BYTES)
+        let (response, consumed) = decode_response_frame(&response_frame)
             .unwrap()
-            .is_some());
+            .expect("response frame should decode");
+        assert_eq!(response, DatabaseResponse::Written);
+        assert_eq!(consumed, response_frame.len());
     }
 
     #[test]
