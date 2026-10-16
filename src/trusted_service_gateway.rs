@@ -792,6 +792,30 @@ mod tests {
     }
 
     #[test]
+    fn typed_response_frame_wrapper_round_trips_one_frame_at_a_time() {
+        let response = DatabaseResponse::Entries(vec![
+            ("alpha".to_string(), "{\"ok\":true}".to_string()),
+            ("beta".to_string(), String::new()),
+        ]);
+        let first = encode_response_frame(&response).expect("response frame should encode");
+        let second = encode_response_frame(&DatabaseResponse::Written)
+            .expect("second response frame should encode");
+        let mut combined = first.clone();
+        combined.extend_from_slice(&second);
+
+        let (decoded, consumed) = decode_response_frame(&combined)
+            .unwrap()
+            .expect("first response frame should decode");
+        assert_eq!(decoded, response);
+        assert_eq!(consumed, first.len());
+        let (decoded_second, consumed_second) = decode_response_frame(&combined[consumed..])
+            .unwrap()
+            .expect("second response frame should decode");
+        assert_eq!(decoded_second, DatabaseResponse::Written);
+        assert_eq!(consumed_second, second.len());
+    }
+
+    #[test]
     fn typed_hello_frame_wrapper_preserves_binding_and_partial_reads() {
         let hello = GatewayConnectionHello {
             protocol_version: GATEWAY_PROTOCOL_VERSION,
