@@ -358,6 +358,7 @@ impl GatewayRequestAdmission {
 #[derive(Debug)]
 pub struct GatewaySession {
     binding: GatewayActivationBinding,
+    peer_policy: GatewayPeerPolicy,
     admission: GatewayRequestAdmission,
     budget: GatewayOperationBudget,
     established: bool,
@@ -365,9 +366,10 @@ pub struct GatewaySession {
 }
 
 impl GatewaySession {
-    pub fn new(binding: GatewayActivationBinding) -> Self {
+    pub fn new(binding: GatewayActivationBinding, peer_policy: GatewayPeerPolicy) -> Self {
         Self {
             binding,
+            peer_policy,
             admission: GatewayRequestAdmission::new(),
             budget: GatewayOperationBudget::new(),
             established: false,
@@ -375,13 +377,18 @@ impl GatewaySession {
         }
     }
 
-    pub fn accept_hello(&mut self, bytes: &[u8]) -> Result<(), String> {
+    pub fn accept_hello(
+        &mut self,
+        bytes: &[u8],
+        peer: GatewayPeerCredentials,
+    ) -> Result<(), String> {
         if self.retired {
             return Err("Gateway session is retired".to_string());
         }
         if self.established {
             return Err("Gateway session is already established".to_string());
         }
+        self.peer_policy.validate(peer)?;
         decode_connection_hello(bytes, &self.binding)?;
         self.established = true;
         Ok(())
@@ -644,16 +651,33 @@ mod tests {
             activation_instance: "activation-1".to_string(),
         };
         let hello_bytes = encode_connection_hello(&hello).expect("hello should encode");
+        let peer = GatewayPeerCredentials {
+            uid: 1000,
+            gid: 1001,
+        };
+        let peer_policy = GatewayPeerPolicy::new(1000, 1001).expect("peer policy should be valid");
         let start = Instant::now();
-        let mut session = GatewaySession::new(binding());
+        let mut session = GatewaySession::new(binding(), peer_policy);
         assert!(session.admit(&request_bytes, start).is_err());
-        assert!(session.accept_hello(br#"{"protocol_version":0}"#).is_err());
+        assert!(session
+            .accept_hello(
+                &hello_bytes,
+                GatewayPeerCredentials {
+                    uid: 1002,
+                    gid: 1001,
+                },
+            )
+            .is_err());
+        assert!(!session.is_established());
+        assert!(session
+            .accept_hello(br#"{"protocol_version":0}"#, peer)
+            .is_err());
         assert!(!session.is_established());
         session
-            .accept_hello(&hello_bytes)
+            .accept_hello(&hello_bytes, peer)
             .expect("valid hello should establish session");
         assert!(session.is_established());
-        assert!(session.accept_hello(&hello_bytes).is_err());
+        assert!(session.accept_hello(&hello_bytes, peer).is_err());
         assert!(session.admit(&request_bytes, start).is_ok());
         let second_request = encode_request(&GatewayRequestEnvelope {
             request_id: "request-2".to_string(),
@@ -667,7 +691,7 @@ mod tests {
             .retire()
             .expect("session retirement should clean admission state");
         assert!(!session.is_established());
-        assert!(session.accept_hello(&hello_bytes).is_err());
+        assert!(session.accept_hello(&hello_bytes, peer).is_err());
         assert!(session.admit(&request_bytes, start).is_err());
     }
 
