@@ -841,8 +841,15 @@ pub fn install(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
 
 pub fn set_enabled(id: &str, enabled: bool) -> Result<AddonRecord, AddonError> {
     let dir = addon_dir(id)?;
-    if !dir.exists() {
-        return Err(AddonError::NotFound);
+    let metadata = match fs::symlink_metadata(&dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AddonError::NotFound);
+        }
+        Err(error) => return Err(io_error(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AddonError::Invalid("Invalid addon directory".to_string()));
     }
     let mut record = read_record(&dir)?;
     record.enabled = enabled;
@@ -2101,12 +2108,28 @@ mod tests {
         let target = root.join("target");
         fs::create_dir_all(&addons_root).unwrap();
         fs::create_dir_all(&target).unwrap();
+        fs::write(
+            target.join(MANIFEST_FILE),
+            serde_json::to_vec(&manifest()).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            target.join(STATE_FILE),
+            serde_json::to_vec(&AddonState {
+                enabled: true,
+                installed_at: "now".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
         let addon_path = addons_root.join("example.weather");
         symlink(&target, &addon_path).unwrap();
         let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
         unsafe {
             std::env::set_var("SIGNAGE_DATA_DIR", &root);
         }
+        let error = set_enabled("example.weather", false).unwrap_err();
+        assert!(error.to_string().contains("Invalid addon directory"));
         let error = remove("example.weather").unwrap_err();
         assert!(error.to_string().contains("Invalid addon directory"));
         assert!(target.is_dir());
