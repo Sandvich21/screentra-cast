@@ -1,6 +1,7 @@
 use crate::trusted_service_runtime::{
     ActivationGate, TrustedServiceRuntimeRecord, EXECUTION_ENABLED,
 };
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -190,16 +191,16 @@ pub fn build_rootless_argv(
 }
 
 fn container_name(spec: &OciLaunchSpec) -> String {
-    let mut name = format!("screentra-{}-{}", spec.addon_id, spec.activation_instance)
+    let identity = format!("{}:{}", spec.addon_id, spec.activation_instance);
+    let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
+    let prefix = format!("{}-{}", spec.addon_id, spec.activation_instance)
         .chars()
         .map(|ch| if ch == '.' || ch == '_' { '-' } else { ch })
         .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
-        .take(63)
+        .take(35)
         .collect::<String>();
-    if name.is_empty() {
-        name = "screentra-addon".to_string();
-    }
-    name
+    let prefix = if prefix.is_empty() { "addon" } else { &prefix };
+    format!("screentra-{prefix}-{}", &digest[..16])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -402,7 +403,7 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        build_rootless_argv, probe_oci_runtime, validate_oci_activation_gates,
+        build_rootless_argv, container_name, probe_oci_runtime, validate_oci_activation_gates,
         validate_oci_approval_metadata, validate_oci_image_registry, validate_oci_launch_spec,
         validate_oci_launch_spec_against_record, ActivationGate, OciLaunchPolicy, OciLaunchSpec,
         OciRegistryPolicy, OciResourceLimits, TrustedServiceRuntimeRecord,
@@ -604,6 +605,21 @@ mod tests {
             .iter()
             .any(|arg| arg == "-c" || arg == "--volume" || arg == "-v"));
     }
+    #[test]
+    fn container_names_remain_bounded_and_activation_distinct() {
+        let mut first = safe_spec();
+        first.activation_instance =
+            "activation-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let mut second = first.clone();
+        second.activation_instance = "activation-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+
+        let first_name = container_name(&first);
+        let second_name = container_name(&second);
+        assert_ne!(first_name, second_name);
+        assert!(first_name.len() <= 63);
+        assert!(second_name.len() <= 63);
+    }
+
     #[test]
     fn approved_record_binding_still_respects_disabled_execution_gate() {
         let record = TrustedServiceRuntimeRecord {
