@@ -75,9 +75,15 @@ trait and harness are the current working-tree changes:
 
 ## Next phase after this plan
 
-Complete lifecycle integration around the non-service-facing adapters: extend
-backup/restore and uninstall coverage for controlled storage and inert runtime
-metadata, add rollback and stopped/disabled identity negative tests, and keep
-`scripts/probe-trusted-service-postgres-permissions.sh` in the backend gate.
-Keep the database gate and execution disabled until those results are reviewed.
-Only then should a rootless OCI backend be considered.
+Lifecycle coverage now verifies that HTTP backup/restore preserves controlled
+addon storage, persisted service audit metadata, and inert runtime records
+without restoring an activation marker. Runtime coverage also rejects disabled
+activation records before planning or starting and rejects repeated stops for a
+stopped activation handle.
+
+Remaining lifecycle work is rollback-preservation coverage for controlled
+storage/audit state and broader uninstall cleanup coverage for runtime records
+and staged metadata. Keep `scripts/probe-trusted-service-postgres-permissions.sh`
+in the backend gate. Keep the database gate and execution disabled until those
+results and the final fail-closed boundary review are complete. Only then
+should a rootless OCI backend be considered.
