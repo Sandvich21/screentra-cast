@@ -134,7 +134,9 @@ validator to accept the service kind:
 6. default-deny network policy and no arbitrary host ports;
 7. bounded CPU, memory, disk, log, timeout, and restart budgets;
 8. service-specific PostgreSQL role/schema or the controlled core storage API;
-9. short-lived gateway credentials with revocation and audit events;
+9. short-lived gateway credentials with revocation and audit events; the current
+   code has only contract-only scope, expiry, capability, and revocation-state
+   validation, while issuance and transport remain blocked;
 10. health checks, rollback, uninstall cleanup, backup/retention behavior, and
     tests proving protected files, credentials, core tables, and other addon
     namespaces are inaccessible.
