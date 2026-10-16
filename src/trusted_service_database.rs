@@ -395,6 +395,70 @@ impl TrustedServiceSqliteGateway {
     }
 }
 
+/// PostgreSQL implementation of the same controlled core storage API. The
+/// per-addon schema/role mode is intentionally rejected until its grants and
+/// disposable permission probe exist.
+#[derive(Clone)]
+pub(crate) struct TrustedServicePostgresGateway {
+    store: Arc<crate::postgres::PostgresStore>,
+    contract: TrustedServiceDatabaseContract,
+}
+
+impl TrustedServicePostgresGateway {
+    pub(crate) fn new(
+        store: Arc<crate::postgres::PostgresStore>,
+        contract: TrustedServiceDatabaseContract,
+    ) -> Result<Self, DatabaseGatewayError> {
+        contract
+            .validate()
+            .map_err(DatabaseGatewayError::Contract)?;
+        if contract.boundary != DatabaseBoundaryKind::CoreStorageApi {
+            return Err(DatabaseGatewayError::Contract(
+                DatabaseContractError::Unsupported(
+                    "PostgreSQL schema gateway is not enabled".to_string(),
+                ),
+            ));
+        }
+        Ok(Self { store, contract })
+    }
+
+    pub(crate) async fn handle(
+        &self,
+        request: DatabaseRequest,
+    ) -> Result<DatabaseResponse, DatabaseGatewayError> {
+        request
+            .validate_against(&self.contract)
+            .map_err(DatabaseGatewayError::Contract)?;
+        let addon_id = &self.contract.storage_namespace;
+        match request.operation {
+            DatabaseOperation::Get { key } => self
+                .store
+                .get_addon_storage(addon_id, &key)
+                .await
+                .map(DatabaseResponse::Value)
+                .map_err(DatabaseGatewayError::Storage),
+            DatabaseOperation::Put { key, value_json } => self
+                .store
+                .set_addon_storage(addon_id, &key, &value_json, &Utc::now().to_rfc3339())
+                .await
+                .map(|()| DatabaseResponse::Written)
+                .map_err(DatabaseGatewayError::Storage),
+            DatabaseOperation::Delete { key } => self
+                .store
+                .delete_addon_storage(addon_id, &key)
+                .await
+                .map(DatabaseResponse::Deleted)
+                .map_err(DatabaseGatewayError::Storage),
+            DatabaseOperation::List { prefix, limit } => self
+                .store
+                .list_addon_storage(addon_id, &prefix, limit)
+                .await
+                .map(DatabaseResponse::Entries)
+                .map_err(DatabaseGatewayError::Storage),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,5 +702,105 @@ mod tests {
                 == DatabaseResponse::Value(None)
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a disposable PostgreSQL database supplied through SIGNAGE_DATABASE_URL"]
+    async fn postgres_gateway_round_trip_is_namespaced_and_identity_bound() {
+        crate::postgres::apply_initial_schema()
+            .await
+            .expect("apply PostgreSQL migrations");
+        let store = Arc::new(
+            crate::postgres::PostgresStore::connect()
+                .await
+                .expect("connect to PostgreSQL"),
+        );
+        let addon_id = format!("test.gateway.{}", uuid::Uuid::new_v4());
+        let other_addon_id = format!("test.gateway.other.{}", uuid::Uuid::new_v4());
+        let mut contract =
+            TrustedServiceDatabaseContract::core_storage_api(&addon_id, "activation-1");
+        let gateway = TrustedServicePostgresGateway::new(store.clone(), contract.clone())
+            .expect("PostgreSQL gateway");
+
+        assert_eq!(
+            gateway
+                .handle(DatabaseRequest {
+                    addon_id: addon_id.clone(),
+                    activation_instance: "activation-1".to_string(),
+                    operation: DatabaseOperation::Put {
+                        key: "state".to_string(),
+                        value_json: r#"{"owner":"gateway"}"#.to_string(),
+                    },
+                })
+                .await
+                .expect("put through PostgreSQL gateway"),
+            DatabaseResponse::Written
+        );
+        assert_eq!(
+            gateway
+                .handle(DatabaseRequest {
+                    addon_id: addon_id.clone(),
+                    activation_instance: "activation-1".to_string(),
+                    operation: DatabaseOperation::Get {
+                        key: "state".to_string(),
+                    },
+                })
+                .await
+                .expect("get through PostgreSQL gateway"),
+            DatabaseResponse::Value(Some(r#"{"owner":"gateway"}"#.to_string()))
+        );
+        assert_eq!(
+            gateway
+                .handle(DatabaseRequest {
+                    addon_id: addon_id.clone(),
+                    activation_instance: "activation-2".to_string(),
+                    operation: DatabaseOperation::Get {
+                        key: "state".to_string(),
+                    },
+                })
+                .await
+                .expect_err("replaced PostgreSQL activation must be rejected"),
+            DatabaseGatewayError::Contract(DatabaseContractError::IdentityMismatch)
+        );
+        store
+            .set_addon_storage(
+                &other_addon_id,
+                "private",
+                r#"{"owner":"other"}"#,
+                "2026-10-15T00:00:00Z",
+            )
+            .await
+            .expect("seed other namespace");
+        let error = gateway
+            .handle(DatabaseRequest {
+                addon_id: other_addon_id.clone(),
+                activation_instance: "activation-1".to_string(),
+                operation: DatabaseOperation::Get {
+                    key: "private".to_string(),
+                },
+            })
+            .await
+            .expect_err("cross-addon PostgreSQL request must be rejected");
+        assert!(matches!(
+            error,
+            DatabaseGatewayError::Contract(DatabaseContractError::IdentityMismatch)
+        ));
+        assert_eq!(
+            store
+                .get_addon_storage(&other_addon_id, "private")
+                .await
+                .expect("read other namespace"),
+            Some(r#"{"owner":"other"}"#.to_string())
+        );
+        store
+            .delete_addon_storage_namespace(&addon_id)
+            .await
+            .expect("clean gateway namespace");
+        store
+            .delete_addon_storage_namespace(&other_addon_id)
+            .await
+            .expect("clean other namespace");
+        contract.activation_instance = "replaced-activation".to_string();
+        assert!(TrustedServicePostgresGateway::new(store, contract).is_ok());
     }
 }

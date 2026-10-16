@@ -84,12 +84,16 @@ Until every gate exists, an apparently valid image reference remains metadata
 only. A successful manifest parse must never cause a registry request or code
 execution.
 
-The SQLite side now has a non-service-facing adapter in
-`src/trusted_service_database.rs`. It calls only the core-owned namespaced
-storage methods and is covered by a round-trip test proving that another addon
-namespace and another activation identity cannot be reached. It is not wired to
-a runtime, HTTP route, container, credential, or gateway; the
-`database_boundary` activation gate remains false.
+The SQLite side has a non-service-facing adapter in
+`src/trusted_service_database.rs`. It calls only core-owned namespaced storage
+methods. PostgreSQL has the same controlled adapter over the server-owned
+`PostgresStore`; the configured database URL never leaves the server boundary.
+The disposable SQLite and PostgreSQL tests cover round trips, cross-addon and
+activation-identity rejection, and cleanup. Neither adapter is wired to a
+runtime, HTTP route, container, credential, or service gateway; the
+`database_boundary` activation gate remains false. The per-addon PostgreSQL
+schema/role mode is still rejected until its separate grants and permission
+probe are implemented.
 
 ## Backup and restore scope
 

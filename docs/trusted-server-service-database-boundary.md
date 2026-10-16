@@ -1,9 +1,9 @@
 # Trusted server-service database boundary
 
 This document defines the database contract for the future trusted server-service
-runtime. It is a policy boundary, not an implementation claim. The current
-server has no service database adapter, does not expose a service gateway, and
-keeps the `database_boundary` activation gate false.
+runtime. The repository contains non-service-facing SQLite and PostgreSQL
+controlled adapters over core-owned storage methods, but no service gateway is
+exposed and the `database_boundary` activation gate remains false.
 
 ## Identity and authorization
 
@@ -141,8 +141,8 @@ following are required:
 9. supervisor, credential, network, filesystem, and resource gates enabled
    only after the preceding evidence is reviewed.
 
-The contract is validation metadata only. A non-service-facing SQLite adapter
-now exercises typed namespaced operations through core-owned `addon_storage`
-methods, but it is not wired to any runtime, HTTP route, container, credential,
-or service gateway. PostgreSQL schema/role access remains unimplemented, and the
-`database_boundary` activation gate remains false.
+The contract is validation metadata only. Non-service-facing SQLite and
+PostgreSQL adapters now exercise typed namespaced operations through core-owned
+`addon_storage` methods. They are not wired to any runtime, HTTP route,
+container, credential, or service gateway. PostgreSQL schema/role access remains
+unimplemented, and the `database_boundary` activation gate remains false.

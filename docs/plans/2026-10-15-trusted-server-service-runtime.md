@@ -39,16 +39,16 @@ trait and harness are the current working-tree changes:
 - A disabled-by-default credential-broker trait now defines opaque lease
   metadata without exposing, persisting, or transporting credential values.
 
-- A non-service-facing SQLite adapter now exercises the contract through
-  core-owned namespaced storage methods; it does not expose a route or runtime
-  capability.
+- Non-service-facing SQLite and PostgreSQL adapters now exercise the same
+  controlled API through core-owned `addon_storage` methods. SQLite has a
+  namespaced round-trip test; PostgreSQL has a disposable round-trip probe with
+  cross-addon rejection, activation binding, and cleanup.
 - The contract binds every future request to addon ID plus activation instance,
   permits only typed namespaced operations, caps request/value/row/key sizes,
   forbids raw SQL/core tables/migrations/SQLite mounts, and requires audit
   metadata.
-- PostgreSQL remains future work: either the same controlled API or a
-  server-provisioned per-addon schema and least-privilege role. No service
-  gateway or database capability is enabled.
+- PostgreSQL per-addon schema/role mode remains future work. No service gateway
+  or database capability is enabled.
 
 ## Explicitly out of scope
 

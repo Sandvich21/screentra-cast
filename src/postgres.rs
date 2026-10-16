@@ -107,6 +107,40 @@ impl PostgresStore {
             .map_err(|error| format!("get addon storage: {error}"))
     }
 
+    pub async fn list_addon_storage(
+        &self,
+        addon_id: &str,
+        prefix: &str,
+        limit: u32,
+    ) -> Result<Vec<(String, String)>, String> {
+        crate::addons::validate_addon_storage_namespace(addon_id)?;
+        if prefix.len() > crate::addons::MAX_ADDON_STORAGE_KEY_BYTES
+            || prefix.chars().any(|ch| ch.is_control() || ch == '/')
+        {
+            return Err("Invalid addon storage key prefix".to_string());
+        }
+        if limit == 0 || limit > 1_000 {
+            return Err("Invalid addon storage list limit".to_string());
+        }
+        let pattern = format!(
+            "{}%",
+            prefix
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        self.client
+            .query(
+                "SELECT storage_key, value_json FROM addon_storage
+                 WHERE addon_id = $1 AND storage_key LIKE $2 ESCAPE '\\'
+                 ORDER BY storage_key LIMIT $3",
+                &[&addon_id, &pattern, &(limit as i64)],
+            )
+            .await
+            .map(|rows| rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
+            .map_err(|error| format!("list addon storage: {error}"))
+    }
+
     pub async fn delete_addon_storage(&self, addon_id: &str, storage_key: &str) -> Result<bool, String> {
         crate::addons::validate_addon_storage_namespace(addon_id)?;
         crate::addons::validate_addon_storage_key(storage_key)?;
