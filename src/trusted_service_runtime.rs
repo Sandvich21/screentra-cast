@@ -603,7 +603,11 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
     fn start(&mut self, request: &RuntimeLaunchRequest) -> Result<RuntimeHandle, RuntimeError> {
         if request.addon_id.is_empty()
             || request.activation_instance.is_empty()
+            || request.image_digest.len() != "sha256:".len() + 64
             || !request.image_digest.starts_with("sha256:")
+            || !request.image_digest["sha256:".len()..]
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
         {
             return Err(RuntimeError::Invalid(
                 "Fake runtime launch request is invalid".to_string(),
@@ -800,6 +804,12 @@ mod tests {
             storage_namespace: "example.service".to_string(),
             api_namespace: "example.service".to_string(),
         };
+        let mut malformed_digest = request.clone();
+        malformed_digest.image_digest = "sha256:ABC".to_string();
+        assert!(matches!(
+            harness.supervisor.runtime_mut().start(&malformed_digest),
+            Err(RuntimeError::Invalid(_))
+        ));
         let handle = harness
             .supervisor
             .runtime_mut()
