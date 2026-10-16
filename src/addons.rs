@@ -216,6 +216,28 @@ fn storage_dir() -> PathBuf {
     PathBuf::from(root).join("addons")
 }
 
+fn checked_addon_storage_dir(create: bool) -> Result<Option<PathBuf>, AddonError> {
+    let root = storage_dir();
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
+            AddonError::Invalid("Invalid addon storage directory".to_string()),
+        ),
+        Ok(_) => Ok(Some(root)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            fs::create_dir_all(&root).map_err(io_error)?;
+            let metadata = fs::symlink_metadata(&root).map_err(io_error)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(AddonError::Invalid(
+                    "Invalid addon storage directory".to_string(),
+                ));
+            }
+            Ok(Some(root))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
 fn client_status_path(client_id: &str) -> Result<PathBuf, AddonError> {
     if client_id.is_empty() || client_id.len() > 200 || client_id.chars().any(|ch| ch.is_control())
     {
@@ -797,10 +819,9 @@ fn read_record(dir: &Path) -> Result<AddonRecord, AddonError> {
 }
 
 pub fn list() -> Result<Vec<AddonRecord>, AddonError> {
-    let root = storage_dir();
-    if !root.exists() {
+    let Some(root) = checked_addon_storage_dir(false)? else {
         return Ok(Vec::new());
-    }
+    };
     let mut records = Vec::new();
     for entry in fs::read_dir(root).map_err(io_error)? {
         let entry = entry.map_err(io_error)?;
@@ -814,6 +835,7 @@ pub fn list() -> Result<Vec<AddonRecord>, AddonError> {
 
 pub fn install(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
     validate_manifest(&manifest)?;
+    let _ = checked_addon_storage_dir(true)?;
     let dir = addon_dir(&manifest.id)?;
     if dir.exists() {
         return Err(AddonError::AlreadyInstalled);
@@ -840,6 +862,7 @@ pub fn install(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
 }
 
 pub fn set_enabled(id: &str, enabled: bool) -> Result<AddonRecord, AddonError> {
+    let _ = checked_addon_storage_dir(false)?;
     let dir = addon_dir(id)?;
     let metadata = match fs::symlink_metadata(&dir) {
         Ok(metadata) => metadata,
@@ -863,6 +886,7 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<AddonRecord, AddonError> {
 }
 
 pub fn remove(id: &str) -> Result<(), AddonError> {
+    let _ = checked_addon_storage_dir(false)?;
     let dir = addon_dir(id)?;
     let metadata = match fs::symlink_metadata(&dir) {
         Ok(metadata) => metadata,
