@@ -273,6 +273,10 @@ pub fn validate_oci_launch_spec(spec: &OciLaunchSpec) -> Result<(), String> {
         return Err("OCI gateway endpoint is not controlled".to_string());
     }
     let mut seen = BTreeSet::new();
+    if spec.capabilities.len() > crate::trusted_service_runtime::TRUSTED_SERVICE_CAPABILITIES.len()
+    {
+        return Err("OCI capabilities are unsupported or duplicated".to_string());
+    }
     for capability in &spec.capabilities {
         if !crate::trusted_service_runtime::TRUSTED_SERVICE_CAPABILITIES
             .contains(&capability.as_str())
