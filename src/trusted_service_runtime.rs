@@ -419,6 +419,8 @@ pub struct RuntimeHandle {
 pub enum RuntimeStatus {
     Running,
     Stopped,
+    Crashed,
+    TimedOut,
 }
 
 pub trait TrustedServiceRuntime {
@@ -510,6 +512,8 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
 pub enum FakeRuntimeAction {
     Start(String),
     Stop(String),
+    Crash(String),
+    Timeout(String),
 }
 
 #[cfg(test)]
@@ -519,6 +523,7 @@ pub struct FakeTrustedServiceRuntime {
     actions: Vec<FakeRuntimeAction>,
     running: BTreeMap<String, RuntimeHandle>,
     known: BTreeSet<String>,
+    terminal: BTreeMap<String, RuntimeStatus>,
 }
 
 #[cfg(test)]
@@ -529,6 +534,7 @@ impl FakeTrustedServiceRuntime {
             actions: Vec::new(),
             running: BTreeMap::new(),
             known: BTreeSet::new(),
+            terminal: BTreeMap::new(),
         }
     }
 
@@ -569,6 +575,7 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
         )
         .map_err(|error| RuntimeError::Io(error.to_string()))?;
         self.known.insert(handle.activation_instance.clone());
+        self.terminal.remove(&handle.activation_instance);
         self.running
             .insert(handle.activation_instance.clone(), handle.clone());
         self.actions
@@ -582,6 +589,8 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
         }
         fs::remove_file(self.root.join("running").join(&handle.activation_instance))
             .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        self.terminal
+            .insert(handle.activation_instance.clone(), RuntimeStatus::Stopped);
         self.actions
             .push(FakeRuntimeAction::Stop(handle.activation_instance.clone()));
         Ok(())
@@ -590,11 +599,49 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
     fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError> {
         if self.running.contains_key(&handle.activation_instance) {
             Ok(RuntimeStatus::Running)
+        } else if let Some(status) = self.terminal.get(&handle.activation_instance) {
+            Ok(*status)
         } else if self.known.contains(&handle.activation_instance) {
             Ok(RuntimeStatus::Stopped)
         } else {
             Err(RuntimeError::NotFound)
         }
+    }
+}
+
+#[cfg(test)]
+impl FakeTrustedServiceRuntime {
+    fn mark_terminal(
+        &mut self,
+        handle: &RuntimeHandle,
+        status: RuntimeStatus,
+        action: FakeRuntimeAction,
+    ) -> Result<(), RuntimeError> {
+        if self.running.remove(&handle.activation_instance).is_none() {
+            return Err(RuntimeError::NotFound);
+        }
+        fs::remove_file(self.root.join("running").join(&handle.activation_instance))
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        self.terminal
+            .insert(handle.activation_instance.clone(), status);
+        self.actions.push(action);
+        Ok(())
+    }
+
+    fn mark_crashed(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        self.mark_terminal(
+            handle,
+            RuntimeStatus::Crashed,
+            FakeRuntimeAction::Crash(handle.activation_instance.clone()),
+        )
+    }
+
+    fn mark_timed_out(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        self.mark_terminal(
+            handle,
+            RuntimeStatus::TimedOut,
+            FakeRuntimeAction::Timeout(handle.activation_instance.clone()),
+        )
     }
 }
 
@@ -699,6 +746,66 @@ mod tests {
         );
         assert!(!harness.root.join("running").join("activation-1").exists());
         assert_eq!(harness.supervisor.runtime().actions().len(), 2);
+    }
+
+    #[test]
+    fn fake_runtime_crash_and_timeout_are_terminal_and_do_not_restart() {
+        let mut harness = DisposableRuntimeHarness::new();
+        let request = RuntimeLaunchRequest {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-failure".to_string(),
+            image: "registry.example/service".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.service".to_string(),
+            api_namespace: "example.service".to_string(),
+        };
+        let handle = harness
+            .supervisor
+            .runtime_mut()
+            .start(&request)
+            .expect("fake runtime start");
+        harness
+            .supervisor
+            .runtime_mut()
+            .mark_crashed(&handle)
+            .expect("fake runtime crash");
+        assert_eq!(
+            harness.supervisor.runtime().status(&handle).unwrap(),
+            RuntimeStatus::Crashed
+        );
+        assert!(!harness
+            .root
+            .join("running")
+            .join("activation-failure")
+            .exists());
+        assert!(matches!(
+            harness.supervisor.deactivate(&handle),
+            Err(RuntimeError::NotFound)
+        ));
+        assert_eq!(harness.supervisor.runtime().actions().len(), 2);
+
+        let timeout_handle = harness
+            .supervisor
+            .runtime_mut()
+            .start(&RuntimeLaunchRequest {
+                activation_instance: "activation-timeout".to_string(),
+                ..request
+            })
+            .expect("second fake runtime start");
+        harness
+            .supervisor
+            .runtime_mut()
+            .mark_timed_out(&timeout_handle)
+            .expect("fake runtime timeout");
+        assert_eq!(
+            harness
+                .supervisor
+                .runtime()
+                .status(&timeout_handle)
+                .unwrap(),
+            RuntimeStatus::TimedOut
+        );
     }
 
     #[test]
