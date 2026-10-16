@@ -121,6 +121,7 @@ pub struct OciLaunchSpec {
     pub capabilities: Vec<String>,
     pub storage_namespace: String,
     pub api_namespace: String,
+    pub gateway_socket_path: String,
     pub command: Vec<String>,
     pub environment: Vec<(String, String)>,
     pub host_mounts: Vec<String>,
@@ -160,6 +161,9 @@ pub fn validate_oci_launch_spec(spec: &OciLaunchSpec) -> Result<(), String> {
     }
     crate::addons::validate_addon_storage_namespace(&spec.storage_namespace)?;
     crate::addons::validate_addon_storage_namespace(&spec.api_namespace)?;
+    if spec.gateway_socket_path != "/run/screentra/gateway.sock" {
+        return Err("OCI gateway endpoint is not controlled".to_string());
+    }
     let mut seen = BTreeSet::new();
     for capability in &spec.capabilities {
         if !crate::trusted_service_runtime::TRUSTED_SERVICE_CAPABILITIES
@@ -227,6 +231,7 @@ mod tests {
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.weather".to_string(),
             api_namespace: "example.weather".to_string(),
+            gateway_socket_path: "/run/screentra/gateway.sock".to_string(),
             command: vec!["/service".to_string()],
             environment: Vec::new(),
             host_mounts: Vec::new(),
@@ -293,6 +298,10 @@ mod tests {
         let mut invalid = safe_spec();
         invalid.activation_instance = "../other".to_string();
         assert!(validate_oci_launch_spec(&invalid).is_err());
+
+        let mut gateway = safe_spec();
+        gateway.gateway_socket_path = "/tmp/host.sock".to_string();
+        assert!(validate_oci_launch_spec(&gateway).is_err());
     }
 
     #[test]

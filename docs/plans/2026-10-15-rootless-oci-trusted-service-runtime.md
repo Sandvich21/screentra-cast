@@ -31,6 +31,8 @@ The development host has no `podman`, `docker`, `nerdctl`, `crun`, `runc`, or `b
 
 ## Task 1: Define the OCI launch contract
 
+**Status:** Contract-only implementation complete in `src/trusted_service_oci.rs`; execution remains disabled.
+
 **Files:**
 - Modify: `src/trusted_service_runtime.rs`
 - Test: `src/trusted_service_runtime.rs`
@@ -43,6 +45,8 @@ Keep the contract independent of any installed OCI binary. The contract must rem
 Verify with focused runtime tests, then commit the contract separately.
 
 ## Task 2: Add an explicit runtime capability probe
+
+**Status:** Blocked preflight implementation complete; no runtime executable is installed and no capability command is invoked.
 
 **Files:**
 - Create: `src/trusted_service_oci.rs`
@@ -58,6 +62,8 @@ Verify with the host’s current absence of OCI tools: the probe must report blo
 
 ## Task 3: Implement fixed-argument, no-network launch preparation
 
+**Status:** Dry-run fixed-argument builder complete; it returns argv only and cannot start or pull anything.
+
 **Files:**
 - Modify: `src/trusted_service_oci.rs`
 - Modify: `src/trusted_service_runtime.rs`
@@ -68,6 +74,8 @@ Write failing tests proving the generated invocation uses an argument vector, ne
 Build only a dry-run launch description until the runtime probe is available. Do not start a process, pull an image, or contact a registry in unit tests.
 
 ## Task 4: Add isolated storage and gateway boundaries
+
+**Status:** Bounded typed gateway frame contract is complete; Unix listener, authentication transport, rate limiting, and runtime wiring remain disabled.
 
 **Files:**
 - Create: `src/trusted_service_gateway.rs`

@@ -75,7 +75,9 @@ A contract-only gateway transport is defined in
 `src/trusted_service_gateway.rs`. It uses bounded JSON frames, binds every
 request to addon and activation identities, accepts only the `storage`
 capability, and converts only the typed storage operations into the existing
-database boundary. It has no listener, Unix socket, host port, credential
+database boundary. The OCI contract permits only the container-side endpoint
+`/run/screentra/gateway.sock`; the host-side socket mapping and listener are
+not implemented. It has no listener, Unix socket, host port, credential
 transport, or runtime caller; decoding validates before any backend adapter
 could be reached.
 
