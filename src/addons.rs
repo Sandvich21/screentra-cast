@@ -1308,8 +1308,8 @@ fn sha256_file(path: &Path) -> Result<String, AddonError> {
 /// never executed by the server; the client-loader phase will consume the
 /// stored manifest and client directory after its own signature verification.
 pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, AddonError> {
-    let root = storage_dir();
-    fs::create_dir_all(&root).map_err(io_error)?;
+    let root = checked_addon_storage_dir(true)?
+        .ok_or_else(|| AddonError::Io("Addon storage directory is unavailable".to_string()))?;
     let stage = root.join(format!(".package-install-{}", Uuid::new_v4()));
     if let Err(error) = crate::safe_archive::extract_tar_gz(archive, &stage, 0) {
         let _ = fs::remove_dir_all(&stage);
