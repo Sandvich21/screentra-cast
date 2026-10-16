@@ -10005,6 +10005,52 @@ mod audit_validation_tests {
         };
         assert_eq!(validate_layout_set_values(&set), Err(StatusCode::BAD_REQUEST));
     }
+
+    #[tokio::test]
+    async fn delete_addon_cleans_namespaced_storage_before_registry_removal() {
+        static DELETE_ADDON_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = DELETE_ADDON_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let root = std::env::temp_dir().join(format!("screentra-addon-delete-{}", Uuid::new_v4()));
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &data_dir); }
+        let addon_id = format!("example.delete.{}", Uuid::new_v4().simple());
+        let manifest = AddonManifest {
+            schema_version: 1,
+            id: addon_id.clone(),
+            name: "Delete test".to_string(),
+            description: String::new(),
+            version: "1.0.0".to_string(),
+            kind: "declarative".to_string(),
+            min_server_version: None,
+            min_client_version: None,
+            widget_types: Vec::new(),
+            permissions: Vec::new(),
+            client_entrypoint: None,
+            server_entrypoint: None,
+            trusted_service: None,
+            client_sha256: None,
+            client_api_version: None,
+        };
+        crate::addons::install(manifest).expect("install test addon");
+        let db_path = data_dir.join("signage.db");
+        let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open storage database"));
+        db.set_addon_storage(&addon_id, "settings", "{\"enabled\":true}", "2026-10-15T00:00:00Z")
+            .expect("seed addon storage");
+        let removed = delete_addon(State(AddonStorageRepository::Sqlite(db.clone())), Path(addon_id.clone()))
+            .await
+            .expect("addon removal should succeed");
+        assert_eq!(removed, StatusCode::NO_CONTENT);
+        assert_eq!(db.get_addon_storage(&addon_id, "settings").unwrap(), None);
+        assert!(!crate::addons::list().unwrap().iter().any(|record| record.manifest.id == addon_id));
+        if let Some(value) = old_data_dir {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[derive(Clone)]
