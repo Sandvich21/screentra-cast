@@ -79,7 +79,6 @@ impl GatewayActivationBinding {
 
 pub const MAX_REQUESTS_PER_ACTIVATION: u32 = 60;
 const RATE_WINDOW: Duration = Duration::from_secs(60);
-const MAX_TRACKED_ACTIVATIONS: usize = 1_024;
 
 #[derive(Debug, Clone, Copy)]
 struct RateState {
@@ -130,6 +129,7 @@ impl GatewayRateLimiter {
     }
 }
 pub const MAX_REQUEST_IDS_PER_ACTIVATION: usize = 1_024;
+pub const MAX_TRACKED_ACTIVATIONS: usize = 1_024;
 
 #[derive(Debug, Default)]
 pub struct GatewayReplayGuard {
@@ -153,6 +153,9 @@ impl GatewayReplayGuard {
             binding.contract.activation_instance.clone(),
         );
         let Some(ids) = self.accepted.get(&key) else {
+            if self.accepted.len() >= MAX_TRACKED_ACTIVATIONS {
+                return Err("Gateway replay state is full".to_string());
+            }
             return Ok(());
         };
         if ids.contains(request_id) {
@@ -338,7 +341,7 @@ mod tests {
         decode_request, encode_request, encode_response, GatewayActivationBinding,
         GatewayActivationState, GatewayOperationBudget, GatewayRateLimiter, GatewayReplayGuard,
         GatewayRequestAdmission, GatewayRequestEnvelope, GatewayStorageOperation,
-        MAX_OPERATIONS_PER_CONNECTION, MAX_REQUESTS_PER_ACTIVATION,
+        MAX_OPERATIONS_PER_CONNECTION, MAX_REQUESTS_PER_ACTIVATION, MAX_TRACKED_ACTIVATIONS,
     };
     use crate::trusted_service_database::{
         DatabaseResponse, TrustedServiceDatabaseContract, MAX_REQUEST_BYTES,
@@ -438,6 +441,25 @@ mod tests {
         inactive.state = GatewayActivationState::Stopped;
         assert!(guard.accept(&inactive, "request-2").is_err());
     }
+    #[test]
+    fn bounds_replay_state_across_activation_instances() {
+        let mut guard = GatewayReplayGuard::new();
+        for index in 0..MAX_TRACKED_ACTIVATIONS {
+            let contract = TrustedServiceDatabaseContract::core_storage_api(
+                &format!("example.service{index}"),
+                "activation-1",
+            );
+            let binding = GatewayActivationBinding::new(contract);
+            guard
+                .accept(&binding, "request-1")
+                .expect("replay state should allow configured activations");
+        }
+        let final_binding = GatewayActivationBinding::new(
+            TrustedServiceDatabaseContract::core_storage_api("example.final", "activation-1"),
+        );
+        assert!(guard.accept(&final_binding, "request-1").is_err());
+    }
+
     #[test]
     fn rate_limits_each_active_activation_and_resets_after_window() {
         let mut limiter = GatewayRateLimiter::new();
