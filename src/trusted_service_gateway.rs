@@ -324,6 +324,7 @@ impl GatewayRequestAdmission {
 pub struct GatewaySession {
     binding: GatewayActivationBinding,
     admission: GatewayRequestAdmission,
+    budget: GatewayOperationBudget,
     established: bool,
 }
 
@@ -332,6 +333,7 @@ impl GatewaySession {
         Self {
             binding,
             admission: GatewayRequestAdmission::new(),
+            budget: GatewayOperationBudget::new(),
             established: false,
         }
     }
@@ -350,6 +352,7 @@ impl GatewaySession {
         if !self.established {
             return Err("Gateway connection hello is required".to_string());
         }
+        self.budget.take_at(now)?;
         self.admission.admit(bytes, &self.binding, now)
     }
 }
@@ -573,6 +576,14 @@ mod tests {
             .expect("valid hello should establish session");
         assert!(session.is_established());
         assert!(session.admit(&request_bytes, start).is_ok());
+        let second_request = encode_request(&GatewayRequestEnvelope {
+            request_id: "request-2".to_string(),
+            ..request()
+        })
+        .expect("second request should encode");
+        assert!(session
+            .admit(&second_request, start + Duration::from_secs(6))
+            .is_err());
     }
 
     #[test]
