@@ -474,6 +474,25 @@ impl GatewaySession {
         }
     }
 
+    pub fn accept_hello_frame(
+        &mut self,
+        bytes: &[u8],
+        peer: GatewayPeerCredentials,
+    ) -> Result<Option<usize>, String> {
+        if self.retired {
+            return Err("Gateway session is retired".to_string());
+        }
+        if self.established {
+            return Err("Gateway session is already established".to_string());
+        }
+        self.peer_policy.validate(peer)?;
+        let Some((_, consumed)) = decode_connection_hello_frame(bytes, &self.binding)? else {
+            return Ok(None);
+        };
+        self.established = true;
+        Ok(Some(consumed))
+    }
+
     pub fn accept_hello(
         &mut self,
         bytes: &[u8],
@@ -829,6 +848,31 @@ mod tests {
     fn response_frame_decoder_rejects_oversized_length_before_payload_read() {
         let oversized_length = ((MAX_RESPONSE_BYTES + 1) as u32).to_be_bytes();
         assert!(decode_response_frame(&oversized_length).is_err());
+    }
+
+    #[test]
+    fn session_accepts_framed_hello_only_after_peer_validation() {
+        let hello = GatewayConnectionHello {
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            addon_id: "example.weather".to_string(),
+            activation_instance: "activation-1".to_string(),
+        };
+        let frame = encode_connection_hello_frame(&hello).expect("hello frame should encode");
+        let policy = GatewayPeerPolicy::new(1000, 1001, 42).expect("policy should be valid");
+        let peer = GatewayPeerCredentials::from_os_credentials(1000, 1001, 42);
+        let mut session = GatewaySession::new(binding(), policy);
+
+        assert_eq!(session.accept_hello_frame(&frame[..2], peer).unwrap(), None);
+        assert!(!session.is_established());
+        assert!(session
+            .accept_hello_frame(
+                &frame,
+                GatewayPeerCredentials::from_os_credentials(1002, 1001, 42),
+            )
+            .is_err());
+        assert!(!session.is_established());
+        assert_eq!(session.accept_hello_frame(&frame, peer).unwrap(), Some(frame.len()));
+        assert!(session.is_established());
     }
 
     #[test]
