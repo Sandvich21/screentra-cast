@@ -614,6 +614,10 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
             ));
         }
         validate_capabilities(&request.capabilities)?;
+        addons::validate_addon_storage_namespace(&request.addon_id)
+            .map_err(RuntimeError::Invalid)?;
+        addons::validate_addon_storage_namespace(&request.activation_instance)
+            .map_err(RuntimeError::Invalid)?;
         addons::validate_addon_storage_namespace(&request.storage_namespace)
             .map_err(RuntimeError::Invalid)?;
         addons::validate_addon_storage_namespace(&request.api_namespace)
@@ -808,6 +812,12 @@ mod tests {
         malformed_digest.image_digest = "sha256:ABC".to_string();
         assert!(matches!(
             harness.supervisor.runtime_mut().start(&malformed_digest),
+            Err(RuntimeError::Invalid(_))
+        ));
+        let mut traversal_instance = request.clone();
+        traversal_instance.activation_instance = "../escape".to_string();
+        assert!(matches!(
+            harness.supervisor.runtime_mut().start(&traversal_instance),
             Err(RuntimeError::Invalid(_))
         ));
         let handle = harness
