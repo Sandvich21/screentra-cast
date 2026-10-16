@@ -81,6 +81,12 @@ pub struct CredentialLease {
     pub expires_at: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialLeaseState {
+    Active,
+    Revoked,
+}
+
 impl CredentialLease {
     pub fn validate(&self) -> Result<(), CredentialError> {
         crate::addons::validate_addon_storage_namespace(&self.addon_id)
@@ -122,6 +128,22 @@ impl CredentialLease {
         {
             return Err(CredentialError::Invalid(
                 "Credential lease scope does not match".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_use(
+        &self,
+        scope: &CredentialScope,
+        state: CredentialLeaseState,
+        now: chrono::DateTime<chrono::FixedOffset>,
+    ) -> Result<(), CredentialError> {
+        self.binds_scope(scope)?;
+        self.validate_at(now)?;
+        if state == CredentialLeaseState::Revoked {
+            return Err(CredentialError::Blocked(
+                "Trusted service credential lease is revoked".to_string(),
             ));
         }
         Ok(())
@@ -343,6 +365,25 @@ mod tests {
             lease
                 .validate_at(chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z").unwrap()),
             Err(CredentialError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn lease_use_requires_active_unexpired_matching_scope() {
+        let lease = CredentialLease {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
+            capabilities: vec!["storage".to_string()],
+            lease_id: "lease-3".to_string(),
+            expires_at: "2030-01-01T00:00:00Z".to_string(),
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2029-12-31T23:59:59Z").unwrap();
+        lease
+            .validate_for_use(&scope(), CredentialLeaseState::Active, now)
+            .expect("active lease should be usable");
+        assert!(matches!(
+            lease.validate_for_use(&scope(), CredentialLeaseState::Revoked, now),
+            Err(CredentialError::Blocked(_))
         ));
     }
 
