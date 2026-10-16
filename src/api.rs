@@ -1943,6 +1943,7 @@ fn trusted_service_runtime_error_response(
     match error {
         RuntimeError::Invalid(message) => (StatusCode::BAD_REQUEST, message),
         RuntimeError::Conflict(message) => (StatusCode::CONFLICT, message),
+        RuntimeError::Blocked(message) => (StatusCode::CONFLICT, message),
         RuntimeError::NotFound => (StatusCode::NOT_FOUND, error.to_string()),
         RuntimeError::Io(message) => {
             log::error!("Trusted service runtime storage failure: {message}");

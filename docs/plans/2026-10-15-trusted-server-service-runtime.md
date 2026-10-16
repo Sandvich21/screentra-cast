@@ -21,6 +21,19 @@
 - Clean runtime records when staged metadata is removed.
 - Add unit and HTTP coverage proving approval cannot execute, pull, or expose anything.
 
+## Phase 1 implementation status
+
+The approval boundary was implemented in commit `7dc5ec3`. The follow-up
+trait and harness are the current working-tree changes:
+
+- `TrustedServiceRuntime` defines the future start/stop/status boundary.
+- `TrustedServiceSupervisor` produces activation plans and refuses activation
+  while any gate is incomplete or execution is disabled.
+- `FakeTrustedServiceRuntime` records lifecycle calls and writes only disposable
+  marker files; it never starts a host process or contacts a registry.
+- `DisposableRuntimeHarness` creates and removes an isolated temporary runtime
+  root for integration tests.
+
 ## Explicitly out of scope
 
 - OCI registry access or image pulls.

@@ -8,6 +8,8 @@
 use crate::addons::{self, AddonError, TrustedServiceStage};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -25,6 +27,7 @@ pub enum RuntimeError {
     Invalid(String),
     NotFound,
     Conflict(String),
+    Blocked(String),
     Io(String),
 }
 
@@ -34,6 +37,7 @@ impl std::fmt::Display for RuntimeError {
             Self::Invalid(message) => write!(formatter, "{message}"),
             Self::NotFound => write!(formatter, "Trusted service runtime record not found"),
             Self::Conflict(message) => write!(formatter, "{message}"),
+            Self::Blocked(message) => write!(formatter, "{message}"),
             Self::Io(message) => write!(
                 formatter,
                 "Trusted service runtime storage error: {message}"
@@ -354,6 +358,221 @@ pub fn remove(addon_id: &str) -> Result<(), RuntimeError> {
     }
 }
 
+/// Immutable launch data passed across the supervisor/runtime boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLaunchRequest {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub image: String,
+    pub image_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeHandle {
+    pub activation_instance: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeStatus {
+    Running,
+    Stopped,
+}
+
+pub trait TrustedServiceRuntime {
+    fn start(&mut self, request: &RuntimeLaunchRequest) -> Result<RuntimeHandle, RuntimeError>;
+    fn stop(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError>;
+    fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivationPlan {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub can_start: bool,
+    pub blocked_by: Vec<String>,
+}
+
+pub struct TrustedServiceSupervisor<R> {
+    runtime: R,
+}
+
+impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
+    pub fn new(runtime: R) -> Self {
+        Self { runtime }
+    }
+
+    pub fn runtime(&self) -> &R {
+        &self.runtime
+    }
+
+    pub fn runtime_mut(&mut self) -> &mut R {
+        &mut self.runtime
+    }
+
+    pub fn activation_plan(
+        record: &TrustedServiceRuntimeRecord,
+    ) -> Result<ActivationPlan, RuntimeError> {
+        if record.state != "approved" {
+            return Err(RuntimeError::Blocked(
+                "Trusted service is not approved for activation".to_string(),
+            ));
+        }
+        let mut blocked_by = record
+            .gates
+            .iter()
+            .filter(|gate| !gate.passed)
+            .map(|gate| gate.name.clone())
+            .collect::<Vec<_>>();
+        if !EXECUTION_ENABLED && !blocked_by.iter().any(|gate| gate == "execution_backend") {
+            blocked_by.push("execution_backend".to_string());
+        }
+        Ok(ActivationPlan {
+            addon_id: record.addon_id.clone(),
+            activation_instance: record.activation_instance.clone(),
+            can_start: blocked_by.is_empty(),
+            blocked_by,
+        })
+    }
+
+    pub fn activate(
+        &mut self,
+        record: &TrustedServiceRuntimeRecord,
+    ) -> Result<RuntimeHandle, RuntimeError> {
+        let plan = Self::activation_plan(record)?;
+        if !plan.can_start {
+            return Err(RuntimeError::Blocked(format!(
+                "Trusted service activation is blocked by: {}",
+                plan.blocked_by.join(", ")
+            )));
+        }
+        self.runtime.start(&RuntimeLaunchRequest {
+            addon_id: record.addon_id.clone(),
+            activation_instance: record.activation_instance.clone(),
+            image: record.image.clone(),
+            image_digest: record.image_digest.clone(),
+        })
+    }
+
+    pub fn deactivate(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        self.runtime.stop(handle)
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FakeRuntimeAction {
+    Start(String),
+    Stop(String),
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub struct FakeTrustedServiceRuntime {
+    root: PathBuf,
+    actions: Vec<FakeRuntimeAction>,
+    running: BTreeMap<String, RuntimeHandle>,
+    known: BTreeSet<String>,
+}
+
+#[cfg(test)]
+impl FakeTrustedServiceRuntime {
+    fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            actions: Vec::new(),
+            running: BTreeMap::new(),
+            known: BTreeSet::new(),
+        }
+    }
+
+    pub fn actions(&self) -> &[FakeRuntimeAction] {
+        &self.actions
+    }
+}
+
+#[cfg(test)]
+impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
+    fn start(&mut self, request: &RuntimeLaunchRequest) -> Result<RuntimeHandle, RuntimeError> {
+        if request.addon_id.is_empty()
+            || request.activation_instance.is_empty()
+            || !request.image_digest.starts_with("sha256:")
+        {
+            return Err(RuntimeError::Invalid(
+                "Fake runtime launch request is invalid".to_string(),
+            ));
+        }
+        if self.running.contains_key(&request.activation_instance) {
+            return Err(RuntimeError::Conflict(
+                "Fake runtime activation is already running".to_string(),
+            ));
+        }
+        let handle = RuntimeHandle {
+            activation_instance: request.activation_instance.clone(),
+        };
+        let running_dir = self.root.join("running");
+        fs::create_dir_all(&running_dir).map_err(|error| RuntimeError::Io(error.to_string()))?;
+        fs::write(
+            running_dir.join(&handle.activation_instance),
+            request.addon_id.as_bytes(),
+        )
+        .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        self.known.insert(handle.activation_instance.clone());
+        self.running
+            .insert(handle.activation_instance.clone(), handle.clone());
+        self.actions
+            .push(FakeRuntimeAction::Start(request.addon_id.clone()));
+        Ok(handle)
+    }
+
+    fn stop(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        if self.running.remove(&handle.activation_instance).is_none() {
+            return Err(RuntimeError::NotFound);
+        }
+        fs::remove_file(self.root.join("running").join(&handle.activation_instance))
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        self.actions
+            .push(FakeRuntimeAction::Stop(handle.activation_instance.clone()));
+        Ok(())
+    }
+
+    fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError> {
+        if self.running.contains_key(&handle.activation_instance) {
+            Ok(RuntimeStatus::Running)
+        } else if self.known.contains(&handle.activation_instance) {
+            Ok(RuntimeStatus::Stopped)
+        } else {
+            Err(RuntimeError::NotFound)
+        }
+    }
+}
+
+#[cfg(test)]
+struct DisposableRuntimeHarness {
+    root: PathBuf,
+    supervisor: TrustedServiceSupervisor<FakeTrustedServiceRuntime>,
+}
+
+#[cfg(test)]
+impl DisposableRuntimeHarness {
+    fn new() -> Self {
+        let root =
+            std::env::temp_dir().join(format!("screentra-runtime-harness-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create disposable runtime root");
+        let runtime_root = root.clone();
+        Self {
+            root,
+            supervisor: TrustedServiceSupervisor::new(FakeTrustedServiceRuntime::new(runtime_root)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for DisposableRuntimeHarness {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,17 +601,65 @@ mod tests {
 
     #[test]
     fn runtime_record_round_trip_rejects_execution_enabled_records() {
-        let _guard = TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
-        let root = std::env::temp_dir().join(format!("screentra-runtime-test-{}", Uuid::new_v4()));
-        unsafe {
-            std::env::set_var("SIGNAGE_DATA_DIR", &root);
-        }
-        let path = root
-            .join(RUNTIME_DIR)
-            .join("example.service")
-            .join(RUNTIME_FILE);
-        let record = TrustedServiceRuntimeRecord {
+        let root =
+            std::env::temp_dir().join(format!("screentra-runtime-record-{}", Uuid::new_v4()));
+        let path = root.join("example.service").join(RUNTIME_FILE);
+        let record = test_record();
+        write_atomic(&path, &record).unwrap();
+        assert_eq!(read_record(&path).unwrap(), record);
+        let mut unsafe_record = record;
+        unsafe_record.execution_enabled = true;
+        write_atomic(&path, &unsafe_record).unwrap();
+        assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fake_runtime_records_start_and_stop_without_host_processes() {
+        let mut harness = DisposableRuntimeHarness::new();
+        let request = RuntimeLaunchRequest {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
+            image: "registry.example/service".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+        };
+        let handle = harness
+            .supervisor
+            .runtime_mut()
+            .start(&request)
+            .expect("fake runtime start");
+        assert_eq!(
+            harness.supervisor.runtime().status(&handle).unwrap(),
+            RuntimeStatus::Running
+        );
+        assert!(harness.root.join("running").join("activation-1").is_file());
+        harness
+            .supervisor
+            .runtime_mut()
+            .stop(&handle)
+            .expect("fake runtime stop");
+        assert_eq!(
+            harness.supervisor.runtime().status(&handle).unwrap(),
+            RuntimeStatus::Stopped
+        );
+        assert!(!harness.root.join("running").join("activation-1").exists());
+        assert_eq!(harness.supervisor.runtime().actions().len(), 2);
+    }
+
+    #[test]
+    fn supervisor_blocks_activation_until_every_execution_gate_is_ready() {
+        let mut harness = DisposableRuntimeHarness::new();
+        let record = test_record();
+        let error = harness
+            .supervisor
+            .activate(&record)
+            .expect_err("disabled execution must fail closed");
+        assert!(matches!(error, RuntimeError::Blocked(_)));
+        assert!(harness.supervisor.runtime().actions().is_empty());
+    }
+
+    fn test_record() -> TrustedServiceRuntimeRecord {
+        TrustedServiceRuntimeRecord {
             record_version: RUNTIME_RECORD_VERSION,
             addon_id: "example.service".to_string(),
             addon_version: "1.0.0".to_string(),
@@ -401,7 +668,7 @@ mod tests {
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.service".to_string(),
             api_namespace: "example.service".to_string(),
-            activation_instance: Uuid::new_v4().to_string(),
+            activation_instance: "activation-1".to_string(),
             state: "approved".to_string(),
             approved_by: Some("admin".to_string()),
             approved_at: Some(Utc::now().to_rfc3339()),
@@ -409,22 +676,18 @@ mod tests {
             execution_enabled: false,
             gates: activation_gates(),
             last_error: None,
-        };
-        write_atomic(&path, &record).unwrap();
-        assert_eq!(read_record(&path).unwrap(), record);
-        let mut unsafe_record = record;
-        unsafe_record.execution_enabled = true;
-        write_atomic(&path, &unsafe_record).unwrap();
-        assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
-        let _ = fs::remove_dir_all(&root);
-        if let Some(value) = old_data_root {
-            unsafe {
-                std::env::set_var("SIGNAGE_DATA_DIR", value);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("SIGNAGE_DATA_DIR");
-            }
         }
+    }
+
+    #[test]
+    fn activation_plan_is_not_a_runtime_start_request() {
+        let record = test_record();
+        let plan = TrustedServiceSupervisor::<FakeTrustedServiceRuntime>::activation_plan(&record)
+            .expect("approved records can produce a plan");
+        assert!(!plan.can_start);
+        assert!(plan
+            .blocked_by
+            .iter()
+            .any(|gate| gate == "execution_backend"));
     }
 }
