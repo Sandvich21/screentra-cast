@@ -19,6 +19,7 @@ mod screenshot;
 mod system;
 mod traffic;
 mod trusted_service_credentials;
+mod trusted_service_database;
 mod trusted_service_runtime;
 mod version;
 

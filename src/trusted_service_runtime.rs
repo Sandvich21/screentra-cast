@@ -165,7 +165,8 @@ fn activation_gates() -> Vec<ActivationGate> {
         ActivationGate {
             name: "database_boundary".to_string(),
             passed: false,
-            reason: "service database boundary is not implemented".to_string(),
+            reason: "service database boundary contract exists, but no adapter is enabled"
+                .to_string(),
         },
         ActivationGate {
             name: "controlled_gateway".to_string(),

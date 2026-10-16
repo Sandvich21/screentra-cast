@@ -84,6 +84,16 @@ Until every gate exists, an apparently valid image reference remains metadata
 only. A successful manifest parse must never cause a registry request or code
 execution.
 
+The database boundary contract is now defined in
+`docs/trusted-server-service-database-boundary.md` and validated by the
+contract-only `trusted_service_database` module. It specifies SQLite API-only
+access, future PostgreSQL per-addon schema/role isolation, identity binding to
+addon plus activation instance, typed namespaced operations, bounded limits,
+mandatory audit metadata, and fail-closed backup/restore/uninstall behavior.
+This is not a live adapter: no service receives a database URL, SQLite file,
+raw SQL, core-table access, credentials, or a gateway. The `database_boundary`
+activation gate remains false.
+
 ## Backup and restore scope
 
 The filesystem archive path is currently a **SQLite-only restore/upload** path.

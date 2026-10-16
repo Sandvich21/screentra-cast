@@ -39,6 +39,17 @@ trait and harness are the current working-tree changes:
 - A disabled-by-default credential-broker trait now defines opaque lease
   metadata without exposing, persisting, or transporting credential values.
 
+- A contract-only database boundary is defined in
+  `docs/trusted-server-service-database-boundary.md` and
+  `src/trusted_service_database.rs`.
+- The contract binds every future request to addon ID plus activation instance,
+  permits only typed namespaced operations, caps request/value/row/key sizes,
+  forbids raw SQL/core tables/migrations/SQLite mounts, and requires audit
+  metadata.
+- SQLite remains API-only. PostgreSQL remains future work: either the same
+  controlled API or a server-provisioned per-addon schema and least-privilege
+  role. No database adapter or service gateway is enabled.
+
 ## Explicitly out of scope
 
 - OCI registry access or image pulls.
@@ -61,4 +72,9 @@ trait and harness are the current working-tree changes:
 
 ## Next phase after this plan
 
-Implement the fake supervisor/runtime trait and disposable integration harness. Only after that should a real rootless OCI backend be considered.
+Implement the controlled gateway adapters and disposable probes for the contract:
+SQLite namespaced API round-trip first, then PostgreSQL per-addon schema/role
+permission isolation. Keep the database gate and execution disabled until both
+backends, audit behavior, backup/restore, uninstall cleanup, and cross-namespace
+negative tests are verified. Only then should a rootless OCI backend be
+considered.
