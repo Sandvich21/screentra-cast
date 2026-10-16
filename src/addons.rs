@@ -964,12 +964,9 @@ pub fn stage_trusted_service_manifest(
             .map_err(io_error)?,
         )
         .map_err(io_error)?;
+        let validated_stage = read_trusted_service_stage(&stage)?;
         fs::rename(&stage, &target).map_err(io_error)?;
-        Ok(TrustedServiceStage {
-            manifest,
-            state: "staged".to_string(),
-            staged_at,
-        })
+        Ok(validated_stage)
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(&stage);
