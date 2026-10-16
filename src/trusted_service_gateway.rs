@@ -145,7 +145,7 @@ pub fn encode_request(request: &GatewayRequestEnvelope) -> Result<Vec<u8>, Strin
 
 const GATEWAY_FRAME_LENGTH_BYTES: usize = 4;
 
-pub fn encode_gateway_frame(payload: &[u8], maximum_bytes: usize) -> Result<Vec<u8>, String> {
+fn encode_gateway_frame(payload: &[u8], maximum_bytes: usize) -> Result<Vec<u8>, String> {
     if payload.len() > maximum_bytes || payload.len() > u32::MAX as usize {
         return Err("Gateway frame is too large".to_string());
     }
@@ -155,7 +155,7 @@ pub fn encode_gateway_frame(payload: &[u8], maximum_bytes: usize) -> Result<Vec<
     Ok(frame)
 }
 
-pub fn decode_gateway_frame(
+fn decode_gateway_frame(
     bytes: &[u8],
     maximum_bytes: usize,
 ) -> Result<Option<(Vec<u8>, usize)>, String> {
