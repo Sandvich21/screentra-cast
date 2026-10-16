@@ -815,6 +815,11 @@ mod tests {
         write_atomic(&path, &invalid).unwrap();
         assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
 
+        invalid = test_record();
+        invalid.gates.clear();
+        write_atomic(&path, &invalid).unwrap();
+        assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
+
         let _ = fs::remove_dir_all(&root);
     }
 

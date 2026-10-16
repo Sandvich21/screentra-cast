@@ -78,10 +78,11 @@ The launch contract also has an approval-binding validator. It requires the
 approved state, approver, every named activation gate, exact record identity,
 image, digest, capabilities, and namespaces before a launch spec can be used;
 with the current `EXECUTION_ENABLED = false` and incomplete gates it always
-rejects. Gate records are also rejected when malformed or duplicated, preventing
-conflicting records from satisfying a required gate accidentally. A composed
-approval validator can additionally require the explicit registry policy before
-any future image transport; this remains contract-only.
+rejects. Gate records are rejected when incomplete, malformed, or duplicated,
+preventing missing or conflicting records from satisfying a required gate
+accidentally. A composed approval validator can additionally require the
+explicit registry policy before any future image transport; this remains
+contract-only.
 
 A runtime preflight report also exists for the explicitly selected executable.
 It accepts only the named rootless runtime families (`podman` or `nerdctl`),

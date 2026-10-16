@@ -35,6 +35,12 @@ pub fn validate_oci_activation_gate_records(gates: &[ActivationGate]) -> Result<
     }) {
         return Err("OCI activation gates are malformed or duplicated".to_string());
     }
+    if REQUIRED_OCI_ACTIVATION_GATES
+        .iter()
+        .any(|required| !gates.iter().any(|gate| gate.name == *required))
+    {
+        return Err("Trusted service activation gates are incomplete".to_string());
+    }
     Ok(())
 }
 
@@ -408,7 +414,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        build_rootless_argv, container_name, probe_oci_runtime, validate_oci_activation_gates,
+        build_rootless_argv, container_name, probe_oci_runtime,
+        validate_oci_activation_gate_records, validate_oci_activation_gates,
         validate_oci_approval_metadata, validate_oci_image_registry, validate_oci_launch_spec,
         validate_oci_launch_spec_against_record, ActivationGate, OciLaunchPolicy, OciLaunchSpec,
         OciRegistryPolicy, OciResourceLimits, TrustedServiceRuntimeRecord,
@@ -492,6 +499,9 @@ mod tests {
         let mut incomplete = complete;
         incomplete[0].passed = false;
         assert!(validate_oci_activation_gates(&incomplete).is_err());
+        let mut missing = incomplete.clone();
+        missing.pop();
+        assert!(validate_oci_activation_gate_records(&missing).is_err());
     }
 
     #[test]
