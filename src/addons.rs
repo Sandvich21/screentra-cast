@@ -351,7 +351,9 @@ pub(crate) fn validate_trusted_service_image_reference(image: &str) -> Result<()
         || !image.contains('/')
         || image.starts_with('/')
         || image.ends_with('/')
-        || image.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+        || image
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control() || ch.is_ascii_uppercase())
         || !image
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | ':'))
@@ -1281,6 +1283,7 @@ mod tests {
             "registry//service",
             "registry/service:tag",
             "registry.example/.",
+            "registry.example/Weather",
         ] {
             assert!(validate_trusted_service_image_reference(image).is_err(), "{image}");
         }
