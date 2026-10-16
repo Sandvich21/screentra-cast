@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -387,8 +388,11 @@ fn validate_trusted_service_spec(spec: &TrustedServerServiceSpec) -> Result<(), 
             "Too many trusted service capabilities".to_string(),
         ));
     }
+    let mut seen_capabilities = BTreeSet::new();
     for capability in &spec.capabilities {
-        if !TRUSTED_SERVICE_CAPABILITIES.contains(&capability.as_str()) {
+        if !TRUSTED_SERVICE_CAPABILITIES.contains(&capability.as_str())
+            || !seen_capabilities.insert(capability)
+        {
             return Err(AddonError::Invalid(format!(
                 "Unknown trusted service capability: {capability}"
             )));
@@ -1322,6 +1326,18 @@ mod tests {
         });
         let error = validate_manifest(&value).unwrap_err().to_string();
         assert!(error.contains("trusted service capability"));
+    }
+
+    #[test]
+    fn rejects_duplicate_trusted_service_capabilities_before_runtime_gate() {
+        let mut value = trusted_manifest();
+        value
+            .trusted_service
+            .as_mut()
+            .unwrap()
+            .capabilities
+            .push("storage".to_string());
+        assert!(validate_manifest(&value).is_err());
     }
 
     fn trusted_manifest() -> AddonManifest {
