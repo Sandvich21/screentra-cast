@@ -83,9 +83,11 @@ any future image transport; this remains contract-only.
 
 A runtime preflight report also exists for the explicitly selected executable.
 It accepts only the named rootless runtime families (`podman` or `nerdctl`),
-reports missing or non-executable paths as blocked, and always keeps
-`can_start` false while OCI capability probing is disabled. It does not search
-PATH, invoke a command, fall back to a host process, or contact a registry.
+requires an explicitly configured absolute regular executable path, rejects
+symlinked or relative paths, reports missing or non-executable paths as blocked,
+and always keeps `can_start` false while OCI capability probing is disabled. It
+does not search PATH, invoke a command, fall back to a host process, or contact
+a registry.
 
 A contract-only gateway transport is defined in
 `src/trusted_service_gateway.rs`. It uses bounded JSON frames, binds every
