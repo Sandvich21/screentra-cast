@@ -88,6 +88,7 @@ impl CredentialLease {
                 .expires_at
                 .chars()
                 .any(|character| character.is_control())
+            || chrono::DateTime::parse_from_rfc3339(&self.expires_at).is_err()
         {
             return Err(CredentialError::Invalid(
                 "Invalid trusted service credential lease metadata".to_string(),
@@ -220,6 +221,14 @@ mod tests {
         };
         assert!(matches!(
             invalid_expiry.validate(),
+            Err(CredentialError::Invalid(_))
+        ));
+        let invalid_timestamp = CredentialLease {
+            lease_id: "lease-2".to_string(),
+            expires_at: "not-a-timestamp".to_string(),
+        };
+        assert!(matches!(
+            invalid_timestamp.validate(),
             Err(CredentialError::Invalid(_))
         ));
     }
