@@ -857,8 +857,15 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<AddonRecord, AddonError> {
 
 pub fn remove(id: &str) -> Result<(), AddonError> {
     let dir = addon_dir(id)?;
-    if !dir.exists() {
-        return Err(AddonError::NotFound);
+    let metadata = match fs::symlink_metadata(&dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AddonError::NotFound);
+        }
+        Err(error) => return Err(io_error(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AddonError::Invalid("Invalid addon directory".to_string()));
     }
     fs::remove_dir_all(dir).map_err(io_error)
 }
@@ -2086,6 +2093,32 @@ mod tests {
             }
         }
     }
+    #[cfg(unix)]
+    #[test]
+    fn remove_rejects_symlinked_addon_directory() {
+        let root = std::env::temp_dir().join(format!("screentra-addon-remove-{}", Uuid::new_v4()));
+        let addons_root = root.join("addons");
+        let target = root.join("target");
+        fs::create_dir_all(&addons_root).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let addon_path = addons_root.join("example.weather");
+        symlink(&target, &addon_path).unwrap();
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        let error = remove("example.weather").unwrap_err();
+        assert!(error.to_string().contains("Invalid addon directory"));
+        assert!(target.is_dir());
+        assert!(addon_path.is_symlink());
+        if let Some(value) = old_data_root {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn storage_round_trip_preserves_enable_state() {
         let _guard = STORAGE_TEST_LOCK
