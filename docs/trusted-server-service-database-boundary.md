@@ -103,10 +103,17 @@ audit metadata containing the addon ID, activation instance, operation name,
 outcome, and timestamp. It must not contain values, credentials, SQL text,
 connection strings, or complete request bodies.
 
-The boundary fails closed when identity, capability, namespace, limits,
-backend mode, schema/role binding, or audit persistence cannot be validated.
-A database timeout or permission error is an operation failure; it must not
-fall back to a broader role, another namespace, or direct filesystem access.
+The current adapters persist this metadata through the existing server audit
+repositories. The lifecycle is explicit: a rejected request records `rejected`;
+a valid request records `accepted`; an operation result records `succeeded` or
+`failed`. If any audit write fails, the gateway returns a generic failure and
+does not report the database operation as successful. This behavior is covered
+for SQLite; PostgreSQL uses the same sink contract but remains non-service-facing.
+The boundary fails closed when identity, capability, namespace, limits, backend
+mode, schema/role binding, or audit persistence cannot be validated. A database
+failure must not fall back to a broader role, another namespace, or direct
+filesystem access.
+
 
 ## Backup, restore, uninstall, and rollback
 

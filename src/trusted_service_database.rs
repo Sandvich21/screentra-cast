@@ -8,6 +8,8 @@ use crate::db::Database;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -226,7 +228,164 @@ pub enum DatabaseOperation {
     List { prefix: String, limit: u32 },
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseOperationKind {
+    Get,
+    Put,
+    Delete,
+    List,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseAuditOutcome {
+    Rejected,
+    Accepted,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatabaseAuditEvent {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub operation: DatabaseOperationKind,
+    pub outcome: DatabaseAuditOutcome,
+    pub occurred_at: String,
+}
+
+impl DatabaseAuditEvent {
+    fn validate(&self) -> Result<(), DatabaseGatewayError> {
+        validate_identity(&self.addon_id, "addon identity")
+            .map_err(DatabaseGatewayError::Contract)?;
+        validate_identity(&self.activation_instance, "activation instance")
+            .map_err(DatabaseGatewayError::Contract)?;
+        if self.occurred_at.is_empty()
+            || self.occurred_at.len() > 64
+            || self
+                .occurred_at
+                .chars()
+                .any(|character| character.is_control())
+        {
+            return Err(DatabaseGatewayError::Audit(
+                "Trusted service database audit metadata is invalid".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) trait DatabaseAuditSink: Send + Sync {
+    fn record<'a>(
+        &'a self,
+        event: DatabaseAuditEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+}
+
+pub(crate) struct SqliteDatabaseAuditSink {
+    db: Arc<Database>,
+}
+
+impl SqliteDatabaseAuditSink {
+    pub(crate) fn new(db: Arc<Database>) -> Self {
+        Self { db }
+    }
+}
+
+pub(crate) struct PostgresDatabaseAuditSink {
+    store: Arc<crate::postgres::PostgresStore>,
+}
+
+impl PostgresDatabaseAuditSink {
+    pub(crate) fn new(store: Arc<crate::postgres::PostgresStore>) -> Self {
+        Self { store }
+    }
+}
+
+fn audit_outcome_label(outcome: DatabaseAuditOutcome) -> &'static str {
+    match outcome {
+        DatabaseAuditOutcome::Rejected => "rejected",
+        DatabaseAuditOutcome::Accepted => "accepted",
+        DatabaseAuditOutcome::Succeeded => "succeeded",
+        DatabaseAuditOutcome::Failed => "failed",
+    }
+}
+
+fn audit_operation_label(operation: DatabaseOperationKind) -> &'static str {
+    match operation {
+        DatabaseOperationKind::Get => "get",
+        DatabaseOperationKind::Put => "put",
+        DatabaseOperationKind::Delete => "delete",
+        DatabaseOperationKind::List => "list",
+    }
+}
+
+impl DatabaseAuditSink for SqliteDatabaseAuditSink {
+    fn record<'a>(
+        &'a self,
+        event: DatabaseAuditEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            event.validate().map_err(|error| error.to_string())?;
+            let detail = format!(
+                "activation_instance={};operation={}",
+                event.activation_instance,
+                audit_operation_label(event.operation)
+            );
+            self.db
+                .record_audit_event(
+                    Some("trusted-service"),
+                    Some("service"),
+                    "trusted_service_database",
+                    Some(&event.addon_id),
+                    audit_outcome_label(event.outcome),
+                    Some(&detail),
+                    &event.occurred_at,
+                )
+                .map(|_| ())
+        })
+    }
+}
+
+impl DatabaseAuditSink for PostgresDatabaseAuditSink {
+    fn record<'a>(
+        &'a self,
+        event: DatabaseAuditEvent,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            event.validate().map_err(|error| error.to_string())?;
+            let detail = format!(
+                "activation_instance={};operation={}",
+                event.activation_instance,
+                audit_operation_label(event.operation)
+            );
+            self.store
+                .record_audit_event(
+                    Some("trusted-service"),
+                    Some("service"),
+                    "trusted_service_database",
+                    Some(&event.addon_id),
+                    audit_outcome_label(event.outcome),
+                    Some(&detail),
+                    &event.occurred_at,
+                )
+                .await
+                .map(|_| ())
+        })
+    }
+}
+
 impl DatabaseOperation {
+    pub fn kind(&self) -> DatabaseOperationKind {
+        match self {
+            Self::Get { .. } => DatabaseOperationKind::Get,
+            Self::Put { .. } => DatabaseOperationKind::Put,
+            Self::Delete { .. } => DatabaseOperationKind::Delete,
+            Self::List { .. } => DatabaseOperationKind::List,
+        }
+    }
+
     pub fn validate(
         &self,
         contract: &TrustedServiceDatabaseContract,
@@ -307,6 +466,16 @@ impl DatabaseRequest {
         }
         self.operation.validate(contract)
     }
+
+    fn audit_event(&self, outcome: DatabaseAuditOutcome) -> DatabaseAuditEvent {
+        DatabaseAuditEvent {
+            addon_id: self.addon_id.clone(),
+            activation_instance: self.activation_instance.clone(),
+            operation: self.operation.kind(),
+            outcome,
+            occurred_at: Utc::now().to_rfc3339(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -321,13 +490,16 @@ pub enum DatabaseResponse {
 pub enum DatabaseGatewayError {
     Contract(DatabaseContractError),
     Storage(String),
+    Audit(String),
 }
 
 impl fmt::Display for DatabaseGatewayError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Contract(error) => write!(formatter, "{error}"),
-            Self::Storage(_) => write!(formatter, "Trusted service database operation failed"),
+            Self::Storage(_) | Self::Audit(_) => {
+                write!(formatter, "Trusted service database operation failed")
+            }
         }
     }
 }
@@ -389,6 +561,35 @@ impl TrustedServiceSqliteGateway {
                 .map(DatabaseResponse::Entries)
                 .map_err(DatabaseGatewayError::Storage),
         }
+    }
+
+    pub(crate) async fn handle_with_audit<S: DatabaseAuditSink>(
+        &self,
+        request: DatabaseRequest,
+        audit: &S,
+    ) -> Result<DatabaseResponse, DatabaseGatewayError> {
+        if let Err(error) = request.validate_against(&self.contract) {
+            audit
+                .record(request.audit_event(DatabaseAuditOutcome::Rejected))
+                .await
+                .map_err(DatabaseGatewayError::Audit)?;
+            return Err(DatabaseGatewayError::Contract(error));
+        }
+        audit
+            .record(request.audit_event(DatabaseAuditOutcome::Accepted))
+            .await
+            .map_err(DatabaseGatewayError::Audit)?;
+        let result = self.handle(request.clone()).await;
+        let outcome = if result.is_ok() {
+            DatabaseAuditOutcome::Succeeded
+        } else {
+            DatabaseAuditOutcome::Failed
+        };
+        audit
+            .record(request.audit_event(outcome))
+            .await
+            .map_err(DatabaseGatewayError::Audit)?;
+        result
     }
 }
 
@@ -454,6 +655,35 @@ impl TrustedServicePostgresGateway {
                 .map_err(DatabaseGatewayError::Storage),
         }
     }
+
+    pub(crate) async fn handle_with_audit<S: DatabaseAuditSink>(
+        &self,
+        request: DatabaseRequest,
+        audit: &S,
+    ) -> Result<DatabaseResponse, DatabaseGatewayError> {
+        if let Err(error) = request.validate_against(&self.contract) {
+            audit
+                .record(request.audit_event(DatabaseAuditOutcome::Rejected))
+                .await
+                .map_err(DatabaseGatewayError::Audit)?;
+            return Err(DatabaseGatewayError::Contract(error));
+        }
+        audit
+            .record(request.audit_event(DatabaseAuditOutcome::Accepted))
+            .await
+            .map_err(DatabaseGatewayError::Audit)?;
+        let result = self.handle(request.clone()).await;
+        let outcome = if result.is_ok() {
+            DatabaseAuditOutcome::Succeeded
+        } else {
+            DatabaseAuditOutcome::Failed
+        };
+        audit
+            .record(request.audit_event(outcome))
+            .await
+            .map_err(DatabaseGatewayError::Audit)?;
+        result
+    }
 }
 
 #[cfg(test)]
@@ -472,6 +702,147 @@ mod tests {
         contract
     }
 
+    struct FailingAuditSink;
+
+    impl DatabaseAuditSink for FailingAuditSink {
+        fn record<'a>(
+            &'a self,
+            _event: DatabaseAuditEvent,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async { Err("audit unavailable".to_string()) })
+        }
+    }
+
+    #[test]
+    fn audit_event_shape_excludes_values_and_credentials() {
+        let event = DatabaseAuditEvent {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
+            operation: DatabaseOperationKind::Put,
+            outcome: DatabaseAuditOutcome::Succeeded,
+            occurred_at: "2026-10-15T00:00:00Z".to_string(),
+        };
+        let encoded = serde_json::to_string(&event).expect("serialize audit event");
+        assert!(!encoded.contains("enabled"));
+        assert!(!encoded.contains("password"));
+        assert!(event.validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn sqlite_gateway_audits_success_without_recording_values() {
+        let path = std::env::temp_dir().join(format!(
+            "screentra-service-audit-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let db =
+            Arc::new(Database::open(path.to_str().expect("database path")).expect("open database"));
+        let gateway =
+            TrustedServiceSqliteGateway::new(db.clone(), sqlite_contract()).expect("gateway");
+        let sink = SqliteDatabaseAuditSink::new(db.clone());
+        gateway
+            .handle_with_audit(
+                DatabaseRequest {
+                    addon_id: "example.service".to_string(),
+                    activation_instance: "activation-1".to_string(),
+                    operation: DatabaseOperation::Put {
+                        key: "state".to_string(),
+                        value_json: r#"{"enabled":true}"#.to_string(),
+                    },
+                },
+                &sink,
+            )
+            .await
+            .expect("audited write");
+        let events = db.list_audit_events(10).expect("list audit events");
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|event| event.event_type == "trusted_service_database"));
+        assert!(events
+            .iter()
+            .all(|event| event.target.as_deref() == Some("example.service")));
+        assert!(events.iter().all(|event| !event
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("enabled")));
+        assert!(events.iter().any(|event| event.outcome == "accepted"));
+        assert!(events.iter().any(|event| event.outcome == "succeeded"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_gateway_audits_rejected_identity_without_storage_access() {
+        let path = std::env::temp_dir().join(format!(
+            "screentra-service-audit-rejected-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let db =
+            Arc::new(Database::open(path.to_str().expect("database path")).expect("open database"));
+        let gateway =
+            TrustedServiceSqliteGateway::new(db.clone(), sqlite_contract()).expect("gateway");
+        let sink = SqliteDatabaseAuditSink::new(db.clone());
+        let error = gateway
+            .handle_with_audit(
+                DatabaseRequest {
+                    addon_id: "example.service".to_string(),
+                    activation_instance: "wrong-activation".to_string(),
+                    operation: DatabaseOperation::Put {
+                        key: "state".to_string(),
+                        value_json: r#"{"enabled":true}"#.to_string(),
+                    },
+                },
+                &sink,
+            )
+            .await
+            .expect_err("identity mismatch must be rejected");
+        assert!(matches!(error, DatabaseGatewayError::Contract(_)));
+        let events = db.list_audit_events(10).expect("list audit events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].outcome, "rejected");
+        assert_eq!(events[0].target.as_deref(), Some("example.service"));
+        assert!(!events[0]
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("enabled"));
+        assert_eq!(
+            db.get_addon_storage("example.service", "state").unwrap(),
+            None
+        );
+        let _ = std::fs::remove_file(path);
+    }
+    #[tokio::test]
+    async fn sqlite_gateway_fails_closed_before_storage_when_audit_is_unavailable() {
+        let path = std::env::temp_dir().join(format!(
+            "screentra-service-audit-failure-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let db =
+            Arc::new(Database::open(path.to_str().expect("database path")).expect("open database"));
+        let gateway =
+            TrustedServiceSqliteGateway::new(db.clone(), sqlite_contract()).expect("gateway");
+        let error = gateway
+            .handle_with_audit(
+                DatabaseRequest {
+                    addon_id: "example.service".to_string(),
+                    activation_instance: "activation-1".to_string(),
+                    operation: DatabaseOperation::Put {
+                        key: "state".to_string(),
+                        value_json: r#"{"enabled":true}"#.to_string(),
+                    },
+                },
+                &FailingAuditSink,
+            )
+            .await
+            .expect_err("audit failure must block storage");
+        assert!(matches!(error, DatabaseGatewayError::Audit(_)));
+        assert_eq!(
+            db.get_addon_storage("example.service", "state").unwrap(),
+            None
+        );
+        let _ = std::fs::remove_file(path);
+    }
     #[test]
     fn core_storage_contract_is_file_and_sql_free() {
         let contract = sqlite_contract();

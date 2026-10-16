@@ -41,12 +41,15 @@ trait and harness are the current working-tree changes:
 
 - Non-service-facing SQLite and PostgreSQL adapters now exercise the same
   controlled API through core-owned `addon_storage` methods. SQLite has a
-  namespaced round-trip test; PostgreSQL has a disposable round-trip probe with
-  cross-addon rejection, activation binding, and cleanup.
+  namespaced round-trip and persisted audit coverage; PostgreSQL has a
+  disposable round-trip probe with cross-addon rejection, activation binding,
+  and cleanup. Both adapters have the same typed audit lifecycle boundary, but
+  neither is wired to a service runtime.
 - The contract binds every future request to addon ID plus activation instance,
   permits only typed namespaced operations, caps request/value/row/key sizes,
-  forbids raw SQL/core tables/migrations/SQLite mounts, and requires audit
-  metadata.
+  forbids raw SQL/core tables/migrations/SQLite mounts, and persists only
+  bounded audit metadata. Audit failure returns a generic gateway error and
+  prevents the operation from being reported as successful.
 - PostgreSQL per-addon schema/role mode remains future work. No service gateway
   or database capability is enabled.
 
