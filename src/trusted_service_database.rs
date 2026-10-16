@@ -17,7 +17,6 @@ pub const MAX_VALUE_BYTES: usize = 64 * 1024;
 pub const MAX_ROWS_PER_REQUEST: u32 = 1_000;
 pub const MAX_KEYS_PER_REQUEST: u32 = 1_000;
 
-const MAX_IDENTITY_LEN: usize = 128;
 const MAX_SQL_IDENTIFIER_LEN: usize = 63;
 const RESERVED_SCHEMA_NAMES: &[&str] = &[
     "public",
@@ -90,15 +89,9 @@ impl fmt::Display for DatabaseContractError {
 }
 
 fn validate_identity(value: &str, label: &str) -> Result<(), DatabaseContractError> {
-    if value.is_empty()
-        || value.len() > MAX_IDENTITY_LEN
-        || value.chars().any(|character| character.is_control())
-    {
-        return Err(DatabaseContractError::Invalid(format!(
-            "Invalid trusted service {label}"
-        )));
-    }
-    Ok(())
+    addons::validate_addon_storage_namespace(value).map_err(|_| {
+        DatabaseContractError::Invalid(format!("Invalid trusted service {label}"))
+    })
 }
 
 fn validate_sql_identifier(value: &str, label: &str) -> Result<(), DatabaseContractError> {
@@ -908,6 +901,16 @@ mod tests {
         assert!(!contract.allow_migrations);
         assert!(contract.postgres_schema.is_none());
         assert!(contract.postgres_role.is_none());
+    }
+
+    #[test]
+    fn database_contract_rejects_noncanonical_activation_identity() {
+        let mut contract = sqlite_contract();
+        contract.activation_instance = "../escape".to_string();
+        assert!(contract.validate().is_err());
+
+        contract.activation_instance = "activation with spaces".to_string();
+        assert!(contract.validate().is_err());
     }
 
     #[test]
