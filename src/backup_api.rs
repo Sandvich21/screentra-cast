@@ -1791,13 +1791,38 @@ mod tests {
         let install_dir = parent.join("install");
         let data_dir = parent.join("data");
         let trusted_dir = data_dir.join("trusted-services/example.weather");
+        let runtime_dir = data_dir.join("trusted-service-runtime/example.weather");
         std::fs::create_dir_all(&install_dir).unwrap();
         std::fs::create_dir_all(&trusted_dir).unwrap();
+        std::fs::create_dir_all(&runtime_dir).unwrap();
         std::fs::write(install_dir.join("server"), b"original server").unwrap();
         std::fs::write(trusted_dir.join("manifest.json"), b"original manifest").unwrap();
         std::fs::write(trusted_dir.join("manifest.sig"), b"original manifest signature").unwrap();
         std::fs::write(trusted_dir.join("image.sig"), b"original image signature").unwrap();
         std::fs::write(trusted_dir.join("state.json"), b"{\"state\":\"staged\"}").unwrap();
+        let original_runtime_record = serde_json::json!({
+            "record_version": 1,
+            "addon_id": "example.weather",
+            "addon_version": "1.0.0",
+            "image": "registry.example/weather",
+            "image_digest": format!("sha256:{}", "a".repeat(64)),
+            "capabilities": ["storage"],
+            "storage_namespace": "example.weather",
+            "api_namespace": "example.weather",
+            "activation_instance": "activation-1",
+            "state": "approved",
+            "approved_by": "admin",
+            "approved_at": "2026-10-15T00:00:00Z",
+            "updated_at": "2026-10-15T00:00:00Z",
+            "execution_enabled": false,
+            "gates": [],
+            "last_error": null
+        });
+        std::fs::write(
+            runtime_dir.join("runtime.json"),
+            serde_json::to_vec_pretty(&original_runtime_record).unwrap(),
+        )
+        .unwrap();
 
         let signage_db_path = data_dir.join("signage.db");
         let signage_db = crate::db::Database::open(signage_db_path.to_str().unwrap()).unwrap();
@@ -1864,6 +1889,7 @@ mod tests {
         std::fs::remove_file(trusted_dir.join("manifest.sig")).unwrap();
         std::fs::remove_file(trusted_dir.join("image.sig")).unwrap();
         std::fs::remove_file(trusted_dir.join("state.json")).unwrap();
+        std::fs::write(runtime_dir.join("runtime.json"), b"{\"state\":\"disabled\"}").unwrap();
 
         let restore_app = Router::new()
             .route("/api/backups/{id}", put(restore_backup))
