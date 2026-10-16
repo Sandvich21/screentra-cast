@@ -1042,7 +1042,7 @@ pub fn stage_trusted_service_manifest(
     let image_digest = manifest
         .trusted_service
         .as_ref()
-        .expect("validated trusted service metadata")
+        .ok_or_else(|| AddonError::Invalid("Trusted service metadata is missing".to_string()))?
         .image_digest
         .as_str();
     verify_trusted_service_image_signature(image_digest, image_signature_path)?;
@@ -1095,7 +1095,7 @@ fn read_trusted_service_stage(dir: &Path) -> Result<TrustedServiceStage, AddonEr
     let image_digest = manifest
         .trusted_service
         .as_ref()
-        .expect("validated trusted service metadata")
+        .ok_or_else(|| AddonError::Invalid("Trusted service metadata is missing".to_string()))?
         .image_digest
         .as_str();
     verify_trusted_service_image_signature(image_digest, &image_signature_path)?;
