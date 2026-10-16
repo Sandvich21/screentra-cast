@@ -857,7 +857,11 @@ pub fn list() -> Result<Vec<AddonRecord>, AddonError> {
     let mut records = Vec::new();
     for entry in fs::read_dir(root).map_err(io_error)? {
         let entry = entry.map_err(io_error)?;
-        if entry.file_type().map_err(io_error)?.is_dir() {
+        let file_type = entry.file_type().map_err(io_error)?;
+        if file_type.is_symlink() {
+            return Err(AddonError::Invalid("Invalid addon directory".to_string()));
+        }
+        if file_type.is_dir() {
             records.push(read_record(&entry.path())?);
         }
     }
