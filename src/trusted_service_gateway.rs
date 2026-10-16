@@ -64,12 +64,13 @@ pub fn decode_connection_hello(
 pub struct GatewayPeerCredentials {
     uid: u32,
     gid: u32,
+    pid: u32,
 }
 
 impl GatewayPeerCredentials {
     /// Constructed by a future OS-backed transport adapter, never from a frame.
-    pub(crate) fn from_os_credentials(uid: u32, gid: u32) -> Self {
-        Self { uid, gid }
+    pub(crate) fn from_os_credentials(uid: u32, gid: u32, pid: u32) -> Self {
+        Self { uid, gid, pid }
     }
 }
 
@@ -77,24 +78,30 @@ impl GatewayPeerCredentials {
 pub struct GatewayPeerPolicy {
     expected_uid: u32,
     expected_gid: u32,
+    expected_pid: u32,
 }
 
 impl GatewayPeerPolicy {
-    pub fn new(expected_uid: u32, expected_gid: u32) -> Result<Self, String> {
-        if expected_uid == 0 || expected_gid == 0 {
-            return Err("Gateway peer policy cannot allow root credentials".to_string());
+    pub fn new(expected_uid: u32, expected_gid: u32, expected_pid: u32) -> Result<Self, String> {
+        if expected_uid == 0 || expected_gid == 0 || expected_pid == 0 {
+            return Err(
+                "Gateway peer policy requires non-root credentials and a process ID".to_string(),
+            );
         }
         Ok(Self {
             expected_uid,
             expected_gid,
+            expected_pid,
         })
     }
 
     pub fn validate(&self, peer: GatewayPeerCredentials) -> Result<(), String> {
         if peer.uid == 0
             || peer.gid == 0
+            || peer.pid == 0
             || peer.uid != self.expected_uid
             || peer.gid != self.expected_gid
+            || peer.pid != self.expected_pid
         {
             return Err("Gateway peer credentials are not permitted".to_string());
         }
@@ -584,21 +591,26 @@ mod tests {
 
     #[test]
     fn peer_policy_requires_exact_non_root_credentials() {
-        let policy = GatewayPeerPolicy::new(1000, 1001).expect("non-root policy should be valid");
+        let policy =
+            GatewayPeerPolicy::new(1000, 1001, 42).expect("non-root policy should be valid");
         policy
-            .validate(GatewayPeerCredentials::from_os_credentials(1000, 1001))
+            .validate(GatewayPeerCredentials::from_os_credentials(1000, 1001, 42))
             .expect("matching peer credentials should be accepted");
         assert!(policy
-            .validate(GatewayPeerCredentials::from_os_credentials(1002, 1001))
+            .validate(GatewayPeerCredentials::from_os_credentials(1002, 1001, 42))
             .is_err());
         assert!(policy
-            .validate(GatewayPeerCredentials::from_os_credentials(1000, 1002))
+            .validate(GatewayPeerCredentials::from_os_credentials(1000, 1002, 42))
             .is_err());
         assert!(policy
-            .validate(GatewayPeerCredentials::from_os_credentials(0, 1001))
+            .validate(GatewayPeerCredentials::from_os_credentials(1000, 1001, 43))
             .is_err());
-        assert!(GatewayPeerPolicy::new(0, 1001).is_err());
-        assert!(GatewayPeerPolicy::new(1000, 0).is_err());
+        assert!(policy
+            .validate(GatewayPeerCredentials::from_os_credentials(0, 1001, 42))
+            .is_err());
+        assert!(GatewayPeerPolicy::new(0, 1001, 42).is_err());
+        assert!(GatewayPeerPolicy::new(1000, 0, 42).is_err());
+        assert!(GatewayPeerPolicy::new(1000, 1001, 0).is_err());
     }
 
     #[test]
@@ -649,15 +661,16 @@ mod tests {
             activation_instance: "activation-1".to_string(),
         };
         let hello_bytes = encode_connection_hello(&hello).expect("hello should encode");
-        let peer = GatewayPeerCredentials::from_os_credentials(1000, 1001);
-        let peer_policy = GatewayPeerPolicy::new(1000, 1001).expect("peer policy should be valid");
+        let peer = GatewayPeerCredentials::from_os_credentials(1000, 1001, 42);
+        let peer_policy =
+            GatewayPeerPolicy::new(1000, 1001, 42).expect("peer policy should be valid");
         let start = Instant::now();
         let mut session = GatewaySession::new(binding(), peer_policy);
         assert!(session.admit(&request_bytes, start).is_err());
         assert!(session
             .accept_hello(
                 &hello_bytes,
-                GatewayPeerCredentials::from_os_credentials(1002, 1001),
+                GatewayPeerCredentials::from_os_credentials(1002, 1001, 42),
             )
             .is_err());
         assert!(!session.is_established());

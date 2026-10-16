@@ -41,9 +41,11 @@ Disablement revokes the credential before or while stopping the service.
 Restart does not broaden capabilities or change the bound namespace.
 
 The current contract-only peer policy separately requires an exact configured
-non-root UID/GID pair and rejects root or mismatched credentials. It defines the
-validation rule only; no Unix socket listener or OS peer-credential acquisition
-exists yet.
+non-root UID/GID/PID tuple and rejects root, zero-PID, or mismatched
+credentials. The PID is expected to come from the OS peer-credential record for
+that activation's transport connection; it must be rebound after a restart.
+The policy defines the validation rule only; no Unix socket listener or OS
+peer-credential acquisition exists yet.
 
 ## Capability routing
 

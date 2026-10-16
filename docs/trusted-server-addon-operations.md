@@ -87,8 +87,8 @@ database boundary. The OCI contract permits only the container-side endpoint
 not implemented. It has no listener, Unix socket, host port, credential
 transport, or runtime caller; decoding validates before any backend adapter
 could be reached. A contract-only peer policy now requires an exact configured
-non-root UID/GID pair; it rejects root and mismatched credentials, but no OS
-peer-credential transport is wired yet.
+non-root UID/GID/PID tuple; it rejects root, zero-PID, and mismatched
+credentials, but no OS peer-credential transport is wired yet.
 Gateway requests are now bound to an explicit activation state. Only `Active`
 bindings may decode a request; stopped, disabled, and replaced activations are
 rejected before parsing can reach a backend adapter. The binding still carries
