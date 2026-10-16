@@ -1142,7 +1142,13 @@ pub fn get_trusted_service_stage(id: &str) -> Result<TrustedServiceStage, AddonE
             "Invalid staged trusted service directory".to_string(),
         ));
     }
-    read_trusted_service_stage(&dir)
+    let stage = read_trusted_service_stage(&dir)?;
+    if stage.manifest.id != id {
+        return Err(AddonError::Invalid(
+            "Trusted service stage directory identity does not match manifest".to_string(),
+        ));
+    }
+    Ok(stage)
 }
 
 pub fn list_trusted_service_stages() -> Result<Vec<TrustedServiceStage>, AddonError> {
@@ -1692,6 +1698,11 @@ mod tests {
         let stages = list_trusted_service_stages().unwrap();
         assert_eq!(stages.len(), 1);
         assert_eq!(stages[0].manifest.id, "example.weather");
+        let mismatched_dir = root.join("data/trusted-services/example.other");
+        fs::rename(&staged_dir, &mismatched_dir).unwrap();
+        let error = get_trusted_service_stage("example.other").unwrap_err();
+        assert!(error.to_string().contains("directory identity"));
+        fs::rename(&mismatched_dir, &staged_dir).unwrap();
         let image_signature_bytes = fs::read(staged_dir.join("image.sig")).unwrap();
         fs::write(staged_dir.join("image.sig"), b"tampered").unwrap();
         let error = list_trusted_service_stages().unwrap_err();
