@@ -5,6 +5,9 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 pub const SUPPORTED_ROOTLESS_RUNTIMES: &[&str] = &["podman", "nerdctl"];
+pub const MAX_OCI_COMMAND_ARGS: usize = 64;
+pub const MAX_OCI_COMMAND_PART_BYTES: usize = 256;
+pub const MAX_OCI_COMMAND_BYTES: usize = 4 * 1024;
 pub const REQUIRED_OCI_ACTIVATION_GATES: &[&str] = &[
     "manifest_signature",
     "image_signature",
@@ -278,7 +281,17 @@ pub fn validate_oci_launch_spec(spec: &OciLaunchSpec) -> Result<(), String> {
             return Err("OCI capabilities are unsupported or duplicated".to_string());
         }
     }
+    let command_bytes = spec
+        .command
+        .iter()
+        .try_fold(0usize, |total, part| total.checked_add(part.len()));
     if spec.command.is_empty()
+        || spec.command.len() > MAX_OCI_COMMAND_ARGS
+        || command_bytes.map_or(true, |bytes| bytes > MAX_OCI_COMMAND_BYTES)
+        || spec
+            .command
+            .iter()
+            .any(|part| part.len() > MAX_OCI_COMMAND_PART_BYTES)
         || spec.command.iter().any(|part| {
             part.is_empty()
                 || part.chars().any(|ch| ch.is_control())
@@ -386,8 +399,8 @@ mod tests {
         build_rootless_argv, probe_oci_runtime, validate_oci_activation_gates,
         validate_oci_approval_metadata, validate_oci_image_registry, validate_oci_launch_spec,
         validate_oci_launch_spec_against_record, ActivationGate, OciLaunchPolicy, OciLaunchSpec,
-        OciRegistryPolicy, OciResourceLimits, TrustedServiceRuntimeRecord,
-        REQUIRED_OCI_ACTIVATION_GATES,
+        OciRegistryPolicy, OciResourceLimits, TrustedServiceRuntimeRecord, MAX_OCI_COMMAND_ARGS,
+        MAX_OCI_COMMAND_PART_BYTES, REQUIRED_OCI_ACTIVATION_GATES,
     };
 
     fn safe_spec() -> OciLaunchSpec {
@@ -524,6 +537,16 @@ mod tests {
             .environment
             .push(("TOKEN".to_string(), "secret".to_string()));
         assert!(validate_oci_launch_spec(&environment).is_err());
+
+        let mut oversized_part = safe_spec();
+        oversized_part.command = vec!["x".repeat(MAX_OCI_COMMAND_PART_BYTES + 1)];
+        assert!(validate_oci_launch_spec(&oversized_part).is_err());
+
+        let mut too_many_args = safe_spec();
+        too_many_args.command = (0..=MAX_OCI_COMMAND_ARGS)
+            .map(|_| "/service".to_string())
+            .collect();
+        assert!(validate_oci_launch_spec(&too_many_args).is_err());
     }
 
     #[test]
