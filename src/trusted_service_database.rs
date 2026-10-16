@@ -704,12 +704,32 @@ mod tests {
 
     struct FailingAuditSink;
 
+    struct FailOnSecondAuditSink {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
     impl DatabaseAuditSink for FailingAuditSink {
         fn record<'a>(
             &'a self,
             _event: DatabaseAuditEvent,
         ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
             Box::pin(async { Err("audit unavailable".to_string()) })
+        }
+    }
+
+    impl DatabaseAuditSink for FailOnSecondAuditSink {
+        fn record<'a>(
+            &'a self,
+            _event: DatabaseAuditEvent,
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if call == 1 {
+                    Err("audit unavailable after operation".to_string())
+                } else {
+                    Ok(())
+                }
+            })
         }
     }
 
@@ -768,6 +788,41 @@ mod tests {
             .contains("enabled")));
         assert!(events.iter().any(|event| event.outcome == "accepted"));
         assert!(events.iter().any(|event| event.outcome == "succeeded"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_gateway_returns_audit_error_if_completion_audit_fails() {
+        let path = std::env::temp_dir().join(format!(
+            "screentra-service-audit-completion-failure-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let db =
+            Arc::new(Database::open(path.to_str().expect("database path")).expect("open database"));
+        let gateway =
+            TrustedServiceSqliteGateway::new(db.clone(), sqlite_contract()).expect("gateway");
+        let sink = FailOnSecondAuditSink {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let error = gateway
+            .handle_with_audit(
+                DatabaseRequest {
+                    addon_id: "example.service".to_string(),
+                    activation_instance: "activation-1".to_string(),
+                    operation: DatabaseOperation::Put {
+                        key: "state".to_string(),
+                        value_json: r#"{"enabled":true}"#.to_string(),
+                    },
+                },
+                &sink,
+            )
+            .await
+            .expect_err("completion audit failure must not report success");
+        assert!(matches!(error, DatabaseGatewayError::Audit(_)));
+        assert_eq!(
+            db.get_addon_storage("example.service", "state").unwrap(),
+            Some(r#"{"enabled":true}"#.to_string())
+        );
         let _ = std::fs::remove_file(path);
     }
 
