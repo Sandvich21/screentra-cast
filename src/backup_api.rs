@@ -1809,6 +1809,17 @@ mod tests {
                 "2026-10-15T00:00:00Z",
             )
             .unwrap();
+        signage_db
+            .record_audit_event(
+                Some("trusted-service"),
+                Some("service"),
+                "trusted_service_database",
+                Some("example.weather"),
+                "succeeded",
+                Some("activation_instance=activation-1;operation=put"),
+                "2026-10-15T00:00:01Z",
+            )
+            .unwrap();
         drop(signage_db);
 
         let metadata_db_path = parent.join("metadata.db");
@@ -1899,6 +1910,17 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(storage, "{\"units\":\"metric\"}");
+        let audit_events = restored_db.list_audit_events(10).unwrap();
+        assert!(audit_events.iter().any(|event| {
+            event.event_type == "trusted_service_database"
+                && event.target.as_deref() == Some("example.weather")
+                && event.outcome == "succeeded"
+                && event
+                    .detail
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("activation_instance=activation-1;operation=put")
+        }));
         assert_eq!(
             std::fs::read(trusted_dir.join("manifest.json")).unwrap(),
             b"original manifest"
