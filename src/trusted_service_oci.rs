@@ -40,6 +40,30 @@ pub fn validate_oci_activation_gates(gates: &[ActivationGate]) -> Result<(), Str
     Ok(())
 }
 
+pub fn validate_oci_approval_metadata(record: &TrustedServiceRuntimeRecord) -> Result<(), String> {
+    let approver = record
+        .approved_by
+        .as_deref()
+        .ok_or_else(|| "Trusted service approval metadata is incomplete".to_string())?;
+    if approver.is_empty()
+        || approver.len() > 128
+        || approver.chars().any(|character| character.is_control())
+    {
+        return Err("Trusted service approval metadata is invalid".to_string());
+    }
+    let approved_at = record
+        .approved_at
+        .as_deref()
+        .ok_or_else(|| "Trusted service approval metadata is incomplete".to_string())?;
+    if approved_at.len() > 64
+        || approved_at.chars().any(|character| character.is_control())
+        || chrono::DateTime::parse_from_rfc3339(approved_at).is_err()
+    {
+        return Err("Trusted service approval metadata is invalid".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OciRuntimeProbeReport {
     pub runtime_name: Option<String>,
@@ -99,6 +123,9 @@ pub fn validate_oci_launch_spec_against_record(
     }
     if record.approved_by.is_none() || validate_oci_activation_gates(&record.gates).is_err() {
         return Err("Trusted service activation gates are incomplete".to_string());
+    }
+    if validate_oci_approval_metadata(record).is_err() {
+        return Err("Trusted service approval metadata is invalid".to_string());
     }
     if spec.addon_id != record.addon_id
         || spec.activation_instance != record.activation_instance
@@ -348,7 +375,7 @@ mod tests {
 
     use super::{
         build_rootless_argv, probe_oci_runtime, validate_oci_activation_gates,
-        validate_oci_image_registry, validate_oci_launch_spec,
+        validate_oci_approval_metadata, validate_oci_image_registry, validate_oci_launch_spec,
         validate_oci_launch_spec_against_record, ActivationGate, OciLaunchPolicy, OciLaunchSpec,
         OciRegistryPolicy, OciResourceLimits, TrustedServiceRuntimeRecord,
         REQUIRED_OCI_ACTIVATION_GATES,
@@ -547,6 +574,10 @@ mod tests {
             gates: Vec::new(),
             last_error: None,
         };
+        validate_oci_approval_metadata(&record).expect("approval metadata should validate");
+        let mut invalid = record.clone();
+        invalid.approved_by = Some(String::new());
+        assert!(validate_oci_approval_metadata(&invalid).is_err());
         assert!(validate_oci_launch_spec_against_record(&safe_spec(), &record).is_err());
     }
     #[test]
