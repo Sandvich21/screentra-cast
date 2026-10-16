@@ -982,7 +982,7 @@ fn verify_trusted_service_image_signature(
     result
 }
 
-fn validate_trusted_service_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
+pub(crate) fn validate_trusted_service_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
     if manifest.schema_version != 1 {
         return Err(AddonError::Invalid(
             "Unsupported addon manifest schema_version; expected 1".to_string(),

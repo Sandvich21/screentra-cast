@@ -263,6 +263,8 @@ fn record_from_stage(
             "Trusted service stage timestamp is invalid".to_string(),
         ));
     }
+    addons::validate_trusted_service_manifest(&stage.manifest)
+        .map_err(|error| RuntimeError::Invalid(error.to_string()))?;
     let service = stage.manifest.trusted_service.as_ref().ok_or_else(|| {
         RuntimeError::Invalid("Trusted service stage lacks service metadata".to_string())
     })?;
