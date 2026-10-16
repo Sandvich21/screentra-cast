@@ -30,7 +30,9 @@ Each active service receives a short-lived credential bound to:
 - activation instance;
 - declared API namespace;
 - declared capabilities;
-- credential expiry and revocation state.
+- credential expiry as bounded RFC3339 metadata, validated against the current
+  time before use;
+- credential revocation state.
 
 Credentials are minted and revoked only by the future supervisor. They are not
 browser sessions, client authentication tokens, updater keys, addon signing
