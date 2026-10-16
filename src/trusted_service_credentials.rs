@@ -71,6 +71,28 @@ pub struct CredentialLease {
     pub expires_at: String,
 }
 
+impl CredentialLease {
+    pub fn validate(&self) -> Result<(), CredentialError> {
+        if self.lease_id.is_empty()
+            || self.lease_id.len() > 128
+            || !self.lease_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+            })
+            || self.expires_at.is_empty()
+            || self.expires_at.len() > 64
+            || self
+                .expires_at
+                .chars()
+                .any(|character| character.is_control())
+        {
+            return Err(CredentialError::Invalid(
+                "Invalid trusted service credential lease metadata".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub trait TrustedServiceCredentialBroker {
     fn issue(&mut self, scope: &CredentialScope) -> Result<CredentialLease, CredentialError>;
     fn revoke(&mut self, lease: &CredentialLease) -> Result<(), CredentialError>;
@@ -154,6 +176,32 @@ mod tests {
         invalid.activation_instance.push('\n');
         assert!(matches!(
             invalid.validate(),
+            Err(CredentialError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn credential_lease_metadata_is_bounded_and_non_secret_shaped() {
+        let valid = CredentialLease {
+            lease_id: "lease-1".to_string(),
+            expires_at: "2030-01-01T00:00:00Z".to_string(),
+        };
+        valid.validate().expect("valid lease metadata should pass");
+
+        let invalid_id = CredentialLease {
+            lease_id: "lease/1".to_string(),
+            ..valid.clone()
+        };
+        assert!(matches!(
+            invalid_id.validate(),
+            Err(CredentialError::Invalid(_))
+        ));
+        let invalid_expiry = CredentialLease {
+            expires_at: "2030-01-01\n00:00:00Z".to_string(),
+            ..valid
+        };
+        assert!(matches!(
+            invalid_expiry.validate(),
             Err(CredentialError::Invalid(_))
         ));
     }
