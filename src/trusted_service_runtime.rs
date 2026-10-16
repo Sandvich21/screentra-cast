@@ -250,6 +250,11 @@ fn record_from_stage(
     approver: &str,
 ) -> Result<TrustedServiceRuntimeRecord, RuntimeError> {
     validate_approver(approver)?;
+    if stage.state != "staged" {
+        return Err(RuntimeError::Invalid(
+            "Trusted service stage is not pending approval".to_string(),
+        ));
+    }
     let service = stage.manifest.trusted_service.as_ref().ok_or_else(|| {
         RuntimeError::Invalid("Trusted service stage lacks service metadata".to_string())
     })?;
@@ -1325,6 +1330,12 @@ mod tests {
         };
         assert!(matches!(
             record_from_stage(&stage, "admin\n"),
+            Err(RuntimeError::Invalid(_))
+        ));
+        let mut invalid_state = stage.clone();
+        invalid_state.state = "approved".to_string();
+        assert!(matches!(
+            record_from_stage(&invalid_state, "admin"),
             Err(RuntimeError::Invalid(_))
         ));
     }
