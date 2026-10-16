@@ -1060,14 +1060,14 @@ pub fn list_trusted_service_stages() -> Result<Vec<TrustedServiceStage>, AddonEr
             ));
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
-            continue;
-        }
         let file_type = entry.file_type().map_err(io_error)?;
         if file_type.is_symlink() {
             return Err(AddonError::Invalid(
                 "Invalid staged trusted service directory".to_string(),
             ));
+        }
+        if name.starts_with('.') {
+            continue;
         }
         if !file_type.is_dir() {
             continue;
@@ -1420,7 +1420,7 @@ mod tests {
         let target = std::env::temp_dir().join(format!("screentra-stage-target-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("trusted-services")).unwrap();
         fs::create_dir_all(&target).unwrap();
-        symlink(&target, root.join("trusted-services/example.weather")).unwrap();
+        symlink(&target, root.join("trusted-services/.stage-example.weather")).unwrap();
         let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
         unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &root); }
         let result = list_trusted_service_stages();
