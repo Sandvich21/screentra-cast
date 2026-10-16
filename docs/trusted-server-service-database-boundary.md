@@ -81,8 +81,9 @@ The contract currently defines only typed namespaced key/value operations:
 
 The initial hard ceilings are:
 
-- request: 64 KiB;
-- value: 64 KiB;
+- request envelope: 64 KiB after serialization, including identities and the
+  typed operation;
+- value: 64 KiB before serialization;
 - result rows: 1,000;
 - keys in one request: 1,000;
 - keys cannot contain `/`, `\\`, control characters, or traversal syntax.
