@@ -22,6 +22,7 @@ pub fn validate_oci_activation_gates(gates: &[ActivationGate]) -> Result<(), Str
         gate.name.is_empty()
             || gate.name.len() > 128
             || gate.name.chars().any(|character| character.is_control())
+            || !REQUIRED_OCI_ACTIVATION_GATES.contains(&gate.name.as_str())
             || !seen.insert(&gate.name)
     }) {
         return Err("OCI activation gates are malformed or duplicated".to_string());
@@ -406,6 +407,14 @@ mod tests {
             reason: "conflict".to_string(),
         });
         assert!(validate_oci_activation_gates(&duplicate).is_err());
+
+        let mut unknown = complete.clone();
+        unknown.push(ActivationGate {
+            name: "future_gate".to_string(),
+            passed: true,
+            reason: "unexpected".to_string(),
+        });
+        assert!(validate_oci_activation_gates(&unknown).is_err());
 
         let mut incomplete = complete;
         incomplete[0].passed = false;
