@@ -60,6 +60,21 @@ pub fn decode_connection_hello(
     Ok(hello)
 }
 
+pub fn encode_connection_hello_frame(hello: &GatewayConnectionHello) -> Result<Vec<u8>, String> {
+    let payload = encode_connection_hello(hello)?;
+    encode_gateway_frame(&payload, MAX_REQUEST_BYTES)
+}
+
+pub fn decode_connection_hello_frame(
+    bytes: &[u8],
+    binding: &GatewayActivationBinding,
+) -> Result<Option<(GatewayConnectionHello, usize)>, String> {
+    let Some((payload, consumed)) = decode_gateway_frame(bytes, MAX_REQUEST_BYTES)? else {
+        return Ok(None);
+    };
+    Ok(Some((decode_connection_hello(&payload, binding)?, consumed)))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GatewayPeerCredentials {
     uid: u32,
@@ -634,8 +649,9 @@ impl GatewayRequestEnvelope {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_connection_hello, decode_gateway_frame, decode_request, decode_request_frame,
-        encode_connection_hello, encode_gateway_frame, encode_request, encode_request_frame,
+        decode_connection_hello, decode_connection_hello_frame, decode_gateway_frame,
+        decode_request, decode_request_frame, encode_connection_hello,
+        encode_connection_hello_frame, encode_gateway_frame, encode_request, encode_request_frame,
         decode_response_frame, encode_response, encode_response_frame,
         validate_connection_hello,
         GatewayActivationBinding,
@@ -746,6 +762,22 @@ mod tests {
         assert!(encode_gateway_frame(&[0u8; 17], 16).is_err());
         let oversized_length = (17u32).to_be_bytes();
         assert!(decode_gateway_frame(&oversized_length, 16).is_err());
+    }
+
+    #[test]
+    fn typed_hello_frame_wrapper_preserves_binding_and_partial_reads() {
+        let hello = GatewayConnectionHello {
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            addon_id: "example.weather".to_string(),
+            activation_instance: "activation-1".to_string(),
+        };
+        let frame = encode_connection_hello_frame(&hello).expect("hello frame should encode");
+        assert_eq!(decode_connection_hello_frame(&frame[..2], &binding()).unwrap(), None);
+        let (decoded, consumed) = decode_connection_hello_frame(&frame, &binding())
+            .unwrap()
+            .expect("complete hello frame should decode");
+        assert_eq!(decoded, hello);
+        assert_eq!(consumed, frame.len());
     }
 
     #[test]
