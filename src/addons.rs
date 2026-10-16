@@ -1207,6 +1207,17 @@ pub fn remove_trusted_service_stage(id: &str) -> Result<(), AddonError> {
             "Invalid staged trusted service directory".to_string(),
         ));
     }
+    match read_trusted_service_stage(&dir) {
+        Ok(stage) if stage.manifest.id != id => {
+            return Err(AddonError::Invalid(
+                "Trusted service stage directory identity does not match manifest".to_string(),
+            ));
+        }
+        Ok(_) | Err(_) => {
+            // Explicit admin cleanup remains available for malformed staged
+            // metadata; the directory was already verified as non-symlink.
+        }
+    }
     fs::remove_dir_all(dir).map_err(io_error)
 }
 
@@ -1710,8 +1721,11 @@ mod tests {
         assert!(error.to_string().contains("directory identity"));
         let error = get_trusted_service_stage("example.other").unwrap_err();
         assert!(error.to_string().contains("directory identity"));
+        let error = remove_trusted_service_stage("example.other").unwrap_err();
+        assert!(error.to_string().contains("directory identity"));
         fs::rename(&mismatched_dir, &staged_dir).unwrap();
         let image_signature_bytes = fs::read(staged_dir.join("image.sig")).unwrap();
+        let manifest_bytes = fs::read(staged_dir.join("manifest.json")).unwrap();
         fs::write(staged_dir.join("image.sig"), b"tampered").unwrap();
         let error = list_trusted_service_stages().unwrap_err();
         assert!(error.to_string().contains("image signature verification failed"));
@@ -1719,6 +1733,7 @@ mod tests {
         fs::write(staged_dir.join("manifest.json"), b"tampered").unwrap();
         let error = list_trusted_service_stages().unwrap_err();
         assert!(error.to_string().contains("signature verification failed"));
+        fs::write(staged_dir.join("manifest.json"), manifest_bytes).unwrap();
         remove_trusted_service_stage("example.weather").unwrap();
         remove_trusted_service_stage("example.weather").unwrap();
         assert!(list_trusted_service_stages().unwrap().is_empty());
