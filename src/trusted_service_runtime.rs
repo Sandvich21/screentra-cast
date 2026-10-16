@@ -684,9 +684,9 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
             .map_err(RuntimeError::Invalid)?;
         addons::validate_addon_storage_namespace(&request.api_namespace)
             .map_err(RuntimeError::Invalid)?;
-        if self.running.contains_key(&request.activation_instance) {
+        if self.known.contains_key(&request.activation_instance) {
             return Err(RuntimeError::Conflict(
-                "Fake runtime activation is already running".to_string(),
+                "Fake runtime activation identity has already been used".to_string(),
             ));
         }
         let handle = RuntimeHandle {
@@ -1294,6 +1294,10 @@ mod tests {
         assert!(matches!(
             harness.supervisor.deactivate(&handle),
             Err(RuntimeError::NotFound)
+        ));
+        assert!(matches!(
+            harness.supervisor.runtime_mut().start(&request),
+            Err(RuntimeError::Conflict(_))
         ));
     }
 
