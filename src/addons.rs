@@ -347,6 +347,8 @@ fn validate_trusted_service_spec(spec: &TrustedServerServiceSpec) -> Result<(), 
         || spec.image.contains("://")
         || spec.image.contains(':')
         || spec.image.contains('@')
+        || spec.image.contains("//")
+        || !spec.image.contains('/')
         || spec.image.starts_with('/')
         || spec.image.ends_with('/')
         || spec
@@ -1339,6 +1341,13 @@ mod tests {
             .unwrap()
             .capabilities
             .push("storage".to_string());
+        assert!(validate_manifest(&value).is_err());
+    }
+
+    #[test]
+    fn rejects_unqualified_trusted_service_image_before_runtime_gate() {
+        let mut value = trusted_manifest();
+        value.trusted_service.as_mut().unwrap().image = "air-quality".to_string();
         assert!(validate_manifest(&value).is_err());
     }
 
