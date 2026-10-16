@@ -775,6 +775,21 @@ fn trusted_service_storage_dir() -> PathBuf {
     PathBuf::from(root).join("trusted-services")
 }
 
+fn checked_trusted_service_storage_dir(create: bool) -> Result<Option<PathBuf>, AddonError> {
+    let root = trusted_service_storage_dir();
+    if create {
+        fs::create_dir_all(&root).map_err(io_error)?;
+    }
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
+            AddonError::Invalid("Invalid trusted service storage directory".to_string()),
+        ),
+        Ok(_) => Ok(Some(root)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
 fn validate_trusted_service_file(
     path: &Path,
     maximum_bytes: u64,
@@ -925,8 +940,8 @@ pub fn stage_trusted_service_manifest(
         .as_str();
     verify_trusted_service_image_signature(image_digest, image_signature_path)?;
 
-    let root = trusted_service_storage_dir();
-    fs::create_dir_all(&root).map_err(io_error)?;
+    let root = checked_trusted_service_storage_dir(true)?
+        .ok_or_else(|| AddonError::Io("Trusted service storage directory is unavailable".to_string()))?;
     let target = root.join(&manifest.id);
     if target.exists() {
         return Err(AddonError::AlreadyInstalled);
@@ -1005,7 +1020,8 @@ fn read_trusted_service_stage(dir: &Path) -> Result<TrustedServiceStage, AddonEr
 
 pub fn get_trusted_service_stage(id: &str) -> Result<TrustedServiceStage, AddonError> {
     validate_id(id)?;
-    let dir = trusted_service_storage_dir().join(id);
+    let root = checked_trusted_service_storage_dir(false)?.ok_or(AddonError::NotFound)?;
+    let dir = root.join(id);
     let metadata = fs::symlink_metadata(&dir).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             AddonError::NotFound
@@ -1022,10 +1038,9 @@ pub fn get_trusted_service_stage(id: &str) -> Result<TrustedServiceStage, AddonE
 }
 
 pub fn list_trusted_service_stages() -> Result<Vec<TrustedServiceStage>, AddonError> {
-    let root = trusted_service_storage_dir();
-    if !root.exists() {
+    let Some(root) = checked_trusted_service_storage_dir(false)? else {
         return Ok(Vec::new());
-    }
+    };
     let mut stages = Vec::new();
     for entry in fs::read_dir(&root).map_err(io_error)? {
         let entry = entry.map_err(io_error)?;
@@ -1047,7 +1062,10 @@ pub fn list_trusted_service_stages() -> Result<Vec<TrustedServiceStage>, AddonEr
 
 pub fn remove_trusted_service_stage(id: &str) -> Result<(), AddonError> {
     validate_id(id)?;
-    let dir = trusted_service_storage_dir().join(id);
+    let Some(root) = checked_trusted_service_storage_dir(false)? else {
+        return Ok(());
+    };
+    let dir = root.join(id);
     let metadata = match fs::symlink_metadata(&dir) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
