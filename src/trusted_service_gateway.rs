@@ -473,6 +473,21 @@ impl GatewayAdmissionState {
         Self::default()
     }
 
+    fn ensure_active(&self, binding: &GatewayActivationBinding) -> Result<(), String> {
+        let registry = self
+            .inner
+            .lock()
+            .map_err(|_| "Gateway admission state is unavailable".to_string())?;
+        let key = (
+            binding.contract.addon_id.clone(),
+            binding.contract.activation_instance.clone(),
+        );
+        if registry.retired.contains(&key) {
+            return Err("Gateway activation admission is retired".to_string());
+        }
+        Ok(())
+    }
+
     fn admit(
         &self,
         bytes: &[u8],
@@ -549,6 +564,7 @@ impl GatewaySession {
             return Err("Gateway session is already established".to_string());
         }
         self.peer_policy.validate(peer)?;
+        self.admission.ensure_active(&self.binding)?;
         let Some((_, consumed)) = decode_connection_hello_frame(bytes, &self.binding)? else {
             return Ok(None);
         };
@@ -568,6 +584,7 @@ impl GatewaySession {
             return Err("Gateway session is already established".to_string());
         }
         self.peer_policy.validate(peer)?;
+        self.admission.ensure_active(&self.binding)?;
         decode_connection_hello(bytes, &self.binding)?;
         self.established = true;
         Ok(())
@@ -1086,7 +1103,8 @@ mod tests {
         let peer_policy = GatewayPeerPolicy::new(1000, 1001, 42).expect("policy should be valid");
         let shared = GatewayAdmissionState::new();
         let mut first = GatewaySession::new(binding(), peer_policy, shared.clone());
-        let mut second = GatewaySession::new(binding(), peer_policy, shared);
+        let mut second = GatewaySession::new(binding(), peer_policy, shared.clone());
+        let mut third = GatewaySession::new(binding(), peer_policy, shared);
         first
             .accept_hello(&hello_bytes, peer)
             .expect("first hello should establish");
@@ -1096,6 +1114,7 @@ mod tests {
         first
             .retire()
             .expect("retirement should clear shared state");
+        assert!(third.accept_hello(&hello_bytes, peer).is_err());
 
         let bytes = encode_request(&request()).expect("request should encode");
         assert!(second.admit(&bytes, Instant::now()).is_err());
