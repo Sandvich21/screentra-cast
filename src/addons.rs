@@ -1179,7 +1179,13 @@ pub fn list_trusted_service_stages() -> Result<Vec<TrustedServiceStage>, AddonEr
         validate_id(&name).map_err(|_| {
             AddonError::Invalid("Invalid staged trusted service directory".to_string())
         })?;
-        stages.push(read_trusted_service_stage(&entry.path())?);
+        let stage = read_trusted_service_stage(&entry.path())?;
+        if stage.manifest.id != name {
+            return Err(AddonError::Invalid(
+                "Trusted service stage directory identity does not match manifest".to_string(),
+            ));
+        }
+        stages.push(stage);
     }
     stages.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
     Ok(stages)
@@ -1700,6 +1706,8 @@ mod tests {
         assert_eq!(stages[0].manifest.id, "example.weather");
         let mismatched_dir = root.join("data/trusted-services/example.other");
         fs::rename(&staged_dir, &mismatched_dir).unwrap();
+        let error = list_trusted_service_stages().unwrap_err();
+        assert!(error.to_string().contains("directory identity"));
         let error = get_trusted_service_stage("example.other").unwrap_err();
         assert!(error.to_string().contains("directory identity"));
         fs::rename(&mismatched_dir, &staged_dir).unwrap();
