@@ -496,8 +496,18 @@ impl RuntimeLaunchRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeHandle {
-    pub addon_id: String,
-    pub activation_instance: String,
+    addon_id: String,
+    activation_instance: String,
+}
+
+impl RuntimeHandle {
+    pub fn addon_id(&self) -> &str {
+        &self.addon_id
+    }
+
+    pub fn activation_instance(&self) -> &str {
+        &self.activation_instance
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1196,6 +1206,8 @@ mod tests {
             .runtime_mut()
             .start(&request)
             .expect("fake runtime start");
+        assert_eq!(handle.addon_id(), "example.service");
+        assert_eq!(handle.activation_instance(), "activation-bound");
         let forged = RuntimeHandle {
             addon_id: "other.service".to_string(),
             activation_instance: handle.activation_instance.clone(),
