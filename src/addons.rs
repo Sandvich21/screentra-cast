@@ -816,11 +816,7 @@ fn verify_trusted_service_manifest_signature(
     signature_path: &Path,
 ) -> Result<(), AddonError> {
     let public_key = trusted_service_signing_public_key();
-    if !public_key.is_file() {
-        return Err(AddonError::Invalid(
-            "Trusted service signing public key is missing".to_string(),
-        ));
-    }
+    validate_trusted_service_file(&public_key, 64 * 1024, "manifest signing public key")?;
     let result = Command::new("openssl")
         .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
         .arg(&public_key)
@@ -849,11 +845,7 @@ fn verify_trusted_service_image_signature(
     signature_path: &Path,
 ) -> Result<(), AddonError> {
     let public_key = trusted_service_image_signing_public_key();
-    if !public_key.is_file() {
-        return Err(AddonError::Invalid(
-            "Trusted service image signing public key is missing".to_string(),
-        ));
-    }
+    validate_trusted_service_file(&public_key, 64 * 1024, "image signing public key")?;
     let digest_path = std::env::temp_dir().join(format!("screentra-trusted-image-digest-{}", Uuid::new_v4()));
     let result = (|| {
         fs::write(&digest_path, image_digest.as_bytes()).map_err(io_error)?;
