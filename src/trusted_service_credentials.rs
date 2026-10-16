@@ -117,7 +117,8 @@ impl CredentialLease {
         scope.validate()?;
         if self.addon_id != scope.addon_id
             || self.activation_instance != scope.activation_instance
-            || self.capabilities != scope.capabilities
+            || self.capabilities.iter().collect::<BTreeSet<_>>()
+                != scope.capabilities.iter().collect::<BTreeSet<_>>()
         {
             return Err(CredentialError::Invalid(
                 "Credential lease scope does not match".to_string(),
@@ -312,6 +313,18 @@ mod tests {
             lease.binds_scope(&broader),
             Err(CredentialError::Invalid(_))
         ));
+
+        let equivalent_scope = broader;
+        let reordered = CredentialLease {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
+            capabilities: vec!["read:clients".to_string(), "storage".to_string()],
+            lease_id: "lease-2".to_string(),
+            expires_at: "2030-01-01T00:00:00Z".to_string(),
+        };
+        reordered
+            .binds_scope(&equivalent_scope)
+            .expect("capability order should not change the bound scope");
     }
 
     #[test]
