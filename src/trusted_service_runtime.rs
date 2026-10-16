@@ -645,6 +645,13 @@ pub struct FakeTrustedServiceRuntime {
 }
 
 #[cfg(test)]
+fn running_marker_path(root: &Path, handle: &RuntimeHandle) -> PathBuf {
+    root.join("running")
+        .join(&handle.addon_id)
+        .join(&handle.activation_instance)
+}
+
+#[cfg(test)]
 impl FakeTrustedServiceRuntime {
     fn new(root: PathBuf) -> Self {
         Self {
@@ -693,13 +700,14 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
             addon_id: request.addon_id.clone(),
             activation_instance: request.activation_instance.clone(),
         };
-        let running_dir = self.root.join("running");
-        fs::create_dir_all(&running_dir).map_err(|error| RuntimeError::Io(error.to_string()))?;
-        fs::write(
-            running_dir.join(&handle.activation_instance),
-            request.addon_id.as_bytes(),
-        )
-        .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        let marker = running_marker_path(&self.root, &handle);
+        let marker_parent = marker.parent().ok_or_else(|| {
+            RuntimeError::Invalid("Fake runtime marker path is invalid".to_string())
+        })?;
+        fs::create_dir_all(marker_parent)
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        fs::write(&marker, request.addon_id.as_bytes())
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
         self.known
             .insert(handle.activation_instance.clone(), handle.clone());
         self.terminal.remove(&handle.activation_instance);
@@ -724,7 +732,7 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
             ));
         }
         self.running.remove(&handle.activation_instance);
-        fs::remove_file(self.root.join("running").join(&handle.activation_instance))
+        fs::remove_file(running_marker_path(&self.root, handle))
             .map_err(|error| RuntimeError::Io(error.to_string()))?;
         self.terminal.insert(
             handle.activation_instance.clone(),
@@ -784,7 +792,7 @@ impl FakeTrustedServiceRuntime {
             ));
         }
         self.running.remove(&handle.activation_instance);
-        fs::remove_file(self.root.join("running").join(&handle.activation_instance))
+        fs::remove_file(running_marker_path(&self.root, handle))
             .map_err(|error| RuntimeError::Io(error.to_string()))?;
         self.terminal.insert(
             handle.activation_instance.clone(),
@@ -980,7 +988,11 @@ mod tests {
             harness.supervisor.runtime_mut().start(&malformed_profile),
             Err(RuntimeError::Invalid(_))
         ));
-        assert!(!harness.root.join("running").join("activation-1").exists());
+        assert!(!harness
+            .root
+            .join("running")
+            .join("example.service")
+            .join("activation-1").exists());
         let mut malformed_digest = request.clone();
         malformed_digest.image_digest = "sha256:ABC".to_string();
         assert!(matches!(
@@ -1008,7 +1020,11 @@ mod tests {
             harness.supervisor.runtime().status(&handle).unwrap(),
             RuntimeStatus::Running
         );
-        assert!(harness.root.join("running").join("activation-1").is_file());
+        assert!(harness
+            .root
+            .join("running")
+            .join("example.service")
+            .join("activation-1").is_file());
         harness
             .supervisor
             .runtime_mut()
@@ -1018,7 +1034,11 @@ mod tests {
             harness.supervisor.runtime().status(&handle).unwrap(),
             RuntimeStatus::Stopped
         );
-        assert!(!harness.root.join("running").join("activation-1").exists());
+        assert!(!harness
+            .root
+            .join("running")
+            .join("example.service")
+            .join("activation-1").exists());
         assert_eq!(harness.supervisor.runtime().actions().len(), 2);
     }
 
@@ -1052,6 +1072,7 @@ mod tests {
         assert!(!harness
             .root
             .join("running")
+            .join("example.service")
             .join("activation-failure")
             .exists());
         assert!(matches!(
@@ -1084,6 +1105,49 @@ mod tests {
     }
 
     #[test]
+    fn fake_runtime_cleanup_is_scoped_to_addon_and_activation() {
+        let root = std::env::temp_dir().join(format!("screentra-runtime-scope-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create disposable runtime root");
+        let mut first = FakeTrustedServiceRuntime::new(root.clone());
+        let mut second = FakeTrustedServiceRuntime::new(root.clone());
+        let first_request = RuntimeLaunchRequest {
+            addon_id: "first.service".to_string(),
+            activation_instance: "shared-activation".to_string(),
+            image: "registry.example/service".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "first.service".to_string(),
+            api_namespace: "first.service".to_string(),
+            launch_profile: test_launch_profile(),
+        };
+        let second_request = RuntimeLaunchRequest {
+            addon_id: "second.service".to_string(),
+            storage_namespace: "second.service".to_string(),
+            api_namespace: "second.service".to_string(),
+            ..first_request.clone()
+        };
+        let first_handle = first.start(&first_request).expect("first runtime start");
+        let second_handle = second
+            .start(&second_request)
+            .expect("second runtime start");
+        let first_marker = root
+            .join("running")
+            .join("first.service")
+            .join("shared-activation");
+        let second_marker = root
+            .join("running")
+            .join("second.service")
+            .join("shared-activation");
+        assert!(first_marker.is_file());
+        assert!(second_marker.is_file());
+        first.stop(&first_handle).expect("first runtime stop");
+        assert!(!first_marker.exists());
+        assert!(second_marker.is_file());
+        second.stop(&second_handle).expect("second runtime stop");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn runtime_handles_bind_status_and_stop_to_addon_identity() {
         let mut harness = DisposableRuntimeHarness::new();
         let request = RuntimeLaunchRequest {
@@ -1113,7 +1177,12 @@ mod tests {
             harness.supervisor.deactivate(&forged),
             Err(RuntimeError::Conflict(_))
         ));
-        assert!(harness.root.join("running").join("activation-bound").exists());
+        assert!(harness
+            .root
+            .join("running")
+            .join("example.service")
+            .join("activation-bound")
+            .exists());
         harness
             .supervisor
             .deactivate(&handle)
