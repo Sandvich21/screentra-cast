@@ -119,7 +119,7 @@ No image pull is implemented until signature verification, registry allowlisting
 
 ## Task 7: Gate activation and perform the boundary review
 
-**Status:** Pending. Contract validation, bounded dry-run argv construction, registry policy, gateway/session types, lifecycle records, and disabled credential/database boundaries are present, but the required real supervisor, Unix transport, image-signature transport, credential broker, resource enforcement, rollback wiring, and production gateway remain incomplete. `EXECUTION_ENABLED` and the `database_boundary` gate remain disabled.
+**Status:** Pending. Contract validation, bounded dry-run argv construction, registry policy, gateway/session types, lifecycle records, and disabled credential/database boundaries are present, but the required real supervisor, Unix transport, image-signature transport, credential broker, resource enforcement, rollback wiring, and production gateway remain incomplete. Before any real launch adapter is added, the approved activation record must also bind the complete launch profile (service command, resource limits, isolation policy, and gateway endpoint), not only identity, image, digest, capabilities, and namespaces. `EXECUTION_ENABLED` and the `database_boundary` gate remain disabled.
 
 **Files:**
 - Modify: `src/trusted_service_runtime.rs`
