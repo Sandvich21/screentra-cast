@@ -19,6 +19,7 @@ const RUNTIME_DIR: &str = "trusted-service-runtime";
 const RUNTIME_FILE: &str = "runtime.json";
 const RUNTIME_RECORD_VERSION: u32 = 1;
 const MAX_RUNTIME_RECORD_BYTES: u64 = 128 * 1024;
+const MAX_RUNTIME_RECORDS: usize = 1_024;
 
 /// This is a compile-time safety marker for the first runtime phase.
 /// It must remain false until a separately reviewed execution backend exists.
@@ -347,6 +348,11 @@ pub fn list() -> Result<Vec<TrustedServiceRuntimeRecord>, RuntimeError> {
         {
             return Err(RuntimeError::Invalid(
                 "Invalid trusted service runtime directory".to_string(),
+            ));
+        }
+        if records.len() >= MAX_RUNTIME_RECORDS {
+            return Err(RuntimeError::Invalid(
+                "Too many trusted service runtime records".to_string(),
             ));
         }
         let record = read_record(&entry.path().join(RUNTIME_FILE))?;
