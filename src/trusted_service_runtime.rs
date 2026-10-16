@@ -249,6 +249,7 @@ fn record_from_stage(
     stage: &TrustedServiceStage,
     approver: &str,
 ) -> Result<TrustedServiceRuntimeRecord, RuntimeError> {
+    validate_approver(approver)?;
     let service = stage.manifest.trusted_service.as_ref().ok_or_else(|| {
         RuntimeError::Invalid("Trusted service stage lacks service metadata".to_string())
     })?;
@@ -1287,6 +1288,43 @@ mod tests {
         };
         assert!(matches!(
             record_from_stage(&stage, "admin"),
+            Err(RuntimeError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn record_conversion_rejects_invalid_approver_even_when_stage_is_valid() {
+        let stage = TrustedServiceStage {
+            manifest: addons::AddonManifest {
+                schema_version: 1,
+                id: "example.service".to_string(),
+                name: "Example".to_string(),
+                description: String::new(),
+                version: "1.0.0".to_string(),
+                kind: "trusted_server_service".to_string(),
+                min_server_version: None,
+                min_client_version: None,
+                widget_types: Vec::new(),
+                permissions: Vec::new(),
+                client_entrypoint: None,
+                server_entrypoint: None,
+                trusted_service: Some(addons::TrustedServerServiceSpec {
+                    image: "registry.example/service".to_string(),
+                    image_digest: format!("sha256:{}", "a".repeat(64)),
+                    capabilities: vec!["storage".to_string()],
+                    storage_namespace: "example.service".to_string(),
+                    api_namespace: "example.service".to_string(),
+                    launch_profile: test_launch_profile(),
+                    client_extension_id: None,
+                }),
+                client_sha256: None,
+                client_api_version: None,
+            },
+            state: "staged".to_string(),
+            staged_at: Utc::now().to_rfc3339(),
+        };
+        assert!(matches!(
+            record_from_stage(&stage, "admin\n"),
             Err(RuntimeError::Invalid(_))
         ));
     }
