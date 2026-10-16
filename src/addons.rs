@@ -1409,6 +1409,31 @@ mod tests {
         let _ = fs::remove_dir_all(target);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn trusted_service_stage_symlink_is_rejected_during_listing() {
+        let _guard = STORAGE_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("screentra-stage-root-{}", Uuid::new_v4()));
+        let target = std::env::temp_dir().join(format!("screentra-stage-target-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("trusted-services")).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        symlink(&target, root.join("trusted-services/example.weather")).unwrap();
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &root); }
+        let result = list_trusted_service_stages();
+        assert!(result.is_err());
+        if let Some(value) = old_data_root {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(target);
+    }
+
     #[test]
     fn signed_trusted_service_manifest_stages_without_activation() {
         let _guard = STORAGE_TEST_LOCK
