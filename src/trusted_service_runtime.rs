@@ -18,6 +18,7 @@ use uuid::Uuid;
 const RUNTIME_DIR: &str = "trusted-service-runtime";
 const RUNTIME_FILE: &str = "runtime.json";
 const RUNTIME_RECORD_VERSION: u32 = 1;
+const MAX_RUNTIME_RECORD_BYTES: u64 = 128 * 1024;
 
 /// This is a compile-time safety marker for the first runtime phase.
 /// It must remain false until a separately reviewed execution backend exists.
@@ -201,6 +202,23 @@ fn write_atomic(path: &Path, value: &TrustedServiceRuntimeRecord) -> Result<(), 
 }
 
 fn read_record(path: &Path) -> Result<TrustedServiceRuntimeRecord, RuntimeError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RuntimeError::NotFound
+        } else {
+            RuntimeError::Io(error.to_string())
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(RuntimeError::Invalid(
+            "Trusted service runtime record is not a regular file".to_string(),
+        ));
+    }
+    if metadata.len() > MAX_RUNTIME_RECORD_BYTES {
+        return Err(RuntimeError::Invalid(
+            "Trusted service runtime record is too large".to_string(),
+        ));
+    }
     let bytes = fs::read(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             RuntimeError::NotFound
@@ -741,6 +759,26 @@ mod tests {
         unsafe_record.execution_enabled = true;
         write_atomic(&path, &unsafe_record).unwrap();
         assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn runtime_record_size_and_file_type_are_bounded() {
+        let root =
+            std::env::temp_dir().join(format!("screentra-runtime-bounds-{}", Uuid::new_v4()));
+        let path = root.join("example.service").join(RUNTIME_FILE);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, vec![b'{'; (MAX_RUNTIME_RECORD_BYTES as usize) + 1]).unwrap();
+        assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
+
+        #[cfg(unix)]
+        {
+            let target = root.join("target.json");
+            fs::write(&target, serde_json::to_vec(&test_record()).unwrap()).unwrap();
+            fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
+        }
         let _ = fs::remove_dir_all(&root);
     }
 
