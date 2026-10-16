@@ -453,14 +453,37 @@ fn validate_runtime_record_contract(
 /// Immutable launch data passed across the supervisor/runtime boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeLaunchRequest {
-    pub addon_id: String,
-    pub activation_instance: String,
-    pub image: String,
-    pub image_digest: String,
-    pub capabilities: Vec<String>,
-    pub storage_namespace: String,
-    pub api_namespace: String,
-    pub launch_profile: addons::TrustedServiceLaunchProfile,
+    addon_id: String,
+    activation_instance: String,
+    image: String,
+    image_digest: String,
+    capabilities: Vec<String>,
+    storage_namespace: String,
+    api_namespace: String,
+    launch_profile: addons::TrustedServiceLaunchProfile,
+}
+
+impl RuntimeLaunchRequest {
+    fn from_approved_record(
+        record: &TrustedServiceRuntimeRecord,
+    ) -> Result<Self, RuntimeError> {
+        validate_runtime_record_contract(record)?;
+        if record.state != "approved" {
+            return Err(RuntimeError::Blocked(
+                "Trusted service is not approved for activation".to_string(),
+            ));
+        }
+        Ok(Self {
+            addon_id: record.addon_id.clone(),
+            activation_instance: record.activation_instance.clone(),
+            image: record.image.clone(),
+            image_digest: record.image_digest.clone(),
+            capabilities: record.capabilities.clone(),
+            storage_namespace: record.storage_namespace.clone(),
+            api_namespace: record.api_namespace.clone(),
+            launch_profile: record.launch_profile.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -575,16 +598,7 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
                 plan.blocked_by.join(", ")
             )));
         }
-        self.runtime.start(&RuntimeLaunchRequest {
-            addon_id: record.addon_id.clone(),
-            activation_instance: record.activation_instance.clone(),
-            image: record.image.clone(),
-            image_digest: record.image_digest.clone(),
-            capabilities: record.capabilities.clone(),
-            storage_namespace: record.storage_namespace.clone(),
-            api_namespace: record.api_namespace.clone(),
-            launch_profile: record.launch_profile.clone(),
-        })
+        self.runtime.start(&RuntimeLaunchRequest::from_approved_record(record)?)
     }
 
     pub fn deactivate(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
@@ -788,6 +802,23 @@ mod tests {
         assert!(gates
             .iter()
             .any(|gate| gate.name == "controlled_gateway" && !gate.passed));
+    }
+
+    #[test]
+    fn launch_request_is_derived_only_from_an_approved_record() {
+        let record = test_record();
+        let request = RuntimeLaunchRequest::from_approved_record(&record)
+            .expect("approved record should produce a launch request");
+        assert_eq!(request.addon_id, record.addon_id);
+        assert_eq!(request.activation_instance, record.activation_instance);
+        assert_eq!(request.launch_profile, record.launch_profile);
+
+        let mut disabled = record;
+        disabled.state = "disabled".to_string();
+        assert!(matches!(
+            RuntimeLaunchRequest::from_approved_record(&disabled),
+            Err(RuntimeError::Blocked(_))
+        ));
     }
 
     #[test]

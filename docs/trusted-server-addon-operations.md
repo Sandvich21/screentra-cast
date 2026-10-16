@@ -92,9 +92,10 @@ activation planning revalidate this profile, and launch-spec binding rejects
 any field mismatch. This is still inert because the execution and database
 boundaries remain disabled.
 
-The immutable runtime launch request now carries the same approved launch
-profile, and the fake runtime rejects malformed profile data before marker
-creation; no runtime process is started.
+The immutable runtime launch request is now constructed only from a validated
+approved runtime record; its fields are not publicly constructible. It carries
+the same approved launch profile, and the fake runtime rejects malformed
+profile data before marker creation; no runtime process is started.
 
 A runtime preflight report also exists for the explicitly selected executable.
 It accepts only the named rootless runtime families (`podman` or `nerdctl`),

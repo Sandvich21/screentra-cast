@@ -31,7 +31,7 @@ The development host has no `podman`, `docker`, `nerdctl`, `crun`, `runc`, or `b
 
 ## Task 1: Define the OCI launch contract
 
-**Status:** Contract-only implementation complete in `src/trusted_service_oci.rs` and `src/trusted_service_runtime.rs`, including approval-record binding and propagation of the complete profile into the immutable runtime launch request; execution remains disabled.
+**Status:** Contract-only implementation complete in `src/trusted_service_oci.rs` and `src/trusted_service_runtime.rs`, including approval-record binding, propagation of the complete profile into the immutable runtime launch request, and construction restricted to validated approved records; execution remains disabled.
 
 **Files:**
 - Modify: `src/trusted_service_runtime.rs`
