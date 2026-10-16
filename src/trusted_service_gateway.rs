@@ -4,6 +4,7 @@ use crate::trusted_service_database::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,7 +74,10 @@ pub fn decode_connection_hello_frame(
     let Some((payload, consumed)) = decode_gateway_frame(bytes, MAX_REQUEST_BYTES)? else {
         return Ok(None);
     };
-    Ok(Some((decode_connection_hello(&payload, binding)?, consumed)))
+    Ok(Some((
+        decode_connection_hello(&payload, binding)?,
+        consumed,
+    )))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,7 +166,8 @@ fn decode_gateway_frame(
     if bytes.len() < GATEWAY_FRAME_LENGTH_BYTES {
         return Ok(None);
     }
-    let frame_len = u32::from_be_bytes(bytes[..GATEWAY_FRAME_LENGTH_BYTES].try_into().unwrap()) as usize;
+    let frame_len =
+        u32::from_be_bytes(bytes[..GATEWAY_FRAME_LENGTH_BYTES].try_into().unwrap()) as usize;
     if frame_len > maximum_bytes {
         return Err("Gateway frame is too large".to_string());
     }
@@ -452,22 +457,80 @@ impl GatewayRequestAdmission {
     }
 }
 
+#[derive(Debug, Default)]
+struct GatewayAdmissionRegistry {
+    admission: GatewayRequestAdmission,
+    retired: BTreeSet<(String, String)>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GatewayAdmissionState {
+    inner: Arc<Mutex<GatewayAdmissionRegistry>>,
+}
+
+impl GatewayAdmissionState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn admit(
+        &self,
+        bytes: &[u8],
+        binding: &GatewayActivationBinding,
+        now: Instant,
+    ) -> Result<DecodedGatewayRequest, String> {
+        let mut registry = self
+            .inner
+            .lock()
+            .map_err(|_| "Gateway admission state is unavailable".to_string())?;
+        let key = (
+            binding.contract.addon_id.clone(),
+            binding.contract.activation_instance.clone(),
+        );
+        if registry.retired.contains(&key) {
+            return Err("Gateway activation admission is retired".to_string());
+        }
+        registry.admission.admit(bytes, binding, now)
+    }
+
+    fn retire(&self, binding: &GatewayActivationBinding) -> Result<(), String> {
+        let mut registry = self
+            .inner
+            .lock()
+            .map_err(|_| "Gateway admission state is unavailable".to_string())?;
+        let key = (
+            binding.contract.addon_id.clone(),
+            binding.contract.activation_instance.clone(),
+        );
+        if !registry.retired.contains(&key) && registry.retired.len() >= MAX_TRACKED_ACTIVATIONS {
+            return Err("Gateway retired-activation state is full".to_string());
+        }
+        registry.admission.retire_activation(binding)?;
+        registry.retired.insert(key);
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct GatewaySession {
     binding: GatewayActivationBinding,
     peer_policy: GatewayPeerPolicy,
-    admission: GatewayRequestAdmission,
+    admission: GatewayAdmissionState,
     budget: GatewayOperationBudget,
     established: bool,
     retired: bool,
 }
 
 impl GatewaySession {
-    pub fn new(binding: GatewayActivationBinding, peer_policy: GatewayPeerPolicy) -> Self {
+    pub fn new(
+        binding: GatewayActivationBinding,
+        peer_policy: GatewayPeerPolicy,
+        admission: GatewayAdmissionState,
+    ) -> Self {
         Self {
             binding,
             peer_policy,
-            admission: GatewayRequestAdmission::new(),
+            admission,
             budget: GatewayOperationBudget::new(),
             established: false,
             retired: false,
@@ -541,7 +604,7 @@ impl GatewaySession {
     pub fn retire(&mut self) -> Result<(), String> {
         self.established = false;
         self.retired = true;
-        self.admission.retire_activation(&self.binding)
+        self.admission.retire(&self.binding)
     }
 }
 
@@ -631,9 +694,7 @@ pub fn decode_response(bytes: &[u8]) -> Result<DatabaseResponse, String> {
     })
 }
 
-pub fn decode_response_frame(
-    bytes: &[u8],
-) -> Result<Option<(DatabaseResponse, usize)>, String> {
+pub fn decode_response_frame(bytes: &[u8]) -> Result<Option<(DatabaseResponse, usize)>, String> {
     let Some((payload, consumed)) = decode_gateway_frame(bytes, MAX_RESPONSE_BYTES)? else {
         return Ok(None);
     };
@@ -703,16 +764,15 @@ impl GatewayRequestEnvelope {
 mod tests {
     use super::{
         decode_connection_hello, decode_connection_hello_frame, decode_gateway_frame,
-        decode_request, decode_request_frame, encode_connection_hello,
+        decode_request, decode_request_frame, decode_response_frame, encode_connection_hello,
         encode_connection_hello_frame, encode_gateway_frame, encode_request, encode_request_frame,
-        decode_response_frame, encode_response, encode_response_frame,
-        validate_connection_hello,
-        GatewayActivationBinding,
-        GatewayActivationState, GatewayConnectionHello, GatewayOperationBudget,
-        GatewayPeerCredentials, GatewayPeerPolicy, GatewayRateLimiter, GatewayReplayGuard,
-        GatewayRequestAdmission, GatewayRequestEnvelope, GatewaySession, GatewayStorageOperation,
-        GATEWAY_PROTOCOL_VERSION, MAX_OPERATIONS_PER_CONNECTION, MAX_REQUESTS_PER_ACTIVATION,
-        MAX_RESPONSE_BYTES, MAX_TRACKED_ACTIVATIONS,
+        encode_response, encode_response_frame, validate_connection_hello,
+        GatewayActivationBinding, GatewayActivationState, GatewayAdmissionState,
+        GatewayConnectionHello, GatewayOperationBudget, GatewayPeerCredentials, GatewayPeerPolicy,
+        GatewayRateLimiter, GatewayReplayGuard, GatewayRequestAdmission, GatewayRequestEnvelope,
+        GatewaySession, GatewayStorageOperation, GATEWAY_PROTOCOL_VERSION,
+        MAX_OPERATIONS_PER_CONNECTION, MAX_REQUESTS_PER_ACTIVATION, MAX_RESPONSE_BYTES,
+        MAX_TRACKED_ACTIVATIONS,
     };
     use crate::trusted_service_database::{
         DatabaseResponse, TrustedServiceDatabaseContract, MAX_REQUEST_BYTES,
@@ -867,7 +927,7 @@ mod tests {
         let frame = encode_connection_hello_frame(&hello).expect("hello frame should encode");
         let policy = GatewayPeerPolicy::new(1000, 1001, 42).expect("policy should be valid");
         let peer = GatewayPeerCredentials::from_os_credentials(1000, 1001, 42);
-        let mut session = GatewaySession::new(binding(), policy);
+        let mut session = GatewaySession::new(binding(), policy, GatewayAdmissionState::new());
 
         assert_eq!(session.accept_hello_frame(&frame[..2], peer).unwrap(), None);
         assert!(!session.is_established());
@@ -903,7 +963,10 @@ mod tests {
             activation_instance: "activation-1".to_string(),
         };
         let frame = encode_connection_hello_frame(&hello).expect("hello frame should encode");
-        assert_eq!(decode_connection_hello_frame(&frame[..2], &binding()).unwrap(), None);
+        assert_eq!(
+            decode_connection_hello_frame(&frame[..2], &binding()).unwrap(),
+            None
+        );
         let (decoded, consumed) = decode_connection_hello_frame(&frame, &binding())
             .unwrap()
             .expect("complete hello frame should decode");
@@ -933,7 +996,12 @@ mod tests {
     fn framed_admission_waits_for_complete_payload_before_consuming_budget() {
         let frame = encode_request_frame(&request()).expect("request frame should encode");
         let mut admission = GatewayRequestAdmission::new();
-        assert_eq!(admission.admit_frame(&frame[..3], &binding(), Instant::now()).unwrap(), None);
+        assert_eq!(
+            admission
+                .admit_frame(&frame[..3], &binding(), Instant::now())
+                .unwrap(),
+            None
+        );
         let (decoded, consumed) = admission
             .admit_frame(&frame, &binding(), Instant::now())
             .unwrap()
@@ -954,7 +1022,7 @@ mod tests {
         let peer_policy =
             GatewayPeerPolicy::new(1000, 1001, 42).expect("peer policy should be valid");
         let start = Instant::now();
-        let mut session = GatewaySession::new(binding(), peer_policy);
+        let mut session = GatewaySession::new(binding(), peer_policy, GatewayAdmissionState::new());
         session
             .accept_hello(&hello_bytes, peer)
             .expect("hello should establish session");
@@ -964,6 +1032,73 @@ mod tests {
         }
         let request_bytes = encode_request(&request()).expect("request should encode");
         assert!(session.admit(&request_bytes, start).is_ok());
+    }
+
+    #[test]
+    fn shared_admission_state_enforces_limits_across_sessions() {
+        let hello = GatewayConnectionHello {
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            addon_id: "example.weather".to_string(),
+            activation_instance: "activation-1".to_string(),
+        };
+        let hello_bytes = encode_connection_hello(&hello).expect("hello should encode");
+        let peer = GatewayPeerCredentials::from_os_credentials(1000, 1001, 42);
+        let peer_policy = GatewayPeerPolicy::new(1000, 1001, 42).expect("policy should be valid");
+        let shared = GatewayAdmissionState::new();
+        let mut first = GatewaySession::new(binding(), peer_policy, shared.clone());
+        let mut second = GatewaySession::new(binding(), peer_policy, shared);
+        first
+            .accept_hello(&hello_bytes, peer)
+            .expect("first hello should establish");
+        second
+            .accept_hello(&hello_bytes, peer)
+            .expect("second hello should establish");
+
+        for index in 0..MAX_REQUESTS_PER_ACTIVATION {
+            let mut request = request();
+            request.request_id = format!("shared-{index}");
+            let bytes = encode_request(&request).expect("request should encode");
+            let session = if index % 2 == 0 {
+                &mut first
+            } else {
+                &mut second
+            };
+            session
+                .admit(&bytes, Instant::now())
+                .expect("shared activation quota should admit the first 60 requests");
+        }
+
+        let mut rejected = request();
+        rejected.request_id = "shared-rejected".to_string();
+        let bytes = encode_request(&rejected).expect("request should encode");
+        assert!(first.admit(&bytes, Instant::now()).is_err());
+    }
+
+    #[test]
+    fn retiring_one_session_retires_shared_activation_admission() {
+        let hello = GatewayConnectionHello {
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            addon_id: "example.weather".to_string(),
+            activation_instance: "activation-1".to_string(),
+        };
+        let hello_bytes = encode_connection_hello(&hello).expect("hello should encode");
+        let peer = GatewayPeerCredentials::from_os_credentials(1000, 1001, 42);
+        let peer_policy = GatewayPeerPolicy::new(1000, 1001, 42).expect("policy should be valid");
+        let shared = GatewayAdmissionState::new();
+        let mut first = GatewaySession::new(binding(), peer_policy, shared.clone());
+        let mut second = GatewaySession::new(binding(), peer_policy, shared);
+        first
+            .accept_hello(&hello_bytes, peer)
+            .expect("first hello should establish");
+        second
+            .accept_hello(&hello_bytes, peer)
+            .expect("second hello should establish");
+        first
+            .retire()
+            .expect("retirement should clear shared state");
+
+        let bytes = encode_request(&request()).expect("request should encode");
+        assert!(second.admit(&bytes, Instant::now()).is_err());
     }
 
     #[test]
@@ -979,7 +1114,7 @@ mod tests {
         let peer_policy =
             GatewayPeerPolicy::new(1000, 1001, 42).expect("peer policy should be valid");
         let start = Instant::now();
-        let mut session = GatewaySession::new(binding(), peer_policy);
+        let mut session = GatewaySession::new(binding(), peer_policy, GatewayAdmissionState::new());
         assert!(session.admit(&request_bytes, start).is_err());
         assert!(session
             .accept_hello(

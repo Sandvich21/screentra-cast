@@ -115,6 +115,14 @@ The typed wrappers are:
   operation;
 - response frame — value, written, deleted, or bounded entries result.
 
+The typed session constructor receives a shared admission state owned by the
+activation supervisor. All connections for one activation must use the same
+state so the 60-request-per-minute rate limit and 1,024-request replay bound
+apply across connections rather than separately per socket. Retiring one
+activation removes only that activation's bounded state; it does not affect
+other addon or activation identities. Retired-activation tracking is bounded by
+the same 1,024-activation ceiling and fails closed when that bound is full.
+
 These functions are contract-only. There is still no Unix socket listener, OS peer
 credential acquisition, connection loop, or runtime caller. Framing does not
 constitute authentication; peer credentials, hello binding, activation state,
