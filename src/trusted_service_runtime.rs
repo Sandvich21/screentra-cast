@@ -516,6 +516,7 @@ pub enum RuntimeStatus {
     Stopped,
     Crashed,
     TimedOut,
+    Replaced,
 }
 
 pub trait TrustedServiceRuntime {
@@ -642,6 +643,7 @@ pub enum FakeRuntimeAction {
     Stop(String),
     Crash(String),
     Timeout(String),
+    Replace(String),
 }
 
 #[cfg(test)]
@@ -825,6 +827,14 @@ impl FakeTrustedServiceRuntime {
             handle,
             RuntimeStatus::TimedOut,
             FakeRuntimeAction::Timeout(handle.activation_instance.clone()),
+        )
+    }
+
+    fn mark_replaced(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        self.mark_terminal(
+            handle,
+            RuntimeStatus::Replaced,
+            FakeRuntimeAction::Replace(handle.activation_instance.clone()),
         )
     }
 }
@@ -1233,6 +1243,41 @@ mod tests {
         assert!(matches!(
             harness.supervisor.runtime().status(&forged),
             Err(RuntimeError::Conflict(_))
+        ));
+        assert_eq!(harness.supervisor.runtime().actions().len(), 2);
+    }
+
+    #[test]
+    fn fake_runtime_replacement_is_terminal_and_does_not_restart() {
+        let mut harness = DisposableRuntimeHarness::new();
+        let request = RuntimeLaunchRequest {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-replaced".to_string(),
+            image: "registry.example/service".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.service".to_string(),
+            api_namespace: "example.service".to_string(),
+            launch_profile: test_launch_profile(),
+        };
+        let handle = harness
+            .supervisor
+            .runtime_mut()
+            .start(&request)
+            .expect("fake runtime start");
+        harness
+            .supervisor
+            .runtime_mut()
+            .mark_replaced(&handle)
+            .expect("fake runtime replacement");
+        assert_eq!(
+            harness.supervisor.runtime().status(&handle).unwrap(),
+            RuntimeStatus::Replaced
+        );
+        assert!(!running_marker_path(&harness.root, &handle).exists());
+        assert!(matches!(
+            harness.supervisor.deactivate(&handle),
+            Err(RuntimeError::NotFound)
         ));
         assert_eq!(harness.supervisor.runtime().actions().len(), 2);
     }
