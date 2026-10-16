@@ -344,6 +344,9 @@ impl GatewaySession {
         if self.retired {
             return Err("Gateway session is retired".to_string());
         }
+        if self.established {
+            return Err("Gateway session is already established".to_string());
+        }
         decode_connection_hello(bytes, &self.binding)?;
         self.established = true;
         Ok(())
@@ -586,6 +589,7 @@ mod tests {
             .accept_hello(&hello_bytes)
             .expect("valid hello should establish session");
         assert!(session.is_established());
+        assert!(session.accept_hello(&hello_bytes).is_err());
         assert!(session.admit(&request_bytes, start).is_ok());
         let second_request = encode_request(&GatewayRequestEnvelope {
             request_id: "request-2".to_string(),
