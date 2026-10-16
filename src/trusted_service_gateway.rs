@@ -162,6 +162,26 @@ pub fn decode_gateway_frame(
     )))
 }
 
+pub fn encode_request_frame(request: &GatewayRequestEnvelope) -> Result<Vec<u8>, String> {
+    let payload = encode_request(request)?;
+    encode_gateway_frame(&payload, MAX_REQUEST_BYTES)
+}
+
+pub fn decode_request_frame(
+    bytes: &[u8],
+    binding: &GatewayActivationBinding,
+) -> Result<Option<(DecodedGatewayRequest, usize)>, String> {
+    let Some((payload, consumed)) = decode_gateway_frame(bytes, MAX_REQUEST_BYTES)? else {
+        return Ok(None);
+    };
+    Ok(Some((decode_request_with_id(&payload, binding)?, consumed)))
+}
+
+pub fn encode_response_frame(response: &DatabaseResponse) -> Result<Vec<u8>, String> {
+    let payload = encode_response(response)?;
+    encode_gateway_frame(&payload, MAX_RESPONSE_BYTES)
+}
+
 fn validate_request_id(request_id: &str) -> Result<(), String> {
     if request_id.is_empty()
         || request_id.len() > 128
@@ -591,14 +611,15 @@ impl GatewayRequestEnvelope {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_connection_hello, decode_gateway_frame, decode_request, encode_connection_hello,
-        encode_gateway_frame, encode_request, encode_response, validate_connection_hello,
+        decode_connection_hello, decode_gateway_frame, decode_request, decode_request_frame,
+        encode_connection_hello, encode_gateway_frame, encode_request, encode_request_frame,
+        encode_response, encode_response_frame, validate_connection_hello,
         GatewayActivationBinding,
         GatewayActivationState, GatewayConnectionHello, GatewayOperationBudget,
         GatewayPeerCredentials, GatewayPeerPolicy, GatewayRateLimiter, GatewayReplayGuard,
         GatewayRequestAdmission, GatewayRequestEnvelope, GatewaySession, GatewayStorageOperation,
         GATEWAY_PROTOCOL_VERSION, MAX_OPERATIONS_PER_CONNECTION, MAX_REQUESTS_PER_ACTIVATION,
-        MAX_TRACKED_ACTIVATIONS,
+        MAX_RESPONSE_BYTES, MAX_TRACKED_ACTIVATIONS,
     };
     use crate::trusted_service_database::{
         DatabaseResponse, TrustedServiceDatabaseContract, MAX_REQUEST_BYTES,
@@ -701,6 +722,22 @@ mod tests {
         assert!(encode_gateway_frame(&[0u8; 17], 16).is_err());
         let oversized_length = (17u32).to_be_bytes();
         assert!(decode_gateway_frame(&oversized_length, 16).is_err());
+    }
+
+    #[test]
+    fn typed_request_frame_wrapper_preserves_binding_and_partial_reads() {
+        let frame = encode_request_frame(&request()).expect("request frame should encode");
+        assert_eq!(decode_request_frame(&frame[..3], &binding()).unwrap(), None);
+        let (decoded, consumed) = decode_request_frame(&frame, &binding())
+            .unwrap()
+            .expect("complete frame should decode");
+        assert_eq!(decoded.request_id, "request-1");
+        assert_eq!(consumed, frame.len());
+        let response_frame = encode_response_frame(&DatabaseResponse::Written)
+            .expect("response frame should encode");
+        assert!(decode_gateway_frame(&response_frame, MAX_RESPONSE_BYTES)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
