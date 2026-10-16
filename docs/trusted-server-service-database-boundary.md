@@ -139,8 +139,12 @@ non-superuser/non-createdb/non-createrole service role, and a server-owned addon
 schema with explicit `USAGE` plus DML grants only. It verified that the role can
 read/write its approved table but cannot read a core table, read another addon
 schema, create tables in either schema, or connect after `CONNECT` is revoked.
-The temporary database and role were removed by cleanup. Credentials were passed
-only through the child process environment and were not retained.
+A repeatable version of this probe is checked in at
+`scripts/probe-trusted-service-postgres-permissions.sh`. It is a developer
+probe only, is not installed or exposed as production CLI functionality, and
+requires a local PostgreSQL administrator path through non-interactive `sudo`.
+It removes the temporary database and role on exit; credentials are passed only
+through child-process environment variables and are not retained.
 
 This is permission evidence for the future PostgreSQL schema/role mode, not a
 service gateway or activation path. The current controlled adapter still uses
