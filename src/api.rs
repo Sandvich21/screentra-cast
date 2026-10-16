@@ -1972,8 +1972,8 @@ async fn audit_trusted_service_stage_event(
     target: &str,
     outcome: &str,
     detail: Option<&str>,
-) {
-    let _ = state
+) -> Result<(), String> {
+    state
         .client_repository()
         .record_audit_event(
             Some(&principal.username),
@@ -1984,7 +1984,12 @@ async fn audit_trusted_service_stage_event(
             detail,
             &Utc::now().to_rfc3339(),
         )
-        .await;
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            log::error!("trusted service audit persistence failed: {error}");
+            "trusted service audit persistence failed".to_string()
+        })
 }
 
 async fn get_addon_storage(
@@ -2096,7 +2101,11 @@ async fn approve_trusted_service(
         "success",
         None,
     )
-    .await;
+    .await
+    .map_err(|error| {
+        log::error!("trusted service audit persistence failed: {error}");
+        internal_server_error()
+    })?;
     Ok(AxumJson(record))
 }
 
@@ -2116,7 +2125,11 @@ async fn disable_trusted_service(
         "success",
         None,
     )
-    .await;
+    .await
+    .map_err(|error| {
+        log::error!("trusted service audit persistence failed: {error}");
+        internal_server_error()
+    })?;
     Ok(AxumJson(record))
 }
 
@@ -2137,7 +2150,11 @@ async fn remove_trusted_service_stage(
         "success",
         None,
     )
-    .await;
+    .await
+    .map_err(|error| {
+        log::error!("trusted service audit persistence failed: {error}");
+        internal_server_error()
+    })?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2226,7 +2243,11 @@ async fn stage_trusted_service_manifest(
         "success",
         None,
     )
-    .await;
+    .await
+    .map_err(|error| {
+        log::error!("trusted service audit persistence failed: {error}");
+        internal_server_error()
+    })?;
     Ok((StatusCode::CREATED, AxumJson(stage)))
 }
 

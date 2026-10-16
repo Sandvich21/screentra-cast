@@ -81,6 +81,10 @@ without restoring an activation marker. Runtime coverage also rejects disabled
 activation records before planning or starting and rejects repeated stops for a
 stopped activation handle.
 
+The final review also confirms that trusted-service staging, approval,
+disabling, and removal routes fail closed when their audit record cannot be
+persisted; no successful response is emitted for an audit failure.
+
 Remaining work for this phase is the final fail-closed boundary review.
 Keep `scripts/probe-trusted-service-postgres-permissions.sh` in the backend
 gate. Keep the database gate and execution disabled until that review is
