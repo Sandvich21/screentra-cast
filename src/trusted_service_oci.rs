@@ -8,6 +8,7 @@ pub const SUPPORTED_ROOTLESS_RUNTIMES: &[&str] = &["podman", "nerdctl"];
 pub const MAX_OCI_COMMAND_ARGS: usize = 64;
 pub const MAX_OCI_COMMAND_PART_BYTES: usize = 256;
 pub const MAX_OCI_COMMAND_BYTES: usize = 4 * 1024;
+pub const MAX_OCI_ALLOWED_REGISTRIES: usize = 64;
 pub const REQUIRED_OCI_ACTIVATION_GATES: &[&str] = &[
     "manifest_signature",
     "image_signature",
@@ -344,6 +345,7 @@ pub struct OciRegistryPolicy {
 
 pub fn validate_oci_image_registry(image: &str, policy: &OciRegistryPolicy) -> Result<(), String> {
     if policy.allowed_registries.is_empty()
+        || policy.allowed_registries.len() > MAX_OCI_ALLOWED_REGISTRIES
         || policy.allowed_registries.iter().any(|registry| {
             registry.is_empty()
                 || registry.len() > 255
@@ -403,8 +405,9 @@ mod tests {
         build_rootless_argv, probe_oci_runtime, validate_oci_activation_gates,
         validate_oci_approval_metadata, validate_oci_image_registry, validate_oci_launch_spec,
         validate_oci_launch_spec_against_record, ActivationGate, OciLaunchPolicy, OciLaunchSpec,
-        OciRegistryPolicy, OciResourceLimits, TrustedServiceRuntimeRecord, MAX_OCI_COMMAND_ARGS,
-        MAX_OCI_COMMAND_PART_BYTES, REQUIRED_OCI_ACTIVATION_GATES,
+        OciRegistryPolicy, OciResourceLimits, TrustedServiceRuntimeRecord,
+        MAX_OCI_ALLOWED_REGISTRIES, MAX_OCI_COMMAND_ARGS, MAX_OCI_COMMAND_PART_BYTES,
+        REQUIRED_OCI_ACTIVATION_GATES,
     };
 
     fn safe_spec() -> OciLaunchSpec {
@@ -508,6 +511,15 @@ mod tests {
         };
         assert!(
             validate_oci_image_registry("registry.example/weather", &malformed_policy).is_err()
+        );
+
+        let oversized_policy = OciRegistryPolicy {
+            allowed_registries: (0..=MAX_OCI_ALLOWED_REGISTRIES)
+                .map(|index| format!("registry{index}.example"))
+                .collect(),
+        };
+        assert!(
+            validate_oci_image_registry("registry.example/weather", &oversized_policy).is_err()
         );
     }
 
