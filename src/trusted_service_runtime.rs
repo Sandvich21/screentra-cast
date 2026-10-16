@@ -496,6 +496,7 @@ impl RuntimeLaunchRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeHandle {
+    pub addon_id: String,
     pub activation_instance: String,
 }
 
@@ -579,6 +580,15 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
         if old_handle.activation_instance.is_empty() {
             return Err(RuntimeError::Invalid(
                 "Old activation identity is empty".to_string(),
+            ));
+        }
+        addons::validate_addon_storage_namespace(&old_handle.addon_id)
+            .map_err(RuntimeError::Invalid)?;
+        addons::validate_addon_storage_namespace(&old_handle.activation_instance)
+            .map_err(RuntimeError::Invalid)?;
+        if old_handle.addon_id != record.addon_id {
+            return Err(RuntimeError::Conflict(
+                "Activation replacement handle is bound to a different addon".to_string(),
             ));
         }
         if old_handle.activation_instance == record.activation_instance {
@@ -680,6 +690,7 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
             ));
         }
         let handle = RuntimeHandle {
+            addon_id: request.addon_id.clone(),
             activation_instance: request.activation_instance.clone(),
         };
         let running_dir = self.root.join("running");
@@ -699,9 +710,19 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
     }
 
     fn stop(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
-        if self.running.remove(&handle.activation_instance).is_none() {
+        addons::validate_addon_storage_namespace(&handle.addon_id)
+            .map_err(RuntimeError::Invalid)?;
+        addons::validate_addon_storage_namespace(&handle.activation_instance)
+            .map_err(RuntimeError::Invalid)?;
+        let Some(running_handle) = self.running.get(&handle.activation_instance) else {
             return Err(RuntimeError::NotFound);
+        };
+        if running_handle.addon_id != handle.addon_id {
+            return Err(RuntimeError::Conflict(
+                "Runtime handle is not bound to the running addon".to_string(),
+            ));
         }
+        self.running.remove(&handle.activation_instance);
         fs::remove_file(self.root.join("running").join(&handle.activation_instance))
             .map_err(|error| RuntimeError::Io(error.to_string()))?;
         self.terminal
@@ -712,7 +733,16 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
     }
 
     fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError> {
-        if self.running.contains_key(&handle.activation_instance) {
+        addons::validate_addon_storage_namespace(&handle.addon_id)
+            .map_err(RuntimeError::Invalid)?;
+        addons::validate_addon_storage_namespace(&handle.activation_instance)
+            .map_err(RuntimeError::Invalid)?;
+        if let Some(running_handle) = self.running.get(&handle.activation_instance) {
+            if running_handle.addon_id != handle.addon_id {
+                return Err(RuntimeError::Conflict(
+                    "Runtime handle is not bound to the running addon".to_string(),
+                ));
+            }
             Ok(RuntimeStatus::Running)
         } else if let Some(status) = self.terminal.get(&handle.activation_instance) {
             Ok(*status)
@@ -732,9 +762,15 @@ impl FakeTrustedServiceRuntime {
         status: RuntimeStatus,
         action: FakeRuntimeAction,
     ) -> Result<(), RuntimeError> {
-        if self.running.remove(&handle.activation_instance).is_none() {
+        let Some(running_handle) = self.running.get(&handle.activation_instance) else {
             return Err(RuntimeError::NotFound);
+        };
+        if running_handle.addon_id != handle.addon_id {
+            return Err(RuntimeError::Conflict(
+                "Runtime handle is not bound to the running addon".to_string(),
+            ));
         }
+        self.running.remove(&handle.activation_instance);
         fs::remove_file(self.root.join("running").join(&handle.activation_instance))
             .map_err(|error| RuntimeError::Io(error.to_string()))?;
         self.terminal
@@ -1033,14 +1069,60 @@ mod tests {
     }
 
     #[test]
+    fn runtime_handles_bind_status_and_stop_to_addon_identity() {
+        let mut harness = DisposableRuntimeHarness::new();
+        let request = RuntimeLaunchRequest {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-bound".to_string(),
+            image: "registry.example/service".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.service".to_string(),
+            api_namespace: "example.service".to_string(),
+            launch_profile: test_launch_profile(),
+        };
+        let handle = harness
+            .supervisor
+            .runtime_mut()
+            .start(&request)
+            .expect("fake runtime start");
+        let forged = RuntimeHandle {
+            addon_id: "other.service".to_string(),
+            activation_instance: handle.activation_instance.clone(),
+        };
+        assert!(matches!(
+            harness.supervisor.runtime().status(&forged),
+            Err(RuntimeError::Conflict(_))
+        ));
+        assert!(matches!(
+            harness.supervisor.deactivate(&forged),
+            Err(RuntimeError::Conflict(_))
+        ));
+        assert!(harness.root.join("running").join("activation-bound").exists());
+        assert_eq!(harness.supervisor.runtime().actions().len(), 1);
+    }
+
+    #[test]
     fn replacement_plan_requires_a_new_activation_identity_before_stop() {
         let record = test_record();
         let same = RuntimeHandle {
+            addon_id: record.addon_id.clone(),
             activation_instance: record.activation_instance.clone(),
         };
         assert!(matches!(
             TrustedServiceSupervisor::<FakeTrustedServiceRuntime>::activation_replacement_plan(
                 &same, &record
+            ),
+            Err(RuntimeError::Conflict(_))
+        ));
+        let wrong_addon = RuntimeHandle {
+            addon_id: "other.service".to_string(),
+            activation_instance: "activation-old".to_string(),
+        };
+        assert!(matches!(
+            TrustedServiceSupervisor::<FakeTrustedServiceRuntime>::activation_replacement_plan(
+                &wrong_addon,
+                &record,
             ),
             Err(RuntimeError::Conflict(_))
         ));
