@@ -340,6 +340,30 @@ const TRUSTED_SERVICE_CAPABILITIES: &[&str] = &[
     "client_extension",
 ];
 
+pub(crate) fn validate_trusted_service_image_reference(image: &str) -> Result<(), String> {
+    if image.is_empty()
+        || image.len() > 255
+        || image.contains("..")
+        || image.contains("://")
+        || image.contains(':')
+        || image.contains('@')
+        || image.contains("//")
+        || !image.contains('/')
+        || image.starts_with('/')
+        || image.ends_with('/')
+        || image.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+        || !image
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | ':'))
+        || image.split('/').any(|component| {
+            component.is_empty() || component.starts_with(':') || component.ends_with(':')
+        })
+    {
+        return Err("Invalid trusted service image reference".to_string());
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_trusted_service_image_digest(digest: &str) -> Result<(), String> {
     if digest.len() != "sha256:".len() + 64
         || !digest.starts_with("sha256:")
@@ -353,32 +377,7 @@ pub(crate) fn validate_trusted_service_image_digest(digest: &str) -> Result<(), 
 }
 
 fn validate_trusted_service_spec(spec: &TrustedServerServiceSpec) -> Result<(), AddonError> {
-    if spec.image.is_empty()
-        || spec.image.len() > 255
-        || spec.image.contains("..")
-        || spec.image.contains("://")
-        || spec.image.contains(':')
-        || spec.image.contains('@')
-        || spec.image.contains("//")
-        || !spec.image.contains('/')
-        || spec.image.starts_with('/')
-        || spec.image.ends_with('/')
-        || spec
-            .image
-            .chars()
-            .any(|ch| ch.is_whitespace() || ch.is_control())
-        || !spec
-            .image
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | ':'))
-        || spec.image.split('/').any(|component| {
-            component.is_empty() || component.starts_with(':') || component.ends_with(':')
-        })
-    {
-        return Err(AddonError::Invalid(
-            "Invalid trusted service image reference".to_string(),
-        ));
-    }
+    validate_trusted_service_image_reference(&spec.image).map_err(AddonError::Invalid)?;
     validate_trusted_service_image_digest(&spec.image_digest).map_err(AddonError::Invalid)?;
     validate_id(&spec.storage_namespace).map_err(|_| {
         AddonError::Invalid("Invalid trusted service storage namespace".to_string())

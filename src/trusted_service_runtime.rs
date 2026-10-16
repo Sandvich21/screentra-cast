@@ -603,6 +603,7 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
     fn start(&mut self, request: &RuntimeLaunchRequest) -> Result<RuntimeHandle, RuntimeError> {
         if request.addon_id.is_empty()
             || request.activation_instance.is_empty()
+            || addons::validate_trusted_service_image_reference(&request.image).is_err()
             || addons::validate_trusted_service_image_digest(&request.image_digest).is_err()
         {
             return Err(RuntimeError::Invalid(
@@ -808,6 +809,12 @@ mod tests {
         malformed_digest.image_digest = "sha256:ABC".to_string();
         assert!(matches!(
             harness.supervisor.runtime_mut().start(&malformed_digest),
+            Err(RuntimeError::Invalid(_))
+        ));
+        let mut malformed_image = request.clone();
+        malformed_image.image = "service".to_string();
+        assert!(matches!(
+            harness.supervisor.runtime_mut().start(&malformed_image),
             Err(RuntimeError::Invalid(_))
         ));
         let mut traversal_instance = request.clone();
