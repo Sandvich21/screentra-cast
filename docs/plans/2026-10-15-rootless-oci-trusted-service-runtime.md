@@ -90,7 +90,7 @@ Keep SQLite API-only and keep the current PostgreSQL controlled adapter non-serv
 
 ## Task 5: Add resource, identity, and failure lifecycle coverage
 
-**Status:** Partial contract-only coverage added: the disposable fake runtime now models crash and readiness-timeout terminal states, removes activation-owned running markers, rejects repeated stop attempts, and never restarts automatically. Real OCI readiness, process supervision, gateway timeout handling, and production failure wiring remain disabled.
+**Status:** Partial contract-only coverage added: the disposable fake runtime now models crash and readiness-timeout terminal states, removes activation-owned running markers, rejects repeated stop attempts, and never restarts automatically. Replacement planning now requires a distinct activation identity and validates the new record before any future stop/start sequence. Real OCI readiness, process supervision, gateway timeout handling, and production failure wiring remain disabled.
 
 **Files:**
 - Modify: `src/trusted_service_oci.rs`

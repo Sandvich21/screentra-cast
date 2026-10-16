@@ -437,6 +437,14 @@ pub struct ActivationPlan {
     pub blocked_by: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivationReplacementPlan {
+    pub old_activation_instance: String,
+    pub new_activation_instance: String,
+    pub can_start: bool,
+    pub blocked_by: Vec<String>,
+}
+
 pub struct TrustedServiceSupervisor<R> {
     runtime: R,
 }
@@ -477,6 +485,29 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
             activation_instance: record.activation_instance.clone(),
             can_start: blocked_by.is_empty(),
             blocked_by,
+        })
+    }
+
+    pub fn activation_replacement_plan(
+        old_handle: &RuntimeHandle,
+        record: &TrustedServiceRuntimeRecord,
+    ) -> Result<ActivationReplacementPlan, RuntimeError> {
+        if old_handle.activation_instance.is_empty() {
+            return Err(RuntimeError::Invalid(
+                "Old activation identity is empty".to_string(),
+            ));
+        }
+        if old_handle.activation_instance == record.activation_instance {
+            return Err(RuntimeError::Conflict(
+                "Activation replacement requires a new activation identity".to_string(),
+            ));
+        }
+        let plan = Self::activation_plan(record)?;
+        Ok(ActivationReplacementPlan {
+            old_activation_instance: old_handle.activation_instance.clone(),
+            new_activation_instance: plan.activation_instance,
+            can_start: plan.can_start,
+            blocked_by: plan.blocked_by,
         })
     }
 
@@ -806,6 +837,32 @@ mod tests {
                 .unwrap(),
             RuntimeStatus::TimedOut
         );
+    }
+
+    #[test]
+    fn replacement_plan_requires_a_new_activation_identity_before_stop() {
+        let record = test_record();
+        let same = RuntimeHandle {
+            activation_instance: record.activation_instance.clone(),
+        };
+        assert!(matches!(
+            TrustedServiceSupervisor::<FakeTrustedServiceRuntime>::activation_replacement_plan(
+                &same, &record
+            ),
+            Err(RuntimeError::Conflict(_))
+        ));
+
+        let mut replacement = record.clone();
+        replacement.activation_instance = "activation-replacement".to_string();
+        let plan =
+            TrustedServiceSupervisor::<FakeTrustedServiceRuntime>::activation_replacement_plan(
+                &same,
+                &replacement,
+            )
+            .expect("replacement should produce a blocked-or-ready plan");
+        assert_eq!(plan.old_activation_instance, "activation-1");
+        assert_eq!(plan.new_activation_instance, "activation-replacement");
+        assert!(!plan.can_start);
     }
 
     #[test]
