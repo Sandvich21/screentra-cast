@@ -16,6 +16,7 @@ pub enum GatewayStorageOperation {
 }
 
 pub const GATEWAY_PROTOCOL_VERSION: u16 = 1;
+pub const GATEWAY_SOCKET_PATH: &str = "/run/screentra/gateway.sock";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GatewayConnectionHello {
