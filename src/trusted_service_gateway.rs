@@ -871,8 +871,18 @@ mod tests {
             )
             .is_err());
         assert!(!session.is_established());
-        assert_eq!(session.accept_hello_frame(&frame, peer).unwrap(), Some(frame.len()));
+        assert_eq!(
+            session.accept_hello_frame(&frame, peer).unwrap(),
+            Some(frame.len())
+        );
         assert!(session.is_established());
+        let request_frame = encode_request_frame(&request()).expect("request frame should encode");
+        let (decoded_request, consumed) = session
+            .admit_frame(&request_frame, Instant::now())
+            .unwrap()
+            .expect("request frame should be admitted after hello");
+        assert_eq!(decoded_request.request_id, "request-1");
+        assert_eq!(consumed, request_frame.len());
     }
 
     #[test]
