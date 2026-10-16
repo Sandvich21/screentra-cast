@@ -119,6 +119,8 @@ No image pull is implemented until signature verification, registry allowlisting
 
 ## Task 7: Gate activation and perform the boundary review
 
+**Status:** Pending. Contract validation, bounded dry-run argv construction, registry policy, gateway/session types, lifecycle records, and disabled credential/database boundaries are present, but the required real supervisor, Unix transport, image-signature transport, credential broker, resource enforcement, rollback wiring, and production gateway remain incomplete. `EXECUTION_ENABLED` and the `database_boundary` gate remain disabled.
+
 **Files:**
 - Modify: `src/trusted_service_runtime.rs`
 - Modify: `docs/plans/2026-10-15-rootless-oci-trusted-service-runtime.md`
