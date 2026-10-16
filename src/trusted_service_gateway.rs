@@ -686,7 +686,7 @@ mod tests {
         GatewayPeerCredentials, GatewayPeerPolicy, GatewayRateLimiter, GatewayReplayGuard,
         GatewayRequestAdmission, GatewayRequestEnvelope, GatewaySession, GatewayStorageOperation,
         GATEWAY_PROTOCOL_VERSION, MAX_OPERATIONS_PER_CONNECTION, MAX_REQUESTS_PER_ACTIVATION,
-        MAX_TRACKED_ACTIVATIONS,
+        MAX_RESPONSE_BYTES, MAX_TRACKED_ACTIVATIONS,
     };
     use crate::trusted_service_database::{
         DatabaseResponse, TrustedServiceDatabaseContract, MAX_REQUEST_BYTES,
@@ -813,6 +813,22 @@ mod tests {
             .expect("second response frame should decode");
         assert_eq!(decoded_second, DatabaseResponse::Written);
         assert_eq!(consumed_second, second.len());
+    }
+
+    #[test]
+    fn response_encoding_rejects_oversized_entries_before_serialization() {
+        let response = DatabaseResponse::Entries(vec![(
+            "oversized".to_string(),
+            "x".repeat(MAX_RESPONSE_BYTES),
+        )]);
+        assert!(encode_response(&response).is_err());
+        assert!(encode_response_frame(&response).is_err());
+    }
+
+    #[test]
+    fn response_frame_decoder_rejects_oversized_length_before_payload_read() {
+        let oversized_length = ((MAX_RESPONSE_BYTES + 1) as u32).to_be_bytes();
+        assert!(decode_response_frame(&oversized_length).is_err());
     }
 
     #[test]
