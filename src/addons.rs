@@ -1006,7 +1006,11 @@ fn read_trusted_service_stage(dir: &Path) -> Result<TrustedServiceStage, AddonEr
     let staged_at = state
         .get("staged_at")
         .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty() && value.len() <= 64)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && chrono::DateTime::parse_from_rfc3339(value).is_ok()
+        })
         .ok_or_else(|| AddonError::Io("Staged trusted service timestamp is invalid".to_string()))?;
     if state_name != "staged" {
         return Err(AddonError::Io(
