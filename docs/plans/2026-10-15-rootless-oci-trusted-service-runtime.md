@@ -104,6 +104,8 @@ Use a disposable fixture and a real rootless OCI runtime only when one is explic
 
 ## Task 6: Add signed-image and registry transport policy
 
+**Status:** Contract-only registry allowlist validation is complete. It rejects unqualified images, non-canonical registry entries, aliases, and traversal paths; no image pull, registry connection, credential handling, or transport is enabled.
+
 **Files:**
 - Modify: `src/addons.rs`
 - Modify: `src/trusted_service_oci.rs`

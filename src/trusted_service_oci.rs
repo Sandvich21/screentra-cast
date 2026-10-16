@@ -261,14 +261,55 @@ pub fn validate_oci_launch_spec(spec: &OciLaunchSpec) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciRegistryPolicy {
+    pub allowed_registries: BTreeSet<String>,
+}
+
+pub fn validate_oci_image_registry(image: &str, policy: &OciRegistryPolicy) -> Result<(), String> {
+    if policy.allowed_registries.is_empty()
+        || policy.allowed_registries.iter().any(|registry| {
+            registry.is_empty()
+                || registry.len() > 255
+                || registry.contains('/')
+                || registry.contains(':')
+                || registry.contains('@')
+                || registry.contains("..")
+                || registry
+                    .chars()
+                    .any(|character| character.is_whitespace() || character.is_control())
+                || registry != &registry.to_ascii_lowercase()
+        })
+    {
+        return Err("OCI registry allowlist is invalid".to_string());
+    }
+    let (registry, repository) = image
+        .split_once('/')
+        .ok_or_else(|| "OCI image must use an allowlisted registry".to_string())?;
+    if repository.is_empty()
+        || repository.starts_with('/')
+        || repository.contains("//")
+        || repository
+            .split('/')
+            .any(|part| part == "." || part == "..")
+    {
+        return Err("OCI image repository path is invalid".to_string());
+    }
+    if !policy.allowed_registries.contains(registry) {
+        return Err("OCI image registry is not allowlisted".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::path::Path;
 
     use super::{
-        build_rootless_argv, probe_oci_runtime, validate_oci_launch_spec,
-        validate_oci_launch_spec_against_record, OciLaunchPolicy, OciLaunchSpec, OciResourceLimits,
-        TrustedServiceRuntimeRecord,
+        build_rootless_argv, probe_oci_runtime, validate_oci_image_registry,
+        validate_oci_launch_spec, validate_oci_launch_spec_against_record, OciLaunchPolicy,
+        OciLaunchSpec, OciRegistryPolicy, OciResourceLimits, TrustedServiceRuntimeRecord,
     };
 
     fn safe_spec() -> OciLaunchSpec {
@@ -306,6 +347,23 @@ mod tests {
     #[test]
     fn accepts_immutable_rootless_launch_spec() {
         validate_oci_launch_spec(&safe_spec()).expect("safe OCI spec should validate");
+    }
+
+    #[test]
+    fn registry_policy_requires_an_explicit_allowlisted_registry() {
+        let policy = OciRegistryPolicy {
+            allowed_registries: BTreeSet::from(["registry.example".to_string()]),
+        };
+        validate_oci_image_registry("registry.example/weather", &policy)
+            .expect("allowlisted registry should pass");
+        assert!(validate_oci_image_registry("docker.io/weather", &policy).is_err());
+        assert!(validate_oci_image_registry("weather", &policy).is_err());
+        assert!(validate_oci_image_registry("registry.example/../weather", &policy).is_err());
+
+        let invalid_policy = OciRegistryPolicy {
+            allowed_registries: BTreeSet::from(["Registry.Example".to_string()]),
+        };
+        assert!(validate_oci_image_registry("registry.example/weather", &invalid_policy).is_err());
     }
 
     #[test]

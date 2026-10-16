@@ -66,6 +66,12 @@ CPU, PID, and writable scratch limits. It does not
 select a runtime, invoke a process, pull an image, or change the disabled
 execution gate.
 
+The image transport policy now has a separate contract-only registry validator.
+It requires an explicit lower-case registry allowlist, rejects unqualified images,
+registry aliases, traversal components, and malformed allowlist entries. The
+validator is not connected to a puller; registry access, credentials, and image
+transport remain disabled.
+
 The launch contract also has an approval-binding validator. It requires the
 approved state, approver, every named activation gate, exact record identity,
 image, digest, capabilities, and namespaces before a launch spec can be used;
