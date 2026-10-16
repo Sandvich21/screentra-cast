@@ -1056,7 +1056,13 @@ pub fn list_trusted_service_stages() -> Result<Vec<TrustedServiceStage>, AddonEr
         if name.starts_with('.') {
             continue;
         }
-        if !entry.file_type().map_err(io_error)?.is_dir() {
+        let file_type = entry.file_type().map_err(io_error)?;
+        if file_type.is_symlink() {
+            return Err(AddonError::Invalid(
+                "Invalid staged trusted service directory".to_string(),
+            ));
+        }
+        if !file_type.is_dir() {
             continue;
         }
         validate_id(&name).map_err(|_| {
