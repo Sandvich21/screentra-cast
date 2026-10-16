@@ -57,10 +57,13 @@ execution policy:
 - capabilities are bounded to the documented allowlist:
   `storage`, `read:clients`, `read:layouts`, and `client_extension`.
 
-These checks are defensive validation plus detached image-digest signature
-verification, not OCI image verification. The current server does not pull
-from a registry, verify an OCI signature, create a container, mint a service
-credential, mount a volume, expose a gateway, or start a process.
+The first rootless-OCI phase now has a contract-only validator in
+`src/trusted_service_oci.rs`. It accepts only an exact lowercase image digest,
+activation-bound namespaces, allowlisted capabilities, shell-free argv, no
+environment or host mounts, no published ports, rootless/read-only/no-new-
+privileges/default-deny-network policy, and bounded resources. It does not
+select a runtime, invoke a process, pull an image, or change the disabled
+execution gate.
 
 ## Required future activation gates
 
