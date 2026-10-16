@@ -1218,6 +1218,9 @@ mod tests {
 
     use std::sync::{Mutex, OnceLock};
 
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
     static STORAGE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn manifest() -> AddonManifest {
@@ -1375,6 +1378,35 @@ mod tests {
         });
         value.widget_types.clear();
         value
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_service_root_symlink_is_rejected_before_creation() {
+        let _guard = STORAGE_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("screentra-trusted-root-{}", Uuid::new_v4()));
+        let target =
+            std::env::temp_dir().join(format!("screentra-trusted-target-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        symlink(&target, root.join("trusted-services")).unwrap();
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        let result = checked_trusted_service_storage_dir(true);
+        assert!(result.is_err());
+        assert!(target.read_dir().unwrap().next().is_none());
+        if let Some(value) = old_data_root {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(target);
     }
 
     #[test]
