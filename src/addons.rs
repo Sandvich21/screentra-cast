@@ -74,6 +74,23 @@ pub fn validate_addon_storage_value(value: &str) -> Result<(), String> {
         .map_err(|_| "Addon storage value must be valid JSON".to_string())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrustedServiceLaunchProfile {
+    pub command: Vec<String>,
+    pub gateway_socket_path: String,
+    pub rootless: bool,
+    pub non_root: bool,
+    pub network_disabled: bool,
+    pub read_only_rootfs: bool,
+    pub no_new_privileges: bool,
+    pub drop_all_capabilities: bool,
+    pub seccomp_default: bool,
+    pub memory_bytes: u64,
+    pub cpu_millis: u32,
+    pub pids: u32,
+    pub writable_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustedServerServiceSpec {
     pub image: String,
@@ -82,6 +99,7 @@ pub struct TrustedServerServiceSpec {
     pub capabilities: Vec<String>,
     pub storage_namespace: String,
     pub api_namespace: String,
+    pub launch_profile: TrustedServiceLaunchProfile,
     #[serde(default)]
     pub client_extension_id: Option<String>,
 }
@@ -390,9 +408,73 @@ pub(crate) fn validate_trusted_service_image_digest(digest: &str) -> Result<(), 
     Ok(())
 }
 
+pub(crate) fn validate_trusted_service_launch_profile(
+    profile: &TrustedServiceLaunchProfile,
+) -> Result<(), AddonError> {
+    if profile.gateway_socket_path != crate::trusted_service_gateway::GATEWAY_SOCKET_PATH
+        || !profile.rootless
+        || !profile.non_root
+        || !profile.network_disabled
+        || !profile.read_only_rootfs
+        || !profile.no_new_privileges
+        || !profile.drop_all_capabilities
+        || !profile.seccomp_default
+    {
+        return Err(AddonError::Invalid(
+            "Invalid trusted service isolation profile".to_string(),
+        ));
+    }
+    let command_bytes = profile
+        .command
+        .iter()
+        .try_fold(0usize, |total, part| total.checked_add(part.len()));
+    if profile.command.is_empty()
+        || profile.command.len() > 64
+        || command_bytes.map_or(true, |bytes| bytes > 4 * 1024)
+        || profile.command.iter().any(|part| {
+            let executable = Path::new(part)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(part);
+            part.is_empty()
+                || part.len() > 256
+                || part.chars().any(|character| character.is_control())
+                || matches!(
+                    executable,
+                    "sh" | "bash"
+                        | "dash"
+                        | "zsh"
+                        | "ksh"
+                        | "fish"
+                        | "csh"
+                        | "tcsh"
+                        | "pwsh"
+                        | "powershell"
+                        | "cmd"
+                        | "cmd.exe"
+                )
+                || matches!(part.as_str(), "-c" | "-lc")
+        })
+        || profile.memory_bytes == 0
+        || profile.memory_bytes > 4 * 1024 * 1024 * 1024
+        || profile.cpu_millis == 0
+        || profile.cpu_millis > 16_000
+        || profile.pids == 0
+        || profile.pids > 4_096
+        || profile.writable_bytes == 0
+        || profile.writable_bytes > 1024 * 1024 * 1024
+    {
+        return Err(AddonError::Invalid(
+            "Invalid trusted service launch profile".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_trusted_service_spec(spec: &TrustedServerServiceSpec) -> Result<(), AddonError> {
     validate_trusted_service_image_reference(&spec.image).map_err(AddonError::Invalid)?;
     validate_trusted_service_image_digest(&spec.image_digest).map_err(AddonError::Invalid)?;
+    validate_trusted_service_launch_profile(&spec.launch_profile)?;
     validate_id(&spec.storage_namespace).map_err(|_| {
         AddonError::Invalid("Invalid trusted service storage namespace".to_string())
     })?;
@@ -1267,6 +1349,42 @@ mod tests {
         }
     }
 
+    fn launch_profile() -> TrustedServiceLaunchProfile {
+        TrustedServiceLaunchProfile {
+            command: vec!["/service".to_string()],
+            gateway_socket_path: "/run/screentra/gateway.sock".to_string(),
+            rootless: true,
+            non_root: true,
+            network_disabled: true,
+            read_only_rootfs: true,
+            no_new_privileges: true,
+            drop_all_capabilities: true,
+            seccomp_default: true,
+            memory_bytes: 256 * 1024 * 1024,
+            cpu_millis: 500,
+            pids: 64,
+            writable_bytes: 16 * 1024 * 1024,
+        }
+    }
+
+    #[test]
+    fn validates_explicit_trusted_service_launch_profile() {
+        validate_trusted_service_launch_profile(&launch_profile())
+            .expect("bounded rootless launch profile should validate");
+
+        let mut shell = launch_profile();
+        shell.command = vec!["/bin/sh".to_string(), "-c".to_string(), "run".to_string()];
+        assert!(validate_trusted_service_launch_profile(&shell).is_err());
+
+        let mut gateway = launch_profile();
+        gateway.gateway_socket_path = "/tmp/host.sock".to_string();
+        assert!(validate_trusted_service_launch_profile(&gateway).is_err());
+
+        let mut oversized = launch_profile();
+        oversized.memory_bytes = 4 * 1024 * 1024 * 1024 + 1;
+        assert!(validate_trusted_service_launch_profile(&oversized).is_err());
+    }
+
     fn client_manifest(client_sha256: &str) -> AddonManifest {
         let mut value = manifest();
         value.kind = "client_extension".to_string();
@@ -1343,6 +1461,7 @@ mod tests {
             capabilities: vec!["storage".to_string()],
             storage_namespace: "air-quality".to_string(),
             api_namespace: "air-quality".to_string(),
+            launch_profile: launch_profile(),
             client_extension_id: Some("air-quality.client".to_string()),
         });
         let error = validate_manifest(&value).unwrap_err().to_string();
@@ -1359,6 +1478,7 @@ mod tests {
             capabilities: vec!["storage".to_string()],
             storage_namespace: "air-quality".to_string(),
             api_namespace: "air-quality".to_string(),
+            launch_profile: launch_profile(),
             client_extension_id: Some("air-quality.client".to_string()),
         });
         let error = validate_manifest(&value).unwrap_err().to_string();
@@ -1375,6 +1495,7 @@ mod tests {
             capabilities: vec!["read:secrets".to_string()],
             storage_namespace: "air-quality".to_string(),
             api_namespace: "air-quality".to_string(),
+            launch_profile: launch_profile(),
             client_extension_id: Some("air-quality.client".to_string()),
         });
         let error = validate_manifest(&value).unwrap_err().to_string();
@@ -1410,6 +1531,7 @@ mod tests {
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.air-quality".to_string(),
             api_namespace: "example.air-quality".to_string(),
+            launch_profile: launch_profile(),
             client_extension_id: Some("example.air-quality.client".to_string()),
         });
         value.widget_types.clear();
@@ -1703,6 +1825,7 @@ mod tests {
             capabilities: vec!["storage".to_string()],
             storage_namespace: "air-quality".to_string(),
             api_namespace: "air-quality".to_string(),
+            launch_profile: launch_profile(),
             client_extension_id: Some("air-quality.client".to_string()),
         });
         let error = validate_manifest(&value).unwrap_err().to_string();

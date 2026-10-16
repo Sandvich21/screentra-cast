@@ -77,6 +77,7 @@ pub struct TrustedServiceRuntimeRecord {
     pub capabilities: Vec<String>,
     pub storage_namespace: String,
     pub api_namespace: String,
+    pub launch_profile: addons::TrustedServiceLaunchProfile,
     pub activation_instance: String,
     pub state: String,
     pub approved_by: Option<String>,
@@ -260,6 +261,7 @@ fn record_from_stage(stage: &TrustedServiceStage, approver: &str) -> TrustedServ
         capabilities: service.capabilities.clone(),
         storage_namespace: service.storage_namespace.clone(),
         api_namespace: service.api_namespace.clone(),
+        launch_profile: service.launch_profile.clone(),
         activation_instance: Uuid::new_v4().to_string(),
         state: "approved".to_string(),
         approved_by: Some(approver.to_string()),
@@ -435,6 +437,8 @@ fn validate_runtime_record_contract(
         ));
     }
     validate_capability_binding(record)?;
+    addons::validate_trusted_service_launch_profile(&record.launch_profile)
+        .map_err(|error| RuntimeError::Invalid(error.to_string()))?;
     addons::validate_trusted_service_image_reference(&record.image)
         .map_err(RuntimeError::Invalid)?;
     addons::validate_trusted_service_image_digest(&record.image_digest)
@@ -824,6 +828,17 @@ mod tests {
     }
 
     #[test]
+    fn persisted_record_rejects_tampered_launch_profile() {
+        let mut record = test_record();
+        record.launch_profile.gateway_socket_path = "/tmp/host.sock".to_string();
+        assert!(validate_runtime_record_contract(&record).is_err());
+
+        let mut record = test_record();
+        record.launch_profile.command = vec!["/bin/sh".to_string(), "-c".to_string()];
+        assert!(validate_runtime_record_contract(&record).is_err());
+    }
+
+    #[test]
     fn runtime_record_size_and_file_type_are_bounded() {
         let root =
             std::env::temp_dir().join(format!("screentra-runtime-bounds-{}", Uuid::new_v4()));
@@ -1014,6 +1029,24 @@ mod tests {
         assert!(harness.supervisor.runtime().actions().is_empty());
     }
 
+    fn test_launch_profile() -> addons::TrustedServiceLaunchProfile {
+        addons::TrustedServiceLaunchProfile {
+            command: vec!["/service".to_string()],
+            gateway_socket_path: "/run/screentra/gateway.sock".to_string(),
+            rootless: true,
+            non_root: true,
+            network_disabled: true,
+            read_only_rootfs: true,
+            no_new_privileges: true,
+            drop_all_capabilities: true,
+            seccomp_default: true,
+            memory_bytes: 256 * 1024 * 1024,
+            cpu_millis: 500,
+            pids: 64,
+            writable_bytes: 16 * 1024 * 1024,
+        }
+    }
+
     fn test_record() -> TrustedServiceRuntimeRecord {
         TrustedServiceRuntimeRecord {
             record_version: RUNTIME_RECORD_VERSION,
@@ -1024,6 +1057,7 @@ mod tests {
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.service".to_string(),
             api_namespace: "example.service".to_string(),
+            launch_profile: test_launch_profile(),
             activation_instance: "activation-1".to_string(),
             state: "approved".to_string(),
             approved_by: Some("admin".to_string()),

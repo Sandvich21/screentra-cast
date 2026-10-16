@@ -40,15 +40,33 @@ A future manifest uses `kind=trusted_server_service` and declares:
     "capabilities": ["storage", "read:clients"],
     "storage_namespace": "example.air-quality",
     "api_namespace": "example.air-quality",
+    "launch_profile": {
+      "command": ["/usr/local/bin/air-quality-service"],
+      "gateway_socket_path": "/run/screentra/gateway.sock",
+      "rootless": true,
+      "non_root": true,
+      "network_disabled": true,
+      "read_only_rootfs": true,
+      "no_new_privileges": true,
+      "drop_all_capabilities": true,
+      "seccomp_default": true,
+      "memory_bytes": 268435456,
+      "cpu_millis": 500,
+      "pids": 64,
+      "writable_bytes": 16777216
+    },
     "client_extension_id": "example.air-quality.client"
   }
 }
 ```
 
 The manifest must never contain database URLs, passwords, bearer tokens, host
-paths, shell commands, arbitrary mounts, or unrestricted upstream proxy URLs.
-The image digest is part of the signed contract; mutable tags are display
-metadata only and are not sufficient for installation.
+paths, shell fragments, arbitrary mounts, or unrestricted upstream proxy URLs.
+The `command` field is an explicit bounded executable argv, not a shell command;
+its isolation and resource fields are persisted into the approval record and
+must match the eventual launch specification exactly. The image digest is part
+of the signed contract; mutable tags are display metadata only and are not
+sufficient for installation.
 
 ## Storage boundary
 

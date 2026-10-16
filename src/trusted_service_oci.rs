@@ -134,6 +134,25 @@ fn is_regular_executable(metadata: std::fs::Metadata) -> bool {
     }
 }
 
+fn launch_profile_matches(
+    spec: &OciLaunchSpec,
+    profile: &crate::addons::TrustedServiceLaunchProfile,
+) -> bool {
+    spec.command == profile.command
+        && spec.gateway_socket_path == profile.gateway_socket_path
+        && spec.policy.rootless == profile.rootless
+        && spec.policy.non_root == profile.non_root
+        && spec.policy.network_disabled == profile.network_disabled
+        && spec.policy.read_only_rootfs == profile.read_only_rootfs
+        && spec.policy.no_new_privileges == profile.no_new_privileges
+        && spec.policy.drop_all_capabilities == profile.drop_all_capabilities
+        && spec.policy.seccomp_default == profile.seccomp_default
+        && spec.resources.memory_bytes == profile.memory_bytes
+        && spec.resources.cpu_millis == profile.cpu_millis
+        && spec.resources.pids == profile.pids
+        && spec.resources.writable_bytes == profile.writable_bytes
+}
+
 pub fn validate_oci_launch_spec_against_record(
     spec: &OciLaunchSpec,
     record: &TrustedServiceRuntimeRecord,
@@ -154,6 +173,7 @@ pub fn validate_oci_launch_spec_against_record(
         || spec.capabilities != record.capabilities
         || spec.storage_namespace != record.storage_namespace
         || spec.api_namespace != record.api_namespace
+        || !launch_profile_matches(spec, &record.launch_profile)
     {
         return Err("OCI launch spec does not match the approved activation".to_string());
     }
@@ -429,7 +449,8 @@ mod tests {
         build_rootless_argv, container_name, probe_oci_runtime,
         validate_oci_activation_gate_records, validate_oci_activation_gates,
         validate_oci_approval_metadata, validate_oci_image_registry, validate_oci_launch_spec,
-        validate_oci_launch_spec_against_record, ActivationGate, OciLaunchPolicy, OciLaunchSpec,
+        validate_oci_launch_spec_against_record, launch_profile_matches, ActivationGate,
+        OciLaunchPolicy, OciLaunchSpec,
         OciRegistryPolicy, OciResourceLimits, TrustedServiceRuntimeRecord,
         MAX_OCI_ALLOWED_REGISTRIES, MAX_OCI_COMMAND_ARGS, MAX_OCI_COMMAND_PART_BYTES,
         REQUIRED_OCI_ACTIVATION_GATES,
@@ -675,6 +696,21 @@ mod tests {
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.weather".to_string(),
             api_namespace: "example.weather".to_string(),
+            launch_profile: crate::addons::TrustedServiceLaunchProfile {
+                command: vec!["/service".to_string()],
+                gateway_socket_path: crate::trusted_service_gateway::GATEWAY_SOCKET_PATH.to_string(),
+                rootless: true,
+                non_root: true,
+                network_disabled: true,
+                read_only_rootfs: true,
+                no_new_privileges: true,
+                drop_all_capabilities: true,
+                seccomp_default: true,
+                memory_bytes: 256 * 1024 * 1024,
+                cpu_millis: 500,
+                pids: 64,
+                writable_bytes: 16 * 1024 * 1024,
+            },
             activation_instance: "activation-1".to_string(),
             state: "approved".to_string(),
             approved_by: Some("admin".to_string()),
@@ -685,6 +721,13 @@ mod tests {
             last_error: None,
         };
         validate_oci_approval_metadata(&record).expect("approval metadata should validate");
+        assert!(launch_profile_matches(&safe_spec(), &record.launch_profile));
+        let mut mismatched_spec = safe_spec();
+        mismatched_spec.resources.memory_bytes += 1;
+        assert!(!launch_profile_matches(
+            &mismatched_spec,
+            &record.launch_profile
+        ));
         let mut invalid = record.clone();
         invalid.approved_by = Some(String::new());
         assert!(validate_oci_approval_metadata(&invalid).is_err());
