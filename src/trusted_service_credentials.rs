@@ -5,7 +5,15 @@
 //! fails closed. Lease metadata is intentionally not a credential value and is
 //! never persisted in runtime records, manifests, backups, or client payloads.
 
+use std::collections::BTreeSet;
 use std::fmt;
+
+const SUPPORTED_CREDENTIAL_CAPABILITIES: &[&str] = &[
+    "storage",
+    "read:clients",
+    "read:layouts",
+    "client_extension",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialScope {
@@ -39,6 +47,15 @@ impl CredentialScope {
                 .iter()
                 .any(|capability| capability.is_empty() || capability.len() > 64)
         {
+            return Err(CredentialError::Invalid(
+                "Invalid trusted service credential scope".to_string(),
+            ));
+        }
+        let mut capabilities = BTreeSet::new();
+        if self.capabilities.iter().any(|capability| {
+            !SUPPORTED_CREDENTIAL_CAPABILITIES.contains(&capability.as_str())
+                || !capabilities.insert(capability)
+        }) {
             return Err(CredentialError::Invalid(
                 "Invalid trusted service credential scope".to_string(),
             ));
@@ -113,6 +130,22 @@ mod tests {
             .issue(&scope())
             .expect_err("credential issuance must remain disabled");
         assert!(matches!(error, CredentialError::Blocked(_)));
+    }
+
+    #[test]
+    fn credential_scope_rejects_unknown_and_duplicate_capabilities() {
+        let mut invalid = scope();
+        invalid.capabilities = vec!["unknown".to_string()];
+        assert!(matches!(
+            invalid.validate(),
+            Err(CredentialError::Invalid(_))
+        ));
+
+        invalid.capabilities = vec!["storage".to_string(), "storage".to_string()];
+        assert!(matches!(
+            invalid.validate(),
+            Err(CredentialError::Invalid(_))
+        ));
     }
 
     #[test]
