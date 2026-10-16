@@ -260,7 +260,45 @@ pub enum GatewayResponseEnvelope {
     Entries { entries: Vec<(String, String)> },
 }
 
+fn encoded_json_string_len(value: &str) -> Option<usize> {
+    value.chars().try_fold(2usize, |length, character| {
+        let extra = match character {
+            '"' | '\\' => 2,
+            character if character <= '\u{1f}' => 6,
+            character => character.len_utf8(),
+        };
+        length.checked_add(extra)
+    })
+}
+
 pub fn encode_response(response: &DatabaseResponse) -> Result<Vec<u8>, String> {
+    let estimated_size = match response {
+        DatabaseResponse::Value(value_json) => 32usize
+            .checked_add(match value_json.as_deref() {
+                Some(value) => encoded_json_string_len(value)
+                    .ok_or_else(|| "Gateway response is too large".to_string())?,
+                None => 0,
+            })
+            .ok_or_else(|| "Gateway response is too large".to_string())?,
+        DatabaseResponse::Written => 32,
+        DatabaseResponse::Deleted(_) => 48,
+        DatabaseResponse::Entries(entries) => {
+            let entries_size = entries.iter().try_fold(0usize, |total, (key, value)| {
+                let item_size = encoded_json_string_len(key)?
+                    .checked_add(encoded_json_string_len(value)?)?
+                    .checked_add(3)?;
+                total.checked_add(item_size)
+            });
+            64usize
+                .checked_add(
+                    entries_size.ok_or_else(|| "Gateway response is too large".to_string())?,
+                )
+                .ok_or_else(|| "Gateway response is too large".to_string())?
+        }
+    };
+    if estimated_size > MAX_RESPONSE_BYTES {
+        return Err("Gateway response is too large".to_string());
+    }
     let envelope = match response {
         DatabaseResponse::Value(value_json) => GatewayResponseEnvelope::Value {
             value_json: value_json.clone(),
@@ -393,6 +431,12 @@ mod tests {
     fn bounds_responses_and_connection_operations() {
         let oversized = DatabaseResponse::Value(Some("x".repeat(70 * 1024)));
         assert!(encode_response(&oversized).is_err());
+
+        let oversized_entries = DatabaseResponse::Entries(vec![
+            ("first".to_string(), "x".repeat(40 * 1024)),
+            ("second".to_string(), "x".repeat(40 * 1024)),
+        ]);
+        assert!(encode_response(&oversized_entries).is_err());
 
         let mut budget = GatewayOperationBudget::new();
         for _ in 0..MAX_OPERATIONS_PER_CONNECTION {
