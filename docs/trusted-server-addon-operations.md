@@ -60,8 +60,9 @@ execution policy:
 The first rootless-OCI phase now has a contract-only validator in
 `src/trusted_service_oci.rs`. It accepts only an exact lowercase image digest,
 activation-bound namespaces, allowlisted capabilities, shell-free argv, no
-environment or host mounts, no published ports, rootless/read-only/no-new-
-privileges/default-deny-network policy, and bounded resources. It does not
+environment or host mounts, no published ports, non-root UID, default seccomp,
+read-only/no-new-privileges/default-deny-network policy, and bounded memory,
+CPU, PID, and writable scratch limits. It does not
 select a runtime, invoke a process, pull an image, or change the disabled
 execution gate.
 

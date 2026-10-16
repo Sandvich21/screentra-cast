@@ -108,8 +108,11 @@ pub fn build_rootless_argv(
         format!("--name={}", container_name(spec)),
         "--network=none".to_string(),
         "--read-only".to_string(),
+        "--user=65532:65532".to_string(),
         "--cap-drop=ALL".to_string(),
         "--security-opt=no-new-privileges".to_string(),
+        "--security-opt=seccomp=default".to_string(),
+        format!("--tmpfs=/tmp:rw,size={}", spec.resources.writable_bytes),
         format!("--pids-limit={}", spec.resources.pids),
         format!("--memory={}", spec.resources.memory_bytes),
         format!(
@@ -139,10 +142,12 @@ fn container_name(spec: &OciLaunchSpec) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OciLaunchPolicy {
     pub rootless: bool,
+    pub non_root: bool,
     pub network_disabled: bool,
     pub read_only_rootfs: bool,
     pub no_new_privileges: bool,
     pub drop_all_capabilities: bool,
+    pub seccomp_default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,10 +238,12 @@ pub fn validate_oci_launch_spec(spec: &OciLaunchSpec) -> Result<(), String> {
         return Err("OCI launch spec exposes a forbidden host boundary".to_string());
     }
     if !spec.policy.rootless
+        || !spec.policy.non_root
         || !spec.policy.network_disabled
         || !spec.policy.read_only_rootfs
         || !spec.policy.no_new_privileges
         || !spec.policy.drop_all_capabilities
+        || !spec.policy.seccomp_default
     {
         return Err("OCI isolation policy is incomplete".to_string());
     }
@@ -280,10 +287,12 @@ mod tests {
             published_ports: Vec::new(),
             policy: OciLaunchPolicy {
                 rootless: true,
+                non_root: true,
                 network_disabled: true,
                 read_only_rootfs: true,
                 no_new_privileges: true,
                 drop_all_capabilities: true,
+                seccomp_default: true,
             },
             resources: OciResourceLimits {
                 memory_bytes: 256 * 1024 * 1024,
@@ -354,6 +363,13 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--network=none", "--read-only"]));
         assert!(args.iter().any(|arg| arg == "--cap-drop=ALL"));
+        assert!(args.iter().any(|arg| arg == "--user=65532:65532"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--security-opt=seccomp=default"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "--tmpfs=/tmp:rw,size=16777216"));
         assert!(args
             .iter()
             .any(|arg| arg == "--security-opt=no-new-privileges"));
