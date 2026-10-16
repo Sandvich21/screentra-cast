@@ -71,6 +71,14 @@ reports missing or non-executable paths as blocked, and always keeps
 `can_start` false while OCI capability probing is disabled. It does not search
 PATH, invoke a command, fall back to a host process, or contact a registry.
 
+A contract-only gateway transport is defined in
+`src/trusted_service_gateway.rs`. It uses bounded JSON frames, binds every
+request to addon and activation identities, accepts only the `storage`
+capability, and converts only the typed storage operations into the existing
+database boundary. It has no listener, Unix socket, host port, credential
+transport, or runtime caller; decoding validates before any backend adapter
+could be reached.
+
 A fixed-argument builder is also present for the future supervisor. It emits
 only the selected supported runtime, `run`, immutable `image@digest`,
 `--network=none`, read-only root filesystem, dropped capabilities,
