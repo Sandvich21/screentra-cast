@@ -25,7 +25,9 @@ because no service can currently run.
 The listing path re-verifies each staged manifest and its `image.sig` against
 the trusted-service and image public keys before returning metadata. A tampered
 or malformed staged directory fails closed instead of being reported as an
-active service.
+active service. Explicit administrator removal can still delete malformed inert
+stage metadata after verifying the requested directory is a real non-symlink
+directory, allowing uninstall cleanup to complete.
 
 ## Phase 1 runtime records
 
