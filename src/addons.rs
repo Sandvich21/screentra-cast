@@ -873,8 +873,10 @@ pub fn install(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
     validate_manifest(&manifest)?;
     let _ = checked_addon_storage_dir(true)?;
     let dir = addon_dir(&manifest.id)?;
-    if dir.exists() {
-        return Err(AddonError::AlreadyInstalled);
+    match fs::symlink_metadata(&dir) {
+        Ok(_) => return Err(AddonError::AlreadyInstalled),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error(error)),
     }
     fs::create_dir_all(&dir).map_err(io_error)?;
     let installed_at = chrono::Utc::now().to_rfc3339();
@@ -1384,8 +1386,10 @@ pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, Addo
             ));
         }
         let destination = addon_dir(&manifest.id)?;
-        if destination.exists() {
-            return Err(AddonError::AlreadyInstalled);
+        match fs::symlink_metadata(&destination) {
+            Ok(_) => return Err(AddonError::AlreadyInstalled),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(error)),
         }
         let installed_at = chrono::Utc::now().to_rfc3339();
         let state = AddonState {
