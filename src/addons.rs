@@ -345,6 +345,8 @@ fn validate_trusted_service_spec(spec: &TrustedServerServiceSpec) -> Result<(), 
         || spec.image.len() > 255
         || spec.image.contains("..")
         || spec.image.contains("://")
+        || spec.image.contains(':')
+        || spec.image.contains('@')
         || spec.image.starts_with('/')
         || spec.image.ends_with('/')
         || spec
@@ -1285,7 +1287,7 @@ mod tests {
         let mut value = manifest();
         value.kind = "trusted_server_service".to_string();
         value.trusted_service = Some(TrustedServerServiceSpec {
-            image: "registry.example/air-quality:latest bad".to_string(),
+            image: "registry.example/air-quality:latest".to_string(),
             image_digest: "sha256:".to_string() + &"a".repeat(64),
             capabilities: vec!["storage".to_string()],
             storage_namespace: "air-quality".to_string(),
