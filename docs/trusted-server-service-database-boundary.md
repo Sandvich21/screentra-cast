@@ -131,6 +131,21 @@ Backups preserve service-owned data according to the selected boundary:
   stopped and its identity is revoked; it must not remove another namespace or
   core tables. Cleanup is idempotent and auditable.
 
+## Disposable PostgreSQL permission probe status
+
+A local disposable probe has verified the minimum server-provisioned role
+boundary without enabling it in Screentra. The probe used a temporary database,
+non-superuser/non-createdb/non-createrole service role, and a server-owned addon
+schema with explicit `USAGE` plus DML grants only. It verified that the role can
+read/write its approved table but cannot read a core table, read another addon
+schema, create tables in either schema, or connect after `CONNECT` is revoked.
+The temporary database and role were removed by cleanup. Credentials were passed
+only through the child process environment and were not retained.
+
+This is permission evidence for the future PostgreSQL schema/role mode, not a
+service gateway or activation path. The current controlled adapter still uses
+server-owned `addon_storage`, and the `database_boundary` gate remains false.
+
 ## Required implementation gates
 
 Before any real container can receive database capability, all of the

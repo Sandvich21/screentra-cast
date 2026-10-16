@@ -77,7 +77,7 @@ trait and harness are the current working-tree changes:
 
 Complete lifecycle integration around the non-service-facing adapters: extend
 backup/restore and uninstall coverage for controlled storage and inert runtime
-metadata, add rollback and stopped/disabled identity negative tests, and run the
-required PostgreSQL per-addon schema/role permission probe. Keep the database
-gate and execution disabled until those results are reviewed. Only then should a
-rootless OCI backend be considered.
+metadata, add rollback and stopped/disabled identity negative tests, and turn
+the disposable PostgreSQL schema/role permission probe into repeatable checked-in
+integration coverage. Keep the database gate and execution disabled until those
+results are reviewed. Only then should a rootless OCI backend be considered.
