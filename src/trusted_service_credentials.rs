@@ -173,6 +173,45 @@ pub trait TrustedServiceCredentialBroker {
     fn revoke(&mut self, lease: &CredentialLease) -> Result<(), CredentialError>;
 }
 
+/// Metadata-only lease ledger for a future broker boundary. It stores no
+/// secret value and cannot issue credentials; callers must register an
+/// already-approved opaque lease before use can be validated.
+#[derive(Debug, Default)]
+pub struct CredentialLeaseLedger {
+    leases: std::collections::BTreeMap<String, (CredentialLease, CredentialLeaseState)>,
+}
+
+impl CredentialLeaseLedger {
+    pub fn register(&mut self, lease: CredentialLease) -> Result<(), CredentialError> {
+        lease.validate()?;
+        if self.leases.contains_key(&lease.lease_id) {
+            return Err(CredentialError::Invalid(
+                "Trusted service credential lease is already registered".to_string(),
+            ));
+        }
+        let lease_id = lease.lease_id.clone();
+        self.leases
+            .insert(lease_id, (lease, CredentialLeaseState::Active));
+        Ok(())
+    }
+
+    pub fn revoke(&mut self, lease_id: &str) -> Result<(), CredentialError> {
+        let (_, state) = self.leases.get_mut(lease_id).ok_or(CredentialError::NotFound)?;
+        *state = CredentialLeaseState::Revoked;
+        Ok(())
+    }
+
+    pub fn validate_for_use(
+        &self,
+        lease_id: &str,
+        scope: &CredentialScope,
+        now: chrono::DateTime<chrono::FixedOffset>,
+    ) -> Result<(), CredentialError> {
+        let (lease, state) = self.leases.get(lease_id).ok_or(CredentialError::NotFound)?;
+        lease.validate_for_use(scope, *state, now)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialError {
     Invalid(String),
@@ -384,6 +423,42 @@ mod tests {
         assert!(matches!(
             lease.validate_for_use(&scope(), CredentialLeaseState::Revoked, now),
             Err(CredentialError::Blocked(_))
+        ));
+    }
+
+    #[test]
+    fn metadata_lease_ledger_owns_revocation_state_without_storing_secrets() {
+        let lease = CredentialLease {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
+            capabilities: vec!["storage".to_string()],
+            lease_id: "ledger-lease-1".to_string(),
+            expires_at: "2030-01-01T00:00:00Z".to_string(),
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2029-12-31T23:59:59Z").unwrap();
+        let mut ledger = CredentialLeaseLedger::default();
+        ledger
+            .register(lease.clone())
+            .expect("approved metadata lease should register");
+        assert!(matches!(
+            ledger.register(lease.clone()),
+            Err(CredentialError::Invalid(_))
+        ));
+        ledger
+            .validate_for_use("ledger-lease-1", &scope(), now)
+            .expect("active registered lease should validate");
+        ledger.revoke("ledger-lease-1").expect("revoke lease");
+        assert!(matches!(
+            ledger.validate_for_use("ledger-lease-1", &scope(), now),
+            Err(CredentialError::Blocked(_))
+        ));
+        assert!(matches!(
+            ledger.validate_for_use("missing", &scope(), now),
+            Err(CredentialError::NotFound)
+        ));
+        assert!(matches!(
+            ledger.revoke("missing"),
+            Err(CredentialError::NotFound)
         ));
     }
 
