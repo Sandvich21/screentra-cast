@@ -1907,6 +1907,38 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn legacy_runtime_records_default_new_evidence_to_false() {
+        let mut value = serde_json::to_value(test_record()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        for field in [
+            "image_signature_verified",
+            "resource_policy_verified",
+            "readiness_verified",
+            "credential_broker_verified",
+            "database_boundary_verified",
+            "controlled_gateway_verified",
+            "audit_verified",
+            "image_transport_verified",
+            "lifecycle_rollback_verified",
+            "cleanup_verified",
+            "dedicated_host_verified",
+        ] {
+            object.remove(field);
+        }
+        let record: TrustedServiceRuntimeRecord = serde_json::from_value(value).unwrap();
+        assert!(!record.image_signature_verified);
+        assert!(!record.resource_policy_verified);
+        assert!(!record.readiness_verified);
+        assert!(!record.credential_broker_verified);
+        assert!(!record.database_boundary_verified);
+        assert!(!record.controlled_gateway_verified);
+        assert!(!record.audit_verified);
+        assert!(!record.image_transport_verified);
+        assert!(!record.lifecycle_rollback_verified);
+        assert!(!record.cleanup_verified);
+        assert!(!record.dedicated_host_verified);
+    }
     #[cfg(unix)]
     #[test]
     fn runtime_record_read_rejects_symlinked_parent() {
