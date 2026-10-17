@@ -264,15 +264,34 @@ fn write_atomic(path: &Path, value: &TrustedServiceRuntimeRecord) -> Result<(), 
             RuntimeError::Io(error.to_string())
         }
     })?;
-    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
-        return Err(RuntimeError::Invalid(
-            "Invalid trusted service runtime record directory".to_string(),
-        ));
-    }
+    validate_private_runtime_directory(
+        &parent_metadata,
+        "Invalid trusted service runtime record directory",
+    )?;
+    #[cfg(unix)]
+    let parent_identity = {
+        use std::os::unix::fs::MetadataExt;
+        (parent_metadata.dev(), parent_metadata.ino())
+    };
     let temporary = parent.join(format!(".runtime-{}.tmp", Uuid::new_v4()));
     let bytes =
         serde_json::to_vec_pretty(value).map_err(|error| RuntimeError::Io(error.to_string()))?;
     let result = (|| {
+        let current_parent = fs::symlink_metadata(parent)
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        validate_private_runtime_directory(
+            &current_parent,
+            "Invalid trusted service runtime record directory",
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if (current_parent.dev(), current_parent.ino()) != parent_identity {
+                return Err(RuntimeError::Conflict(
+                    "Trusted service runtime record parent changed".to_string(),
+                ));
+            }
+        }
         let mut temporary_options = fs::OpenOptions::new();
         temporary_options.write(true).create_new(true);
         #[cfg(unix)]
@@ -302,6 +321,21 @@ fn write_atomic(path: &Path, value: &TrustedServiceRuntimeRecord) -> Result<(), 
             permissions.set_mode(0o600);
             fs::set_permissions(&temporary, permissions)
                 .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        }
+        let final_parent = fs::symlink_metadata(parent)
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        validate_private_runtime_directory(
+            &final_parent,
+            "Invalid trusted service runtime record directory",
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if (final_parent.dev(), final_parent.ino()) != parent_identity {
+                return Err(RuntimeError::Conflict(
+                    "Trusted service runtime record parent changed".to_string(),
+                ));
+            }
         }
         fs::rename(&temporary, path).map_err(|error| RuntimeError::Io(error.to_string()))?;
         Ok(())
@@ -1680,6 +1714,11 @@ mod tests {
             std::env::temp_dir().join(format!("screentra-runtime-record-{}", Uuid::new_v4()));
         let path = root.join("example.service").join(RUNTIME_FILE);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let record = test_record();
         write_atomic(&path, &record).unwrap();
         assert_eq!(read_record(&path).unwrap(), record);
@@ -1707,6 +1746,11 @@ mod tests {
         let mut invalid = test_record();
         invalid.image = "service".to_string();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
         write_atomic(&path, &invalid).unwrap();
         assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
 
