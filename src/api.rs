@@ -200,6 +200,29 @@ impl RuntimeState {
         }
     }
 
+    #[cfg(unix)]
+    pub(crate) fn trusted_service_gateway(
+        &self,
+        addon_id: &str,
+        activation_instance: &str,
+        peer_policy: crate::trusted_service_gateway::GatewayPeerPolicy,
+    ) -> Result<(
+        crate::trusted_service_gateway::TrustedServiceUnixGateway,
+        Arc<dyn crate::trusted_service_gateway::GatewayOperationHandler>,
+    ), String> {
+        let handler = self.trusted_service_database_handler(addon_id, activation_instance)?;
+        let contract = crate::trusted_service_database::TrustedServiceDatabaseContract::core_storage_api(
+            addon_id,
+            activation_instance,
+        );
+        let binding = crate::trusted_service_gateway::GatewayActivationBinding::new(contract);
+        let gateway = crate::trusted_service_gateway::TrustedServiceUnixGateway::new(
+            binding,
+            peer_policy,
+        )?;
+        Ok((gateway, handler))
+    }
+
     pub fn sqlite(db: AppState) -> Self {
         let auth_repository = crate::auth::AuthRepository::Sqlite(db.clone());
         let backup_repository = backup_api::BackupMetadataRepository::Sqlite(db.clone());
@@ -9540,6 +9563,25 @@ mod tests {
         .await
         .expect_err("deleted addon storage should be absent");
         assert_eq!(missing.0, StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn trusted_service_boundary_selection_is_gate_first_and_socket_free() {
+        let db_path = std::env::temp_dir().join(format!("screentra-trusted-boundary-{}.db", Uuid::new_v4()));
+        let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open test database"));
+        let state = RuntimeState::sqlite(db);
+        let peer_policy = crate::trusted_service_gateway::GatewayPeerPolicy::new(1000, 1000, 42)
+            .expect("peer policy should validate");
+        let (gateway, handler) = state
+            .trusted_service_gateway("example.service", "activation-1", peer_policy)
+            .expect("controlled trusted-service boundary should be constructible");
+        let error = gateway
+            .run(handler)
+            .await
+            .expect_err("disabled boundary must not bind a socket");
+        assert!(error.contains("disabled"));
         let _ = std::fs::remove_file(db_path);
     }
 
