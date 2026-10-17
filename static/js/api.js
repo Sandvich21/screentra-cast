@@ -278,6 +278,16 @@ window.API = {
         return res.json();
     },
 
+    async updateAddon(manifest) {
+        const res = await fetch(`/api/addons/${encodeURIComponent(manifest.id)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(manifest),
+        });
+        if (!res.ok) throw new Error(await res.text() || 'Failed to update addon');
+        return res.json();
+    },
+
     async installAddonPackage(file) {
         const body = new FormData();
         body.append('package', file);

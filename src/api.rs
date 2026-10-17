@@ -1310,7 +1310,7 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         )
         .route("/api/addons/{id}/enable", post(enable_addon))
         .route("/api/addons/{id}/disable", post(disable_addon))
-        .route("/api/addons/{id}", delete(delete_addon))
+        .route("/api/addons/{id}", put(update_addon).delete(delete_addon))
         .route("/api/scenes", get(list_scenes).post(create_scene))
         .route(
             "/api/scenes/{id}",
@@ -2484,6 +2484,21 @@ async fn install_addon(
 ) -> Result<(StatusCode, AxumJson<AddonRecord>), (StatusCode, String)> {
     crate::addons::install(manifest)
         .map(|record| (StatusCode::CREATED, AxumJson(record)))
+        .map_err(addon_error_response)
+}
+
+async fn update_addon(
+    Path(id): Path<String>,
+    Json(manifest): Json<AddonManifest>,
+) -> Result<AxumJson<AddonRecord>, (StatusCode, String)> {
+    if id != manifest.id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Addon path ID must match manifest ID".to_string(),
+        ));
+    }
+    crate::addons::update(manifest)
+        .map(AxumJson)
         .map_err(addon_error_response)
 }
 

@@ -916,8 +916,15 @@ const App = {
             status.textContent = '';
             try {
                 const manifest = JSON.parse(input.value);
-                await API.installAddon(manifest);
-                status.textContent = '✓ Installed';
+                const installed = await API.listAddons();
+                const exists = installed.some(addon => addon && addon.id === manifest.id);
+                if (exists) {
+                    await API.updateAddon(manifest);
+                    status.textContent = '✓ Updated';
+                } else {
+                    await API.installAddon(manifest);
+                    status.textContent = '✓ Installed';
+                }
                 input.value = '';
                 await this.loadAddons();
             } catch (e) {

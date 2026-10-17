@@ -1080,6 +1080,34 @@ pub fn install(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
     })
 }
 
+pub fn update(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
+    validate_manifest(&manifest)?;
+    let _ = checked_addon_storage_dir(false)?;
+    let dir = addon_dir(&manifest.id)?;
+    let metadata = match fs::symlink_metadata(&dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AddonError::NotFound);
+        }
+        Err(error) => return Err(io_error(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AddonError::Invalid("Invalid addon directory".to_string()));
+    }
+    let existing = read_record(&dir)?;
+    let manifest_text = serde_json::to_string_pretty(&manifest).map_err(io_error)?;
+    write_addon_file_atomic(
+        &dir.join(MANIFEST_FILE),
+        manifest_text.as_bytes(),
+        "manifest-update",
+    )?;
+    Ok(AddonRecord {
+        manifest,
+        enabled: existing.enabled,
+        installed_at: existing.installed_at,
+    })
+}
+
 pub fn set_enabled(id: &str, enabled: bool) -> Result<AddonRecord, AddonError> {
     let _ = checked_addon_storage_dir(false)?;
     let dir = addon_dir(id)?;
@@ -2806,6 +2834,39 @@ mod tests {
             unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn updating_declarative_addon_replaces_manifest_and_preserves_enable_state() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-cast-addon-update-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        install(manifest()).unwrap();
+        set_enabled("example.weather", false).unwrap();
+        let mut replacement = manifest();
+        replacement.version = "0.2.0".to_string();
+        replacement.name = "Updated Example Weather".to_string();
+
+        let updated = update(replacement).unwrap();
+        assert_eq!(updated.manifest.version, "0.2.0");
+        assert_eq!(updated.manifest.name, "Updated Example Weather");
+        assert!(!updated.enabled);
+        assert_eq!(list().unwrap().len(), 1);
+
+        remove("example.weather").unwrap();
+        let _ = fs::remove_dir_all(&root);
+        unsafe {
+            std::env::remove_var("SIGNAGE_DATA_DIR");
+        }
     }
 
     #[test]
