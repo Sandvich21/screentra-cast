@@ -120,9 +120,27 @@ fn record_path(addon_id: &str) -> Result<PathBuf, RuntimeError> {
 }
 
 fn ensure_runtime_directory(addon_id: &str) -> Result<PathBuf, RuntimeError> {
-    let root = checked_runtime_root(true)?
-        .ok_or(RuntimeError::NotFound)?;
-    fs::create_dir_all(&root).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    let root = checked_runtime_root(true)?.ok_or(RuntimeError::NotFound)?;
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(RuntimeError::Invalid(
+                "Invalid trusted service runtime root".to_string(),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut directory_builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                directory_builder.mode(0o700);
+            }
+            directory_builder
+                .create(&root)
+                .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        }
+        Err(error) => return Err(RuntimeError::Io(error.to_string())),
+    }
     let root_metadata =
         fs::symlink_metadata(&root).map_err(|error| RuntimeError::Io(error.to_string()))?;
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
@@ -218,9 +236,14 @@ fn write_atomic(path: &Path, value: &TrustedServiceRuntimeRecord) -> Result<(), 
     let bytes =
         serde_json::to_vec_pretty(value).map_err(|error| RuntimeError::Io(error.to_string()))?;
     let result = (|| {
-        let mut temporary_file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut temporary_options = fs::OpenOptions::new();
+        temporary_options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            temporary_options.mode(0o600);
+        }
+        let mut temporary_file = temporary_options
             .open(&temporary)
             .map_err(|error| RuntimeError::Io(error.to_string()))?;
         use std::io::Write;
