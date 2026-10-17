@@ -654,8 +654,16 @@ pub struct AddonWidgetRegistration {
 }
 
 pub fn client_package(id: &str) -> Result<Vec<u8>, AddonError> {
+    let _ = checked_addon_storage_dir(false)?;
     let dir = addon_dir(id)?;
-    if !dir.exists() {
+    let metadata = fs::symlink_metadata(&dir).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            AddonError::NotFound
+        } else {
+            io_error(error)
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(AddonError::NotFound);
     }
     let record = read_record(&dir)?;
@@ -1126,8 +1134,10 @@ pub fn stage_trusted_service_manifest(
     let root = checked_trusted_service_storage_dir(true)?
         .ok_or_else(|| AddonError::Io("Trusted service storage directory is unavailable".to_string()))?;
     let target = root.join(&manifest.id);
-    if target.exists() {
-        return Err(AddonError::AlreadyInstalled);
+    match fs::symlink_metadata(&target) {
+        Ok(_) => return Err(AddonError::AlreadyInstalled),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error(error)),
     }
     let stage = root.join(format!(".stage-{}", Uuid::new_v4()));
     let result = (|| {
