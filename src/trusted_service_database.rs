@@ -260,6 +260,7 @@ impl DatabaseAuditEvent {
                 .occurred_at
                 .chars()
                 .any(|character| character.is_control())
+            || chrono::DateTime::parse_from_rfc3339(&self.occurred_at).is_err()
         {
             return Err(DatabaseGatewayError::Audit(
                 "Trusted service database audit metadata is invalid".to_string(),
@@ -807,6 +808,18 @@ mod tests {
         assert!(!encoded.contains("enabled"));
         assert!(!encoded.contains("password"));
         assert!(event.validate().is_ok());
+    }
+
+    #[test]
+    fn audit_event_rejects_non_rfc3339_timestamps() {
+        let event = DatabaseAuditEvent {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
+            operation: DatabaseOperationKind::Get,
+            outcome: DatabaseAuditOutcome::Rejected,
+            occurred_at: "not-a-timestamp".to_string(),
+        };
+        assert!(event.validate().is_err());
     }
 
     #[tokio::test]
