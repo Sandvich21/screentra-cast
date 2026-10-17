@@ -405,7 +405,22 @@ pub fn save_client_status(
         .ok_or_else(|| AddonError::Io("Invalid addon status path".to_string()))?;
     fs::create_dir_all(parent).map_err(io_error)?;
     let temporary = parent.join(format!(".status-{}.tmp", Uuid::new_v4()));
-    fs::write(&temporary, bytes).map_err(io_error)?;
+    let mut temporary_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(io_error)?;
+    use std::io::Write;
+    temporary_file.write_all(&bytes).map_err(io_error)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::symlink_metadata(&temporary)
+            .map_err(io_error)?
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&temporary, permissions).map_err(io_error)?;
+    }
     fs::rename(temporary, path).map_err(io_error)
 }
 
