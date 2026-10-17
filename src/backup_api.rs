@@ -537,7 +537,21 @@ async fn sha256_file(path: &str) -> Result<String, String> {
     Ok(s.split_whitespace().next().unwrap_or("").to_string())
 }
 
+fn configured_service_target_allowed(service: &str, kind: &str) -> bool {
+    matches!(
+        (service, kind),
+        ("screentra-cast-server.service", "system")
+            | ("signage.service", "system")
+            | ("screentra-cast-server.service", "user")
+            | ("signage-server.service", "user")
+    )
+}
+
 async fn systemctl_action(action: &str, service: &str, kind: &str) -> Result<(), String> {
+    if !configured_service_target_allowed(service, kind) {
+        log::warn!("refusing systemctl action for unapproved service target: kind={kind}");
+        return Err("service action denied".to_string());
+    }
     let mut cmd = if kind == "user" {
         let mut c = Command::new("systemctl");
         c.arg("--user");
@@ -1171,6 +1185,17 @@ mod tests {
         header.set_mode(0o644);
         header.set_cksum();
         builder.append_data(&mut header, path, data).unwrap();
+    }
+
+    #[test]
+    fn configured_service_target_allowlist_is_exact() {
+        assert!(configured_service_target_allowed("screentra-cast-server.service", "system"));
+        assert!(configured_service_target_allowed("signage.service", "system"));
+        assert!(configured_service_target_allowed("screentra-cast-server.service", "user"));
+        assert!(configured_service_target_allowed("signage-server.service", "user"));
+        assert!(!configured_service_target_allowed("../../tmp/evil.service", "system"));
+        assert!(!configured_service_target_allowed("signage.service", "user"));
+        assert!(!configured_service_target_allowed("signage.service", "SYSTEM"));
     }
 
     #[cfg(unix)]
