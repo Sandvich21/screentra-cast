@@ -18,6 +18,8 @@ use std::{
 #[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
+use tokio::sync::Semaphore;
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -650,6 +652,9 @@ pub trait GatewayOperationHandler: Send + Sync {
 }
 
 #[cfg(unix)]
+pub const MAX_ACTIVE_GATEWAY_CONNECTIONS: usize = 64;
+
+#[cfg(unix)]
 pub struct TrustedServiceUnixGateway {
     binding: GatewayActivationBinding,
     peer_policy: GatewayPeerPolicy,
@@ -712,16 +717,21 @@ impl TrustedServiceUnixGateway {
             fs::set_permissions(&self.socket_path, permissions)
                 .map_err(|_| "Gateway socket permissions could not be set".to_string())?;
         }
+        let permits = Arc::new(Semaphore::new(MAX_ACTIVE_GATEWAY_CONNECTIONS));
         loop {
             let (stream, _) = listener
                 .accept()
                 .await
                 .map_err(|_| "Gateway socket accept failed".to_string())?;
+            let Ok(permit) = permits.clone().try_acquire_owned() else {
+                continue;
+            };
             let binding = self.binding.clone();
             let peer_policy = self.peer_policy;
             let admission = self.admission.clone();
             let handler = handler.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 let _ = handle_unix_connection(stream, binding, peer_policy, admission, handler).await;
             });
         }
