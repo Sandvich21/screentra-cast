@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use uuid::Uuid;
@@ -1239,6 +1239,93 @@ pub(crate) fn validate_trusted_service_manifest(manifest: &AddonManifest) -> Res
     Ok(())
 }
 
+fn create_private_trusted_service_stage_dir(path: &Path) -> Result<(), AddonError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| AddonError::Invalid("Trusted service stage parent is missing".to_string()))?;
+    let parent_metadata = fs::symlink_metadata(parent).map_err(io_error)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(AddonError::Invalid(
+            "Trusted service stage parent is not a real directory".to_string(),
+        ));
+    }
+    fs::create_dir(path).map_err(io_error)?;
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        let _ = fs::remove_dir(path);
+        return Err(AddonError::Invalid(
+            "Trusted service stage is not a real directory".to_string(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o700);
+        if let Err(error) = fs::set_permissions(path, permissions) {
+            let _ = fs::remove_dir(path);
+            return Err(io_error(error));
+        }
+    }
+    Ok(())
+}
+
+fn copy_private_trusted_service_file(source: &Path, target: &Path) -> Result<(), AddonError> {
+    let mut input = fs::File::open(source).map_err(io_error)?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+        .map_err(io_error)?;
+    if let Err(error) = io::copy(&mut input, &mut output) {
+        let _ = fs::remove_file(target);
+        return Err(io_error(error));
+    }
+    output.flush().map_err(io_error)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = fs::symlink_metadata(target).map_err(io_error)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            let _ = fs::remove_file(target);
+            return Err(AddonError::Invalid(
+                "Trusted service stage file is not regular".to_string(),
+            ));
+        }
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o600);
+        if let Err(error) = fs::set_permissions(target, permissions) {
+            let _ = fs::remove_file(target);
+            return Err(io_error(error));
+        }
+    }
+    Ok(())
+}
+
+fn write_private_trusted_service_file(path: &Path, bytes: &[u8]) -> Result<(), AddonError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(io_error)?;
+    if let Err(error) = file.write_all(bytes).and_then(|_| file.flush()) {
+        let _ = fs::remove_file(path);
+        return Err(io_error(error));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o600);
+        if let Err(error) = fs::set_permissions(path, permissions) {
+            let _ = fs::remove_file(path);
+            return Err(io_error(error));
+        }
+    }
+    Ok(())
+}
+
 pub fn stage_trusted_service_manifest(
     manifest_path: &Path,
     signature_path: &Path,
@@ -1269,20 +1356,19 @@ pub fn stage_trusted_service_manifest(
     }
     let stage = root.join(format!(".stage-{}", Uuid::new_v4()));
     let result = (|| {
-        fs::create_dir(&stage).map_err(io_error)?;
-        fs::copy(manifest_path, stage.join(MANIFEST_FILE)).map_err(io_error)?;
-        fs::copy(signature_path, stage.join("manifest.sig")).map_err(io_error)?;
-        fs::copy(image_signature_path, stage.join("image.sig")).map_err(io_error)?;
+        create_private_trusted_service_stage_dir(&stage)?;
+        copy_private_trusted_service_file(manifest_path, &stage.join(MANIFEST_FILE))?;
+        copy_private_trusted_service_file(signature_path, &stage.join("manifest.sig"))?;
+        copy_private_trusted_service_file(image_signature_path, &stage.join("image.sig"))?;
         let staged_at = chrono::Utc::now().to_rfc3339();
-        fs::write(
-            stage.join(STATE_FILE),
-            serde_json::to_vec(&serde_json::json!({
+        write_private_trusted_service_file(
+            &stage.join(STATE_FILE),
+            &serde_json::to_vec(&serde_json::json!({
                 "state": "staged",
                 "staged_at": &staged_at,
             }))
             .map_err(io_error)?,
-        )
-        .map_err(io_error)?;
+        )?;
         let validated_stage = read_trusted_service_stage(&stage)?;
         fs::rename(&stage, &target).map_err(io_error)?;
         Ok(validated_stage)
