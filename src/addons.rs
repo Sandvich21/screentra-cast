@@ -1105,6 +1105,10 @@ fn validate_trusted_service_file(
     maximum_bytes: u64,
     description: &str,
 ) -> Result<(), AddonError> {
+    reject_symlinked_path_ancestors(
+        path,
+        &format!("Trusted service {description} has a symlinked path ancestor"),
+    )?;
     let metadata = fs::symlink_metadata(path).map_err(io_error)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(AddonError::Invalid(format!(
