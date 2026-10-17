@@ -20,6 +20,12 @@ pub const REQUIRED_OCI_ACTIVATION_GATES: &[&str] = &[
     "database_boundary",
     "controlled_gateway",
     "resource_policy",
+    "readiness_handshake",
+    "audit",
+    "image_transport",
+    "lifecycle_rollback",
+    "cleanup",
+    "dedicated_host",
 ];
 
 pub fn validate_oci_activation_gate_records(gates: &[ActivationGate]) -> Result<(), String> {
@@ -890,6 +896,10 @@ mod tests {
             database_boundary_verified: true,
             controlled_gateway_verified: true,
             audit_verified: true,
+            image_transport_verified: true,
+            lifecycle_rollback_verified: true,
+            cleanup_verified: true,
+            dedicated_host_verified: true,
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.weather".to_string(),
             api_namespace: "example.weather".to_string(),

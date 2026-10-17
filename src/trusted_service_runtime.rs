@@ -89,6 +89,14 @@ pub struct TrustedServiceRuntimeRecord {
     pub controlled_gateway_verified: bool,
     #[serde(default)]
     pub audit_verified: bool,
+    #[serde(default)]
+    pub image_transport_verified: bool,
+    #[serde(default)]
+    pub lifecycle_rollback_verified: bool,
+    #[serde(default)]
+    pub cleanup_verified: bool,
+    #[serde(default)]
+    pub dedicated_host_verified: bool,
     pub capabilities: Vec<String>,
     pub storage_namespace: String,
     pub api_namespace: String,
@@ -277,9 +285,39 @@ fn activation_gates() -> Vec<ActivationGate> {
             reason: "controlled internal gateway is not enabled".to_string(),
         },
         ActivationGate {
+            name: "readiness_handshake".to_string(),
+            passed: false,
+            reason: "live service readiness handshake evidence is incomplete".to_string(),
+        },
+        ActivationGate {
+            name: "audit".to_string(),
+            passed: false,
+            reason: "complete live audit-boundary evidence is incomplete".to_string(),
+        },
+        ActivationGate {
             name: "resource_policy".to_string(),
             passed: false,
             reason: "OCI resource and network flags are contract-validated, but runtime enforcement evidence is incomplete".to_string(),
+        },
+        ActivationGate {
+            name: "image_transport".to_string(),
+            passed: false,
+            reason: "approved registry transport and signed-image pull evidence is incomplete".to_string(),
+        },
+        ActivationGate {
+            name: "lifecycle_rollback".to_string(),
+            passed: false,
+            reason: "real OCI crash, timeout, replacement, and rollback evidence is incomplete".to_string(),
+        },
+        ActivationGate {
+            name: "cleanup".to_string(),
+            passed: false,
+            reason: "real cleanup and restart-safety evidence is incomplete".to_string(),
+        },
+        ActivationGate {
+            name: "dedicated_host".to_string(),
+            passed: false,
+            reason: "dedicated-host acceptance evidence is incomplete".to_string(),
         },
     ]
 }
@@ -504,6 +542,10 @@ fn record_from_stage(
         database_boundary_verified: false,
         controlled_gateway_verified: false,
         audit_verified: false,
+        image_transport_verified: false,
+        lifecycle_rollback_verified: false,
+        cleanup_verified: false,
+        dedicated_host_verified: false,
         capabilities: service.capabilities.clone(),
         storage_namespace: service.storage_namespace.clone(),
         api_namespace: service.api_namespace.clone(),
@@ -1229,6 +1271,10 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
             ("database_boundary", record.database_boundary_verified),
             ("controlled_gateway", record.controlled_gateway_verified),
             ("audit", record.audit_verified),
+            ("image_transport", record.image_transport_verified),
+            ("lifecycle_rollback", record.lifecycle_rollback_verified),
+            ("cleanup", record.cleanup_verified),
+            ("dedicated_host", record.dedicated_host_verified),
         ] {
             if !verified && !blocked_by.iter().any(|gate| gate == gate_name) {
                 blocked_by.push(gate_name.to_string());
@@ -2792,6 +2838,10 @@ mod tests {
             "database_boundary",
             "controlled_gateway",
             "audit",
+            "image_transport",
+            "lifecycle_rollback",
+            "cleanup",
+            "dedicated_host",
         ] {
             let mut missing_evidence = all_gates_passed.clone();
             match gate_name {
@@ -2799,6 +2849,10 @@ mod tests {
                 "database_boundary" => missing_evidence.database_boundary_verified = false,
                 "controlled_gateway" => missing_evidence.controlled_gateway_verified = false,
                 "audit" => missing_evidence.audit_verified = false,
+                "image_transport" => missing_evidence.image_transport_verified = false,
+                "lifecycle_rollback" => missing_evidence.lifecycle_rollback_verified = false,
+                "cleanup" => missing_evidence.cleanup_verified = false,
+                "dedicated_host" => missing_evidence.dedicated_host_verified = false,
                 _ => unreachable!(),
             }
             let plan = TrustedServiceSupervisor::<FakeTrustedServiceRuntime>::activation_plan(
@@ -2841,6 +2895,10 @@ mod tests {
             database_boundary_verified: true,
             controlled_gateway_verified: true,
             audit_verified: true,
+            image_transport_verified: true,
+            lifecycle_rollback_verified: true,
+            cleanup_verified: true,
+            dedicated_host_verified: true,
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.service".to_string(),
             api_namespace: "example.service".to_string(),
