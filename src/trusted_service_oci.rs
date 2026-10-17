@@ -359,6 +359,43 @@ pub struct OciLaunchSpec {
     pub resources: OciResourceLimits,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciResourcePolicyEvidence {
+    pub rootless: bool,
+    pub uid: u32,
+    pub network_none: bool,
+    pub read_only_rootfs: bool,
+    pub no_new_privileges: bool,
+    pub capabilities_dropped: bool,
+    pub seccomp_default: bool,
+    pub memory_bytes: u64,
+    pub cpu_millis: u32,
+    pub pids: u32,
+    pub writable_bytes: u64,
+}
+
+pub fn validate_oci_resource_policy_evidence(
+    spec: &OciLaunchSpec,
+    evidence: &OciResourcePolicyEvidence,
+) -> Result<(), String> {
+    validate_oci_launch_spec(spec)?;
+    if !evidence.rootless
+        || evidence.uid == 0
+        || !evidence.network_none
+        || !evidence.read_only_rootfs
+        || !evidence.no_new_privileges
+        || !evidence.capabilities_dropped
+        || !evidence.seccomp_default
+        || evidence.memory_bytes != spec.resources.memory_bytes
+        || evidence.cpu_millis != spec.resources.cpu_millis
+        || evidence.pids != spec.resources.pids
+        || evidence.writable_bytes != spec.resources.writable_bytes
+    {
+        return Err("OCI runtime resource-policy evidence does not match the approved launch spec".to_string());
+    }
+    Ok(())
+}
+
 fn is_shell_command(part: &str) -> bool {
     let executable = Path::new(part)
         .file_name()
@@ -581,6 +618,32 @@ mod tests {
                 writable_bytes: 16 * 1024 * 1024,
             },
         }
+    }
+
+    #[test]
+    fn resource_policy_evidence_must_match_the_approved_launch_spec() {
+        let spec = safe_spec();
+        let evidence = super::OciResourcePolicyEvidence {
+            rootless: true,
+            uid: 65532,
+            network_none: true,
+            read_only_rootfs: true,
+            no_new_privileges: true,
+            capabilities_dropped: true,
+            seccomp_default: true,
+            memory_bytes: spec.resources.memory_bytes,
+            cpu_millis: spec.resources.cpu_millis,
+            pids: spec.resources.pids,
+            writable_bytes: spec.resources.writable_bytes,
+        };
+        super::validate_oci_resource_policy_evidence(&spec, &evidence)
+            .expect("matching resource evidence should pass");
+        let mut wrong_uid = evidence.clone();
+        wrong_uid.uid = 0;
+        assert!(super::validate_oci_resource_policy_evidence(&spec, &wrong_uid).is_err());
+        let mut wrong_memory = evidence;
+        wrong_memory.memory_bytes += 1;
+        assert!(super::validate_oci_resource_policy_evidence(&spec, &wrong_memory).is_err());
     }
 
     #[test]
