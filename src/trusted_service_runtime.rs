@@ -699,6 +699,9 @@ pub trait TrustedServiceRuntime {
     fn replace(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
         self.stop(handle)
     }
+    fn timeout(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        self.stop(handle)
+    }
     fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError>;
     fn supervise(&mut self) -> Result<(), RuntimeError> {
         Ok(())
@@ -971,6 +974,10 @@ impl TrustedServiceRuntime for RootlessOciRuntime {
         self.replace_process(handle)
     }
 
+    fn timeout(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        self.stop_process_with_status(handle, RuntimeStatus::TimedOut)
+    }
+
     fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError> {
         self.status_process(handle)
     }
@@ -1113,6 +1120,30 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
 
     pub fn supervise(&mut self) -> Result<(), RuntimeError> {
         self.runtime.supervise()
+    }
+
+    pub fn observe_readiness(
+        &mut self,
+        handle: &RuntimeHandle,
+        deadline: &RuntimeReadinessDeadline,
+        now: Instant,
+        ready: bool,
+    ) -> Result<RuntimeReadinessStatus, RuntimeError> {
+        let observation = deadline.observe(now, ready);
+        match observation {
+            RuntimeReadinessStatus::Pending | RuntimeReadinessStatus::Ready => {
+                if self.runtime.status(handle)? != RuntimeStatus::Running {
+                    return Err(RuntimeError::Conflict(
+                        "Trusted service stopped before readiness was established".to_string(),
+                    ));
+                }
+                Ok(observation)
+            }
+            RuntimeReadinessStatus::TimedOut => {
+                self.runtime.timeout(handle)?;
+                Ok(RuntimeReadinessStatus::TimedOut)
+            }
+        }
     }
 
     pub fn replace(
@@ -1345,6 +1376,10 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
 
     fn replace(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
         self.mark_replaced(handle)
+    }
+
+    fn timeout(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        self.mark_timed_out(handle)
     }
 
     fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError> {
@@ -2075,6 +2110,47 @@ mod tests {
             Err(RuntimeError::NotFound)
         ));
         assert_eq!(harness.supervisor.runtime().actions().len(), 2);
+    }
+
+    #[test]
+    fn readiness_timeout_marks_runtime_terminal_and_cleans_up() {
+        let mut harness = DisposableRuntimeHarness::new();
+        let record = test_record();
+        let request = RuntimeLaunchRequest::from_approved_record(&record)
+            .expect("test record should produce a launch request");
+        let handle = harness
+            .supervisor
+            .runtime_mut()
+            .start(&request)
+            .expect("fake runtime start");
+        let started_at = Instant::now();
+        let deadline = RuntimeReadinessDeadline::new(started_at, Duration::from_secs(5))
+            .expect("valid readiness deadline");
+        assert_eq!(
+            harness
+                .supervisor
+                .observe_readiness(&handle, &deadline, started_at, false)
+                .expect("readiness should remain pending"),
+            RuntimeReadinessStatus::Pending
+        );
+        assert_eq!(
+            harness
+                .supervisor
+                .observe_readiness(
+                    &handle,
+                    &deadline,
+                    started_at + Duration::from_secs(5),
+                    false,
+                )
+                .expect("readiness timeout should clean up"),
+            RuntimeReadinessStatus::TimedOut
+        );
+        assert_eq!(
+            harness.supervisor.runtime().status(&handle).unwrap(),
+            RuntimeStatus::TimedOut
+        );
+        assert!(!running_marker_path(&harness.root, &handle).exists());
+        drop(harness);
     }
 
     #[test]
