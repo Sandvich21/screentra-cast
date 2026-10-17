@@ -46,7 +46,7 @@ Verify with focused runtime tests, then commit the contract separately.
 
 ## Task 2: Add an explicit runtime capability probe
 
-**Status:** Blocked preflight implementation complete; no runtime executable is installed and no capability command is invoked.
+**Status:** Preflight implementation complete; the dedicated test host has a verified runtime, but the application invokes no capability command and remains execution-disabled. The pure path-bound argv helper now accepts only an explicitly validated absolute runtime executable and preserves that exact path in the generated vector; it still performs no process execution.
 
 **Files:**
 - Create: `src/trusted_service_oci.rs`

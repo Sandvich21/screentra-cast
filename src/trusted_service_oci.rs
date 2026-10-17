@@ -236,6 +236,23 @@ pub fn build_rootless_argv(
     Ok(argv)
 }
 
+pub fn build_rootless_argv_for_path(
+    runtime_path: &Path,
+    spec: &OciLaunchSpec,
+) -> Result<Vec<String>, String> {
+    let report = probe_oci_runtime(runtime_path);
+    if !report.executable_present {
+        return Err("rootless runtime executable is unavailable".to_string());
+    }
+    let runtime_name = report
+        .runtime_name
+        .as_deref()
+        .ok_or_else(|| "rootless runtime name is unavailable".to_string())?;
+    let mut argv = build_rootless_argv(runtime_name, spec)?;
+    argv[0] = runtime_path.to_string_lossy().into_owned();
+    Ok(argv)
+}
+
 fn container_name(spec: &OciLaunchSpec) -> String {
     let identity = format!("{}:{}", spec.addon_id, spec.activation_instance);
     let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
@@ -463,7 +480,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        build_rootless_argv, container_name, launch_profile_matches, probe_oci_runtime,
+        build_rootless_argv, build_rootless_argv_for_path, container_name, launch_profile_matches,
+        probe_oci_runtime,
         validate_oci_activation_gate_records, validate_oci_activation_gates,
         validate_oci_approval_metadata, validate_oci_image_registry, validate_oci_launch_spec,
         validate_oci_launch_spec_against_record, ActivationGate, OciLaunchPolicy, OciLaunchSpec,
@@ -687,6 +705,35 @@ mod tests {
             .iter()
             .any(|arg| arg == "-c" || arg == "--volume" || arg == "-v"));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_runtime_path_builder_preserves_path_binding_without_execution() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("screentra-oci-runtime-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("runtime fixture directory should be created");
+        let runtime_path = root.join("podman");
+        fs::write(&runtime_path, b"not executed").expect("runtime fixture should be created");
+        let mut permissions = fs::metadata(&runtime_path)
+            .expect("runtime fixture metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&runtime_path, permissions)
+            .expect("runtime fixture should be executable");
+
+        let args = build_rootless_argv_for_path(&runtime_path, &safe_spec())
+            .expect("explicit runtime path should build argv");
+        assert_eq!(
+            args.first().map(String::as_str),
+            Some(runtime_path.to_str().expect("runtime path should be UTF-8"))
+        );
+        assert!(args.iter().any(|arg| arg == "--pull=never"));
+        assert!(args.iter().any(|arg| arg == "registry.example/weather@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(!root.join("started").exists());
+        fs::remove_dir_all(root).expect("runtime fixture should be removed");
+    }
+
     #[test]
     fn container_names_remain_bounded_and_activation_distinct() {
         let mut first = safe_spec();
