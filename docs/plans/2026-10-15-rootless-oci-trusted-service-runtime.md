@@ -104,7 +104,7 @@ Use a disposable fixture and a real rootless OCI runtime only when one is explic
 
 ## Task 6: Add signed-image and registry transport policy
 
-**Status:** Contract-only registry allowlist validation is complete. It rejects unqualified images, non-canonical registry entries, aliases, and traversal paths; trusted-service upload and persisted staging now reject symlinked path ancestors, create exclusive mode-`0700` directories and mode-`0600` regular files at creation time under validated parents, publish with Linux `renameat2(RENAME_NOREPLACE)` so an existing target cannot be replaced, and verify directory identity before staged cleanup. Image-signature verification uses an exclusive mode-`0600` temporary digest file and rejects symlinked key/signature path ancestors. No image pull, registry connection, credential handling, or transport is enabled.
+**Status:** Contract-only registry allowlist validation is complete. It rejects unqualified images, non-canonical registry entries, aliases, and traversal paths; trusted-service upload and persisted staging now reject symlinked path ancestors, create exclusive mode-`0700` directories and mode-`0600` regular files at creation time under validated parents, publish with Linux `renameat2(RENAME_NOREPLACE)` so an existing target cannot be replaced, and verify directory identity before staged cleanup or failed-stage cleanup. Image-signature verification uses an exclusive mode-`0600` temporary digest file and rejects symlinked key/signature path ancestors. No image pull, registry connection, credential handling, or transport is enabled.
 
 **Files:**
 - Modify: `src/addons.rs`

@@ -1394,8 +1394,16 @@ pub fn stage_trusted_service_manifest(
         Err(error) => return Err(io_error(error)),
     }
     let stage = root.join(format!(".stage-{}", Uuid::new_v4()));
+    #[cfg(unix)]
+    let mut stage_identity = None;
     let result = (|| {
         create_private_trusted_service_stage_dir(&stage)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = fs::symlink_metadata(&stage).map_err(io_error)?;
+            stage_identity = Some((metadata.dev(), metadata.ino()));
+        }
         copy_private_trusted_service_file(manifest_path, &stage.join(MANIFEST_FILE))?;
         copy_private_trusted_service_file(signature_path, &stage.join("manifest.sig"))?;
         copy_private_trusted_service_file(image_signature_path, &stage.join("image.sig"))?;
@@ -1413,7 +1421,24 @@ pub fn stage_trusted_service_manifest(
         Ok(validated_stage)
     })();
     if result.is_err() {
-        let _ = fs::remove_dir_all(&stage);
+        #[cfg(unix)]
+        if let Some(identity) = stage_identity {
+            use std::os::unix::fs::MetadataExt;
+            let owned = fs::symlink_metadata(&stage)
+                .map(|metadata| {
+                    !metadata.file_type().is_symlink()
+                        && metadata.is_dir()
+                        && (metadata.dev(), metadata.ino()) == identity
+                })
+                .unwrap_or(false);
+            if owned {
+                let _ = fs::remove_dir_all(&stage);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fs::remove_dir_all(&stage);
+        }
     }
     result
 }
