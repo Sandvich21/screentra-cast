@@ -2933,6 +2933,14 @@ mod tests {
             .unwrap()
             .iter()
             .any(|addon| addon.manifest.id == "traffic-standard-us-ca"));
+        let registrations = enabled_widget_registrations().unwrap();
+        assert_eq!(registrations.len(), 2);
+        assert!(registrations
+            .iter()
+            .any(|registration| registration.id == "weather-standard"));
+        assert!(registrations
+            .iter()
+            .any(|registration| registration.id == "traffic-standard"));
 
         let weather_dir = root.join("addons/weather-widget-standard-us-ca");
         fs::remove_dir_all(weather_dir).unwrap();
