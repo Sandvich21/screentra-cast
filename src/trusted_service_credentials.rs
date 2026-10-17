@@ -173,6 +173,8 @@ pub trait TrustedServiceCredentialBroker {
     fn revoke(&mut self, lease: &CredentialLease) -> Result<(), CredentialError>;
 }
 
+pub const MAX_TRACKED_CREDENTIAL_LEASES: usize = 1_024;
+
 /// Metadata-only lease ledger for a future broker boundary. It stores no
 /// secret value and cannot issue credentials; callers must register an
 /// already-approved opaque lease before use can be validated.
@@ -184,6 +186,11 @@ pub struct CredentialLeaseLedger {
 impl CredentialLeaseLedger {
     pub fn register(&mut self, lease: CredentialLease) -> Result<(), CredentialError> {
         lease.validate()?;
+        if self.leases.len() >= MAX_TRACKED_CREDENTIAL_LEASES {
+            return Err(CredentialError::Blocked(
+                "Trusted service credential lease ledger is full".to_string(),
+            ));
+        }
         if self.leases.contains_key(&lease.lease_id) {
             return Err(CredentialError::Invalid(
                 "Trusted service credential lease is already registered".to_string(),
@@ -460,6 +467,32 @@ mod tests {
             ledger.revoke("missing"),
             Err(CredentialError::NotFound)
         ));
+    }
+
+    #[test]
+    fn metadata_lease_ledger_is_bounded() {
+        let mut ledger = CredentialLeaseLedger::default();
+        for index in 0..MAX_TRACKED_CREDENTIAL_LEASES {
+            ledger
+                .register(CredentialLease {
+                    addon_id: "example.service".to_string(),
+                    activation_instance: format!("activation-{index}"),
+                    capabilities: vec!["storage".to_string()],
+                    lease_id: format!("bounded-lease-{index}"),
+                    expires_at: "2030-01-01T00:00:00Z".to_string(),
+                })
+                .expect("lease should fit within the bounded ledger");
+        }
+        let error = ledger
+            .register(CredentialLease {
+                addon_id: "example.service".to_string(),
+                activation_instance: "activation-overflow".to_string(),
+                capabilities: vec!["storage".to_string()],
+                lease_id: "bounded-lease-overflow".to_string(),
+                expires_at: "2030-01-01T00:00:00Z".to_string(),
+            })
+            .expect_err("lease ledger must reject unbounded growth");
+        assert!(matches!(error, CredentialError::Blocked(_)));
     }
 
     #[test]
