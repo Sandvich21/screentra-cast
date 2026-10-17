@@ -1253,7 +1253,13 @@ fn create_private_trusted_service_stage_dir(path: &Path) -> Result<(), AddonErro
             "Trusted service stage parent is not a real directory".to_string(),
         ));
     }
-    fs::create_dir(path).map_err(io_error)?;
+    let mut directory_builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directory_builder.mode(0o700);
+    }
+    directory_builder.create(path).map_err(io_error)?;
     let metadata = fs::symlink_metadata(path).map_err(io_error)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         let _ = fs::remove_dir(path);
@@ -1261,24 +1267,19 @@ fn create_private_trusted_service_stage_dir(path: &Path) -> Result<(), AddonErro
             "Trusted service stage is not a real directory".to_string(),
         ));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(0o700);
-        if let Err(error) = fs::set_permissions(path, permissions) {
-            let _ = fs::remove_dir(path);
-            return Err(io_error(error));
-        }
-    }
     Ok(())
 }
 
 fn copy_private_trusted_service_file(source: &Path, target: &Path) -> Result<(), AddonError> {
     let mut input = fs::File::open(source).map_err(io_error)?;
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut output_options = fs::OpenOptions::new();
+    output_options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        output_options.mode(0o600);
+    }
+    let mut output = output_options
         .open(target)
         .map_err(io_error)?;
     if let Err(error) = io::copy(&mut input, &mut output) {
@@ -1286,46 +1287,28 @@ fn copy_private_trusted_service_file(source: &Path, target: &Path) -> Result<(),
         return Err(io_error(error));
     }
     output.flush().map_err(io_error)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let metadata = fs::symlink_metadata(target).map_err(io_error)?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            let _ = fs::remove_file(target);
-            return Err(AddonError::Invalid(
-                "Trusted service stage file is not regular".to_string(),
-            ));
-        }
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(0o600);
-        if let Err(error) = fs::set_permissions(target, permissions) {
-            let _ = fs::remove_file(target);
-            return Err(io_error(error));
-        }
+    let metadata = fs::symlink_metadata(target).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        let _ = fs::remove_file(target);
+        return Err(AddonError::Invalid(
+            "Trusted service stage file is not regular".to_string(),
+        ));
     }
     Ok(())
 }
 
 fn write_private_trusted_service_file(path: &Path, bytes: &[u8]) -> Result<(), AddonError> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(io_error)?;
+    let mut file_options = fs::OpenOptions::new();
+    file_options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        file_options.mode(0o600);
+    }
+    let mut file = file_options.open(path).map_err(io_error)?;
     if let Err(error) = file.write_all(bytes).and_then(|_| file.flush()) {
         let _ = fs::remove_file(path);
         return Err(io_error(error));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let metadata = fs::symlink_metadata(path).map_err(io_error)?;
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(0o600);
-        if let Err(error) = fs::set_permissions(path, permissions) {
-            let _ = fs::remove_file(path);
-            return Err(io_error(error));
-        }
     }
     Ok(())
 }
