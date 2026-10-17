@@ -689,6 +689,64 @@ impl TrustedServicePostgresGateway {
     }
 }
 
+pub(crate) struct SqliteDatabaseOperationHandler<S: DatabaseAuditSink> {
+    gateway: TrustedServiceSqliteGateway,
+    audit: S,
+}
+
+impl<S: DatabaseAuditSink> SqliteDatabaseOperationHandler<S> {
+    pub(crate) fn new(gateway: TrustedServiceSqliteGateway, audit: S) -> Self {
+        Self { gateway, audit }
+    }
+}
+
+impl<S> crate::trusted_service_gateway::GatewayOperationHandler
+    for SqliteDatabaseOperationHandler<S>
+where
+    S: DatabaseAuditSink + 'static,
+{
+    fn handle<'a>(
+        &'a self,
+        request: DatabaseRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<DatabaseResponse, String>> + Send + 'a>> {
+        Box::pin(async move {
+            self.gateway
+                .handle_with_audit(request, &self.audit)
+                .await
+                .map_err(|_| "Trusted service database operation failed".to_string())
+        })
+    }
+}
+
+pub(crate) struct PostgresDatabaseOperationHandler<S: DatabaseAuditSink> {
+    gateway: TrustedServicePostgresGateway,
+    audit: S,
+}
+
+impl<S: DatabaseAuditSink> PostgresDatabaseOperationHandler<S> {
+    pub(crate) fn new(gateway: TrustedServicePostgresGateway, audit: S) -> Self {
+        Self { gateway, audit }
+    }
+}
+
+impl<S> crate::trusted_service_gateway::GatewayOperationHandler
+    for PostgresDatabaseOperationHandler<S>
+where
+    S: DatabaseAuditSink + 'static,
+{
+    fn handle<'a>(
+        &'a self,
+        request: DatabaseRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<DatabaseResponse, String>> + Send + 'a>> {
+        Box::pin(async move {
+            self.gateway
+                .handle_with_audit(request, &self.audit)
+                .await
+                .map_err(|_| "Trusted service database operation failed".to_string())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -791,6 +849,41 @@ mod tests {
             .contains("enabled")));
         assert!(events.iter().any(|event| event.outcome == "accepted"));
         assert!(events.iter().any(|event| event.outcome == "succeeded"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_gateway_handler_exposes_only_typed_audited_operations() {
+        let path = std::env::temp_dir().join(format!(
+            "screentra-service-handler-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let db =
+            Arc::new(Database::open(path.to_str().expect("database path")).expect("open database"));
+        let gateway =
+            TrustedServiceSqliteGateway::new(db.clone(), sqlite_contract()).expect("gateway");
+        let handler = SqliteDatabaseOperationHandler::new(
+            gateway,
+            SqliteDatabaseAuditSink::new(db.clone()),
+        );
+        let response = crate::trusted_service_gateway::GatewayOperationHandler::handle(
+            &handler,
+            DatabaseRequest {
+                addon_id: "example.service".to_string(),
+                activation_instance: "activation-1".to_string(),
+                operation: DatabaseOperation::Put {
+                    key: "state".to_string(),
+                    value_json: r#"{"enabled":true}"#.to_string(),
+                },
+            },
+        )
+        .await
+        .expect("typed handler operation");
+        assert_eq!(response, DatabaseResponse::Written);
+        assert_eq!(
+            db.get_addon_storage("example.service", "state").unwrap(),
+            Some(r#"{"enabled":true}"#.to_string())
+        );
         let _ = std::fs::remove_file(path);
     }
 
