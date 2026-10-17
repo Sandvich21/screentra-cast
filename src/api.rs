@@ -7524,6 +7524,7 @@ const ALLOWED_CLIENT_COMMAND_ACTIONS: &[&str] = &[
     "start_display_preview",
     "stop_display_preview",
     "ddc_set",
+    "display_power",
     "cec_send",
     "ir_send",
 ];

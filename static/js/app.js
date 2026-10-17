@@ -2584,7 +2584,7 @@ ${targetSection}
                 if (action === 'power_on') {
                     cmd = (method === 'cec' || method === 'auto') ? 'cec pow 0' : 'ddcutil VCP 6=1';
                 } else if (action === 'display_sleep') {
-                    cmd = 'ddcutil VCP 6=2';
+                    cmd = 'wlr-randr --output <selected connector> --off';
                 } else {
                     // power_off
                     cmd = (method === 'cec' || method === 'auto') ? 'cec standby 0' : 'ddcutil VCP 6=4';
@@ -5435,7 +5435,7 @@ ${_cmds.oneLiner}`;
           </div>
           <div style="display:flex;gap:0.4rem;flex-wrap:wrap;margin-bottom:0.5rem;">
             <button class="btn btn-sm btn-secondary client-detail-ddc" data-vcp="D6" data-val="1" title="DDC/CI: wake display from sleep">Power On (DDC)</button>
-            <button class="btn btn-sm btn-secondary client-detail-ddc" data-vcp="D6" data-val="2" title="DDC/CI: put display into standby">Standby (DDC)</button>
+            <button class="btn btn-sm btn-secondary client-detail-display-power" data-state="off" title="Compositor DPMS: put selected display into standby">Standby (Display)</button>
             <button class="btn btn-sm btn-secondary client-detail-cec" data-cmd="pow 0" title="CEC: send power-on to TV">CEC On</button>
             <button class="btn btn-sm btn-secondary client-detail-cec" data-cmd="standby 0" title="CEC: send standby to TV">CEC Off</button>
           </div>
@@ -5624,7 +5624,7 @@ ${_cmds.oneLiner}`;
           const method = methodSelect.value;
           setDisplayStatus('Sending...');
           let fallback = null;
-          if (method === 'auto') {
+          if (method === 'auto' && (action === 'ddc_set' || action === 'cec_send')) {
             fallback = action === 'ddc_set' ? 'cec' : 'ddc';
           }
           const trySend = async (act, pay) => {
@@ -5679,6 +5679,11 @@ ${_cmds.oneLiner}`;
           btn.onclick = () => {
             const vcp = btn.dataset.vcp, val = btn.dataset.val;
             sendCommand('ddc_set', { vcp, value: Number(val) }, dispSelect.value);
+          };
+        });
+        modal.querySelectorAll('.client-detail-display-power[data-state]').forEach(btn => {
+          btn.onclick = () => {
+            sendCommand('display_power', { state: btn.dataset.state }, dispSelect.value);
           };
         });
         modal.querySelectorAll('.client-detail-ddc-apply').forEach(btn => {

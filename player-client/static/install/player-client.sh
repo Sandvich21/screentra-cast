@@ -5788,6 +5788,42 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
     return ok, f'active display count set to {active}', details
 
 
+def apply_display_power(cache_dir: Path, display_index: int | None, state: str) -> tuple[bool, str, dict]:
+    """Use compositor DPMS, not DDC power mode, for monitor standby."""
+    if display_index is None or display_index < 0 or display_index > 3:
+        return False, 'a display index from 0 to 3 is required', {}
+    if state not in {'on', 'off'}:
+        return False, 'display power state must be on or off', {}
+    if shutil.which('wlr-randr') is None:
+        return False, 'wlr-randr is not installed on this client', {}
+    config = _read_json_file(cache_dir.parent / 'config.json', {})
+    connectors = _display_connectors_for_indexes(config, [display_index])
+    if not connectors:
+        return False, f'no compositor output is mapped to display {display_index}', {'display_index': display_index}
+    connector = connectors[0]
+    args = ['wlr-randr', '--output', connector, '--on' if state == 'on' else '--off']
+    wayland_env = os.environ.copy()
+    runtime_dir = wayland_env.get('XDG_RUNTIME_DIR') or f"/run/{wayland_env.get('USER', 'board')}"
+    wayland_env['XDG_RUNTIME_DIR'] = runtime_dir
+    if not wayland_env.get('WAYLAND_DISPLAY'):
+        for candidate in ('wayland-1', 'wayland-0'):
+            if (Path(runtime_dir) / candidate).exists():
+                wayland_env['WAYLAND_DISPLAY'] = candidate
+                break
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=10, env=wayland_env)
+        rc, out, err = proc.returncode, proc.stdout, proc.stderr
+    except Exception as exc:
+        return False, f'compositor display power failed: {exc}', {'display_index': display_index, 'connector': connector, 'state': state, 'command': args}
+    details = {'display_index': display_index, 'connector': connector, 'state': state, 'command': args}
+    if rc != 0:
+        details['stderr'] = err or out
+        return False, f'compositor display power failed (rc={rc}): {err or out}', details
+    observed = next((o for o in _wlr_outputs() if o.get('name') == connector), None)
+    details['enabled'] = observed.get('enabled') if observed else None
+    return True, f'display {display_index} ({connector}) power set to {state}', details
+
+
 def _resolve_touch_name(device_path: str | None, device_name: str | None = None) -> str | None:
     if device_name:
         return str(device_name)
@@ -6367,6 +6403,11 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         has_layout = payload.get('has_layout', False)
         ok, msg = apply_ddc_control(str(vcp), int(value), bus=bus, display_index=display_index, has_layout=has_layout)
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
+
+    if action == 'display_power':
+        state = str(payload.get('state') or '')
+        ok, msg, details = apply_display_power(Path(ctx['cache_dir']), display_index, state)
+        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'details': details, 'started_at': started}
 
     if action == 'cec_send':
         # payload: { "cmd": "pow 0" }   power on OSD addr 0

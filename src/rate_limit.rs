@@ -68,7 +68,7 @@ pub fn client_command_cooldown_secs(action: &str) -> u64 {
     match action {
         "restart_client" | "restart_kiosk" | "restart_renderer" | "update_client"
         | "reboot" | "reboot_client" => 300,
-        "ddc_set" | "cec_send" | "ir_send" | "audio_set_default" | "audio_set_volume" => 10,
+        "ddc_set" | "display_power" | "cec_send" | "ir_send" | "audio_set_default" | "audio_set_volume" => 10,
         "bluetooth_power" | "bluetooth_pair" | "bluetooth_remove" => 30,
         "reload_layout" | "refresh_cache" => 10,
         "set_display_count" | "set_touch_binding" => 60,

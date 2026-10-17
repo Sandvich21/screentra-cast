@@ -317,11 +317,15 @@ fn power_command(
     display_index: i32,
 ) -> (String, serde_json::Value) {
     match (method, state) {
-        ("ddc", _) | (_, "sleep") => {
+        (_, "sleep") => (
+            "display_power".to_string(),
+            serde_json::json!({ "state": "off", "display_index": display_index }),
+        ),
+        ("ddc", _) => {
             // MCCS VCP D6: 1=on, 2=standby, 4=full power off.
             let value = match state {
                 "on" => 1,
-                "sleep" => 2,
+                "sleep" | "standby" => 2,
                 _ => 4,
             };
             (
@@ -477,12 +481,16 @@ fn apply_power_action(
     let log_target = format!("{}[{}]", target, display_index);
 
     let (dispatch_action, payload) = match (control_method, power_state) {
-        ("ddc", _) | (_, "sleep") => {
+        (_, "sleep") => (
+            "display_power".to_string(),
+            serde_json::json!({ "state": "off", "display_index": display_index }),
+        ),
+        ("ddc", _) => {
             // DDC/CI VCP D6: 1=on, 2=standby, 4=full power off.
             // Also used for "sleep" power_state regardless of method (auto path).
             let vcp_val = match power_state {
                 "on" => 1,
-                "sleep" => 2,
+                "sleep" | "standby" => 2,
                 _ => 4,
             };
             let payload = serde_json::json!({ "vcp": 6, "value": vcp_val, "display_index": display_index });
@@ -688,7 +696,7 @@ mod tests {
     #[test]
     fn ddc_power_modes_use_distinct_mccs_values() {
         let (_, on) = power_command("ddc", "on", 0);
-        let (_, standby) = power_command("ddc", "sleep", 0);
+        let (_, standby) = power_command("ddc", "standby", 0);
         let (_, off) = power_command("ddc", "off", 0);
 
         assert_eq!(on["vcp"], 6);
