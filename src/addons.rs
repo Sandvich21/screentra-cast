@@ -2905,6 +2905,54 @@ mod tests {
     }
 
     #[test]
+    fn standard_addon_lifecycle_supports_update_toggle_and_remove() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-cast-standard-addon-lifecycle-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+
+        ensure_bundled_standard_addons().unwrap();
+        set_enabled("weather-widget-standard-us-ca", false).unwrap();
+        let mut replacement: AddonManifest = serde_json::from_str(include_str!(
+            "../addon-packages/weather-widget-standard-us-ca/manifest.json"
+        ))
+        .unwrap();
+        replacement.version = "1.1.0".to_string();
+        replacement.name = "Weather widget standard (US & Canada) Updated".to_string();
+        let updated = update(replacement).unwrap();
+        assert_eq!(updated.manifest.version, "1.1.0");
+        assert!(!updated.enabled);
+        assert!(!enabled_widget_registrations()
+            .unwrap()
+            .iter()
+            .any(|registration| registration.addon_id == "weather-widget-standard-us-ca"));
+
+        set_enabled("weather-widget-standard-us-ca", true).unwrap();
+        assert!(enabled_widget_registrations()
+            .unwrap()
+            .iter()
+            .any(|registration| registration.addon_id == "weather-widget-standard-us-ca"));
+        remove("weather-widget-standard-us-ca").unwrap();
+        assert!(!list()
+            .unwrap()
+            .iter()
+            .any(|addon| addon.manifest.id == "weather-widget-standard-us-ca"));
+
+        let _ = fs::remove_dir_all(&root);
+        unsafe {
+            std::env::remove_var("SIGNAGE_DATA_DIR");
+        }
+    }
+
+    #[test]
     fn bundled_standard_addons_install_once_and_are_listed() {
         let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
