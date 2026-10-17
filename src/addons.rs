@@ -2300,6 +2300,10 @@ mod tests {
         }
         assert!(list().is_err());
         unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", data_link.join("nested"));
+        }
+        assert!(list().is_err());
+        unsafe {
             std::env::set_var("SIGNAGE_DATA_DIR", &root);
         }
         if let Some(value) = old_data_root {
