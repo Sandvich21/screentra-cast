@@ -145,7 +145,7 @@ A real runtime test must report its runtime version, exact image digest, isolate
 
 ## Task 8: Operational rollout and test-box verification
 
-**Status:** Blocked until Task 7's execution, gateway, credential, database, resource, audit, lifecycle, and rollback gates pass. The current host has no supported rootless OCI runtime (`podman` or `nerdctl`) and no trusted-service container has been started. Do not install a runtime, pull an image, enable execution, or deploy a trusted service as part of contract-only work.
+**Status:** Dedicated test host `11.1.1.26` is now prepared with Debian 13 amd64, Podman `5.4.2`, `crun`, cgroup v2, and rootless storage for user `tech`. No trusted-service image has been pulled and no container has been started. Rollout remains blocked until Task 7's execution, gateway, credential, database, resource, audit, lifecycle, and rollback gates pass. Do not enable execution or deploy a trusted service as part of contract-only work.
 
 When Task 7 is complete, rollout must proceed in this order:
 
