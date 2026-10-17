@@ -347,6 +347,20 @@ fn write_atomic(path: &Path, value: &TrustedServiceRuntimeRecord) -> Result<(), 
 }
 
 fn read_record(path: &Path) -> Result<TrustedServiceRuntimeRecord, RuntimeError> {
+    let parent = path.parent().ok_or_else(|| {
+        RuntimeError::Invalid("Trusted service runtime record parent is missing".to_string())
+    })?;
+    let parent_metadata = fs::symlink_metadata(parent).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RuntimeError::NotFound
+        } else {
+            RuntimeError::Io(error.to_string())
+        }
+    })?;
+    validate_private_runtime_directory(
+        &parent_metadata,
+        "Invalid trusted service runtime record directory",
+    )?;
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             RuntimeError::NotFound
@@ -1746,6 +1760,9 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
+            fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
             assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
         }
