@@ -1581,6 +1581,12 @@ pub fn remove_trusted_service_stage(id: &str) -> Result<(), AddonError> {
     let Some(root) = checked_trusted_service_storage_dir(false)? else {
         return Ok(());
     };
+    #[cfg(unix)]
+    let root_identity = {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::symlink_metadata(&root).map_err(io_error)?;
+        (metadata.dev(), metadata.ino())
+    };
     let dir = root.join(id);
     let metadata = match fs::symlink_metadata(&dir) {
         Ok(metadata) => metadata,
@@ -1618,6 +1624,20 @@ pub fn remove_trusted_service_stage(id: &str) -> Result<(), AddonError> {
         {
             return Err(AddonError::Invalid(
                 "Trusted service stage identity changed before removal".to_string(),
+            ));
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let current_root = fs::symlink_metadata(&root).map_err(io_error)?;
+        if current_root.file_type().is_symlink()
+            || !current_root.is_dir()
+            || current_root.permissions().mode() & 0o777 != 0o700
+            || (current_root.dev(), current_root.ino()) != root_identity
+        {
+            return Err(AddonError::Invalid(
+                "Trusted service storage root changed before removal".to_string(),
             ));
         }
     }
