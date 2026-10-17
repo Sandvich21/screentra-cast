@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::{
@@ -655,6 +655,21 @@ pub trait GatewayOperationHandler: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<DatabaseResponse, String>> + Send + 'a>>;
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct GatewayReadiness {
+    ready: Arc<AtomicBool>,
+}
+
+impl GatewayReadiness {
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+
+    fn mark_ready(&self) {
+        self.ready.store(true, Ordering::Release);
+    }
+}
+
 #[cfg(unix)]
 pub const MAX_ACTIVE_GATEWAY_CONNECTIONS: usize = 64;
 
@@ -664,6 +679,7 @@ pub struct TrustedServiceUnixGateway {
     peer_policy: GatewayPeerPolicy,
     admission: GatewayAdmissionState,
     socket_path: PathBuf,
+    readiness: GatewayReadiness,
 }
 
 #[cfg(unix)]
@@ -720,7 +736,12 @@ impl TrustedServiceUnixGateway {
             peer_policy,
             admission: GatewayAdmissionState::new(),
             socket_path,
+            readiness: GatewayReadiness::default(),
         })
+    }
+
+    pub fn readiness(&self) -> GatewayReadiness {
+        self.readiness.clone()
     }
 
     /// Start the listener only after the global execution gate is enabled.
@@ -776,6 +797,7 @@ impl TrustedServiceUnixGateway {
                 .map_err(|_| "Gateway socket permissions could not be set".to_string())?;
         }
         let permits = Arc::new(Semaphore::new(MAX_ACTIVE_GATEWAY_CONNECTIONS));
+        let readiness = self.readiness.clone();
         let mut tasks = JoinSet::new();
         let mut shutdown = Box::pin(shutdown);
         let result = loop {
@@ -796,6 +818,7 @@ impl TrustedServiceUnixGateway {
                     let peer_policy = self.peer_policy;
                     let admission = self.admission.clone();
                     let handler = handler.clone();
+                    let readiness = readiness.clone();
                     tasks.spawn(async move {
                         let _permit = permit;
                         let _ = handle_unix_connection(
@@ -804,6 +827,7 @@ impl TrustedServiceUnixGateway {
                             peer_policy,
                             admission,
                             handler,
+                            readiness,
                         )
                         .await;
                     });
@@ -880,6 +904,7 @@ async fn handle_unix_connection(
     peer_policy: GatewayPeerPolicy,
     admission: GatewayAdmissionState,
     handler: Arc<dyn GatewayOperationHandler>,
+    readiness: GatewayReadiness,
 ) -> Result<(), String> {
     let peer = unix_peer_credentials(&stream)?;
     let hello = tokio::time::timeout(
@@ -890,6 +915,7 @@ async fn handle_unix_connection(
     .map_err(|_| "Gateway hello timed out".to_string())??;
     let mut session = GatewaySession::new(binding, peer_policy, admission);
     session.accept_hello(&hello, peer)?;
+    readiness.mark_ready();
     loop {
         let request = tokio::time::timeout(
             MAX_REQUEST_DURATION,
@@ -1073,7 +1099,7 @@ mod tests {
         encode_connection_hello_frame, encode_gateway_frame, encode_request, encode_request_frame,
         encode_response, encode_response_frame, validate_connection_hello,
         GatewayActivationBinding, GatewayActivationState, GatewayAdmissionState,
-        GatewayConnectionHello, GatewayOperationBudget, GatewayOperationHandler,
+        GatewayConnectionHello, GatewayOperationBudget, GatewayOperationHandler, GatewayReadiness,
         GatewayPeerCredentials, GatewayPeerPolicy,
         GatewayRateLimiter, GatewayReplayGuard, GatewayRequestAdmission, GatewayRequestEnvelope,
         GatewaySession, GatewayStorageOperation, TrustedServiceUnixGateway,
@@ -1108,6 +1134,14 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<DatabaseResponse, String>> + Send + 'a>> {
             Box::pin(async { Ok(DatabaseResponse::Written) })
         }
+    }
+
+    #[test]
+    fn gateway_readiness_requires_a_valid_hello() {
+        let readiness = GatewayReadiness::default();
+        assert!(!readiness.is_ready());
+        readiness.mark_ready();
+        assert!(readiness.is_ready());
     }
 
     #[cfg(unix)]
