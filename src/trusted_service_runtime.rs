@@ -218,6 +218,21 @@ fn write_atomic(path: &Path, value: &TrustedServiceRuntimeRecord) -> Result<(), 
         serde_json::to_vec_pretty(value).map_err(|error| RuntimeError::Io(error.to_string()))?;
     let result = (|| {
         fs::write(&temporary, bytes).map_err(|error| RuntimeError::Io(error.to_string()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = fs::symlink_metadata(&temporary)
+                .map_err(|error| RuntimeError::Io(error.to_string()))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(RuntimeError::Invalid(
+                    "Invalid trusted service runtime record temporary file".to_string(),
+                ));
+            }
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(0o600);
+            fs::set_permissions(&temporary, permissions)
+                .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        }
         fs::rename(&temporary, path).map_err(|error| RuntimeError::Io(error.to_string()))?;
         Ok(())
     })();
@@ -985,6 +1000,11 @@ mod tests {
         let record = test_record();
         write_atomic(&path, &record).unwrap();
         assert_eq!(read_record(&path).unwrap(), record);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         let mut unsafe_record = record;
         unsafe_record.execution_enabled = true;
         write_atomic(&path, &unsafe_record).unwrap();
