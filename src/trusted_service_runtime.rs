@@ -1815,6 +1815,27 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn runtime_record_read_rejects_symlinked_parent() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root =
+            std::env::temp_dir().join(format!("screentra-runtime-read-parent-{}", Uuid::new_v4()));
+        let real_parent = root.join("real");
+        let linked_parent = root.join("linked");
+        let real_path = real_parent.join(RUNTIME_FILE);
+        fs::create_dir_all(&real_parent).unwrap();
+        fs::set_permissions(&real_parent, fs::Permissions::from_mode(0o700)).unwrap();
+        write_atomic(&real_path, &test_record()).unwrap();
+        symlink(&real_parent, &linked_parent).unwrap();
+        assert!(matches!(
+            read_record(&linked_parent.join(RUNTIME_FILE)),
+            Err(RuntimeError::Invalid(_))
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn persisted_runtime_records_reject_invalid_launch_contract_fields() {
         let root = std::env::temp_dir().join(format!(
