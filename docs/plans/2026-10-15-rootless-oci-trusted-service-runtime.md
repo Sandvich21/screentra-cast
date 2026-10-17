@@ -142,3 +142,17 @@ git status --short --branch
 ```
 
 A real runtime test must report its runtime version, exact image digest, isolated fixture root, and cleanup result without exposing credentials or connection strings. No deployment or push is part of this plan.
+
+## Task 8: Operational rollout and test-box verification
+
+**Status:** Blocked until Task 7's execution, gateway, credential, database, resource, audit, lifecycle, and rollback gates pass. The current host has no supported rootless OCI runtime (`podman` or `nerdctl`) and no trusted-service container has been started. Do not install a runtime, pull an image, enable execution, or deploy a trusted service as part of contract-only work.
+
+When Task 7 is complete, rollout must proceed in this order:
+
+1. Prepare a dedicated disposable test environment and record the exact runtime executable path, runtime version, image reference, image digest, approval record, isolated fixture root, and cleanup result. Never record credentials, connection strings, or secret values.
+2. Build the release artifact with the locked toolchain, record its digest, and verify the target artifact matches before installation. Preserve a rollback backup before any state-changing deployment.
+3. Run one explicitly approved trusted service on the dedicated test box only. Verify the Unix gateway socket, peer identity, typed storage operations, credential denial/expiry/revocation, resource limits, crash/timeout handling, replacement, rollback, and cleanup.
+4. Confirm backup, restore, uninstall, and server restart do not activate the service, pull an image, issue credentials, or expose a gateway unexpectedly.
+5. Perform physical/visual confirmation on test client `11.1.1.30` where the change affects client-visible behavior. Treat source tests and server health as insufficient evidence for display behavior.
+6. Record service health, active listeners, runtime state, audit events, image digest, artifact digest, and rollback result. Keep `EXECUTION_ENABLED` and `database_boundary` disabled if any result is missing or ambiguous.
+7. Promote only after the dedicated test-box evidence is complete and independently reviewed. No fleet rollout or push is part of the contract-only phase.
