@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "id": "traffic-standard-us-ca",
+  "name": "Traffic standard (US & Canada)",
+  "description": "Standard traffic events widget contract for US and Canadian locations. Provider selection and normalization remain behind the read-only traffic host API until the signed provider runtime is enabled.",
+  "version": "1.0.0",
+  "kind": "declarative",
+  "min_server_version": "0.1.4",
+  "min_client_version": "1",
+  "widget_types": [
+    {
+      "id": "traffic-standard",
+      "name": "Traffic standard",
+      "description": "US and Canada traffic events widget.",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+          "lon": { "type": "number", "minimum": -180, "maximum": 180 },
+          "radius_miles": { "type": "number", "minimum": 1, "maximum": 100 },
+          "max_events": { "type": "integer", "minimum": 1, "maximum": 10 }
+        }
+      },
+      "renderer_type": "traffic",
+      "icon": "🚧",
+      "default_props": {
+        "radius_miles": 25,
+        "max_events": 3,
+        "hide_if_empty": true,
+        "traffic_variable": "traffic_summary",
+        "manual_closure_blocking": false,
+        "blocked_closures": []
+      }
+    }
+  ],
+  "permissions": [],
+  "data_contract": {
+    "api_version": "1",
+    "region_scope": ["US", "CA"],
+    "endpoints": [
+      { "path": "/api/traffic/events", "method": "GET" },
+      { "path": "/api/traffic/map.png", "method": "GET" }
+    ]
+  }
+}

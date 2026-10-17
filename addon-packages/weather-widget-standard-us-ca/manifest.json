@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "weather-widget-standard-us-ca",
+  "name": "Weather widget standard (US & Canada)",
+  "description": "Standard weather widget contract for US and Canadian locations. Provider logic remains behind the read-only weather host API until the signed provider runtime is enabled.",
+  "version": "1.0.0",
+  "kind": "declarative",
+  "min_server_version": "0.1.4",
+  "min_client_version": "1",
+  "widget_types": [
+    {
+      "id": "weather-standard",
+      "name": "Weather standard",
+      "description": "US and Canada weather forecast widget.",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "lat": { "type": "number", "minimum": -90, "maximum": 90 },
+          "lon": { "type": "number", "minimum": -180, "maximum": 180 },
+          "unit": { "type": "string", "enum": ["F", "C"] },
+          "shown_days": { "type": "integer", "minimum": 1, "maximum": 7 }
+        }
+      },
+      "renderer_type": "weather",
+      "icon": "🌦️",
+      "default_props": {
+        "unit": "F",
+        "units": "imperial",
+        "shown_days": 4,
+        "weather_morning_icon": "off"
+      }
+    }
+  ],
+  "permissions": [],
+  "data_contract": {
+    "api_version": "1",
+    "region_scope": ["US", "CA"],
+    "endpoints": [
+      { "path": "/api/weather/forecast", "method": "GET" },
+      { "path": "/api/weather/lookup", "method": "GET" }
+    ]
+  }
+}

@@ -1,5 +1,16 @@
 # Trusted Server Addon Operations
 
+## Standard weather and traffic packages
+
+The repository includes two first-stage declarative package contracts under `addon-packages/`:
+
+- `weather-widget-standard-us-ca` — **Weather widget standard (US & Canada)**
+- `traffic-standard-us-ca` — **Traffic standard (US & Canada)**
+
+They register add-on-owned editor aliases that reuse the existing trusted weather and traffic renderers. Each manifest declares a versioned, read-only `data_contract` limited to the existing forecast/lookup or traffic events/map GET routes. This is the safe independently-versioned metadata slice; it does not yet move provider code out of the core server.
+
+Provider extraction remains blocked on the signed provider-runtime/client-extension phase. That phase must provide a normalized response contract, compatibility checks, signed payload verification, client loading, update/rollback, and regional capability isolation before weather or traffic implementation code is removed from the core. A regional weather package can then use the same contract with a different `region_scope` (for example Europe or South America) without granting arbitrary server code, database access, credentials, or dashboard injection.
+
 The current server also has a deliberately inert staging boundary for a
 separately signed service manifest and image digest authorization. An
 administrator must submit multipart fields `manifest`, `signature`, and

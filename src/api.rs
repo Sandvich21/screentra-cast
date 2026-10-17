@@ -10368,6 +10368,7 @@ mod audit_validation_tests {
             min_client_version: None,
             widget_types: Vec::new(),
             permissions: Vec::new(),
+            data_contract: None,
             client_entrypoint: None,
             server_entrypoint: None,
             trusted_service: None,

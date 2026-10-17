@@ -104,6 +104,21 @@ pub struct TrustedServerServiceSpec {
     pub client_extension_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AddonDataContract {
+    pub api_version: String,
+    #[serde(default)]
+    pub region_scope: Vec<String>,
+    #[serde(default)]
+    pub endpoints: Vec<AddonDataEndpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AddonDataEndpoint {
+    pub path: String,
+    pub method: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddonManifest {
     pub schema_version: u32,
@@ -122,6 +137,11 @@ pub struct AddonManifest {
     pub widget_types: Vec<AddonWidgetType>,
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// Optional host API contract used by declarative widget packages. This
+    /// describes existing, read-only server endpoints; it does not grant the
+    /// addon arbitrary network, database, or server-code execution access.
+    #[serde(default)]
+    pub data_contract: Option<AddonDataContract>,
     /// Reserved for the signed client-extension phase. Code-bearing fields
     /// are rejected until signature verification and sandboxing exist.
     #[serde(default)]
@@ -621,6 +641,43 @@ fn validate_trusted_service_spec(spec: &TrustedServerServiceSpec) -> Result<(), 
     Ok(())
 }
 
+fn validate_data_contract(contract: &AddonDataContract) -> Result<(), AddonError> {
+    if contract.api_version != "1" {
+        return Err(AddonError::Invalid(
+            "Unsupported addon data contract version".to_string(),
+        ));
+    }
+    if contract.region_scope.len() > 16 || contract.endpoints.is_empty() || contract.endpoints.len() > 8 {
+        return Err(AddonError::Invalid(
+            "Addon data contract has invalid bounds".to_string(),
+        ));
+    }
+    for region in &contract.region_scope {
+        if region.is_empty()
+            || region.len() > 32
+            || !region.bytes().all(|byte| byte.is_ascii_uppercase() || byte == b'-')
+        {
+            return Err(AddonError::Invalid(
+                "Addon data contract contains an invalid region".to_string(),
+            ));
+        }
+    }
+    const READ_ONLY_ENDPOINTS: &[&str] = &[
+        "/api/weather/forecast",
+        "/api/weather/lookup",
+        "/api/traffic/events",
+        "/api/traffic/map.png",
+    ];
+    for endpoint in &contract.endpoints {
+        if endpoint.method != "GET" || !READ_ONLY_ENDPOINTS.contains(&endpoint.path.as_str()) {
+            return Err(AddonError::Invalid(
+                "Addon data contract contains an unsupported or mutating endpoint".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
     if manifest.schema_version != 1 {
         return Err(AddonError::Invalid(
@@ -660,6 +717,9 @@ pub fn validate_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
         return Err(AddonError::Invalid(
             "trusted_service metadata requires kind=trusted_server_service".to_string(),
         ));
+    }
+    if let Some(contract) = &manifest.data_contract {
+        validate_data_contract(contract)?;
     }
     if manifest.client_entrypoint.is_some() || manifest.server_entrypoint.is_some() {
         return Err(AddonError::Invalid(
@@ -1806,6 +1866,7 @@ mod tests {
                 default_props: serde_json::json!({"units": "metric"}),
             }],
             permissions: Vec::new(),
+            data_contract: None,
             client_entrypoint: None,
             server_entrypoint: None,
             trusted_service: None,
@@ -1866,6 +1927,50 @@ mod tests {
         value.client_api_version = Some("1".to_string());
         value.widget_types[0].renderer_type.clear();
         value
+    }
+
+    #[test]
+    fn bundled_standard_addon_manifests_validate() {
+        for bytes in [
+            include_str!("../addon-packages/weather-widget-standard-us-ca/manifest.json"),
+            include_str!("../addon-packages/traffic-standard-us-ca/manifest.json"),
+        ] {
+            let manifest: AddonManifest = serde_json::from_str(bytes).expect("valid addon JSON");
+            validate_manifest(&manifest).expect("bundled standard addon must validate");
+            assert_eq!(manifest.kind, "declarative");
+            assert!(manifest.data_contract.is_some());
+        }
+    }
+
+    #[test]
+    fn standard_weather_data_contract_is_accepted() {
+        let mut manifest = manifest();
+        manifest.id = "weather-widget-standard-us-ca".to_string();
+        manifest.name = "Weather widget standard (US & Canada)".to_string();
+        manifest.data_contract = Some(AddonDataContract {
+            api_version: "1".to_string(),
+            region_scope: vec!["US".to_string(), "CA".to_string()],
+            endpoints: vec![AddonDataEndpoint {
+                path: "/api/weather/forecast".to_string(),
+                method: "GET".to_string(),
+            }],
+        });
+        assert!(validate_manifest(&manifest).is_ok());
+    }
+
+    #[test]
+    fn data_contract_rejects_mutating_or_unknown_endpoints() {
+        let mut manifest = manifest();
+        manifest.data_contract = Some(AddonDataContract {
+            api_version: "1".to_string(),
+            region_scope: vec!["US".to_string()],
+            endpoints: vec![AddonDataEndpoint {
+                path: "/api/admin/database".to_string(),
+                method: "POST".to_string(),
+            }],
+        });
+        let error = validate_manifest(&manifest).unwrap_err().to_string();
+        assert!(error.contains("data contract"));
     }
 
     #[test]
