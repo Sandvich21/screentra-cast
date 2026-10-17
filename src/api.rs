@@ -2158,6 +2158,42 @@ async fn remove_trusted_service_stage(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn create_private_trusted_service_upload_file(path: &StdPath) -> std::io::Result<fs::File> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "upload parent is missing")
+    })?;
+    let parent_metadata = fs::symlink_metadata(parent)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "upload parent is not a real directory",
+        ));
+    }
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            let _ = fs::remove_file(path);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "upload target is not a regular file",
+            ));
+        }
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o600);
+        if let Err(error) = fs::set_permissions(path, permissions) {
+            let _ = fs::remove_file(path);
+            return Err(error);
+        }
+    }
+    Ok(file)
+}
+
 async fn stage_trusted_service_manifest(
     State(state): State<RuntimeState>,
     Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
@@ -2196,7 +2232,8 @@ async fn stage_trusted_service_manifest(
             break;
         }
         *seen = true;
-        let mut file = fs::File::create(path).map_err(|_| internal_server_error())?;
+        let mut file = create_private_trusted_service_upload_file(path)
+            .map_err(|_| internal_server_error())?;
         let mut total = 0usize;
         while let Some(chunk) = field
             .chunk()
@@ -9199,6 +9236,33 @@ fn reverse_name(ip: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trusted_service_upload_files_are_exclusive_and_private() {
+        let root = std::env::temp_dir().join(format!("screentra-upload-{}", Uuid::new_v4()));
+        fs::create_dir(&root).expect("create upload test directory");
+        let path = root.join("manifest.json");
+        let file = create_private_trusted_service_upload_file(&path)
+            .expect("create private upload file");
+        drop(file);
+        assert!(matches!(
+            create_private_trusted_service_upload_file(&path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::symlink_metadata(&path)
+                    .expect("inspect upload file")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn weather_alerts_are_assigned_to_each_overlapping_forecast_day() {
