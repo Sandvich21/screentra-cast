@@ -452,6 +452,22 @@ fn checked_backup_dir(create: bool) -> Result<PathBuf, String> {
     }
 }
 
+fn checked_backup_file(path: &str) -> Result<bool, String> {
+    let backup_dir = checked_backup_dir(false)?;
+    let candidate = StdPath::new(path);
+    if candidate.parent() != Some(backup_dir.as_path()) {
+        return Err("Backup file is outside the backup storage directory".to_string());
+    }
+    match fs::symlink_metadata(candidate) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err("Invalid backup file".to_string())
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("inspect backup file: {error}")),
+    }
+}
+
 #[derive(serde::Serialize)]
 struct RestoreDryRunReport {
     install_dir: String,
@@ -562,8 +578,13 @@ pub async fn restore_backup(
             (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
         })?;
 
-    if !StdPath::new(&backup_file_path).exists() {
-        return Err((StatusCode::NOT_FOUND, "Backup not found".to_string()));
+    match checked_backup_file(&backup_file_path) {
+        Ok(true) => {}
+        Ok(false) => return Err((StatusCode::NOT_FOUND, "Backup not found".to_string())),
+        Err(error) => {
+            log::warn!("backup path validation failed: {error}");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
+        }
     }
 
     // Detect service + dirs (same helpers create_backup uses).
@@ -907,6 +928,14 @@ pub async fn delete_backup(
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
 
+    match checked_backup_file(&file_path) {
+        Ok(true) | Ok(false) => {}
+        Err(error) => {
+            log::warn!("backup path validation failed: {error}");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
+        }
+    }
+
     // Delete the file if it exists. Preserve the database record when the
     // filesystem refuses deletion so the operator can retry safely.
     if let Err(error) = fs::remove_file(&file_path) {
@@ -1065,6 +1094,15 @@ pub async fn download_backup(
         .await
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
 
+    match checked_backup_file(&file_path) {
+        Ok(true) => {}
+        Ok(false) => return Err((StatusCode::NOT_FOUND, "Backup not found".to_string())),
+        Err(error) => {
+            log::warn!("backup path validation failed: {error}");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
+        }
+    }
+
     let path = StdPath::new(&file_path);
     let filename = path
         .file_name()
@@ -1133,6 +1171,36 @@ mod tests {
         header.set_mode(0o644);
         header.set_cksum();
         builder.append_data(&mut header, path, data).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_backup_file_rejects_symlinks_and_outside_paths() {
+        let _guard = BACKUP_HTTP_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = test_root("checked-file");
+        let data_dir = root.join("data");
+        let backup_dir = data_dir.join("backups");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        let inside = backup_dir.join("inside.tar.gz");
+        let outside = root.join("outside.tar.gz");
+        std::fs::write(&inside, b"backup").unwrap();
+        std::fs::write(&outside, b"outside").unwrap();
+        std::os::unix::fs::symlink(&outside, backup_dir.join("redirect.tar.gz")).unwrap();
+
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &data_dir); }
+        assert_eq!(checked_backup_file(inside.to_str().unwrap()), Ok(true));
+        assert!(checked_backup_file(outside.to_str().unwrap()).is_err());
+        assert!(checked_backup_file(backup_dir.join("redirect.tar.gz").to_str().unwrap()).is_err());
+        if let Some(value) = old_data_dir {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1781,11 +1849,11 @@ mod tests {
         let install_dir = parent.join("install");
         let data_dir = parent.join("data");
         std::fs::create_dir_all(&install_dir).unwrap();
-        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(data_dir.join("backups")).unwrap();
         std::fs::write(install_dir.join("old.txt"), b"old install").unwrap();
         std::fs::write(data_dir.join("signage.db"), b"old database").unwrap();
 
-        let archive_path = parent.join("backup.tar.gz");
+        let archive_path = data_dir.join("backups/backup.tar.gz");
         let archive_file = std::fs::File::create(&archive_path).unwrap();
         let encoder = GzEncoder::new(archive_file, Compression::default());
         let mut builder = Builder::new(encoder);
@@ -2064,8 +2132,8 @@ mod tests {
             .unwrap();
         let root = test_root("dry-run");
         let data_dir = root.join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-        let archive_path = root.join("backup.tar.gz");
+        std::fs::create_dir_all(data_dir.join("backups")).unwrap();
+        let archive_path = data_dir.join("backups/backup.tar.gz");
         let archive_file = std::fs::File::create(&archive_path).unwrap();
         let encoder = GzEncoder::new(archive_file, Compression::default());
         let mut builder = Builder::new(encoder);
