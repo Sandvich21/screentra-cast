@@ -1450,6 +1450,16 @@ pub fn stage_trusted_service_manifest(
 }
 
 fn read_trusted_service_stage(dir: &Path) -> Result<TrustedServiceStage, AddonError> {
+    reject_symlinked_path_ancestors(
+        dir,
+        "Invalid staged trusted service directory path",
+    )?;
+    let dir_metadata = fs::symlink_metadata(dir).map_err(io_error)?;
+    if dir_metadata.file_type().is_symlink() || !dir_metadata.is_dir() {
+        return Err(AddonError::Invalid(
+            "Invalid staged trusted service directory".to_string(),
+        ));
+    }
     let manifest_path = dir.join(MANIFEST_FILE);
     let signature_path = dir.join("manifest.sig");
     let image_signature_path = dir.join("image.sig");
