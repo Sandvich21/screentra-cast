@@ -1971,6 +1971,22 @@ mod tests {
         let _ = fs::remove_dir_all(target);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn trusted_service_file_validation_rejects_symlinked_ancestors() {
+        let root = std::env::temp_dir().join(format!("screentra-trusted-file-path-{}", Uuid::new_v4()));
+        let real_dir = root.join("real");
+        let linked_dir = root.join("linked");
+        fs::create_dir_all(&real_dir).unwrap();
+        fs::write(real_dir.join("key.pub"), b"key").unwrap();
+        symlink(&real_dir, &linked_dir).unwrap();
+
+        let error = validate_trusted_service_file(&linked_dir.join("key.pub"), 1024, "test key")
+            .unwrap_err();
+        assert!(error.to_string().contains("symlinked path ancestor"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn trusted_service_stage_rename_never_replaces_existing_target() {
