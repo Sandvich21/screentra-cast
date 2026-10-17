@@ -1823,6 +1823,19 @@ mod tests {
     }
 
     #[test]
+    fn activation_gate_inventory_matches_oci_required_gate_contract() {
+        let gates = activation_gates();
+        let names: std::collections::BTreeSet<_> =
+            gates.iter().map(|gate| gate.name.as_str()).collect();
+        let required: std::collections::BTreeSet<_> = crate::trusted_service_oci::REQUIRED_OCI_ACTIVATION_GATES
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(names, required);
+        assert_eq!(gates.len(), required.len());
+        assert!(gates.iter().all(|gate| !gate.reason.is_empty()));
+    }
+    #[test]
     fn readiness_deadline_is_deterministic_and_bounded() {
         let started_at = Instant::now();
         let deadline = RuntimeReadinessDeadline::new(started_at, Duration::from_secs(5))
