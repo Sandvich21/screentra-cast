@@ -1326,6 +1326,47 @@ fn write_private_trusted_service_file(path: &Path, bytes: &[u8]) -> Result<(), A
     Ok(())
 }
 
+fn rename_trusted_service_stage_noreplace(
+    source: &Path,
+    target: &Path,
+) -> Result<(), AddonError> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let source = CString::new(source.as_os_str().as_bytes()).map_err(|_| {
+            AddonError::Invalid("Trusted service stage path contains an invalid byte".to_string())
+        })?;
+        let target = CString::new(target.as_os_str().as_bytes()).map_err(|_| {
+            AddonError::Invalid("Trusted service target path contains an invalid byte".to_string())
+        })?;
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                target.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(AddonError::AlreadyInstalled);
+        }
+        return Err(io_error(error));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (source, target);
+        Err(AddonError::Invalid(
+            "Trusted service staging requires atomic no-replace rename support".to_string(),
+        ))
+    }
+}
+
 pub fn stage_trusted_service_manifest(
     manifest_path: &Path,
     signature_path: &Path,
@@ -1370,7 +1411,7 @@ pub fn stage_trusted_service_manifest(
             .map_err(io_error)?,
         )?;
         let validated_stage = read_trusted_service_stage(&stage)?;
-        fs::rename(&stage, &target).map_err(io_error)?;
+        rename_trusted_service_stage_noreplace(&stage, &target)?;
         Ok(validated_stage)
     })();
     if result.is_err() {
@@ -1930,6 +1971,24 @@ mod tests {
         }
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(target);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn trusted_service_stage_rename_never_replaces_existing_target() {
+        let root = std::env::temp_dir().join(format!("screentra-noreplace-{}", Uuid::new_v4()));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(source.join("marker"), b"source").unwrap();
+        fs::write(target.join("marker"), b"target").unwrap();
+
+        let error = rename_trusted_service_stage_noreplace(&source, &target).unwrap_err();
+        assert!(matches!(error, AddonError::AlreadyInstalled));
+        assert_eq!(fs::read(target.join("marker")).unwrap(), b"target");
+        assert!(source.exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
