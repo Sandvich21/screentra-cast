@@ -185,7 +185,15 @@ pub struct CredentialLeaseLedger {
 
 impl CredentialLeaseLedger {
     pub fn register(&mut self, lease: CredentialLease) -> Result<(), CredentialError> {
-        lease.validate()?;
+        self.register_at(lease, chrono::Utc::now().fixed_offset())
+    }
+
+    pub fn register_at(
+        &mut self,
+        lease: CredentialLease,
+        now: chrono::DateTime<chrono::FixedOffset>,
+    ) -> Result<(), CredentialError> {
+        lease.validate_at(now)?;
         if self.leases.len() >= MAX_TRACKED_CREDENTIAL_LEASES {
             return Err(CredentialError::Blocked(
                 "Trusted service credential lease ledger is full".to_string(),
@@ -410,6 +418,14 @@ mod tests {
         assert!(matches!(
             lease
                 .validate_at(chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z").unwrap()),
+            Err(CredentialError::Invalid(_))
+        ));
+        let mut ledger = CredentialLeaseLedger::default();
+        assert!(matches!(
+            ledger.register_at(
+                lease,
+                chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z").unwrap(),
+            ),
             Err(CredentialError::Invalid(_))
         ));
     }
