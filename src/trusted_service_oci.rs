@@ -875,6 +875,27 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn runtime_probe_rejects_group_or_other_writable_ancestor_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("screentra-oci-ancestor-permissions-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o775)).unwrap();
+        let executable = root.join("podman");
+        fs::write(&executable, b"not executed").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let report = probe_oci_runtime(&executable);
+        assert!(!report.executable_present);
+        assert!(report
+            .blocked_by
+            .iter()
+            .any(|reason| reason == "runtime path is writable by group or others"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn runtime_probe_rejects_symlinked_parent_paths() {
         use std::os::unix::fs::{symlink, PermissionsExt};
 
