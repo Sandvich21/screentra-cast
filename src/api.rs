@@ -9506,6 +9506,10 @@ mod tests {
 
     #[tokio::test]
     async fn trusted_service_stage_removal_is_audited() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
         let db_path = std::env::temp_dir().join(format!("screentra-trusted-stage-audit-{}.db", Uuid::new_v4()));
         let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open test database"));
         let state = RuntimeState::sqlite(db);
@@ -10192,8 +10196,10 @@ mod audit_validation_tests {
 
     #[tokio::test]
     async fn delete_addon_cleans_namespaced_storage_before_registry_removal() {
-        static DELETE_ADDON_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = DELETE_ADDON_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
         let root = std::env::temp_dir().join(format!("screentra-addon-delete-{}", Uuid::new_v4()));
         let data_dir = root.join("data");
         std::fs::create_dir_all(&data_dir).unwrap();

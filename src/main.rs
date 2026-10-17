@@ -31,6 +31,10 @@ use crate::api::{
 use crate::db::Database;
 use std::sync::Arc;
 
+#[cfg(test)]
+pub(crate) static PROCESS_ENV_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
 #[tokio::main]
 async fn main() {
     // rustls 0.23+ requires a process-level crypto provider. We use ring.

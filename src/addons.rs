@@ -1735,12 +1735,10 @@ pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, Addo
 mod tests {
     use super::*;
 
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
 
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
-
-    static STORAGE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn manifest() -> AddonManifest {
         AddonManifest {
@@ -1962,7 +1960,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn trusted_service_root_symlink_is_rejected_before_creation() {
-        let _guard = STORAGE_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -1991,7 +1989,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn trusted_service_stage_symlink_is_rejected_during_listing() {
-        let _guard = STORAGE_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -2049,7 +2047,7 @@ mod tests {
 
     #[test]
     fn signed_trusted_service_manifest_stages_without_activation() {
-        let _guard = STORAGE_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -2248,7 +2246,7 @@ mod tests {
 
     #[test]
     fn tampered_trusted_service_manifest_is_not_staged() {
-        let _guard = STORAGE_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -2354,7 +2352,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_client_status_without_writing() {
-        let _guard = STORAGE_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -2397,7 +2395,7 @@ mod tests {
     }
     #[test]
     fn saves_bounded_client_status_snapshot() {
-        let _guard = STORAGE_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -2450,7 +2448,7 @@ mod tests {
     }
     #[test]
     fn signed_client_package_round_trip_verifies_and_persists() {
-        let _guard = STORAGE_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -2611,7 +2609,7 @@ mod tests {
 
     #[test]
     fn storage_round_trip_preserves_enable_state() {
-        let _guard = STORAGE_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();

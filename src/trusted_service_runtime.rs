@@ -1434,13 +1434,11 @@ impl Drop for DisposableRuntimeHarness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    use std::sync::Mutex;
 
     #[test]
     fn activation_gates_are_fail_closed() {
-        let _guard = TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = crate::PROCESS_ENV_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         assert!(!EXECUTION_ENABLED);
         let gates = activation_gates();
         assert!(gates
@@ -1562,7 +1560,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn disable_rejects_symlinked_runtime_record_directory() {
-        let _guard = TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _guard = crate::PROCESS_ENV_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let root = std::env::temp_dir().join(format!("screentra-runtime-disable-{}", Uuid::new_v4()));
         let runtime_root = root.join(RUNTIME_DIR);
         let target = root.join("redirected-runtime");

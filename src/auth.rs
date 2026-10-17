@@ -1753,6 +1753,10 @@ mod tests {
 
     #[test]
     fn client_ip_ignores_headers_when_trusted_proxy_disabled() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
         // Make sure the gate is closed by default in tests
         std::env::remove_var("SIGNAGE_TRUSTED_PROXY");
         let mut headers = HeaderMap::new();
@@ -1767,6 +1771,10 @@ mod tests {
 
     #[test]
     fn client_ip_honors_headers_when_trusted_proxy_enabled() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
         std::env::set_var("SIGNAGE_TRUSTED_PROXY", "1");
         let mut headers = HeaderMap::new();
         headers.insert("x-real-ip", HeaderValue::from_static("1.2.3.4"));
@@ -1776,6 +1784,10 @@ mod tests {
 
     #[test]
     fn client_ip_falls_back_to_unknown_when_proxy_enabled_but_no_headers() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
         std::env::set_var("SIGNAGE_TRUSTED_PROXY", "1");
         let headers = HeaderMap::new();
         assert_eq!(client_ip(&headers), "unknown");

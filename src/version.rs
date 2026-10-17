@@ -1293,6 +1293,10 @@ mod update_swap_tests {
 
     #[test]
     fn update_manifest_signature_round_trip_rejects_tampering() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
         let root = std::env::temp_dir().join(format!(
             "ripley-update-signature-roundtrip-{}",
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
@@ -1339,6 +1343,10 @@ mod update_swap_tests {
 
     #[test]
     fn exported_update_bundle_contains_detached_manifest_signature() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
         let root = std::env::temp_dir().join(format!(
             "ripley-update-export-signature-{}",
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
@@ -1438,6 +1446,10 @@ mod update_swap_tests {
 
     #[test]
     fn republish_local_ca_restores_target_ca_after_static_copy() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
         let root = std::env::temp_dir().join(format!(
             "ripley-republish-ca-{}",
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()

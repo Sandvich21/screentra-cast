@@ -1167,13 +1167,11 @@ mod tests {
         Router,
     };
     use flate2::{write::GzEncoder, Compression};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use tar::{Builder, Header};
     use tower::ServiceExt;
-
-    static BACKUP_HTTP_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn test_root(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -1204,7 +1202,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn checked_backup_file_rejects_symlinks_and_outside_paths() {
-        let _guard = BACKUP_HTTP_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -1337,7 +1335,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a disposable PostgreSQL database supplied through SIGNAGE_DATABASE_URL"]
     async fn postgres_http_backup_restore_round_trips_addon_state() {
-        let _guard = BACKUP_HTTP_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -1526,7 +1524,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a disposable PostgreSQL database supplied through SIGNAGE_DATABASE_URL"]
     async fn postgres_http_restore_failure_rolls_back_filesystem_and_database() {
-        let _guard = BACKUP_HTTP_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -1674,7 +1672,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_http_backup_contains_addon_related_data() {
-        let _guard = BACKUP_HTTP_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -1739,7 +1737,7 @@ mod tests {
 
     #[tokio::test]
     async fn upload_http_registers_backup_without_restoring_it() {
-        let _guard = BACKUP_HTTP_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -1822,7 +1820,7 @@ mod tests {
 
     #[tokio::test]
     async fn upload_http_rejects_invalid_archive_without_registering_it() {
-        let _guard = BACKUP_HTTP_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -1869,7 +1867,7 @@ mod tests {
 
     #[tokio::test]
     async fn restore_http_confirmed_swaps_install_and_data_safely() {
-        let _guard = BACKUP_HTTP_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -1965,7 +1963,7 @@ mod tests {
 
     #[tokio::test]
     async fn backup_http_create_and_restore_round_trips_addon_state() {
-        let _guard = BACKUP_HTTP_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
@@ -2154,7 +2152,7 @@ mod tests {
 
     #[tokio::test]
     async fn restore_http_dry_run_reports_addon_and_trusted_service_state() {
-        let _guard = BACKUP_HTTP_TEST_LOCK
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap();
