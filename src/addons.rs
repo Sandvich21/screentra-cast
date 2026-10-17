@@ -2553,6 +2553,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn remove_rejects_symlinked_addon_directory() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
         let root = std::env::temp_dir().join(format!("screentra-addon-remove-{}", Uuid::new_v4()));
         let addons_root = root.join("addons");
         let target = root.join("target");

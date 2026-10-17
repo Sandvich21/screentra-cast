@@ -686,7 +686,7 @@ impl Drop for GatewayReadinessLease {
         let _ = self
             .readiness
             .active_sessions
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 count.checked_sub(1)
             });
     }
