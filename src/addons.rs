@@ -678,11 +678,9 @@ pub fn client_package(id: &str) -> Result<Vec<u8>, AddonError> {
     let manifest_path = dir.join(MANIFEST_FILE);
     let signature_path = dir.join("manifest.sig");
     let client_path = dir.join(entrypoint);
-    if !signature_path.is_file() || !client_path.is_file() {
-        return Err(AddonError::Invalid(
-            "Stored client package is incomplete".to_string(),
-        ));
-    }
+    checked_addon_file(&manifest_path, "stored addon manifest")?;
+    checked_addon_file(&signature_path, "stored addon signature")?;
+    checked_addon_file(&client_path, "stored client package")?;
     let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut builder = tar::Builder::new(encoder);
     builder
@@ -841,8 +839,20 @@ fn io_error(error: impl std::fmt::Display) -> AddonError {
     AddonError::Io(error.to_string())
 }
 
+fn checked_addon_file(path: &Path, description: &str) -> Result<(), AddonError> {
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AddonError::Invalid(format!("Invalid {description}")));
+    }
+    Ok(())
+}
+
 fn read_record(dir: &Path) -> Result<AddonRecord, AddonError> {
-    let manifest_text = fs::read_to_string(dir.join(MANIFEST_FILE)).map_err(io_error)?;
+    let manifest_path = dir.join(MANIFEST_FILE);
+    let state_path = dir.join(STATE_FILE);
+    checked_addon_file(&manifest_path, "addon manifest")?;
+    checked_addon_file(&state_path, "addon state")?;
+    let manifest_text = fs::read_to_string(manifest_path).map_err(io_error)?;
     let manifest: AddonManifest = serde_json::from_str(&manifest_text).map_err(io_error)?;
     if manifest.kind == "client_extension" {
         validate_client_extension_manifest(&manifest)?;
