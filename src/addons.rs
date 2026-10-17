@@ -1012,7 +1012,10 @@ fn trusted_service_storage_dir() -> PathBuf {
 }
 
 fn checked_trusted_service_storage_dir(create: bool) -> Result<Option<PathBuf>, AddonError> {
-    let root = trusted_service_storage_dir();
+    let Some(data_root) = checked_data_dir(create)? else {
+        return Ok(None);
+    };
+    let root = data_root.join("trusted-services");
     match fs::symlink_metadata(&root) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
             AddonError::Invalid("Invalid trusted service storage directory".to_string()),
