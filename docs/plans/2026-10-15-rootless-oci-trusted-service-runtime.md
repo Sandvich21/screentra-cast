@@ -46,7 +46,7 @@ Verify with focused runtime tests, then commit the contract separately.
 
 ## Task 2: Add an explicit runtime capability probe
 
-**Status:** Preflight implementation complete; the dedicated test host has a verified runtime, but the application invokes no capability command and remains execution-disabled. The pure path-bound argv helper now accepts only an explicitly validated absolute runtime executable with non-writable file/ancestor permissions and preserves that exact path in the generated vector; the runtime start path rechecks the capability report and remains blocked until the probe is enabled. No process execution occurs during probing.
+**Status:** Preflight implementation complete; the dedicated test host has a verified runtime, but the application invokes no capability command and remains execution-disabled. The pure path-bound argv helper now accepts only an explicitly validated absolute runtime executable with non-writable file/ancestor permissions and preserves that exact path in the generated vector; the runtime stores the executable device/inode identity, rechecks it before any future spawn, and remains blocked until the capability probe is enabled. No process execution occurs during probing.
 
 **Files:**
 - Create: `src/trusted_service_oci.rs`

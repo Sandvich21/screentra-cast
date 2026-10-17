@@ -89,6 +89,32 @@ pub struct OciRuntimeProbeReport {
     pub blocked_by: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OciRuntimeIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
+
+pub fn runtime_path_identity(path: &Path) -> Option<OciRuntimeIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::symlink_metadata(path).ok()?;
+        if !metadata.file_type().is_file() {
+            return None;
+        }
+        return Some(OciRuntimeIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 pub fn probe_oci_runtime(path: &Path) -> OciRuntimeProbeReport {
     let runtime_name = path
         .file_name()
@@ -851,6 +877,21 @@ mod tests {
             .blocked_by
             .iter()
             .any(|reason| reason == "runtime path must be absolute"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_path_identity_changes_after_replacement() {
+        let root = std::env::temp_dir().join(format!("screentra-oci-identity-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("podman");
+        fs::write(&executable, b"first").unwrap();
+        let first = super::runtime_path_identity(&executable).expect("first identity");
+        fs::rename(&executable, root.join("podman.old")).unwrap();
+        fs::write(&executable, b"second").unwrap();
+        let second = super::runtime_path_identity(&executable).expect("second identity");
+        assert_ne!(first, second);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

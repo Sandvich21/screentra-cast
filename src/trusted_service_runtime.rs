@@ -675,6 +675,7 @@ pub trait TrustedServiceRuntime {
 /// disabled. Image pulls remain disabled in the generated argv.
 pub struct RootlessOciRuntime {
     runtime_path: PathBuf,
+    runtime_identity: crate::trusted_service_oci::OciRuntimeIdentity,
     registry_policy: crate::trusted_service_oci::OciRegistryPolicy,
     running: BTreeMap<String, RootlessOciProcess>,
     known: BTreeMap<String, RuntimeHandle>,
@@ -703,8 +704,13 @@ impl RootlessOciRuntime {
         }
         crate::trusted_service_oci::validate_oci_registry_policy(&registry_policy)
             .map_err(RuntimeError::Invalid)?;
+        let runtime_identity = crate::trusted_service_oci::runtime_path_identity(&runtime_path)
+            .ok_or_else(|| {
+                RuntimeError::Invalid("OCI runtime identity is unavailable".to_string())
+            })?;
         Ok(Self {
             runtime_path,
+            runtime_identity,
             registry_policy,
             running: BTreeMap::new(),
             known: BTreeMap::new(),
@@ -725,6 +731,13 @@ impl RootlessOciRuntime {
         if !runtime_probe.can_start {
             return Err(RuntimeError::Blocked(
                 "OCI runtime capability probe is not enabled".to_string(),
+            ));
+        }
+        let current_identity = crate::trusted_service_oci::runtime_path_identity(&self.runtime_path)
+            .ok_or_else(|| RuntimeError::Blocked("OCI runtime identity is unavailable".to_string()))?;
+        if current_identity != self.runtime_identity {
+            return Err(RuntimeError::Blocked(
+                "OCI runtime path identity changed".to_string(),
             ));
         }
         if self.known.contains_key(&request.activation_instance) {
