@@ -1846,6 +1846,41 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn remove_rejects_insecure_runtime_record_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root =
+            std::env::temp_dir().join(format!("screentra-runtime-remove-{}", Uuid::new_v4()));
+        let runtime_root = root.join(RUNTIME_DIR);
+        let directory = runtime_root.join("example.service");
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&runtime_root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        assert!(matches!(remove("example.service"), Err(RuntimeError::Invalid(_))));
+        assert!(directory.exists());
+        if let Some(value) = old_data_dir {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn runtime_directory_creation_uses_private_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
