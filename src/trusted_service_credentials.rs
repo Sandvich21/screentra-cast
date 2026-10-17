@@ -50,7 +50,8 @@ impl CredentialScope {
 }
 
 fn validate_capabilities(capabilities: &[String]) -> Result<(), CredentialError> {
-    if capabilities.len() > 8
+    if capabilities.is_empty()
+        || capabilities.len() > 8
         || capabilities
             .iter()
             .any(|capability| capability.is_empty() || capability.len() > 64)
@@ -293,6 +294,12 @@ mod tests {
         ));
 
         invalid.capabilities = vec!["storage".to_string(), "storage".to_string()];
+        assert!(matches!(
+            invalid.validate(),
+            Err(CredentialError::Invalid(_))
+        ));
+
+        invalid.capabilities.clear();
         assert!(matches!(
             invalid.validate(),
             Err(CredentialError::Invalid(_))
