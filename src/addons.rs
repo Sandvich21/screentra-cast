@@ -1119,7 +1119,24 @@ fn verify_trusted_service_image_signature(
     validate_trusted_service_file(&public_key, 64 * 1024, "image signing public key")?;
     let digest_path = std::env::temp_dir().join(format!("screentra-trusted-image-digest-{}", Uuid::new_v4()));
     let result = (|| {
-        fs::write(&digest_path, image_digest.as_bytes()).map_err(io_error)?;
+        let mut digest_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&digest_path)
+            .map_err(io_error)?;
+        use std::io::Write;
+        digest_file
+            .write_all(image_digest.as_bytes())
+            .map_err(io_error)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::symlink_metadata(&digest_path)
+                .map_err(io_error)?
+                .permissions();
+            permissions.set_mode(0o600);
+            fs::set_permissions(&digest_path, permissions).map_err(io_error)?;
+        }
         let output = Command::new("openssl")
             .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
             .arg(&public_key)
