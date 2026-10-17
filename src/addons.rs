@@ -1081,10 +1081,23 @@ fn checked_trusted_service_storage_dir(create: bool) -> Result<Option<PathBuf>, 
     };
     let root = data_root.join("trusted-services");
     match fs::symlink_metadata(&root) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
-            AddonError::Invalid("Invalid trusted service storage directory".to_string()),
-        ),
-        Ok(_) => Ok(Some(root)),
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(AddonError::Invalid(
+                    "Invalid trusted service storage directory".to_string(),
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o777 != 0o700 {
+                    return Err(AddonError::Invalid(
+                        "Trusted service storage directory permissions are insecure".to_string(),
+                    ));
+                }
+            }
+            Ok(Some(root))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
             let mut directory_builder = fs::DirBuilder::new();
             #[cfg(unix)]
@@ -1098,6 +1111,15 @@ fn checked_trusted_service_storage_dir(create: bool) -> Result<Option<PathBuf>, 
                 return Err(AddonError::Invalid(
                     "Invalid trusted service storage directory".to_string(),
                 ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o777 != 0o700 {
+                    return Err(AddonError::Invalid(
+                        "Trusted service storage directory permissions are insecure".to_string(),
+                    ));
+                }
             }
             Ok(Some(root))
         }
@@ -1738,7 +1760,7 @@ mod tests {
     use std::sync::Mutex;
 
     #[cfg(unix)]
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{symlink, PermissionsExt};
 
     fn manifest() -> AddonManifest {
         AddonManifest {
@@ -1988,6 +2010,39 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn trusted_service_root_insecure_permissions_are_rejected() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root =
+            std::env::temp_dir().join(format!("screentra-trusted-permissions-{}", Uuid::new_v4()));
+        let storage = root.join("trusted-services");
+        fs::create_dir_all(&storage).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&storage, fs::Permissions::from_mode(0o755)).unwrap();
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        assert!(matches!(
+            checked_trusted_service_storage_dir(false),
+            Err(AddonError::Invalid(message)) if message.contains("permissions")
+        ));
+        if let Some(value) = old_data_root {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn trusted_service_stage_symlink_is_rejected_during_listing() {
         let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
@@ -1996,6 +2051,11 @@ mod tests {
         let root = std::env::temp_dir().join(format!("screentra-stage-root-{}", Uuid::new_v4()));
         let target = std::env::temp_dir().join(format!("screentra-stage-target-{}", Uuid::new_v4()));
         fs::create_dir_all(root.join("trusted-services")).unwrap();
+        fs::set_permissions(
+            root.join("trusted-services"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         fs::create_dir_all(&target).unwrap();
         symlink(&target, root.join("trusted-services/.stage-example.weather")).unwrap();
         let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
