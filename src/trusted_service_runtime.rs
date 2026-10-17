@@ -79,6 +79,8 @@ pub struct TrustedServiceRuntimeRecord {
     pub image_signature_verified: bool,
     #[serde(default)]
     pub resource_policy_verified: bool,
+    #[serde(default)]
+    pub readiness_verified: bool,
     pub capabilities: Vec<String>,
     pub storage_namespace: String,
     pub api_namespace: String,
@@ -489,6 +491,7 @@ fn record_from_stage(
         image_digest: service.image_digest.clone(),
         image_signature_verified: true,
         resource_policy_verified: false,
+        readiness_verified: false,
         capabilities: service.capabilities.clone(),
         storage_namespace: service.storage_namespace.clone(),
         api_namespace: service.api_namespace.clone(),
@@ -1203,6 +1206,11 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
             && !blocked_by.iter().any(|gate| gate == "resource_policy")
         {
             blocked_by.push("resource_policy".to_string());
+        }
+        if !record.readiness_verified
+            && !blocked_by.iter().any(|gate| gate == "readiness_handshake")
+        {
+            blocked_by.push("readiness_handshake".to_string());
         }
         Ok(ActivationPlan {
             addon_id: record.addon_id.clone(),
@@ -2745,6 +2753,17 @@ mod tests {
             .blocked_by
             .iter()
             .any(|gate| gate == "resource_policy"));
+
+        all_gates_passed.resource_policy_verified = true;
+        all_gates_passed.readiness_verified = false;
+        let readiness_blocked = TrustedServiceSupervisor::<FakeTrustedServiceRuntime>::activation_plan(
+            &all_gates_passed,
+        )
+        .expect("missing readiness evidence should produce a blocked plan");
+        assert!(readiness_blocked
+            .blocked_by
+            .iter()
+            .any(|gate| gate == "readiness_handshake"));
     }
 
     fn test_launch_profile() -> addons::TrustedServiceLaunchProfile {
@@ -2774,6 +2793,7 @@ mod tests {
             image_digest: format!("sha256:{}", "a".repeat(64)),
             image_signature_verified: true,
             resource_policy_verified: true,
+            readiness_verified: true,
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.service".to_string(),
             api_namespace: "example.service".to_string(),

@@ -885,6 +885,7 @@ mod tests {
             image_digest: format!("sha256:{}", "a".repeat(64)),
             image_signature_verified: true,
             resource_policy_verified: true,
+            readiness_verified: true,
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.weather".to_string(),
             api_namespace: "example.weather".to_string(),
