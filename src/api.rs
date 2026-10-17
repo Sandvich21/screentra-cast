@@ -4459,7 +4459,7 @@ fn validate_schedule_entry(entry: &ScheduleEntry) -> Result<(), (StatusCode, Str
         _ => return Err(bad("Invalid schedule action")),
     }
     if let Some(method) = entry.control_method.as_deref() {
-        if !matches!(method, "auto" | "ddc" | "cec" | "ir") {
+        if !matches!(method, "auto" | "ddc" | "cec" | "dpms" | "ir") {
             return Err(bad("Invalid schedule control method"));
         }
     }
@@ -8607,11 +8607,11 @@ async fn set_client_display_control_method(
     Json(payload): Json<DisplayControlMethodRequest>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
     let method = match payload.control_method.as_str() {
-        "ddc" | "cec" | "ir" | "auto" => payload.control_method.clone(),
+        "ddc" | "cec" | "ir" | "dpms" | "auto" => payload.control_method.clone(),
         other => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("Invalid control_method '{}'. Valid: ddc, cec, ir, auto", other),
+                format!("Invalid control_method '{}'. Valid: ddc, cec, ir, dpms, auto", other),
             ));
         }
     };

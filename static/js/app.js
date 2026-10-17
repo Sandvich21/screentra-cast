@@ -2045,7 +2045,7 @@ const App = {
             powerHeader.textContent = '⚡ Display Power Schedules';
             container.appendChild(powerHeader);
 
-            const methodLabels = { auto: 'Auto', cec: 'HDMI-CEC', ddc: 'DDC/CI', ir: 'IR', none: 'None', '': 'Auto' };
+            const methodLabels = { auto: 'Auto', cec: 'HDMI-CEC', ddc: 'DDC/CI', dpms: 'Linux DPMS (KMS)', ir: 'IR', none: 'None', '': 'Auto' };
             powerSchedules.forEach(s => {
                 const card = document.createElement('div');
                 card.className = 'sys-card';
@@ -2305,6 +2305,7 @@ const App = {
                             <option value="auto" ${existingMethod === 'auto' ? 'selected' : ''}>Auto (CEC preferred)</option>
                             <option value="cec" ${existingMethod === 'cec' ? 'selected' : ''}>HDMI-CEC</option>
                             <option value="ddc" ${existingMethod === 'ddc' ? 'selected' : ''}>DDC/CI</option>
+                            <option value="dpms" ${existingMethod === 'dpms' ? 'selected' : ''}>Linux DPMS (KMS)</option>
                             <option value="ir" ${existingMethod === 'ir' ? 'selected' : ''}>IR (coming later)</option>
                             <option value="none" ${existingMethod === 'none' ? 'selected' : ''}>None (disabled)</option>
                         </select>
@@ -2579,15 +2580,15 @@ ${targetSection}
             function updatePreview() {
                 const method = methodSel.value;
                 const action = actionSel.value;
-                const labels = { auto: 'Auto', cec: 'HDMI-CEC', ddc: 'DDC/CI', ir: 'IR', none: 'None' };
+                const labels = { auto: 'Auto', cec: 'HDMI-CEC', ddc: 'DDC/CI', dpms: 'Linux DPMS (KMS)', ir: 'IR', none: 'None' };
                 let cmd;
                 if (action === 'power_on') {
-                    cmd = (method === 'cec' || method === 'auto') ? 'cec pow 0' : 'ddcutil VCP 6=1';
+                    cmd = method === 'dpms' ? 'wlr-randr --output <selected connector> --on' : (method === 'cec' || method === 'auto') ? 'cec pow 0' : 'ddcutil VCP 6=1';
                 } else if (action === 'display_sleep') {
                     cmd = 'wlr-randr --output <selected connector> --off';
                 } else {
                     // power_off
-                    cmd = (method === 'cec' || method === 'auto') ? 'cec standby 0' : 'ddcutil VCP 6=4';
+                    cmd = method === 'dpms' ? 'wlr-randr --output <selected connector> --off' : (method === 'cec' || method === 'auto') ? 'cec standby 0' : 'ddcutil VCP 6=4';
                 }
                 cmdPreview.textContent = cmd;
                 methodPreview.textContent = labels[method] || method;
@@ -5419,16 +5420,17 @@ ${_cmds.oneLiner}`;
           <p class="client-detail-status"></p>
         </section>
         <section class="client-detail-section">
-          <h4>Display Control <span style="font-weight:normal;font-size:0.8em;color:var(--text-muted)">DDC/CI + CEC</span></h4>
+          <h4>Display Control <span style="font-weight:normal;font-size:0.8em;color:var(--text-muted)">DDC/CI + CEC + Linux DPMS</span></h4>
           <div style="display:flex;gap:0.5rem;margin-bottom:0.6rem;align-items:center;">
             <span style="font-size:0.85em">Display:</span>
             <select class="kiosk-pane-select client-detail-display-select" style="flex:1;max-width:220px">
               <option value="0">Display 0</option>
             </select>
             <span style="font-size:0.85em">Method:</span>
-            <select class="kiosk-pane-select client-detail-control-method" style="max-width:120px">
+            <select class="kiosk-pane-select client-detail-control-method" style="max-width:180px">
               <option value="auto">Auto</option>
               <option value="ddc">DDC/CI</option>
+              <option value="dpms">Linux DPMS (KMS)</option>
               <option value="cec">CEC</option>
               <option value="ir">IR (later)</option>
             </select>

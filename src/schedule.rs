@@ -321,6 +321,14 @@ fn power_command(
             "display_power".to_string(),
             serde_json::json!({ "state": "off", "display_index": display_index }),
         ),
+        ("dpms", "on") => (
+            "display_power".to_string(),
+            serde_json::json!({ "state": "on", "display_index": display_index }),
+        ),
+        ("dpms", _) => (
+            "display_power".to_string(),
+            serde_json::json!({ "state": "off", "display_index": display_index }),
+        ),
         ("ddc", _) => {
             // MCCS VCP D6: 1=on, 2=standby, 4=full power off.
             let value = match state {
@@ -482,6 +490,14 @@ fn apply_power_action(
 
     let (dispatch_action, payload) = match (control_method, power_state) {
         (_, "sleep") => (
+            "display_power".to_string(),
+            serde_json::json!({ "state": "off", "display_index": display_index }),
+        ),
+        ("dpms", "on") => (
+            "display_power".to_string(),
+            serde_json::json!({ "state": "on", "display_index": display_index }),
+        ),
+        ("dpms", _) => (
             "display_power".to_string(),
             serde_json::json!({ "state": "off", "display_index": display_index }),
         ),
@@ -703,6 +719,18 @@ mod tests {
         assert_eq!(on["value"], 1);
         assert_eq!(standby["value"], 2);
         assert_eq!(off["value"], 4);
+    }
+
+    #[test]
+    fn dpms_power_mode_uses_display_power_action() {
+        let (on_action, on) = power_command("dpms", "on", 0);
+        let (off_action, off) = power_command("dpms", "off", 0);
+
+        assert_eq!(on_action, "display_power");
+        assert_eq!(on["state"], "on");
+        assert_eq!(off_action, "display_power");
+        assert_eq!(off["state"], "off");
+        assert_eq!(off["display_index"], 0);
     }
     use crate::models::LayoutSetEntry;
     use rusqlite::Connection;
