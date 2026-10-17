@@ -404,24 +404,7 @@ pub fn save_client_status(
         .parent()
         .ok_or_else(|| AddonError::Io("Invalid addon status path".to_string()))?;
     fs::create_dir_all(parent).map_err(io_error)?;
-    let temporary = parent.join(format!(".status-{}.tmp", Uuid::new_v4()));
-    let mut temporary_file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(io_error)?;
-    use std::io::Write;
-    temporary_file.write_all(&bytes).map_err(io_error)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::symlink_metadata(&temporary)
-            .map_err(io_error)?
-            .permissions();
-        permissions.set_mode(0o600);
-        fs::set_permissions(&temporary, permissions).map_err(io_error)?;
-    }
-    fs::rename(temporary, path).map_err(io_error)
+    write_addon_file_atomic(&path, &bytes, "status")
 }
 
 pub fn load_client_status(client_id: &str) -> Result<Option<serde_json::Value>, AddonError> {
@@ -928,6 +911,45 @@ fn checked_addon_file(path: &Path, description: &str) -> Result<(), AddonError> 
     Ok(())
 }
 
+fn write_addon_file_atomic(
+    path: &Path,
+    bytes: &[u8],
+    temporary_prefix: &str,
+) -> Result<(), AddonError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| AddonError::Io("Invalid addon file path".to_string()))?;
+    reject_symlinked_path_ancestors(parent, "Invalid addon file parent")?;
+    let parent_metadata = fs::symlink_metadata(parent).map_err(io_error)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(AddonError::Invalid("Invalid addon file parent".to_string()));
+    }
+    let temporary = parent.join(format!(".{temporary_prefix}-{}.tmp", Uuid::new_v4()));
+    let result = (|| {
+        let mut temporary_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(io_error)?;
+        use std::io::Write;
+        temporary_file.write_all(bytes).map_err(io_error)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::symlink_metadata(&temporary)
+                .map_err(io_error)?
+                .permissions();
+            permissions.set_mode(0o600);
+            fs::set_permissions(&temporary, permissions).map_err(io_error)?;
+        }
+        fs::rename(&temporary, path).map_err(io_error)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn read_record(dir: &Path) -> Result<AddonRecord, AddonError> {
     let manifest_path = dir.join(MANIFEST_FILE);
     let state_path = dir.join(STATE_FILE);
@@ -1018,7 +1040,7 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<AddonRecord, AddonError> {
         installed_at: record.installed_at.clone(),
     };
     let state_text = serde_json::to_string_pretty(&state).map_err(io_error)?;
-    fs::write(dir.join(STATE_FILE), state_text).map_err(io_error)?;
+    write_addon_file_atomic(&dir.join(STATE_FILE), state_text.as_bytes(), "state")?;
     Ok(record)
 }
 
