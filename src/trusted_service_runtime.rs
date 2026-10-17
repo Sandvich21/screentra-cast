@@ -301,6 +301,7 @@ pub fn approve(
 ) -> Result<TrustedServiceRuntimeRecord, RuntimeError> {
     validate_approver(approver)?;
     let stage = addons::get_trusted_service_stage(addon_id)?;
+    let record = record_from_stage(&stage, approver)?;
     ensure_runtime_directory(addon_id)?;
     let path = record_path(addon_id)?;
     match fs::symlink_metadata(&path) {
@@ -318,7 +319,6 @@ pub fn approve(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(RuntimeError::Io(error.to_string())),
     }
-    let record = record_from_stage(&stage, approver)?;
     write_atomic(&path, &record)?;
     Ok(record)
 }
