@@ -833,6 +833,21 @@ pub fn ensure_bundled_standard_addons() -> Result<Vec<AddonRecord>, AddonError> 
         include_str!("../addon-packages/weather-widget-standard-us-ca/manifest.json"),
         include_str!("../addon-packages/traffic-standard-us-ca/manifest.json"),
     ];
+    let root = checked_addon_storage_dir(true)?.ok_or_else(|| {
+        AddonError::Io("Addon storage directory is unavailable".to_string())
+    })?;
+    let marker = root.join(".standard-addons-seeded");
+    match fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(AddonError::Invalid(
+                "Invalid standard addon seed marker".to_string(),
+            ));
+        }
+        Ok(_) => return list(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error(error)),
+    }
+
     let existing = list()?;
     for bytes in bundled {
         let manifest: AddonManifest = serde_json::from_str(bytes).map_err(io_error)?;
@@ -844,6 +859,7 @@ pub fn ensure_bundled_standard_addons() -> Result<Vec<AddonRecord>, AddonError> 
             install(manifest)?;
         }
     }
+    write_addon_file_atomic(&marker, b"seeded\n", "standard-addon-seed")?;
     list()
 }
 
@@ -2917,6 +2933,14 @@ mod tests {
             .unwrap()
             .iter()
             .any(|addon| addon.manifest.id == "traffic-standard-us-ca"));
+
+        let weather_dir = root.join("addons/weather-widget-standard-us-ca");
+        fs::remove_dir_all(weather_dir).unwrap();
+        let after_remove = ensure_bundled_standard_addons().unwrap();
+        assert_eq!(after_remove.len(), 1);
+        assert!(after_remove
+            .iter()
+            .all(|addon| addon.manifest.id == "traffic-standard-us-ca"));
 
         let _ = fs::remove_dir_all(&root);
         unsafe {
