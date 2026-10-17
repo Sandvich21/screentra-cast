@@ -217,7 +217,16 @@ fn write_atomic(path: &Path, value: &TrustedServiceRuntimeRecord) -> Result<(), 
     let bytes =
         serde_json::to_vec_pretty(value).map_err(|error| RuntimeError::Io(error.to_string()))?;
     let result = (|| {
-        fs::write(&temporary, bytes).map_err(|error| RuntimeError::Io(error.to_string()))?;
+        let mut temporary_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        use std::io::Write;
+        temporary_file
+            .write_all(&bytes)
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        drop(temporary_file);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
