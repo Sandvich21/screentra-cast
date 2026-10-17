@@ -185,7 +185,7 @@ fn activation_gates() -> Vec<ActivationGate> {
         ActivationGate {
             name: "database_boundary".to_string(),
             passed: false,
-            reason: "service database contract and SQLite adapter exist, but service gateway integration is not enabled"
+            reason: "service database contract and typed SQLite/PostgreSQL adapters exist, but production gateway integration is not enabled"
                 .to_string(),
         },
         ActivationGate {
@@ -196,7 +196,7 @@ fn activation_gates() -> Vec<ActivationGate> {
         ActivationGate {
             name: "resource_policy".to_string(),
             passed: false,
-            reason: "container resource and network policy is not implemented".to_string(),
+            reason: "OCI resource and network flags are contract-validated, but runtime enforcement evidence is incomplete".to_string(),
         },
     ]
 }
