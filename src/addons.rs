@@ -1356,6 +1356,8 @@ fn addon_signing_public_key() -> PathBuf {
 }
 
 fn verify_manifest_signature(manifest: &Path, signature: &Path) -> Result<(), AddonError> {
+    checked_addon_file(manifest, "addon manifest")?;
+    checked_addon_file(signature, "addon signature")?;
     let public_key = addon_signing_public_key();
     match fs::symlink_metadata(&public_key) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
