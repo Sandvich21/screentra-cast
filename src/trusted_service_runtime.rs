@@ -696,6 +696,9 @@ impl RuntimeReadinessDeadline {
 pub trait TrustedServiceRuntime {
     fn start(&mut self, request: &RuntimeLaunchRequest) -> Result<RuntimeHandle, RuntimeError>;
     fn stop(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError>;
+    fn replace(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        self.stop(handle)
+    }
     fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError>;
     fn supervise(&mut self) -> Result<(), RuntimeError> {
         Ok(())
@@ -817,7 +820,11 @@ impl RootlessOciRuntime {
         Ok(handle)
     }
 
-    fn stop_process(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+    fn stop_process_with_status(
+        &mut self,
+        handle: &RuntimeHandle,
+        terminal_status: RuntimeStatus,
+    ) -> Result<(), RuntimeError> {
         addons::validate_addon_storage_namespace(&handle.addon_id).map_err(RuntimeError::Invalid)?;
         addons::validate_addon_storage_namespace(&handle.activation_instance)
             .map_err(RuntimeError::Invalid)?;
@@ -865,7 +872,7 @@ impl RootlessOciRuntime {
         }
         self.terminal.insert(
             handle.activation_instance.clone(),
-            (handle.clone(), RuntimeStatus::Stopped),
+            (handle.clone(), terminal_status),
         );
         Ok(())
     }
@@ -895,6 +902,14 @@ impl RootlessOciRuntime {
             }
         }
         Ok(())
+    }
+
+    fn stop_process(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        self.stop_process_with_status(handle, RuntimeStatus::Stopped)
+    }
+
+    fn replace_process(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        self.stop_process_with_status(handle, RuntimeStatus::Replaced)
     }
 
     fn status_process(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError> {
@@ -950,6 +965,10 @@ impl TrustedServiceRuntime for RootlessOciRuntime {
 
     fn stop(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
         self.stop_process(handle)
+    }
+
+    fn replace(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        self.replace_process(handle)
     }
 
     fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError> {
@@ -1109,7 +1128,7 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
             )));
         }
         let new_handle = self.activate(record)?;
-        if let Err(stop_error) = self.deactivate(old_handle) {
+        if let Err(stop_error) = self.runtime.replace(old_handle) {
             let _rollback_result = self.deactivate(&new_handle);
             return Err(RuntimeError::Conflict(format!(
                 "Activation replacement could not retire the old runtime: {stop_error}"
@@ -1322,6 +1341,10 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
         self.actions
             .push(FakeRuntimeAction::Stop(handle.activation_instance.clone()));
         Ok(())
+    }
+
+    fn replace(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        self.mark_replaced(handle)
     }
 
     fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError> {
@@ -2040,7 +2063,7 @@ mod tests {
         harness
             .supervisor
             .runtime_mut()
-            .mark_replaced(&handle)
+            .replace(&handle)
             .expect("fake runtime replacement");
         assert_eq!(
             harness.supervisor.runtime().status(&handle).unwrap(),
