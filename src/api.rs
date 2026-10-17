@@ -2158,6 +2158,39 @@ async fn remove_trusted_service_stage(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn create_private_trusted_service_upload_dir(path: &StdPath) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "upload parent is missing")
+    })?;
+    let parent_metadata = fs::symlink_metadata(parent)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "upload parent is not a real directory",
+        ));
+    }
+    fs::create_dir(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        let _ = fs::remove_dir(path);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "upload staging path is not a real directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o700);
+        if let Err(error) = fs::set_permissions(path, permissions) {
+            let _ = fs::remove_dir(path);
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 fn create_private_trusted_service_upload_file(path: &StdPath) -> std::io::Result<fs::File> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "upload parent is missing")
@@ -2201,7 +2234,8 @@ async fn stage_trusted_service_manifest(
 ) -> Result<(StatusCode, AxumJson<crate::addons::TrustedServiceStage>), (StatusCode, String)> {
     require_addon_storage_admin(&principal)?;
     let temp_dir = std::env::temp_dir().join(format!("screentra-trusted-service-{}", Uuid::new_v4()));
-    fs::create_dir_all(&temp_dir).map_err(|_| internal_server_error())?;
+    create_private_trusted_service_upload_dir(&temp_dir)
+        .map_err(|_| internal_server_error())?;
     let manifest_path = temp_dir.join("manifest.json");
     let signature_path = temp_dir.join("manifest.sig");
     let image_signature_path = temp_dir.join("image.sig");
@@ -9240,7 +9274,20 @@ mod tests {
     #[test]
     fn trusted_service_upload_files_are_exclusive_and_private() {
         let root = std::env::temp_dir().join(format!("screentra-upload-{}", Uuid::new_v4()));
-        fs::create_dir(&root).expect("create upload test directory");
+        create_private_trusted_service_upload_dir(&root)
+            .expect("create private upload test directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::symlink_metadata(&root)
+                    .expect("inspect upload directory")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
         let path = root.join("manifest.json");
         let file = create_private_trusted_service_upload_file(&path)
             .expect("create private upload file");
