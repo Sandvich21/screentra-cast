@@ -341,7 +341,32 @@ fn write_atomic(path: &Path, value: &TrustedServiceRuntimeRecord) -> Result<(), 
         Ok(())
     })();
     if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        let parent_is_owned = fs::symlink_metadata(parent)
+            .map(|metadata| {
+                if validate_private_runtime_directory(
+                    &metadata,
+                    "Invalid trusted service runtime record directory",
+                )
+                .is_err()
+                {
+                    return false;
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    if (metadata.dev(), metadata.ino()) != parent_identity {
+                        return false;
+                    }
+                }
+                true
+            })
+            .unwrap_or(false);
+        let temporary_is_owned = fs::symlink_metadata(&temporary)
+            .map(|metadata| !metadata.file_type().is_symlink() && metadata.is_file())
+            .unwrap_or(false);
+        if parent_is_owned && temporary_is_owned {
+            let _ = fs::remove_file(&temporary);
+        }
     }
     result
 }
