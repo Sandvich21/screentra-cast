@@ -194,9 +194,10 @@ SCREENTRA_CAST_UPDATE_ASSET=screentra-cast-server-update.tar.gz
 The System page now contains the first add-on manager slice. Administrators can
 install, enable, disable, and remove versioned **declarative** add-on manifests
 persisted below the runtime data directory. Manifests may include widget-type
-metadata, an editor schema, a trusted existing `renderer_type`, and default
-properties. Enabled addon aliases appear in the layout editor palette and reuse
-that existing renderer. Signed client-extension packages are stored separately
+metadata, an editor schema, a trusted existing `host_renderer`, and default
+properties. The add-on owns the widget ID, label, schema, defaults, and data
+contract; the server only supplies the generic host adapter named by
+`host_renderer`. Signed client-extension packages are stored separately
 for the gated client-delivery phase; no custom client code is loaded yet.
 
 Core-owned namespaced addon storage is available through the authenticated admin

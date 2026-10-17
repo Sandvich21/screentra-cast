@@ -20,7 +20,7 @@ const SUPPORTED_CLIENT_API_VERSION: &str = "1";
 const MAX_ID_LEN: usize = 64;
 const MAX_NAME_LEN: usize = 80;
 const MAX_DESCRIPTION_LEN: usize = 500;
-const DECLARATIVE_RENDERERS: &[&str] = &[
+const HOST_RENDERERS: &[&str] = &[
     "text",
     "image",
     "video",
@@ -168,8 +168,8 @@ pub struct AddonWidgetType {
     /// Existing trusted renderer used by this declarative alias. This keeps
     /// the first runtime phase code-free while still making an addon visible
     /// in the editor and usable by the player.
-    #[serde(default)]
-    pub renderer_type: String,
+    #[serde(default, alias = "renderer_type")]
+    pub host_renderer: String,
     #[serde(default)]
     pub icon: String,
     #[serde(default)]
@@ -745,9 +745,9 @@ pub fn validate_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
                 widget.id
             )));
         }
-        if !DECLARATIVE_RENDERERS.contains(&widget.renderer_type.as_str()) {
+        if !HOST_RENDERERS.contains(&widget.host_renderer.as_str()) {
             return Err(AddonError::Invalid(format!(
-                "Widget type '{}' must select a supported renderer_type",
+                "Widget type '{}' must select a supported host_renderer",
                 widget.id
             )));
         }
@@ -771,7 +771,7 @@ pub struct AddonWidgetRegistration {
     pub addon_version: String,
     pub name: String,
     pub description: String,
-    pub renderer_type: String,
+    pub host_renderer: String,
     pub icon: String,
     pub schema: serde_json::Value,
     pub default_props: serde_json::Value,
@@ -867,7 +867,7 @@ pub fn enabled_widget_registrations() -> Result<Vec<AddonWidgetRegistration>, Ad
     let mut registrations = Vec::new();
     for addon in list()?.into_iter().filter(|addon| addon.enabled) {
         for widget in addon.manifest.widget_types {
-            if widget.renderer_type.is_empty() {
+            if widget.host_renderer.is_empty() {
                 continue;
             }
             registrations.push(AddonWidgetRegistration {
@@ -876,7 +876,7 @@ pub fn enabled_widget_registrations() -> Result<Vec<AddonWidgetRegistration>, Ad
                 addon_version: addon.manifest.version.clone(),
                 name: widget.name,
                 description: widget.description,
-                renderer_type: widget.renderer_type,
+                host_renderer: widget.host_renderer,
                 icon: widget.icon,
                 schema: widget.schema,
                 default_props: widget.default_props,
@@ -957,8 +957,8 @@ pub fn validate_client_extension_manifest(manifest: &AddonManifest) -> Result<()
                 widget.id
             )));
         }
-        if !widget.renderer_type.is_empty()
-            && !DECLARATIVE_RENDERERS.contains(&widget.renderer_type.as_str())
+        if !widget.host_renderer.is_empty()
+            && !HOST_RENDERERS.contains(&widget.host_renderer.as_str())
         {
             return Err(AddonError::Invalid(format!(
                 "Widget type '{}' selected an unsupported fallback renderer",
@@ -1924,7 +1924,7 @@ mod tests {
                 name: "Example Weather".to_string(),
                 description: String::new(),
                 schema: serde_json::json!({"type": "object"}),
-                renderer_type: "weather".to_string(),
+                host_renderer: "weather".to_string(),
                 icon: "🌤️".to_string(),
                 default_props: serde_json::json!({"units": "metric"}),
             }],
@@ -1936,6 +1936,21 @@ mod tests {
             client_sha256: None,
             client_api_version: None,
         }
+    }
+
+    #[test]
+    fn host_renderer_wire_name_accepts_legacy_renderer_type_manifests() {
+        let legacy = serde_json::json!({
+            "id": "example.weather",
+            "name": "Example Weather",
+            "renderer_type": "weather"
+        });
+        let parsed: AddonWidgetType = serde_json::from_value(legacy)
+            .expect("legacy renderer_type manifests remain readable");
+        assert_eq!(parsed.host_renderer, "weather");
+        let encoded = serde_json::to_value(parsed).expect("widget type should serialize");
+        assert_eq!(encoded["host_renderer"], "weather");
+        assert!(encoded.get("renderer_type").is_none());
     }
 
     fn launch_profile() -> TrustedServiceLaunchProfile {
@@ -1988,7 +2003,7 @@ mod tests {
         value.client_entrypoint = Some("client/index.js".to_string());
         value.client_sha256 = Some(client_sha256.to_string());
         value.client_api_version = Some("1".to_string());
-        value.widget_types[0].renderer_type.clear();
+        value.widget_types[0].host_renderer.clear();
         value
     }
 
@@ -2599,7 +2614,7 @@ mod tests {
     #[test]
     fn rejects_unknown_renderer() {
         let mut value = manifest();
-        value.widget_types[0].renderer_type = "arbitrary-code".to_string();
+        value.widget_types[0].host_renderer = "arbitrary-code".to_string();
         assert!(validate_manifest(&value).is_err());
     }
 
@@ -3023,7 +3038,7 @@ mod tests {
         assert_eq!(list().unwrap().len(), 1);
         let registrations = enabled_widget_registrations().unwrap();
         assert_eq!(registrations.len(), 1);
-        assert_eq!(registrations[0].renderer_type, "weather");
+        assert_eq!(registrations[0].host_renderer, "weather");
         let disabled = set_enabled("example.weather", false).unwrap();
         assert!(!disabled.enabled);
         assert!(!list().unwrap()[0].enabled);

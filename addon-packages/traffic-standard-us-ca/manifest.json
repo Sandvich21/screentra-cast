@@ -21,7 +21,7 @@
           "max_events": { "type": "integer", "minimum": 1, "maximum": 10 }
         }
       },
-      "renderer_type": "traffic",
+      "host_renderer": "traffic",
       "icon": "🚧",
       "default_props": {
         "radius_miles": 25,

@@ -17,7 +17,15 @@ The Add-ons panel accepts declarative manifest JSON. If the manifest ID is alrea
 
 The standard packages are metadata-only. They do not execute uploaded server code, load unsigned client JavaScript, expose database access, issue credentials, or activate trusted-service containers.
 
-## Current release boundary
+## Ownership boundary
+
+Weather and traffic are add-on-owned widget definitions. Their manifests own the
+widget IDs, labels, schemas, defaults, region contracts, and `host_renderer`
+selection. The server retains only generic trusted host adapters named by that
+field; it does not treat `weather` or `traffic` as base palette entries. Legacy
+manifests using `renderer_type` remain readable, but newly serialized manifests
+use `host_renderer` to make the boundary explicit.
+
 
 The widget definitions, aliases, region scope, and data contracts are independently updateable. Weather and traffic provider/rendering implementation remains a shared core host service for this release. Signed provider runtime loading, regional executable providers, rollback, and deeper hardening are post-release work.
 

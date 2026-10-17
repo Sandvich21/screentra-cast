@@ -1915,7 +1915,7 @@ const Editor = {
   makeLayoutWidget(type, id, x, y) {
     const addon = this._addonWidgetForType(type);
     if (addon) {
-      const widget = this.makeLayoutWidget(addon.renderer_type, id, x, y);
+      const widget = this.makeLayoutWidget(addon.host_renderer, id, x, y);
       const defaultProps = addon.default_props && typeof addon.default_props === 'object' && !Array.isArray(addon.default_props) ? addon.default_props : {};
       widget.props = {
         ...widget.props,
