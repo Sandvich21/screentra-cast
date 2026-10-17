@@ -721,6 +721,12 @@ impl RootlessOciRuntime {
                 "Trusted service execution is disabled".to_string(),
             ));
         }
+        let runtime_probe = crate::trusted_service_oci::probe_oci_runtime(&self.runtime_path);
+        if !runtime_probe.can_start {
+            return Err(RuntimeError::Blocked(
+                "OCI runtime capability probe is not enabled".to_string(),
+            ));
+        }
         if self.known.contains_key(&request.activation_instance) {
             return Err(RuntimeError::Conflict(
                 "Rootless OCI activation identity has already been used".to_string(),
