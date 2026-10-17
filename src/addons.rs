@@ -1151,13 +1151,17 @@ fn validate_trusted_service_file(
     Ok(())
 }
 
+fn trusted_service_signature_verifier_executable() -> &'static str {
+    "/usr/bin/openssl"
+}
+
 fn verify_trusted_service_manifest_signature(
     manifest_path: &Path,
     signature_path: &Path,
 ) -> Result<(), AddonError> {
     let public_key = trusted_service_signing_public_key();
     validate_trusted_service_file(&public_key, 64 * 1024, "manifest signing public key")?;
-    let result = Command::new("openssl")
+    let result = Command::new(trusted_service_signature_verifier_executable())
         .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
         .arg(&public_key)
         .args(["-sigfile"])
@@ -1200,7 +1204,7 @@ fn verify_trusted_service_image_signature(
         digest_file
             .write_all(image_digest.as_bytes())
             .map_err(io_error)?;
-        let output = Command::new("openssl")
+        let output = Command::new(trusted_service_signature_verifier_executable())
             .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
             .arg(&public_key)
             .args(["-sigfile"])
@@ -1673,7 +1677,7 @@ fn verify_manifest_signature(manifest: &Path, signature: &Path) -> Result<(), Ad
         Err(error) => return Err(io_error(error)),
         Ok(_) => {}
     }
-    let result = Command::new("openssl")
+    let result = Command::new(trusted_service_signature_verifier_executable())
         .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
         .arg(&public_key)
         .args(["-sigfile"])
@@ -1826,6 +1830,14 @@ mod tests {
             pids: 64,
             writable_bytes: 16 * 1024 * 1024,
         }
+    }
+
+    #[test]
+    fn trusted_service_signature_verification_uses_a_fixed_absolute_executable() {
+        let executable = trusted_service_signature_verifier_executable();
+        assert!(executable.starts_with('/'));
+        assert_eq!(executable, "/usr/bin/openssl");
+        assert!(!executable.contains(".."));
     }
 
     #[test]
@@ -2150,13 +2162,13 @@ mod tests {
             serde_json::to_vec_pretty(&trusted_manifest()).unwrap(),
         )
         .unwrap();
-        assert!(Command::new("openssl")
+        assert!(Command::new(trusted_service_signature_verifier_executable())
             .args(["genpkey", "-algorithm", "ED25519", "-out"])
             .arg(&private_key)
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("openssl")
+        assert!(Command::new(trusted_service_signature_verifier_executable())
             .args(["pkey", "-in"])
             .arg(&private_key)
             .args(["-pubout", "-out"])
@@ -2164,7 +2176,7 @@ mod tests {
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("openssl")
+        assert!(Command::new(trusted_service_signature_verifier_executable())
             .args(["pkeyutl", "-sign", "-rawin", "-inkey"])
             .arg(&private_key)
             .args(["-in"])
@@ -2181,13 +2193,13 @@ mod tests {
             .image_digest
             .clone();
         fs::write(&image_digest_path, image_digest.as_bytes()).unwrap();
-        assert!(Command::new("openssl")
+        assert!(Command::new(trusted_service_signature_verifier_executable())
             .args(["genpkey", "-algorithm", "ED25519", "-out"])
             .arg(&image_private_key)
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("openssl")
+        assert!(Command::new(trusted_service_signature_verifier_executable())
             .args(["pkey", "-in"])
             .arg(&image_private_key)
             .args(["-pubout", "-out"])
@@ -2195,7 +2207,7 @@ mod tests {
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("openssl")
+        assert!(Command::new(trusted_service_signature_verifier_executable())
             .args(["pkeyutl", "-sign", "-rawin", "-inkey"])
             .arg(&image_private_key)
             .args(["-in"])
@@ -2346,13 +2358,13 @@ mod tests {
             serde_json::to_vec_pretty(&trusted_manifest()).unwrap(),
         )
         .unwrap();
-        assert!(Command::new("openssl")
+        assert!(Command::new(trusted_service_signature_verifier_executable())
             .args(["genpkey", "-algorithm", "ED25519", "-out"])
             .arg(&private_key)
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("openssl")
+        assert!(Command::new(trusted_service_signature_verifier_executable())
             .args(["pkey", "-in"])
             .arg(&private_key)
             .args(["-pubout", "-out"])
@@ -2360,7 +2372,7 @@ mod tests {
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("openssl")
+        assert!(Command::new(trusted_service_signature_verifier_executable())
             .args(["pkeyutl", "-sign", "-rawin", "-inkey"])
             .arg(&private_key)
             .args(["-in"])
@@ -2555,13 +2567,13 @@ mod tests {
         let signature_path = package_root.join("manifest.sig");
         let private_key = root.join("addon-signing.key");
         let public_key = root.join("addon-signing.pub");
-        assert!(Command::new("openssl")
+        assert!(Command::new(trusted_service_signature_verifier_executable())
             .args(["genpkey", "-algorithm", "ED25519", "-out"])
             .arg(&private_key)
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("openssl")
+        assert!(Command::new(trusted_service_signature_verifier_executable())
             .args(["pkey", "-in"])
             .arg(&private_key)
             .args(["-pubout", "-out"])
@@ -2569,7 +2581,7 @@ mod tests {
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("openssl")
+        assert!(Command::new(trusted_service_signature_verifier_executable())
             .args(["pkeyutl", "-sign", "-rawin", "-inkey"])
             .arg(&private_key)
             .args(["-in"])
