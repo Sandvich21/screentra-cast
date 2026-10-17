@@ -121,6 +121,8 @@ No image pull is implemented until signature verification, registry allowlisting
 
 **Status:** Pending. Contract validation, bounded dry-run argv construction, registry policy, gateway/session types, lifecycle records, and disabled credential/database boundaries are present. The manifest now carries an explicit launch profile (service command, resource limits, isolation policy, and exact gateway endpoint), and approval records persist and revalidate that profile; launch-spec binding rejects any mismatch. The required real supervisor, Unix transport, image-signature transport, credential broker, resource enforcement, rollback wiring, and production gateway remain incomplete. `EXECUTION_ENABLED` and the `database_boundary` gate remain disabled.
 
+**Boundary review checkpoint:** The current source review found no trusted-service activation route, runtime process/image-pull invocation, Unix gateway listener, credential transport, or database-boundary activation path. The approval endpoint only creates a persisted record; `activation_plan()` still blocks on the disabled execution gate and incomplete required gates. Backup/restore and addon removal paths perform inert metadata/storage cleanup and do not call runtime activation. This is source-level evidence only; it does not make the pending OCI gates pass.
+
 **Files:**
 - Modify: `src/trusted_service_runtime.rs`
 - Modify: `docs/plans/2026-10-15-rootless-oci-trusted-service-runtime.md`
