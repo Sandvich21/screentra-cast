@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
+use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex};
 use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::{
@@ -657,20 +657,38 @@ pub trait GatewayOperationHandler: Send + Sync {
 
 #[derive(Debug, Clone, Default)]
 pub struct GatewayReadiness {
-    ready: Arc<AtomicBool>,
+    active_sessions: Arc<AtomicUsize>,
 }
 
 impl GatewayReadiness {
     pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
+        self.active_sessions.load(Ordering::Acquire) > 0
     }
 
-    fn mark_ready(&self) {
-        self.ready.store(true, Ordering::Release);
+    fn mark_ready(&self) -> GatewayReadinessLease {
+        self.active_sessions.fetch_add(1, Ordering::AcqRel);
+        GatewayReadinessLease {
+            readiness: self.clone(),
+        }
     }
 
     fn mark_not_ready(&self) {
-        self.ready.store(false, Ordering::Release);
+        self.active_sessions.store(0, Ordering::Release);
+    }
+}
+
+struct GatewayReadinessLease {
+    readiness: GatewayReadiness,
+}
+
+impl Drop for GatewayReadinessLease {
+    fn drop(&mut self) {
+        let _ = self
+            .readiness
+            .active_sessions
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_sub(1)
+            });
     }
 }
 
@@ -922,7 +940,7 @@ async fn handle_unix_connection(
     .map_err(|_| "Gateway hello timed out".to_string())??;
     let mut session = GatewaySession::new(binding, peer_policy, admission);
     session.accept_hello(&hello, peer)?;
-    readiness.mark_ready();
+    let _readiness_lease = readiness.mark_ready();
     loop {
         let request = tokio::time::timeout(
             MAX_REQUEST_DURATION,
@@ -1147,9 +1165,13 @@ mod tests {
     fn gateway_readiness_requires_a_valid_hello() {
         let readiness = GatewayReadiness::default();
         assert!(!readiness.is_ready());
-        readiness.mark_ready();
+        let first = readiness.mark_ready();
         assert!(readiness.is_ready());
-        readiness.mark_not_ready();
+        let second = readiness.mark_ready();
+        assert!(readiness.is_ready());
+        drop(first);
+        assert!(readiness.is_ready());
+        drop(second);
         assert!(!readiness.is_ready());
     }
 
