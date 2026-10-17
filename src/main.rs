@@ -609,6 +609,14 @@ async fn main() {
     .expect("failed to initialize repository backend");
     crate::screenshot::init(256 * 1024 * 1024);
 
+    match crate::addons::ensure_bundled_standard_addons() {
+        Ok(addons) => log::info!(
+            "Standard weather/traffic addons available: {}",
+            addons.len()
+        ),
+        Err(error) => log::error!("Failed to install bundled standard addons: {error}"),
+    }
+
     let scheduler_repository = runtime_state.client_repository();
     tokio::spawn(async move {
         crate::schedule::run_repository_scheduler(scheduler_repository).await;

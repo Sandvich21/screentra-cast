@@ -828,6 +828,25 @@ pub fn enabled_client_extensions() -> Result<Vec<AddonManifest>, AddonError> {
         .collect())
 }
 
+pub fn ensure_bundled_standard_addons() -> Result<Vec<AddonRecord>, AddonError> {
+    let bundled = [
+        include_str!("../addon-packages/weather-widget-standard-us-ca/manifest.json"),
+        include_str!("../addon-packages/traffic-standard-us-ca/manifest.json"),
+    ];
+    let existing = list()?;
+    for bytes in bundled {
+        let manifest: AddonManifest = serde_json::from_str(bytes).map_err(io_error)?;
+        validate_manifest(&manifest)?;
+        if !existing
+            .iter()
+            .any(|addon| addon.manifest.id == manifest.id)
+        {
+            install(manifest)?;
+        }
+    }
+    list()
+}
+
 pub fn enabled_widget_registrations() -> Result<Vec<AddonWidgetRegistration>, AddonError> {
     let mut registrations = Vec::new();
     for addon in list()?.into_iter().filter(|addon| addon.enabled) {
@@ -2863,6 +2882,42 @@ mod tests {
         assert_eq!(list().unwrap().len(), 1);
 
         remove("example.weather").unwrap();
+        let _ = fs::remove_dir_all(&root);
+        unsafe {
+            std::env::remove_var("SIGNAGE_DATA_DIR");
+        }
+    }
+
+    #[test]
+    fn bundled_standard_addons_install_once_and_are_listed() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-cast-standard-addon-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+
+        let first = ensure_bundled_standard_addons().unwrap();
+        assert_eq!(first.len(), 2);
+        assert!(first.iter().all(|addon| addon.enabled));
+        let second = ensure_bundled_standard_addons().unwrap();
+        assert_eq!(second.len(), 2);
+        assert_eq!(list().unwrap().len(), 2);
+        assert!(list()
+            .unwrap()
+            .iter()
+            .any(|addon| addon.manifest.id == "weather-widget-standard-us-ca"));
+        assert!(list()
+            .unwrap()
+            .iter()
+            .any(|addon| addon.manifest.id == "traffic-standard-us-ca"));
+
         let _ = fs::remove_dir_all(&root);
         unsafe {
             std::env::remove_var("SIGNAGE_DATA_DIR");

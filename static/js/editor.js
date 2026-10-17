@@ -863,8 +863,6 @@ const Editor = {
       { type: 'video', icon: '🎬', label: 'Video' },
       { type: 'clock', icon: '🕐', label: 'Clock' },
       { type: 'date', icon: '📅', label: 'Date' },
-      { type: 'weather', icon: '🌤️', label: 'Weather' },
-      { type: 'traffic', icon: '🚧', label: 'Traffic' },
       { type: 'countdown', icon: '⏱️', label: 'Countdown' },
       { type: 'sound', icon: '🔊', label: 'Sound' },
       { type: 'embed', icon: '🔗', label: 'Embed' },
