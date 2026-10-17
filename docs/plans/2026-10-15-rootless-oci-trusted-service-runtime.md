@@ -75,7 +75,7 @@ Build only a dry-run launch description until the runtime probe is available. Do
 
 ## Task 4: Add isolated storage and gateway boundaries
 
-**Status:** Bounded typed gateway framing is complete, including four-byte big-endian length-prefix parsing, partial-frame handling, versioned and bounded connection-identity hello encoding, typed request/response wrappers, request-envelope and response pre-serialization size checks, transactional session operation-budget admission, session-enforced peer validation before hello decoding, 5-second request deadlines, 100-operation budgets, terminal session retirement, active/stopped/disabled/replaced activation binding, shared per-activation admission state across sessions, and framed hello-to-request admission coverage. Unix listener, OS peer-credential acquisition, and runtime wiring remain disabled.
+**Status:** Typed gateway framing and admission are complete, and a Unix transport adapter is now implemented behind the disabled execution gate. `TrustedServiceUnixGateway` uses the fixed socket path, validates the real parent/socket, acquires Linux `SO_PEERCRED` before decoding the hello, enforces the typed session admission state, bounds frames, applies timeout budgets, and routes only through a typed operation handler. It returns before binding when `EXECUTION_ENABLED` is false. Production selection, database-handler wiring, credential transport, and live socket verification remain disabled.
 
 **Files:**
 - Create: `src/trusted_service_gateway.rs`

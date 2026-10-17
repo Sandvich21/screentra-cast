@@ -2,10 +2,23 @@ use crate::trusted_service_database::{
     DatabaseOperation, DatabaseRequest, DatabaseResponse, TrustedServiceDatabaseContract,
     MAX_REQUEST_BYTES,
 };
+use crate::trusted_service_runtime::EXECUTION_ENABLED;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::{
+    fs,
+    os::unix::fs::FileTypeExt,
+    path::{Path, PathBuf},
+};
+#[cfg(unix)]
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case")]
@@ -627,6 +640,183 @@ impl GatewaySession {
     }
 }
 
+/// Typed operation handler used by the Unix transport. The transport never
+/// exposes a database connection or accepts an untyped command channel.
+pub trait GatewayOperationHandler: Send + Sync {
+    fn handle<'a>(
+        &'a self,
+        request: DatabaseRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<DatabaseResponse, String>> + Send + 'a>>;
+}
+
+#[cfg(unix)]
+pub struct TrustedServiceUnixGateway {
+    binding: GatewayActivationBinding,
+    peer_policy: GatewayPeerPolicy,
+    admission: GatewayAdmissionState,
+    socket_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl TrustedServiceUnixGateway {
+    pub fn new(
+        binding: GatewayActivationBinding,
+        peer_policy: GatewayPeerPolicy,
+    ) -> Result<Self, String> {
+        binding.validate()?;
+        let socket_path = PathBuf::from(GATEWAY_SOCKET_PATH);
+        if !socket_path.is_absolute() || socket_path != Path::new(GATEWAY_SOCKET_PATH) {
+            return Err("Gateway socket path is not fixed".to_string());
+        }
+        Ok(Self {
+            binding,
+            peer_policy,
+            admission: GatewayAdmissionState::new(),
+            socket_path,
+        })
+    }
+
+    /// Start the listener only after the global execution gate is enabled.
+    /// The current build intentionally returns before binding any socket.
+    pub async fn run(
+        self,
+        handler: Arc<dyn GatewayOperationHandler>,
+    ) -> Result<(), String> {
+        if !EXECUTION_ENABLED {
+            return Err("Trusted service gateway is disabled".to_string());
+        }
+        let parent = self
+            .socket_path
+            .parent()
+            .ok_or_else(|| "Gateway socket parent is invalid".to_string())?;
+        let parent_metadata = fs::symlink_metadata(parent)
+            .map_err(|_| "Gateway socket parent is unavailable".to_string())?;
+        if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+            return Err("Gateway socket parent is not a real directory".to_string());
+        }
+        if fs::symlink_metadata(&self.socket_path).is_ok() {
+            return Err("Gateway socket path already exists".to_string());
+        }
+        let listener = UnixListener::bind(&self.socket_path)
+            .map_err(|_| "Gateway socket could not be bound".to_string())?;
+        let socket_metadata = fs::symlink_metadata(&self.socket_path)
+            .map_err(|_| "Gateway socket could not be inspected".to_string())?;
+        if socket_metadata.file_type().is_symlink() || !socket_metadata.file_type().is_socket() {
+            return Err("Gateway socket is not a Unix socket".to_string());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = socket_metadata.permissions();
+            permissions.set_mode(0o660);
+            fs::set_permissions(&self.socket_path, permissions)
+                .map_err(|_| "Gateway socket permissions could not be set".to_string())?;
+        }
+        loop {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .map_err(|_| "Gateway socket accept failed".to_string())?;
+            let binding = self.binding.clone();
+            let peer_policy = self.peer_policy;
+            let admission = self.admission.clone();
+            let handler = handler.clone();
+            tokio::spawn(async move {
+                let _ = handle_unix_connection(stream, binding, peer_policy, admission, handler).await;
+            });
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn read_unix_frame(stream: &mut UnixStream, maximum_bytes: usize) -> Result<Vec<u8>, String> {
+    let mut header = [0u8; GATEWAY_FRAME_LENGTH_BYTES];
+    stream
+        .read_exact(&mut header)
+        .await
+        .map_err(|_| "Gateway frame header could not be read".to_string())?;
+    let frame_len = u32::from_be_bytes(header) as usize;
+    if frame_len > maximum_bytes {
+        return Err("Gateway frame is too large".to_string());
+    }
+    let mut payload = vec![0u8; frame_len];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .map_err(|_| "Gateway frame payload could not be read".to_string())?;
+    Ok(payload)
+}
+
+#[cfg(target_os = "linux")]
+fn unix_peer_credentials(stream: &UnixStream) -> Result<GatewayPeerCredentials, String> {
+    use std::mem::size_of;
+    use std::os::unix::io::AsRawFd;
+    let mut credentials = libc::ucred { pid: 0, uid: 0, gid: 0 };
+    let mut length = size_of::<libc::ucred>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut length,
+        )
+    };
+    if result != 0 || length as usize != size_of::<libc::ucred>() {
+        return Err("Gateway peer credentials are unavailable".to_string());
+    }
+    Ok(GatewayPeerCredentials::from_os_credentials(
+        credentials.uid,
+        credentials.gid,
+        credentials.pid as u32,
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unix_peer_credentials(_stream: &UnixStream) -> Result<GatewayPeerCredentials, String> {
+    Err("Gateway peer credentials are unsupported on this platform".to_string())
+}
+
+#[cfg(unix)]
+async fn handle_unix_connection(
+    mut stream: UnixStream,
+    binding: GatewayActivationBinding,
+    peer_policy: GatewayPeerPolicy,
+    admission: GatewayAdmissionState,
+    handler: Arc<dyn GatewayOperationHandler>,
+) -> Result<(), String> {
+    let peer = unix_peer_credentials(&stream)?;
+    let hello = tokio::time::timeout(
+        MAX_REQUEST_DURATION,
+        read_unix_frame(&mut stream, MAX_REQUEST_BYTES),
+    )
+    .await
+    .map_err(|_| "Gateway hello timed out".to_string())??;
+    let mut session = GatewaySession::new(binding, peer_policy, admission);
+    session.accept_hello(&hello, peer)?;
+    loop {
+        let request = tokio::time::timeout(
+            MAX_REQUEST_DURATION,
+            read_unix_frame(&mut stream, MAX_REQUEST_BYTES),
+        )
+        .await
+        .map_err(|_| "Gateway request timed out".to_string())??;
+        let decoded = session.admit(&request, Instant::now())?;
+        let response = tokio::time::timeout(
+            MAX_REQUEST_DURATION,
+            handler.handle(decoded.database_request),
+        )
+        .await
+        .map_err(|_| "Gateway operation timed out".to_string())?
+        .map_err(|_| "Gateway operation failed".to_string())?;
+        let frame = encode_response_frame(&response)?;
+        stream
+            .write_all(&frame)
+            .await
+            .map_err(|_| "Gateway response could not be written".to_string())?;
+    }
+}
+
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub const MAX_OPERATIONS_PER_CONNECTION: u32 = 100;
 pub const MAX_REQUEST_DURATION: Duration = Duration::from_secs(5);
@@ -787,15 +977,20 @@ mod tests {
         encode_connection_hello_frame, encode_gateway_frame, encode_request, encode_request_frame,
         encode_response, encode_response_frame, validate_connection_hello,
         GatewayActivationBinding, GatewayActivationState, GatewayAdmissionState,
-        GatewayConnectionHello, GatewayOperationBudget, GatewayPeerCredentials, GatewayPeerPolicy,
+        GatewayConnectionHello, GatewayOperationBudget, GatewayOperationHandler,
+        GatewayPeerCredentials, GatewayPeerPolicy,
         GatewayRateLimiter, GatewayReplayGuard, GatewayRequestAdmission, GatewayRequestEnvelope,
-        GatewaySession, GatewayStorageOperation, GATEWAY_PROTOCOL_VERSION,
+        GatewaySession, GatewayStorageOperation, TrustedServiceUnixGateway,
+        GATEWAY_PROTOCOL_VERSION,
         MAX_OPERATIONS_PER_CONNECTION, MAX_REQUESTS_PER_ACTIVATION, MAX_RESPONSE_BYTES,
         MAX_TRACKED_ACTIVATIONS,
     };
     use crate::trusted_service_database::{
         DatabaseResponse, TrustedServiceDatabaseContract, MAX_REQUEST_BYTES,
     };
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     fn contract() -> TrustedServiceDatabaseContract {
@@ -805,6 +1000,33 @@ mod tests {
     fn binding() -> GatewayActivationBinding {
         GatewayActivationBinding::new(contract())
     }
+
+    #[cfg(unix)]
+    struct NoopGatewayHandler;
+
+    #[cfg(unix)]
+    impl GatewayOperationHandler for NoopGatewayHandler {
+        fn handle<'a>(
+            &'a self,
+            _request: crate::trusted_service_database::DatabaseRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<DatabaseResponse, String>> + Send + 'a>> {
+            Box::pin(async { Ok(DatabaseResponse::Written) })
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_gateway_never_binds_while_execution_is_disabled() {
+        let peer_policy = GatewayPeerPolicy::new(1000, 1000, 1).expect("peer policy");
+        let gateway = TrustedServiceUnixGateway::new(binding(), peer_policy)
+            .expect("disabled gateway configuration should validate");
+        let error = gateway
+            .run(Arc::new(NoopGatewayHandler))
+            .await
+            .expect_err("disabled gateway must not bind");
+        assert!(error.contains("disabled"));
+    }
+
     fn request() -> GatewayRequestEnvelope {
         GatewayRequestEnvelope {
             addon_id: "example.weather".to_string(),

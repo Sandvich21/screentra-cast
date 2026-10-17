@@ -1938,6 +1938,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "hmac 0.12.1",
+ "libc",
  "log",
  "lru",
  "rand_core 0.6.4",
