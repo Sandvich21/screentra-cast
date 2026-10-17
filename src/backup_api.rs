@@ -377,9 +377,12 @@ fn restrict_backup_file(path: &StdPath) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(path)
-            .map_err(|error| format!("inspect backup permissions: {error}"))?
-            .permissions();
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| format!("inspect backup permissions: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("backup path is not a regular file".to_string());
+        }
+        let mut permissions = metadata.permissions();
         permissions.set_mode(0o600);
         fs::set_permissions(path, permissions)
             .map_err(|error| format!("restrict backup permissions: {error}"))?;
