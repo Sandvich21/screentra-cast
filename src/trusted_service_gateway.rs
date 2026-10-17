@@ -20,6 +20,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::sync::Semaphore;
 #[cfg(unix)]
+use tokio::task::JoinSet;
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -663,6 +665,23 @@ pub struct TrustedServiceUnixGateway {
 }
 
 #[cfg(unix)]
+struct GatewaySocketCleanup {
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for GatewaySocketCleanup {
+    fn drop(&mut self) {
+        let Ok(metadata) = fs::symlink_metadata(&self.path) else {
+            return;
+        };
+        if metadata.file_type().is_socket() {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[cfg(unix)]
 impl TrustedServiceUnixGateway {
     pub fn new(
         binding: GatewayActivationBinding,
@@ -687,6 +706,17 @@ impl TrustedServiceUnixGateway {
         self,
         handler: Arc<dyn GatewayOperationHandler>,
     ) -> Result<(), String> {
+        self.run_until_shutdown(handler, std::future::pending()).await
+    }
+
+    pub async fn run_until_shutdown<S>(
+        self,
+        handler: Arc<dyn GatewayOperationHandler>,
+        shutdown: S,
+    ) -> Result<(), String>
+    where
+        S: Future<Output = ()> + Send + 'static,
+    {
         if !EXECUTION_ENABLED {
             return Err("Trusted service gateway is disabled".to_string());
         }
@@ -704,6 +734,9 @@ impl TrustedServiceUnixGateway {
         }
         let listener = UnixListener::bind(&self.socket_path)
             .map_err(|_| "Gateway socket could not be bound".to_string())?;
+        let _socket_cleanup = GatewaySocketCleanup {
+            path: self.socket_path.clone(),
+        };
         let socket_metadata = fs::symlink_metadata(&self.socket_path)
             .map_err(|_| "Gateway socket could not be inspected".to_string())?;
         if socket_metadata.file_type().is_symlink() || !socket_metadata.file_type().is_socket() {
@@ -718,23 +751,48 @@ impl TrustedServiceUnixGateway {
                 .map_err(|_| "Gateway socket permissions could not be set".to_string())?;
         }
         let permits = Arc::new(Semaphore::new(MAX_ACTIVE_GATEWAY_CONNECTIONS));
-        loop {
-            let (stream, _) = listener
-                .accept()
-                .await
-                .map_err(|_| "Gateway socket accept failed".to_string())?;
-            let Ok(permit) = permits.clone().try_acquire_owned() else {
-                continue;
-            };
-            let binding = self.binding.clone();
-            let peer_policy = self.peer_policy;
-            let admission = self.admission.clone();
-            let handler = handler.clone();
-            tokio::spawn(async move {
-                let _permit = permit;
-                let _ = handle_unix_connection(stream, binding, peer_policy, admission, handler).await;
-            });
+        let mut tasks = JoinSet::new();
+        let mut shutdown = Box::pin(shutdown);
+        let result = loop {
+            tokio::select! {
+                _ = &mut shutdown => break Ok(()),
+                joined = tasks.join_next(), if !tasks.is_empty() => {
+                    if let Some(Err(_)) = joined {
+                        // Individual connection failures are isolated from the listener.
+                    }
+                }
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted
+                        .map_err(|_| "Gateway socket accept failed".to_string())?;
+                    let Ok(permit) = permits.clone().try_acquire_owned() else {
+                        continue;
+                    };
+                    let binding = self.binding.clone();
+                    let peer_policy = self.peer_policy;
+                    let admission = self.admission.clone();
+                    let handler = handler.clone();
+                    tasks.spawn(async move {
+                        let _permit = permit;
+                        let _ = handle_unix_connection(
+                            stream,
+                            binding,
+                            peer_policy,
+                            admission,
+                            handler,
+                        )
+                        .await;
+                    });
+                }
+            }
+        };
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        drop(listener);
+        if result.is_ok() {
+            fs::remove_file(&self.socket_path)
+                .map_err(|_| "Gateway socket could not be removed".to_string())?;
         }
+        result
     }
 }
 
