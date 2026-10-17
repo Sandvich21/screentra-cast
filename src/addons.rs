@@ -1006,11 +1006,6 @@ fn trusted_service_signing_public_key() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/etc/screentra-cast/trusted-service-signing.pub"))
 }
 
-fn trusted_service_storage_dir() -> PathBuf {
-    let root = std::env::var("SIGNAGE_DATA_DIR").unwrap_or_else(|_| "/home/board/data".to_string());
-    PathBuf::from(root).join("trusted-services")
-}
-
 fn checked_trusted_service_storage_dir(create: bool) -> Result<Option<PathBuf>, AddonError> {
     let Some(data_root) = checked_data_dir(create)? else {
         return Ok(None);
@@ -1362,11 +1357,24 @@ fn addon_signing_public_key() -> PathBuf {
 
 fn verify_manifest_signature(manifest: &Path, signature: &Path) -> Result<(), AddonError> {
     let public_key = addon_signing_public_key();
-    if !public_key.is_file() {
-        return Err(AddonError::Invalid(format!(
-            "Addon signing public key is missing: {}",
-            public_key.display()
-        )));
+    match fs::symlink_metadata(&public_key) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AddonError::Invalid(format!(
+                "Addon signing public key is missing: {}",
+                public_key.display()
+            )));
+        }
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() > 64 * 1024 =>
+        {
+            return Err(AddonError::Invalid(
+                "Addon signing public key is invalid".to_string(),
+            ));
+        }
+        Err(error) => return Err(io_error(error)),
+        Ok(_) => {}
     }
     let result = Command::new("openssl")
         .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
