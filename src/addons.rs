@@ -2025,6 +2025,28 @@ mod tests {
         assert_eq!(staged.manifest.id, "example.weather");
         let staged_dir = root.join("data/trusted-services/example.weather");
         assert!(staged_dir.join("manifest.json").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::symlink_metadata(&staged_dir)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            for filename in ["manifest.json", "manifest.sig", "image.sig", "state.json"] {
+                assert_eq!(
+                    fs::symlink_metadata(staged_dir.join(filename))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+        }
         assert!(staged_dir.join("manifest.sig").is_file());
         assert!(staged_dir.join("image.sig").is_file());
         assert!(!staged_dir.join("active").exists());
