@@ -41,7 +41,7 @@ pub struct ScheduleEntry {
 
     /// Action this schedule triggers. Defaults to `switch_layout`
     /// for backward compatibility with rows created before this
-    /// column existed. Other valid values: `power_on`, `power_off`.
+    /// column existed. Other valid values: `power_on`, `display_sleep`, `power_off`.
     #[serde(default = "default_action")]
     pub action: String,
 
@@ -51,15 +51,15 @@ pub struct ScheduleEntry {
     #[serde(default)]
     pub target_client: Option<String>,
 
-    /// For `power_on`/`power_off` actions: the state to send
-    /// ("on" / "off"). NULL for layout switches.
+    /// For power actions: the state to send ("on" / "sleep" / "off").
+    /// NULL for layout switches.
     #[serde(default)]
     pub power_state: Option<String>,
 
     #[serde(default)]
     pub display_name: Option<String>,
 
-    /// For power_on/power_off: which control method to use (auto, ddc, cec, ir).
+    /// For power actions: which control method to use (auto, ddc, cec, ir).
     #[serde(default)]
     pub control_method: Option<String>,
 
@@ -193,7 +193,7 @@ async fn apply_repository_schedules_at(
                         .await;
                 }
             }
-            "power_on" | "power_off" => {
+            "power_on" | "display_sleep" | "power_off" => {
                 apply_repository_power_action(repository, &schedule, action, &now_rfc).await?;
             }
             other => {
@@ -251,7 +251,11 @@ async fn apply_repository_power_action(
     let state = schedule
         .power_state
         .as_deref()
-        .unwrap_or(if action == "power_on" { "on" } else { "off" });
+        .unwrap_or(match action {
+            "power_on" => "on",
+            "display_sleep" => "sleep",
+            _ => "off",
+        });
     let display_index = schedule.display_index.unwrap_or(0);
     let (command, payload) = power_command(method, state, display_index);
     let payload_json = payload.to_string();
@@ -313,10 +317,18 @@ fn power_command(
     display_index: i32,
 ) -> (String, serde_json::Value) {
     match (method, state) {
-        ("ddc", _) | (_, "sleep") => (
-            "ddc_set".to_string(),
-            serde_json::json!({ "vcp": 6, "value": if state == "on" { 1 } else { 4 }, "bus": display_index }),
-        ),
+        ("ddc", _) | (_, "sleep") => {
+            // MCCS VCP D6: 1=on, 2=standby, 4=full power off.
+            let value = match state {
+                "on" => 1,
+                "sleep" => 2,
+                _ => 4,
+            };
+            (
+                "ddc_set".to_string(),
+                serde_json::json!({ "vcp": 6, "value": value, "display_index": display_index }),
+            )
+        }
         ("cec", "off") | ("auto", "off") => (
             "cec_send".to_string(),
             serde_json::json!({ "cmd": "standby 0" }),
@@ -358,7 +370,7 @@ pub async fn apply_active_schedules_at(
     for schedule in &active {
         // Dispatch on `schedule.action`. The default is `switch_layout`
         // (backward compat with rows created before the action column
-        // existed). New actions: `power_on` and `power_off` queue an
+        // existed). New actions: `power_on`, `display_sleep`, and `power_off` queue a
         // `ir_blast` command for `target_client` so the player can
         // power-cycle the attached display.
         let action = if schedule.action.is_empty() {
@@ -371,7 +383,7 @@ pub async fn apply_active_schedules_at(
             "switch_layout" => {
                 apply_switch_layout(db, schedule, now, &current_time, day_of_week)?;
             }
-            "power_on" | "power_off" => {
+            "power_on" | "display_sleep" | "power_off" => {
                 apply_power_action(db, schedule, action, &now_rfc)?;
             }
             other => {
@@ -456,16 +468,24 @@ fn apply_power_action(
     let power_state = schedule
         .power_state
         .as_deref()
-        .unwrap_or(if action == "power_on" { "on" } else { "off" });
+        .unwrap_or(match action {
+            "power_on" => "on",
+            "display_sleep" => "sleep",
+            _ => "off",
+        });
 
     let log_target = format!("{}[{}]", target, display_index);
 
     let (dispatch_action, payload) = match (control_method, power_state) {
         ("ddc", _) | (_, "sleep") => {
-            // DDC/CI VCP D6: 1=wake from sleep, 4=enter sleep (display_sleep / display standby).
+            // DDC/CI VCP D6: 1=on, 2=standby, 4=full power off.
             // Also used for "sleep" power_state regardless of method (auto path).
-            let vcp_val = if power_state == "on" { 1 } else { 4 };
-            let payload = serde_json::json!({ "vcp": 6, "value": vcp_val, "bus": display_index });
+            let vcp_val = match power_state {
+                "on" => 1,
+                "sleep" => 2,
+                _ => 4,
+            };
+            let payload = serde_json::json!({ "vcp": 6, "value": vcp_val, "display_index": display_index });
             ("ddc_set".to_string(), payload)
         }
         ("cec", "off") => {
@@ -664,6 +684,18 @@ fn parse_hhmm(s: &str) -> (u32, u32) {
 mod tests {
     use super::*;
     use crate::db::Database;
+
+    #[test]
+    fn ddc_power_modes_use_distinct_mccs_values() {
+        let (_, on) = power_command("ddc", "on", 0);
+        let (_, standby) = power_command("ddc", "sleep", 0);
+        let (_, off) = power_command("ddc", "off", 0);
+
+        assert_eq!(on["vcp"], 6);
+        assert_eq!(on["value"], 1);
+        assert_eq!(standby["value"], 2);
+        assert_eq!(off["value"], 4);
+    }
     use crate::models::LayoutSetEntry;
     use rusqlite::Connection;
     use std::path::PathBuf;

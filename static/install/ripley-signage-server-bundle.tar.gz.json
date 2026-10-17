@@ -2,7 +2,7 @@
   "ok": true,
   "path": "/home/tech/screentra-cast/static/install/ripley-signage-server-bundle.tar.gz",
   "url": "/install/ripley-signage-server-bundle.tar.gz",
-  "size_bytes": 9748240,
-  "sha256": "b352ede488a9b9274a736ca88e8790cfcb9d6d85d48e73b8db6e9c3f0128d401",
+  "size_bytes": 9743734,
+  "sha256": "8426c944bc03e4c79fe83605a478c3400d148b5c2ae08616546e996953798a60",
   "bootstrap_url": "/install/ripley-signage-server-bundle-install.sh"
 }

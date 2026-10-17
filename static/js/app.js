@@ -2584,7 +2584,7 @@ ${targetSection}
                 if (action === 'power_on') {
                     cmd = (method === 'cec' || method === 'auto') ? 'cec pow 0' : 'ddcutil VCP 6=1';
                 } else if (action === 'display_sleep') {
-                    cmd = 'ddcutil VCP 6=4';
+                    cmd = 'ddcutil VCP 6=2';
                 } else {
                     // power_off
                     cmd = (method === 'cec' || method === 'auto') ? 'cec standby 0' : 'ddcutil VCP 6=4';
@@ -5435,7 +5435,7 @@ ${_cmds.oneLiner}`;
           </div>
           <div style="display:flex;gap:0.4rem;flex-wrap:wrap;margin-bottom:0.5rem;">
             <button class="btn btn-sm btn-secondary client-detail-ddc" data-vcp="D6" data-val="1" title="DDC/CI: wake display from sleep">Power On (DDC)</button>
-            <button class="btn btn-sm btn-secondary client-detail-ddc" data-vcp="D6" data-val="4" title="DDC/CI: put display to sleep">Standby (DDC)</button>
+            <button class="btn btn-sm btn-secondary client-detail-ddc" data-vcp="D6" data-val="2" title="DDC/CI: put display into standby">Standby (DDC)</button>
             <button class="btn btn-sm btn-secondary client-detail-cec" data-cmd="pow 0" title="CEC: send power-on to TV">CEC On</button>
             <button class="btn btn-sm btn-secondary client-detail-cec" data-cmd="standby 0" title="CEC: send standby to TV">CEC Off</button>
           </div>
@@ -5638,7 +5638,11 @@ ${_cmds.oneLiner}`;
           } catch(e) {
             const errMsg = e.message;
             const isDdcFail = errMsg.startsWith('ddcutil_') || ['not found', 'No such file', 'unable', 'communication', 'timeout'].some(t => errMsg.includes(t));
-            if (fallback && isDdcFail) {
+            const isDdcStandby = action === 'ddc_set' && payload.vcp === 'D6' && Number(payload.value) === 2;
+            // DDC/CI standby has no safe CEC equivalent: CEC standby may
+            // hard-power-off a display. Never translate a failed D6=2 request
+            // into a CEC standby command.
+            if (fallback && isDdcFail && !isDdcStandby) {
               const altAction = action === 'ddc_set' ? 'cec_send' : 'ddc_set';
               const altPayload = action === 'ddc_set'
                 ? { cmd: payload.vcp === 'D6' ? (payload.value === 1 ? 'pow 0' : 'standby 0') : `setvcp ${payload.vcp} ${payload.value}` }

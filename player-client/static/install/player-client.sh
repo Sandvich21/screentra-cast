@@ -5466,13 +5466,17 @@ def ddcutil_detect(bus: str | None = None) -> tuple[bool, str]:
     return False, err.strip() or out.strip()
 
 
-def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_layout: bool = False) -> tuple[bool, str]:
+def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, display_index: int | None = None, has_layout: bool = False) -> tuple[bool, str]:
     """Set a DDC/CI VCP value via ddcutil. Returns (ok, message).
     If has_layout=True and the display is not initially detected (ddcutil_no_bus),
     runs ddcutil detect once and retries before returning failure."""
     args = ['sudo', '-n', 'ddcutil', 'setvcp']
     if bus:
         args.extend(['--bus', bus])
+    elif display_index is not None and display_index >= 0:
+        # ddcutil display numbers are 1-based; the client API indexes
+        # displays from zero. Keep DDC scoped to the selected display.
+        args.extend(['--display', str(display_index + 1)])
     args.extend([vcp_code, str(value)])
 
     def _do_set():
@@ -5480,9 +5484,14 @@ def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_lay
         if rc == 0:
             return True, f'DDC: {vcp_code}={value}' + (f' ({out.strip()})' if out.strip() else '')
         err_msg = err.strip() or out.strip()
-        if 'not found' in err_msg.lower() or 'no such file' in err_msg.lower():
+        # Distinguish a missing ddcutil executable from a monitor that is
+        # currently unavailable over DDC (for example after DPMS/full off).
+        if 'command not found' in err_msg.lower() or 'no such file or directory' in err_msg.lower():
             return False, f'ddcutil_not_installed: {err_msg}'
-        if 'unable to open' in err_msg.lower() or 'i2c' in err_msg.lower() or 'no bus' in err_msg.lower():
+        if ('display not found' in err_msg.lower() or 'no displays found' in err_msg.lower()
+                or 'no monitor detected' in err_msg.lower()
+                or 'unable to open' in err_msg.lower() or 'i2c' in err_msg.lower()
+                or 'no bus' in err_msg.lower()):
             return False, 'ddcutil_no_bus', err_msg
         if 'communication' in err_msg.lower() or 'timeout' in err_msg.lower():
             return False, f'ddcutil_no_support: {err_msg}'
@@ -6356,7 +6365,7 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         value = payload.get('value', 0)
         bus = payload.get('bus')
         has_layout = payload.get('has_layout', False)
-        ok, msg = apply_ddc_control(str(vcp), int(value), bus=bus, has_layout=has_layout)
+        ok, msg = apply_ddc_control(str(vcp), int(value), bus=bus, display_index=display_index, has_layout=has_layout)
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
 
     if action == 'cec_send':
