@@ -164,7 +164,24 @@ fn ensure_runtime_directory(addon_id: &str) -> Result<PathBuf, RuntimeError> {
     let root_metadata =
         fs::symlink_metadata(&root).map_err(|error| RuntimeError::Io(error.to_string()))?;
     validate_private_runtime_directory(&root_metadata, "Invalid trusted service runtime root")?;
+    #[cfg(unix)]
+    let root_identity = {
+        use std::os::unix::fs::MetadataExt;
+        (root_metadata.dev(), root_metadata.ino())
+    };
     let directory = record_dir(addon_id)?;
+    let current_root = fs::symlink_metadata(&root)
+        .map_err(|error| RuntimeError::Io(error.to_string()))?;
+    validate_private_runtime_directory(&current_root, "Invalid trusted service runtime root")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (current_root.dev(), current_root.ino()) != root_identity {
+            return Err(RuntimeError::Conflict(
+                "Trusted service runtime root changed".to_string(),
+            ));
+        }
+    }
     match fs::symlink_metadata(&directory) {
         Ok(metadata) => {
             validate_private_runtime_directory(
