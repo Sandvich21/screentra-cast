@@ -2116,6 +2116,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("screentra-oci-supervisor-{}", Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let runtime_path = root.join("podman");
         fs::write(&runtime_path, b"not executed").unwrap();
         let mut permissions = fs::metadata(&runtime_path).unwrap().permissions();

@@ -105,11 +105,16 @@ pub fn probe_oci_runtime(path: &Path) -> OciRuntimeProbeReport {
         blocked_by.push("unsupported rootless runtime".to_string());
     }
     let contains_symlink = path.is_absolute() && path_contains_symlink(path);
+    let insecure_permissions = path.is_absolute() && path_has_insecure_permissions(path);
     if contains_symlink {
         blocked_by.push("runtime path contains a symlink".to_string());
     }
+    if insecure_permissions {
+        blocked_by.push("runtime path is writable by group or others".to_string());
+    }
     let executable_present = path.is_absolute()
         && !contains_symlink
+        && !insecure_permissions
         && path
             .symlink_metadata()
             .map(is_regular_executable)
@@ -134,6 +139,31 @@ fn path_contains_symlink(path: &Path) -> bool {
             .map(|metadata| metadata.file_type().is_symlink())
             .unwrap_or(false)
     })
+}
+
+fn path_has_insecure_permissions(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return path.ancestors().any(|ancestor| {
+            let Ok(metadata) = fs::symlink_metadata(ancestor) else {
+                return true;
+            };
+            let mode = metadata.permissions().mode();
+            if metadata.is_dir() {
+                let writable_by_untrusted = mode & 0o022 != 0;
+                let protected_by_sticky_bit = mode & 0o1000 != 0;
+                writable_by_untrusted && !protected_by_sticky_bit
+            } else {
+                mode & 0o022 != 0
+            }
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 fn is_regular_executable(metadata: std::fs::Metadata) -> bool {
@@ -718,6 +748,8 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("screentra-oci-runtime-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("runtime fixture directory should be created");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("runtime fixture directory should be private");
         let runtime_path = root.join("podman");
         fs::write(&runtime_path, b"not executed").expect("runtime fixture should be created");
         let mut permissions = fs::metadata(&runtime_path)
@@ -819,6 +851,26 @@ mod tests {
             .blocked_by
             .iter()
             .any(|reason| reason == "runtime path must be absolute"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_probe_rejects_group_or_other_writable_runtime_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("screentra-oci-permissions-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let executable = root.join("podman");
+        fs::write(&executable, b"not executed").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o775)).unwrap();
+
+        let report = probe_oci_runtime(&executable);
+        assert!(!report.executable_present);
+        assert!(report
+            .blocked_by
+            .iter()
+            .any(|reason| reason == "runtime path is writable by group or others"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
