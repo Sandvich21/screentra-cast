@@ -668,6 +668,10 @@ impl GatewayReadiness {
     fn mark_ready(&self) {
         self.ready.store(true, Ordering::Release);
     }
+
+    fn mark_not_ready(&self) {
+        self.ready.store(false, Ordering::Release);
+    }
 }
 
 #[cfg(unix)]
@@ -687,11 +691,13 @@ struct GatewaySocketCleanup {
     path: PathBuf,
     device: u64,
     inode: u64,
+    readiness: GatewayReadiness,
 }
 
 #[cfg(unix)]
 impl Drop for GatewaySocketCleanup {
     fn drop(&mut self) {
+        self.readiness.mark_not_ready();
         let Ok(metadata) = fs::symlink_metadata(&self.path) else {
             return;
         };
@@ -787,6 +793,7 @@ impl TrustedServiceUnixGateway {
             path: self.socket_path.clone(),
             device: socket_metadata.dev(),
             inode: socket_metadata.ino(),
+            readiness: self.readiness.clone(),
         };
         #[cfg(unix)]
         {
@@ -1142,6 +1149,8 @@ mod tests {
         assert!(!readiness.is_ready());
         readiness.mark_ready();
         assert!(readiness.is_ready());
+        readiness.mark_not_ready();
+        assert!(!readiness.is_ready());
     }
 
     #[cfg(unix)]
