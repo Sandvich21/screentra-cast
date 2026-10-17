@@ -749,6 +749,49 @@ fn running_marker_path(root: &Path, handle: &RuntimeHandle) -> PathBuf {
 }
 
 #[cfg(test)]
+fn checked_marker_for_cleanup(
+    root: &Path,
+    handle: &RuntimeHandle,
+) -> Result<PathBuf, RuntimeError> {
+    addons::validate_addon_storage_namespace(&handle.addon_id)
+        .map_err(RuntimeError::Invalid)?;
+    addons::validate_addon_storage_namespace(&handle.activation_instance)
+        .map_err(RuntimeError::Invalid)?;
+    let root_metadata =
+        fs::symlink_metadata(root).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(RuntimeError::Invalid(
+            "Fake runtime root is invalid".to_string(),
+        ));
+    }
+    let running_root = root.join("running");
+    let running_metadata =
+        fs::symlink_metadata(&running_root).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    if running_metadata.file_type().is_symlink() || !running_metadata.is_dir() {
+        return Err(RuntimeError::Invalid(
+            "Fake runtime running directory is invalid".to_string(),
+        ));
+    }
+    let addon_root = running_root.join(&handle.addon_id);
+    let addon_metadata =
+        fs::symlink_metadata(&addon_root).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    if addon_metadata.file_type().is_symlink() || !addon_metadata.is_dir() {
+        return Err(RuntimeError::Invalid(
+            "Fake runtime addon marker directory is invalid".to_string(),
+        ));
+    }
+    let marker = running_marker_path(root, handle);
+    let marker_metadata =
+        fs::symlink_metadata(&marker).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    if marker_metadata.file_type().is_symlink() || !marker_metadata.is_file() {
+        return Err(RuntimeError::Invalid(
+            "Fake runtime marker is invalid".to_string(),
+        ));
+    }
+    Ok(marker)
+}
+
+#[cfg(test)]
 impl FakeTrustedServiceRuntime {
     fn new(root: PathBuf) -> Self {
         Self {
@@ -867,8 +910,8 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
                 "Runtime handle is not bound to the running addon".to_string(),
             ));
         }
-        fs::remove_file(running_marker_path(&self.root, handle))
-            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        let marker = checked_marker_for_cleanup(&self.root, handle)?;
+        fs::remove_file(marker).map_err(|error| RuntimeError::Io(error.to_string()))?;
         self.running.remove(&handle.activation_instance);
         self.terminal.insert(
             handle.activation_instance.clone(),
@@ -927,8 +970,8 @@ impl FakeTrustedServiceRuntime {
                 "Runtime handle is not bound to the running addon".to_string(),
             ));
         }
-        fs::remove_file(running_marker_path(&self.root, handle))
-            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        let marker = checked_marker_for_cleanup(&self.root, handle)?;
+        fs::remove_file(marker).map_err(|error| RuntimeError::Io(error.to_string()))?;
         self.running.remove(&handle.activation_instance);
         self.terminal.insert(
             handle.activation_instance.clone(),
@@ -1350,6 +1393,40 @@ mod tests {
         assert!(second_marker.is_file());
         second.stop(&second_handle).expect("second runtime stop");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_runtime_cleanup_rejects_symlinked_addon_directory() {
+        let mut harness = DisposableRuntimeHarness::new();
+        let request = RuntimeLaunchRequest {
+            addon_id: "example.service".to_string(),
+            activation_instance: "cleanup-symlink".to_string(),
+            image: "registry.example/service".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.service".to_string(),
+            api_namespace: "example.service".to_string(),
+            launch_profile: test_launch_profile(),
+        };
+        let handle = harness
+            .supervisor
+            .runtime_mut()
+            .start(&request)
+            .expect("fake runtime start");
+        let addon_dir = harness.root.join("running").join("example.service");
+        let redirected = harness.root.join("redirected-addon");
+        fs::rename(&addon_dir, &redirected).unwrap();
+        std::os::unix::fs::symlink(&redirected, &addon_dir).unwrap();
+        assert!(matches!(
+            harness.supervisor.runtime_mut().stop(&handle),
+            Err(RuntimeError::Invalid(_))
+        ));
+        assert_eq!(
+            harness.supervisor.runtime().status(&handle).unwrap(),
+            RuntimeStatus::Running
+        );
+        assert!(redirected.join("cleanup-symlink").is_file());
     }
 
     #[test]
