@@ -265,6 +265,12 @@ fn checked_data_dir(create: bool) -> Result<Option<PathBuf>, AddonError> {
     }
 }
 
+pub(crate) fn checked_addon_data_root(
+    create: bool,
+) -> Result<Option<PathBuf>, AddonError> {
+    checked_data_dir(create)
+}
+
 fn storage_dir() -> PathBuf {
     data_dir().join("addons")
 }

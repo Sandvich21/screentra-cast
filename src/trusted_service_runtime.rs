@@ -88,14 +88,17 @@ pub struct TrustedServiceRuntimeRecord {
     pub last_error: Option<String>,
 }
 
-fn storage_root() -> PathBuf {
-    let root = std::env::var("SIGNAGE_DATA_DIR").unwrap_or_else(|_| "/home/board/data".to_string());
-    PathBuf::from(root).join(RUNTIME_DIR)
+fn checked_runtime_root(create: bool) -> Result<Option<PathBuf>, RuntimeError> {
+    addons::checked_addon_data_root(create)
+        .map(|root| root.map(|path| path.join(RUNTIME_DIR)))
+        .map_err(|error| RuntimeError::Invalid(error.to_string()))
 }
 
 fn record_dir(addon_id: &str) -> Result<PathBuf, RuntimeError> {
     addons::validate_addon_storage_namespace(addon_id).map_err(RuntimeError::Invalid)?;
-    Ok(storage_root().join(addon_id))
+    checked_runtime_root(false)?
+        .ok_or(RuntimeError::NotFound)
+        .map(|root| root.join(addon_id))
 }
 
 fn record_path(addon_id: &str) -> Result<PathBuf, RuntimeError> {
@@ -103,7 +106,8 @@ fn record_path(addon_id: &str) -> Result<PathBuf, RuntimeError> {
 }
 
 fn ensure_runtime_directory(addon_id: &str) -> Result<PathBuf, RuntimeError> {
-    let root = storage_root();
+    let root = checked_runtime_root(true)?
+        .ok_or(RuntimeError::NotFound)?;
     fs::create_dir_all(&root).map_err(|error| RuntimeError::Io(error.to_string()))?;
     let root_metadata =
         fs::symlink_metadata(&root).map_err(|error| RuntimeError::Io(error.to_string()))?;
@@ -343,12 +347,14 @@ pub fn disable(addon_id: &str) -> Result<TrustedServiceRuntimeRecord, RuntimeErr
 }
 
 pub fn list() -> Result<Vec<TrustedServiceRuntimeRecord>, RuntimeError> {
-    let root = storage_root();
-    if !root.exists() {
+    let Some(root) = checked_runtime_root(false)? else {
         return Ok(Vec::new());
-    }
-    let root_metadata =
-        fs::symlink_metadata(&root).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    };
+    let root_metadata = match fs::symlink_metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(RuntimeError::Io(error.to_string())),
+    };
     if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
         return Err(RuntimeError::Invalid(
             "Invalid trusted service runtime root".to_string(),
@@ -389,7 +395,11 @@ pub fn list() -> Result<Vec<TrustedServiceRuntimeRecord>, RuntimeError> {
 
 /// Remove only the inert runtime record associated with staged metadata.
 pub fn remove(addon_id: &str) -> Result<(), RuntimeError> {
-    let directory = record_dir(addon_id)?;
+    let directory = match record_dir(addon_id) {
+        Ok(directory) => directory,
+        Err(RuntimeError::NotFound) => return Ok(()),
+        Err(error) => return Err(error),
+    };
     match fs::symlink_metadata(&directory) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
