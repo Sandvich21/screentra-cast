@@ -77,6 +77,8 @@ pub struct TrustedServiceRuntimeRecord {
     pub image_digest: String,
     #[serde(default)]
     pub image_signature_verified: bool,
+    #[serde(default)]
+    pub resource_policy_verified: bool,
     pub capabilities: Vec<String>,
     pub storage_namespace: String,
     pub api_namespace: String,
@@ -486,6 +488,7 @@ fn record_from_stage(
         image: service.image.clone(),
         image_digest: service.image_digest.clone(),
         image_signature_verified: true,
+        resource_policy_verified: false,
         capabilities: service.capabilities.clone(),
         storage_namespace: service.storage_namespace.clone(),
         api_namespace: service.api_namespace.clone(),
@@ -1195,6 +1198,11 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
             .collect::<Vec<_>>();
         if !EXECUTION_ENABLED && !blocked_by.iter().any(|gate| gate == "execution_backend") {
             blocked_by.push("execution_backend".to_string());
+        }
+        if !record.resource_policy_verified
+            && !blocked_by.iter().any(|gate| gate == "resource_policy")
+        {
+            blocked_by.push("resource_policy".to_string());
         }
         Ok(ActivationPlan {
             addon_id: record.addon_id.clone(),
@@ -2727,6 +2735,16 @@ mod tests {
             Err(RuntimeError::Blocked(_))
         ));
         assert!(harness.supervisor.runtime().actions().is_empty());
+
+        all_gates_passed.resource_policy_verified = false;
+        let resource_blocked = TrustedServiceSupervisor::<FakeTrustedServiceRuntime>::activation_plan(
+            &all_gates_passed,
+        )
+        .expect("missing resource evidence should produce a blocked plan");
+        assert!(resource_blocked
+            .blocked_by
+            .iter()
+            .any(|gate| gate == "resource_policy"));
     }
 
     fn test_launch_profile() -> addons::TrustedServiceLaunchProfile {
@@ -2755,6 +2773,7 @@ mod tests {
             image: "registry.example/service".to_string(),
             image_digest: format!("sha256:{}", "a".repeat(64)),
             image_signature_verified: true,
+            resource_policy_verified: true,
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.service".to_string(),
             api_namespace: "example.service".to_string(),
