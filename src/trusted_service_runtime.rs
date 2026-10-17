@@ -102,7 +102,20 @@ fn record_dir(addon_id: &str) -> Result<PathBuf, RuntimeError> {
 }
 
 fn record_path(addon_id: &str) -> Result<PathBuf, RuntimeError> {
-    Ok(record_dir(addon_id)?.join(RUNTIME_FILE))
+    let directory = record_dir(addon_id)?;
+    let metadata = fs::symlink_metadata(&directory).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RuntimeError::NotFound
+        } else {
+            RuntimeError::Io(error.to_string())
+        }
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(RuntimeError::Invalid(
+            "Invalid trusted service runtime directory".to_string(),
+        ));
+    }
+    Ok(directory.join(RUNTIME_FILE))
 }
 
 fn ensure_runtime_directory(addon_id: &str) -> Result<PathBuf, RuntimeError> {
@@ -1003,6 +1016,27 @@ mod tests {
         assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disable_rejects_symlinked_runtime_record_directory() {
+        let _guard = TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let root = std::env::temp_dir().join(format!("screentra-runtime-disable-{}", Uuid::new_v4()));
+        let runtime_root = root.join(RUNTIME_DIR);
+        let target = root.join("redirected-runtime");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(&runtime_root).unwrap();
+        std::os::unix::fs::symlink(&target, runtime_root.join("example.service")).unwrap();
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &root); }
+        assert!(matches!(disable("example.service"), Err(RuntimeError::Invalid(_))));
+        if let Some(value) = old_data_dir {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
