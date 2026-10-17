@@ -1246,10 +1246,19 @@ fn ensure_fake_runtime_directory(path: &Path, label: &str) -> Result<(), Runtime
 }
 
 #[cfg(test)]
+struct CheckedFakeRuntimeMarker {
+    path: PathBuf,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+#[cfg(test)]
 fn checked_marker_for_cleanup(
     root: &Path,
     handle: &RuntimeHandle,
-) -> Result<PathBuf, RuntimeError> {
+) -> Result<CheckedFakeRuntimeMarker, RuntimeError> {
     addons::validate_addon_storage_namespace(&handle.addon_id)
         .map_err(RuntimeError::Invalid)?;
     addons::validate_addon_storage_namespace(&handle.activation_instance)
@@ -1285,7 +1294,40 @@ fn checked_marker_for_cleanup(
             "Fake runtime marker is invalid".to_string(),
         ));
     }
-    Ok(marker)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        return Ok(CheckedFakeRuntimeMarker {
+            path: marker,
+            device: marker_metadata.dev(),
+            inode: marker_metadata.ino(),
+        });
+    }
+    #[cfg(not(unix))]
+    Ok(CheckedFakeRuntimeMarker { path: marker })
+}
+
+#[cfg(test)]
+fn remove_checked_fake_runtime_marker(
+    marker: CheckedFakeRuntimeMarker,
+) -> Result<(), RuntimeError> {
+    let metadata = fs::symlink_metadata(&marker.path)
+        .map_err(|error| RuntimeError::Io(error.to_string()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(RuntimeError::Invalid(
+            "Fake runtime marker changed before cleanup".to_string(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.dev() != marker.device || metadata.ino() != marker.inode {
+            return Err(RuntimeError::Conflict(
+                "Fake runtime marker identity changed before cleanup".to_string(),
+            ));
+        }
+    }
+    fs::remove_file(marker.path).map_err(|error| RuntimeError::Io(error.to_string()))
 }
 
 #[cfg(test)]
@@ -1391,7 +1433,7 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
             ));
         }
         let marker = checked_marker_for_cleanup(&self.root, handle)?;
-        fs::remove_file(marker).map_err(|error| RuntimeError::Io(error.to_string()))?;
+        remove_checked_fake_runtime_marker(marker)?;
         self.running.remove(&handle.activation_instance);
         self.terminal.insert(
             handle.activation_instance.clone(),
@@ -1459,7 +1501,7 @@ impl FakeTrustedServiceRuntime {
             ));
         }
         let marker = checked_marker_for_cleanup(&self.root, handle)?;
-        fs::remove_file(marker).map_err(|error| RuntimeError::Io(error.to_string()))?;
+        remove_checked_fake_runtime_marker(marker)?;
         self.running.remove(&handle.activation_instance);
         self.terminal.insert(
             handle.activation_instance.clone(),
