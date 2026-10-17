@@ -10,7 +10,7 @@ use axum::{
 use chrono::Utc;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::Path as StdPath;
+use std::path::{Path as StdPath, PathBuf};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use uuid::Uuid;
@@ -234,12 +234,11 @@ pub async fn create_backup(
     let data_dir = signage_data_dir();
     let app_root =
         std::env::current_dir().map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
-    let backup_dir = format!("{}/backups", data_dir);
-    fs::create_dir_all(&backup_dir)
+    let backup_dir = checked_backup_dir(true)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
 
     let filename = format!("ripley-signage-{}-{}.tar.gz", safe_ts, id);
-    let full_path = format!("{}/{}", backup_dir, filename);
+    let full_path = format!("{}/{}", backup_dir.display(), filename);
 
     // Archive the installed app plus the runtime data directory. We cd to the
     // PARENT of each root and pass `./<basename>` so the basename appears in
@@ -394,6 +393,63 @@ fn signage_data_dir() -> String {
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/ripley".to_string());
     format!("{}/.local/share/signage", home)
+}
+
+fn checked_backup_dir(create: bool) -> Result<PathBuf, String> {
+    let data_dir = PathBuf::from(signage_data_dir());
+    let mut current = data_dir.as_path();
+    loop {
+        match fs::symlink_metadata(current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err("Invalid backup data directory".to_string());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("inspect backup data directory: {error}")),
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    match fs::symlink_metadata(&data_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err("Invalid backup data directory".to_string());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            fs::create_dir_all(&data_dir)
+                .map_err(|error| format!("create backup data directory: {error}"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("Backup data directory is unavailable".to_string());
+        }
+        Err(error) => return Err(format!("inspect backup data directory: {error}")),
+    }
+    let backup_dir = data_dir.join("backups");
+    match fs::symlink_metadata(&backup_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err("Invalid backup storage directory".to_string())
+        }
+        Ok(_) => Ok(backup_dir),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            fs::create_dir_all(&backup_dir)
+                .map_err(|error| format!("create backup storage directory: {error}"))?;
+            let metadata = fs::symlink_metadata(&backup_dir)
+                .map_err(|error| format!("inspect backup storage directory: {error}"))?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err("Invalid backup storage directory".to_string());
+            }
+            Ok(backup_dir)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err("Backup storage directory is unavailable".to_string())
+        }
+        Err(error) => Err(format!("inspect backup storage directory: {error}")),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -872,9 +928,7 @@ pub async fn upload_backup(
     mut multipart: Multipart,
 ) -> Result<axum::http::StatusCode, (StatusCode, String)> {
     let postgres_backend = matches!(&db, BackupMetadataRepository::Postgres(_));
-    let data_dir = signage_data_dir();
-    let backup_dir = format!("{}/backups", data_dir);
-    fs::create_dir_all(&backup_dir)
+    let backup_dir = checked_backup_dir(true)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
 
     if let Ok(Some(field)) = multipart.next_field().await {
@@ -895,11 +949,11 @@ pub async fn upload_backup(
             return Err((StatusCode::BAD_REQUEST, "Invalid backup filename".to_string()));
         }
         let storage_name = format!("{}-{}", Uuid::new_v4(), safe_name);
-        let full_path = format!("{}/{}", backup_dir, storage_name);
+        let full_path = format!("{}/{}", backup_dir.display(), storage_name);
 
         // Stream to a private temporary file rather than buffering an entire
         // multipart backup in memory. The limit is enforced while reading.
-        let probe_path = format!("{}/.upload-{}", backup_dir, Uuid::new_v4());
+        let probe_path = format!("{}/.upload-{}", backup_dir.display(), Uuid::new_v4());
         let mut probe_file = tokio::fs::File::create(&probe_path)
             .await
             .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
