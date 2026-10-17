@@ -281,11 +281,35 @@ fn client_status_path(client_id: &str) -> Result<PathBuf, AddonError> {
         .join(format!("{:x}.json", digest)))
 }
 
+fn checked_client_status_dir(create: bool) -> Result<Option<PathBuf>, AddonError> {
+    let Some(data_root) = checked_data_dir(create)? else {
+        return Ok(None);
+    };
+    let dir = data_root.join("addon-client-status");
+    match fs::symlink_metadata(&dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
+            AddonError::Invalid("Invalid addon client status directory".to_string()),
+        ),
+        Ok(_) => Ok(Some(dir)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            fs::create_dir_all(&dir).map_err(io_error)?;
+            let metadata = fs::symlink_metadata(&dir).map_err(io_error)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(AddonError::Invalid(
+                    "Invalid addon client status directory".to_string(),
+                ));
+            }
+            Ok(Some(dir))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
 pub fn save_client_status(
     client_id: &str,
     report: ClientAddonStatusReport,
 ) -> Result<(), AddonError> {
-    let _ = checked_data_dir(true)?;
     let path = client_status_path(client_id)?;
     if report.at.as_deref().map_or(false, |value| value.len() > 64) {
         return Err(AddonError::Invalid(
@@ -343,6 +367,7 @@ pub fn save_client_status(
             "Addon status payload is too large".to_string(),
         ));
     }
+    let _ = checked_client_status_dir(true)?;
     let parent = path
         .parent()
         .ok_or_else(|| AddonError::Io("Invalid addon status path".to_string()))?;
@@ -353,10 +378,19 @@ pub fn save_client_status(
 }
 
 pub fn load_client_status(client_id: &str) -> Result<Option<serde_json::Value>, AddonError> {
-    let _ = checked_data_dir(false)?;
-    let path = client_status_path(client_id)?;
-    if !path.is_file() {
+    let Some(_status_dir) = checked_client_status_dir(false)? else {
         return Ok(None);
+    };
+    let path = client_status_path(client_id)?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AddonError::Invalid(
+            "Invalid stored addon status".to_string(),
+        ));
     }
     let bytes = fs::read(path).map_err(io_error)?;
     if bytes.len() > 256 * 1024 {
