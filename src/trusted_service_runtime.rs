@@ -224,9 +224,13 @@ fn write_atomic(path: &Path, value: &TrustedServiceRuntimeRecord) -> Result<(), 
     let parent = path
         .parent()
         .ok_or_else(|| RuntimeError::Io("Runtime record parent is missing".to_string()))?;
-    fs::create_dir_all(parent).map_err(|error| RuntimeError::Io(error.to_string()))?;
-    let parent_metadata =
-        fs::symlink_metadata(parent).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    let parent_metadata = fs::symlink_metadata(parent).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RuntimeError::NotFound
+        } else {
+            RuntimeError::Io(error.to_string())
+        }
+    })?;
     if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
         return Err(RuntimeError::Invalid(
             "Invalid trusted service runtime record directory".to_string(),
@@ -1576,6 +1580,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("screentra-runtime-record-{}", Uuid::new_v4()));
         let path = root.join("example.service").join(RUNTIME_FILE);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         let record = test_record();
         write_atomic(&path, &record).unwrap();
         assert_eq!(read_record(&path).unwrap(), record);
