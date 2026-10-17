@@ -843,7 +843,7 @@ pub fn ensure_bundled_standard_addons() -> Result<Vec<AddonRecord>, AddonError> 
                 "Invalid standard addon seed marker".to_string(),
             ));
         }
-        Ok(_) => return list(),
+        Ok(_) => return migrate_legacy_standard_renderer_fields(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(io_error(error)),
     }
@@ -860,6 +860,50 @@ pub fn ensure_bundled_standard_addons() -> Result<Vec<AddonRecord>, AddonError> 
         }
     }
     write_addon_file_atomic(&marker, b"seeded\n", "standard-addon-seed")?;
+    migrate_legacy_standard_renderer_fields()
+}
+
+/// Rewrite the two bundled declarative manifests through the canonical
+/// serializer when an older install still stores `renderer_type`. The
+/// manifest update path is atomic and preserves the existing lifecycle state.
+fn migrate_legacy_standard_renderer_fields() -> Result<Vec<AddonRecord>, AddonError> {
+    const STANDARD_IDS: &[&str] = &["weather-widget-standard-us-ca", "traffic-standard-us-ca"];
+
+    for id in STANDARD_IDS {
+        let dir = addon_dir(id)?;
+        let metadata = match fs::symlink_metadata(&dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(io_error(error)),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(AddonError::Invalid(
+                "Invalid standard addon directory".to_string(),
+            ));
+        }
+
+        let manifest_path = dir.join(MANIFEST_FILE);
+        checked_addon_file(&manifest_path, "standard addon manifest")?;
+        let manifest_text = fs::read_to_string(&manifest_path).map_err(io_error)?;
+        let raw: serde_json::Value = serde_json::from_str(&manifest_text).map_err(io_error)?;
+        let has_legacy_renderer = raw
+            .get("widget_types")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|widgets| {
+                widgets.iter().any(|widget| {
+                    widget
+                        .as_object()
+                        .is_some_and(|object| object.contains_key("renderer_type"))
+                })
+            });
+        if !has_legacy_renderer {
+            continue;
+        }
+
+        let manifest: AddonManifest = serde_json::from_value(raw).map_err(io_error)?;
+        update(manifest)?;
+    }
+
     list()
 }
 
@@ -3012,6 +3056,46 @@ mod tests {
         assert!(after_remove
             .iter()
             .all(|addon| addon.manifest.id == "traffic-standard-us-ca"));
+
+        let _ = fs::remove_dir_all(&root);
+        unsafe {
+            std::env::remove_var("SIGNAGE_DATA_DIR");
+        }
+    }
+
+    #[test]
+    fn startup_migrates_legacy_standard_renderer_fields() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-cast-standard-addon-migration-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+
+        ensure_bundled_standard_addons().unwrap();
+        set_enabled("weather-widget-standard-us-ca", false).unwrap();
+        let manifest_path = root.join("addons/weather-widget-standard-us-ca/manifest.json");
+        let canonical = fs::read_to_string(&manifest_path).unwrap();
+        let legacy = canonical.replace("\"host_renderer\"", "\"renderer_type\"");
+        assert_ne!(legacy, canonical);
+        fs::write(&manifest_path, legacy).unwrap();
+
+        let migrated = ensure_bundled_standard_addons().unwrap();
+        let stored = fs::read_to_string(&manifest_path).unwrap();
+        assert!(stored.contains("\"host_renderer\""));
+        assert!(!stored.contains("\"renderer_type\""));
+        let weather = migrated
+            .iter()
+            .find(|addon| addon.manifest.id == "weather-widget-standard-us-ca")
+            .unwrap();
+        assert!(!weather.enabled);
+        assert_eq!(weather.manifest.widget_types[0].host_renderer, "weather");
 
         let _ = fs::remove_dir_all(&root);
         unsafe {
