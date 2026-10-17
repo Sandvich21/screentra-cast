@@ -288,6 +288,15 @@ fn read_record(path: &Path) -> Result<TrustedServiceRuntimeRecord, RuntimeError>
             "Trusted service runtime record is not a regular file".to_string(),
         ));
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            return Err(RuntimeError::Invalid(
+                "Trusted service runtime record permissions are insecure".to_string(),
+            ));
+        }
+    }
     if metadata.len() > MAX_RUNTIME_RECORD_BYTES {
         return Err(RuntimeError::Invalid(
             "Trusted service runtime record is too large".to_string(),
@@ -1514,6 +1523,8 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
         }
         let mut unsafe_record = record;
         unsafe_record.execution_enabled = true;
