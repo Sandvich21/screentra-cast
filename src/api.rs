@@ -223,6 +223,35 @@ impl RuntimeState {
         Ok((gateway, handler))
     }
 
+    #[cfg(unix)]
+    pub(crate) fn trusted_service_gateway_with_credential_lease(
+        &self,
+        addon_id: &str,
+        activation_instance: &str,
+        ledger: Arc<Mutex<crate::trusted_service_credentials::CredentialLeaseLedger>>,
+        lease_id: String,
+        peer_policy: crate::trusted_service_gateway::GatewayPeerPolicy,
+    ) -> Result<
+        (
+            crate::trusted_service_gateway::TrustedServiceUnixGateway,
+            Arc<dyn crate::trusted_service_gateway::GatewayOperationHandler>,
+        ),
+        String,
+    > {
+        let handler = self.trusted_service_database_handler(addon_id, activation_instance)?;
+        let contract = crate::trusted_service_database::TrustedServiceDatabaseContract::core_storage_api(
+            addon_id,
+            activation_instance,
+        );
+        let binding = crate::trusted_service_gateway::GatewayActivationBinding::new(contract)
+            .with_credential_lease(ledger, lease_id)?;
+        let gateway = crate::trusted_service_gateway::TrustedServiceUnixGateway::new(
+            binding,
+            peer_policy,
+        )?;
+        Ok((gateway, handler))
+    }
+
     pub fn sqlite(db: AppState) -> Self {
         let auth_repository = crate::auth::AuthRepository::Sqlite(db.clone());
         let backup_repository = backup_api::BackupMetadataRepository::Sqlite(db.clone());

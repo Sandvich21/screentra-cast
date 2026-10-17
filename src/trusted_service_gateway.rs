@@ -244,10 +244,14 @@ pub enum GatewayActivationState {
     Replaced,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct GatewayActivationBinding {
     pub contract: TrustedServiceDatabaseContract,
     pub state: GatewayActivationState,
+    credential_lease: Option<(
+        Arc<Mutex<crate::trusted_service_credentials::CredentialLeaseLedger>>,
+        String,
+    )>,
 }
 
 impl GatewayActivationBinding {
@@ -255,7 +259,30 @@ impl GatewayActivationBinding {
         Self {
             contract,
             state: GatewayActivationState::Active,
+            credential_lease: None,
         }
+    }
+
+    pub fn with_credential_lease(
+        mut self,
+        ledger: Arc<Mutex<crate::trusted_service_credentials::CredentialLeaseLedger>>,
+        lease_id: String,
+    ) -> Result<Self, String> {
+        if lease_id.is_empty() {
+            return Err("Gateway credential lease ID is empty".to_string());
+        }
+        let scope = crate::trusted_service_credentials::CredentialScope {
+            addon_id: self.contract.addon_id.clone(),
+            activation_instance: self.contract.activation_instance.clone(),
+            capabilities: vec!["storage".to_string()],
+        };
+        ledger
+            .lock()
+            .map_err(|_| "Gateway credential lease state is unavailable".to_string())?
+            .validate_for_use(&lease_id, &scope, chrono::Utc::now().fixed_offset())
+            .map_err(|error| error.to_string())?;
+        self.credential_lease = Some((ledger, lease_id));
+        Ok(self)
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -264,7 +291,20 @@ impl GatewayActivationBinding {
         }
         self.contract
             .validate()
-            .map_err(|_| "Gateway activation contract is not permitted".to_string())
+            .map_err(|_| "Gateway activation contract is not permitted".to_string())?;
+        if let Some((ledger, lease_id)) = &self.credential_lease {
+            let scope = crate::trusted_service_credentials::CredentialScope {
+                addon_id: self.contract.addon_id.clone(),
+                activation_instance: self.contract.activation_instance.clone(),
+                capabilities: vec!["storage".to_string()],
+            };
+            ledger
+                .lock()
+                .map_err(|_| "Gateway credential lease state is unavailable".to_string())?
+                .validate_for_use(lease_id, &scope, chrono::Utc::now().fixed_offset())
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 }
 
@@ -1159,6 +1199,42 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<DatabaseResponse, String>> + Send + 'a>> {
             Box::pin(async { Ok(DatabaseResponse::Written) })
         }
+    }
+
+    #[test]
+    fn gateway_credential_lease_binding_rejects_revoked_requests() {
+        let lease = crate::trusted_service_credentials::CredentialLease {
+            addon_id: "example.weather".to_string(),
+            activation_instance: "activation-1".to_string(),
+            capabilities: vec!["storage".to_string()],
+            lease_id: "gateway-lease-1".to_string(),
+            expires_at: "2030-01-01T00:00:00Z".to_string(),
+        };
+        let mut ledger = crate::trusted_service_credentials::CredentialLeaseLedger::default();
+        ledger
+            .register(lease)
+            .expect("future metadata lease should register");
+        let ledger = Arc::new(std::sync::Mutex::new(ledger));
+        let binding = GatewayActivationBinding::new(contract())
+            .with_credential_lease(ledger.clone(), "gateway-lease-1".to_string())
+            .expect("matching credential lease should bind");
+        let hello = GatewayConnectionHello {
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            addon_id: "example.weather".to_string(),
+            activation_instance: "activation-1".to_string(),
+        };
+        let peer = GatewayPeerCredentials::from_os_credentials(1000, 1001, 42);
+        let policy = GatewayPeerPolicy::new(1000, 1001, 42).expect("peer policy");
+        let mut session = GatewaySession::new(binding, policy, GatewayAdmissionState::new());
+        session
+            .accept_hello(&encode_connection_hello(&hello).expect("hello"), peer)
+            .expect("active lease should establish the session");
+        ledger
+            .lock()
+            .expect("ledger lock")
+            .revoke("gateway-lease-1")
+            .expect("revoke lease");
+        assert!(session.admit(&encode_request(&request()).expect("request"), Instant::now()).is_err());
     }
 
     #[test]
