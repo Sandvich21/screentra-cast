@@ -214,6 +214,7 @@ pub fn build_rootless_argv(
     let mut argv = vec![runtime_name.to_string(), "run".to_string()];
     argv.extend([
         "--rm".to_string(),
+        "--pull=never".to_string(),
         format!("--name={}", container_name(spec)),
         "--network=none".to_string(),
         "--read-only".to_string(),
@@ -668,6 +669,7 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--network=none", "--read-only"]));
+        assert!(args.iter().any(|arg| arg == "--pull=never"));
         assert!(args.iter().any(|arg| arg == "--cap-drop=ALL"));
         assert!(args.iter().any(|arg| arg == "--user=65532:65532"));
         assert!(args

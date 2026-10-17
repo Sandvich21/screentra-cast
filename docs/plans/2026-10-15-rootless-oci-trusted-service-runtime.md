@@ -62,7 +62,7 @@ Verify with the host’s current absence of OCI tools: the probe must report blo
 
 ## Task 3: Implement fixed-argument, no-network launch preparation
 
-**Status:** Dry-run fixed-argument builder complete; it returns argv only and cannot start or pull anything. The vector includes non-root UID, default seccomp, and bounded writable scratch via a fixed tmpfs path.
+**Status:** Dry-run fixed-argument builder complete; it returns argv only and cannot start or pull anything. The vector includes non-root UID, default seccomp, bounded writable scratch via a fixed tmpfs path, and explicit `--pull=never` so a future launcher cannot implicitly fetch an image before separate signature/registry policy approval.
 
 **Files:**
 - Modify: `src/trusted_service_oci.rs`
