@@ -1205,6 +1205,47 @@ fn running_marker_path(root: &Path, handle: &RuntimeHandle) -> PathBuf {
 }
 
 #[cfg(test)]
+fn ensure_fake_runtime_directory(path: &Path, label: &str) -> Result<(), RuntimeError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(RuntimeError::Invalid(format!("Fake runtime {label} is invalid")));
+        }
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(RuntimeError::Io(error.to_string())),
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| RuntimeError::Invalid(format!("Fake runtime {label} parent is missing")))?;
+    let parent_metadata = fs::symlink_metadata(parent).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RuntimeError::NotFound
+        } else {
+            RuntimeError::Io(error.to_string())
+        }
+    })?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(RuntimeError::Invalid(format!(
+            "Fake runtime {label} parent is invalid"
+        )));
+    }
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(path)
+        .map_err(|error| RuntimeError::Io(error.to_string()))?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(RuntimeError::Invalid(format!("Fake runtime {label} is invalid")));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn checked_marker_for_cleanup(
     root: &Path,
     handle: &RuntimeHandle,
@@ -1297,40 +1338,23 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
             activation_instance: request.activation_instance.clone(),
         };
         let marker = running_marker_path(&self.root, &handle);
-        fs::create_dir_all(&self.root)
-            .map_err(|error| RuntimeError::Io(error.to_string()))?;
-        let root_metadata = fs::symlink_metadata(&self.root)
-            .map_err(|error| RuntimeError::Io(error.to_string()))?;
-        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-            return Err(RuntimeError::Invalid(
-                "Fake runtime root is invalid".to_string(),
-            ));
-        }
+        ensure_fake_runtime_directory(&self.root, "root")?;
         let running_root = self.root.join("running");
-        fs::create_dir_all(&running_root)
-            .map_err(|error| RuntimeError::Io(error.to_string()))?;
-        let running_metadata = fs::symlink_metadata(&running_root)
-            .map_err(|error| RuntimeError::Io(error.to_string()))?;
-        if running_metadata.file_type().is_symlink() || !running_metadata.is_dir() {
-            return Err(RuntimeError::Invalid(
-                "Fake runtime running directory is invalid".to_string(),
-            ));
-        }
+        ensure_fake_runtime_directory(&running_root, "running directory")?;
+        let addon_root = running_root.join(&handle.addon_id);
+        ensure_fake_runtime_directory(&addon_root, "addon marker directory")?;
         let marker_parent = marker.parent().ok_or_else(|| {
             RuntimeError::Invalid("Fake runtime marker path is invalid".to_string())
         })?;
-        fs::create_dir_all(marker_parent)
-            .map_err(|error| RuntimeError::Io(error.to_string()))?;
-        let parent_metadata = fs::symlink_metadata(marker_parent)
-            .map_err(|error| RuntimeError::Io(error.to_string()))?;
-        if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
-            return Err(RuntimeError::Invalid(
-                "Fake runtime marker parent is invalid".to_string(),
-            ));
+        ensure_fake_runtime_directory(marker_parent, "marker parent")?;
+        let mut marker_options = fs::OpenOptions::new();
+        marker_options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            marker_options.mode(0o600);
         }
-        let mut marker_file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut marker_file = marker_options
             .open(&marker)
             .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::AlreadyExists {
