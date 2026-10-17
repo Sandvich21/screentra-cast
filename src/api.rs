@@ -2158,7 +2158,29 @@ async fn remove_trusted_service_stage(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn reject_symlinked_trusted_service_upload_ancestors(path: &StdPath) -> std::io::Result<()> {
+    let mut current = path;
+    loop {
+        match fs::symlink_metadata(current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "upload path contains a symlinked ancestor",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let Some(parent) = current.parent() else {
+            return Ok(());
+        };
+        current = parent;
+    }
+}
+
 fn create_private_trusted_service_upload_dir(path: &StdPath) -> std::io::Result<()> {
+    reject_symlinked_trusted_service_upload_ancestors(path)?;
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "upload parent is missing")
     })?;
@@ -2198,6 +2220,7 @@ fn create_private_trusted_service_upload_dir(path: &StdPath) -> std::io::Result<
 }
 
 fn create_private_trusted_service_upload_file(path: &StdPath) -> std::io::Result<fs::File> {
+    reject_symlinked_trusted_service_upload_ancestors(path)?;
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "upload parent is missing")
     })?;
@@ -9312,6 +9335,24 @@ mod tests {
             );
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_service_upload_rejects_symlinked_ancestors() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("screentra-upload-path-{}", Uuid::new_v4()));
+        let real_dir = root.join("real");
+        let linked_dir = root.join("linked");
+        fs::create_dir_all(&real_dir).unwrap();
+        symlink(&real_dir, &linked_dir).unwrap();
+
+        let error = create_private_trusted_service_upload_file(&linked_dir.join("payload"))
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("symlinked ancestor"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
