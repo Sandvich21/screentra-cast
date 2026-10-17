@@ -1505,7 +1505,15 @@ impl DisposableRuntimeHarness {
     fn new() -> Self {
         let root =
             std::env::temp_dir().join(format!("screentra-runtime-harness-{}", Uuid::new_v4()));
-        fs::create_dir_all(&root).expect("create disposable runtime root");
+        let mut directory_builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            directory_builder.mode(0o700);
+        }
+        directory_builder
+            .create(&root)
+            .expect("create disposable runtime root");
         let runtime_root = root.clone();
         Self {
             root,
@@ -1766,7 +1774,33 @@ mod tests {
             .root
             .join("running")
             .join("example.service")
-            .join("activation-1").is_file());
+            .join("activation-1")
+            .is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for directory in [
+                harness.root.clone(),
+                harness.root.join("running"),
+                harness.root.join("running").join("example.service"),
+            ] {
+                assert_eq!(fs::metadata(directory).unwrap().permissions().mode() & 0o777, 0o700);
+            }
+            assert_eq!(
+                fs::metadata(
+                    harness
+                        .root
+                        .join("running")
+                        .join("example.service")
+                        .join("activation-1")
+                )
+                .unwrap()
+                .permissions()
+                .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         harness
             .supervisor
             .runtime_mut()
