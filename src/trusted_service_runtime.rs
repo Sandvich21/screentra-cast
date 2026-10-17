@@ -95,11 +95,37 @@ fn checked_runtime_root(create: bool) -> Result<Option<PathBuf>, RuntimeError> {
         .map_err(|error| RuntimeError::Invalid(error.to_string()))
 }
 
+fn validate_private_runtime_directory(
+    metadata: &fs::Metadata,
+    description: &str,
+) -> Result<(), RuntimeError> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(RuntimeError::Invalid(description.to_string()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o777 != 0o700 {
+            return Err(RuntimeError::Invalid(format!(
+                "{description} permissions are insecure"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn record_dir(addon_id: &str) -> Result<PathBuf, RuntimeError> {
     addons::validate_addon_storage_namespace(addon_id).map_err(RuntimeError::Invalid)?;
-    checked_runtime_root(false)?
-        .ok_or(RuntimeError::NotFound)
-        .map(|root| root.join(addon_id))
+    let root = checked_runtime_root(false)?.ok_or(RuntimeError::NotFound)?;
+    let metadata = fs::symlink_metadata(&root).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RuntimeError::NotFound
+        } else {
+            RuntimeError::Io(error.to_string())
+        }
+    })?;
+    validate_private_runtime_directory(&metadata, "Invalid trusted service runtime root")?;
+    Ok(root.join(addon_id))
 }
 
 fn record_path(addon_id: &str) -> Result<PathBuf, RuntimeError> {
@@ -111,23 +137,17 @@ fn record_path(addon_id: &str) -> Result<PathBuf, RuntimeError> {
             RuntimeError::Io(error.to_string())
         }
     })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(RuntimeError::Invalid(
-            "Invalid trusted service runtime directory".to_string(),
-        ));
-    }
+    validate_private_runtime_directory(&metadata, "Invalid trusted service runtime directory")?;
     Ok(directory.join(RUNTIME_FILE))
 }
 
 fn ensure_runtime_directory(addon_id: &str) -> Result<PathBuf, RuntimeError> {
     let root = checked_runtime_root(true)?.ok_or(RuntimeError::NotFound)?;
     match fs::symlink_metadata(&root) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return Err(RuntimeError::Invalid(
-                "Invalid trusted service runtime root".to_string(),
-            ));
-        }
-        Ok(_) => {}
+        Ok(metadata) => validate_private_runtime_directory(
+            &metadata,
+            "Invalid trusted service runtime root",
+        )?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut directory_builder = fs::DirBuilder::new();
             #[cfg(unix)]
@@ -143,19 +163,32 @@ fn ensure_runtime_directory(addon_id: &str) -> Result<PathBuf, RuntimeError> {
     }
     let root_metadata =
         fs::symlink_metadata(&root).map_err(|error| RuntimeError::Io(error.to_string()))?;
-    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        return Err(RuntimeError::Invalid(
-            "Invalid trusted service runtime root".to_string(),
-        ));
-    }
+    validate_private_runtime_directory(&root_metadata, "Invalid trusted service runtime root")?;
     let directory = record_dir(addon_id)?;
     match fs::symlink_metadata(&directory) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
-            RuntimeError::Invalid("Invalid trusted service runtime directory".to_string()),
-        ),
-        Ok(_) => Ok(directory),
+        Ok(metadata) => {
+            validate_private_runtime_directory(
+                &metadata,
+                "Invalid trusted service runtime directory",
+            )?;
+            Ok(directory)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(&directory).map_err(|error| RuntimeError::Io(error.to_string()))?;
+            let mut directory_builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                directory_builder.mode(0o700);
+            }
+            directory_builder
+                .create(&directory)
+                .map_err(|error| RuntimeError::Io(error.to_string()))?;
+            let metadata = fs::symlink_metadata(&directory)
+                .map_err(|error| RuntimeError::Io(error.to_string()))?;
+            validate_private_runtime_directory(
+                &metadata,
+                "Invalid trusted service runtime directory",
+            )?;
             Ok(directory)
         }
         Err(error) => Err(RuntimeError::Io(error.to_string())),
@@ -1715,6 +1748,83 @@ mod tests {
             unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
         } else {
             unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_directory_rejects_insecure_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root =
+            std::env::temp_dir().join(format!("screentra-runtime-permissions-{}", Uuid::new_v4()));
+        let runtime_root = root.join(RUNTIME_DIR);
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&runtime_root, fs::Permissions::from_mode(0o755)).unwrap();
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        assert!(matches!(
+            ensure_runtime_directory("example.service"),
+            Err(RuntimeError::Invalid(_))
+        ));
+        if let Some(value) = old_data_dir {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_directory_creation_uses_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root =
+            std::env::temp_dir().join(format!("screentra-runtime-create-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        let directory = ensure_runtime_directory("example.service").unwrap();
+        assert_eq!(
+            fs::metadata(root.join(RUNTIME_DIR))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        if let Some(value) = old_data_dir {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
         }
         let _ = fs::remove_dir_all(root);
     }

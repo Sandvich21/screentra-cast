@@ -10228,7 +10228,21 @@ mod audit_validation_tests {
         crate::addons::install(manifest).expect("install test addon");
         std::fs::create_dir_all(&staged_dir).unwrap();
         std::fs::write(staged_dir.join("state.json"), b"staged").unwrap();
+        let runtime_root = data_dir.join("trusted-service-runtime");
+        std::fs::create_dir_all(&runtime_root).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&runtime_root, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
         std::fs::create_dir_all(&runtime_dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
         std::fs::write(runtime_dir.join("runtime.json"), b"inert").unwrap();
         let db_path = data_dir.join("signage.db");
         let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open storage database"));
