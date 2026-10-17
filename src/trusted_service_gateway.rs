@@ -1219,6 +1219,11 @@ mod tests {
             .take_at(start)
             .expect("operation should be accepted before deadline");
         assert!(budget.take_at(start + Duration::from_secs(6)).is_err());
+        assert_eq!(budget.used, 1);
+        budget
+            .take_at(start + Duration::from_secs(6))
+            .expect_err("expired requests must remain rejected without changing the budget");
+        assert_eq!(budget.used, 1);
     }
 
     #[test]
