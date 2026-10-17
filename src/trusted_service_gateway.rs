@@ -23,6 +23,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case")]
@@ -667,6 +669,8 @@ pub struct TrustedServiceUnixGateway {
 #[cfg(unix)]
 struct GatewaySocketCleanup {
     path: PathBuf,
+    device: u64,
+    inode: u64,
 }
 
 #[cfg(unix)]
@@ -675,10 +679,29 @@ impl Drop for GatewaySocketCleanup {
         let Ok(metadata) = fs::symlink_metadata(&self.path) else {
             return;
         };
-        if metadata.file_type().is_socket() {
+        if metadata.file_type().is_socket()
+            && metadata.dev() == self.device
+            && metadata.ino() == self.inode
+        {
             let _ = fs::remove_file(&self.path);
         }
     }
+}
+
+#[cfg(unix)]
+fn remove_owned_gateway_socket(path: &Path, device: u64, inode: u64) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("Gateway socket could not be inspected for removal".to_string()),
+    };
+    if !metadata.file_type().is_socket()
+        || metadata.dev() != device
+        || metadata.ino() != inode
+    {
+        return Err("Gateway socket identity changed before removal".to_string());
+    }
+    fs::remove_file(path).map_err(|_| "Gateway socket could not be removed".to_string())
 }
 
 #[cfg(unix)]
@@ -734,14 +757,16 @@ impl TrustedServiceUnixGateway {
         }
         let listener = UnixListener::bind(&self.socket_path)
             .map_err(|_| "Gateway socket could not be bound".to_string())?;
-        let _socket_cleanup = GatewaySocketCleanup {
-            path: self.socket_path.clone(),
-        };
         let socket_metadata = fs::symlink_metadata(&self.socket_path)
             .map_err(|_| "Gateway socket could not be inspected".to_string())?;
         if socket_metadata.file_type().is_symlink() || !socket_metadata.file_type().is_socket() {
             return Err("Gateway socket is not a Unix socket".to_string());
         }
+        let _socket_cleanup = GatewaySocketCleanup {
+            path: self.socket_path.clone(),
+            device: socket_metadata.dev(),
+            inode: socket_metadata.ino(),
+        };
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -789,8 +814,11 @@ impl TrustedServiceUnixGateway {
         while tasks.join_next().await.is_some() {}
         drop(listener);
         if result.is_ok() {
-            fs::remove_file(&self.socket_path)
-                .map_err(|_| "Gateway socket could not be removed".to_string())?;
+            remove_owned_gateway_socket(
+                &self.socket_path,
+                socket_metadata.dev(),
+                socket_metadata.ino(),
+            )?;
         }
         result
     }
