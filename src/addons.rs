@@ -217,8 +217,34 @@ fn data_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/home/board/data"))
 }
 
+fn reject_symlinked_path_ancestors(
+    path: &Path,
+    description: &str,
+) -> Result<(), AddonError> {
+    let mut current = path;
+    loop {
+        match fs::symlink_metadata(current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(AddonError::Invalid(description.to_string()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(error)),
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    Ok(())
+}
+
 fn checked_data_dir(create: bool) -> Result<Option<PathBuf>, AddonError> {
     let root = data_dir();
+    reject_symlinked_path_ancestors(&root, "Invalid addon data directory")?;
     match fs::symlink_metadata(&root) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
             AddonError::Invalid("Invalid addon data directory".to_string()),
