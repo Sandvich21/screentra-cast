@@ -820,6 +820,7 @@ mod tests {
             addon_version: "1.0.0".to_string(),
             image: "registry.example/weather".to_string(),
             image_digest: format!("sha256:{}", "a".repeat(64)),
+            image_signature_verified: true,
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.weather".to_string(),
             api_namespace: "example.weather".to_string(),

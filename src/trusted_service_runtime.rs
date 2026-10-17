@@ -75,6 +75,8 @@ pub struct TrustedServiceRuntimeRecord {
     pub addon_version: String,
     pub image: String,
     pub image_digest: String,
+    #[serde(default)]
+    pub image_signature_verified: bool,
     pub capabilities: Vec<String>,
     pub storage_namespace: String,
     pub api_namespace: String,
@@ -483,6 +485,7 @@ fn record_from_stage(
         addon_version: stage.manifest.version.clone(),
         image: service.image.clone(),
         image_digest: service.image_digest.clone(),
+        image_signature_verified: true,
         capabilities: service.capabilities.clone(),
         storage_namespace: service.storage_namespace.clone(),
         api_namespace: service.api_namespace.clone(),
@@ -679,6 +682,11 @@ fn validate_runtime_record_contract(
     addons::validate_addon_storage_namespace(&record.addon_id).map_err(RuntimeError::Invalid)?;
     addons::validate_addon_storage_namespace(&record.activation_instance)
         .map_err(RuntimeError::Invalid)?;
+    if !record.image_signature_verified {
+        return Err(RuntimeError::Invalid(
+            "Trusted service image signature approval is missing".to_string(),
+        ));
+    }
     if record.storage_namespace != record.addon_id || record.api_namespace != record.addon_id {
         return Err(RuntimeError::Invalid(
             "Trusted service runtime namespaces are not bound to the addon".to_string(),
@@ -2681,6 +2689,15 @@ mod tests {
     }
 
     #[test]
+    fn activation_requires_image_signature_approval_binding() {
+        let mut record = test_record();
+        record.image_signature_verified = false;
+        let error = TrustedServiceSupervisor::<FakeTrustedServiceRuntime>::activation_plan(&record)
+            .expect_err("unsigned image approval must not produce an activation plan");
+        assert!(matches!(error, RuntimeError::Invalid(_)));
+    }
+
+    #[test]
     fn supervisor_blocks_activation_until_every_execution_gate_is_ready() {
         let mut harness = DisposableRuntimeHarness::new();
         let record = test_record();
@@ -2737,6 +2754,7 @@ mod tests {
             addon_version: "1.0.0".to_string(),
             image: "registry.example/service".to_string(),
             image_digest: format!("sha256:{}", "a".repeat(64)),
+            image_signature_verified: true,
             capabilities: vec!["storage".to_string()],
             storage_namespace: "example.service".to_string(),
             api_namespace: "example.service".to_string(),
