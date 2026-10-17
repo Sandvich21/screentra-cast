@@ -955,6 +955,10 @@ impl TrustedServiceRuntime for RootlessOciRuntime {
     fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError> {
         self.status_process(handle)
     }
+
+    fn supervise(&mut self) -> Result<(), RuntimeError> {
+        RootlessOciRuntime::supervise(self)
+    }
 }
 
 impl Drop for RootlessOciRuntime {
