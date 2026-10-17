@@ -417,9 +417,7 @@ pub struct OciRegistryPolicy {
     pub allowed_registries: BTreeSet<String>,
 }
 
-pub fn validate_oci_image_registry(image: &str, policy: &OciRegistryPolicy) -> Result<(), String> {
-    crate::addons::validate_trusted_service_image_reference(image)
-        .map_err(|_| "OCI image reference is invalid".to_string())?;
+pub fn validate_oci_registry_policy(policy: &OciRegistryPolicy) -> Result<(), String> {
     if policy.allowed_registries.is_empty()
         || policy.allowed_registries.len() > MAX_OCI_ALLOWED_REGISTRIES
         || policy.allowed_registries.iter().any(|registry| {
@@ -449,6 +447,13 @@ pub fn validate_oci_image_registry(image: &str, policy: &OciRegistryPolicy) -> R
     {
         return Err("OCI registry allowlist is invalid".to_string());
     }
+    Ok(())
+}
+
+pub fn validate_oci_image_registry(image: &str, policy: &OciRegistryPolicy) -> Result<(), String> {
+    crate::addons::validate_trusted_service_image_reference(image)
+        .map_err(|_| "OCI image reference is invalid".to_string())?;
+    validate_oci_registry_policy(policy)?;
     let (registry, repository) = image
         .split_once('/')
         .ok_or_else(|| "OCI image must use an allowlisted registry".to_string())?;

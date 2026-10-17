@@ -8,11 +8,11 @@
 use crate::addons::{self, AddonError, TrustedServiceStage};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use uuid::Uuid;
 
 const RUNTIME_DIR: &str = "trusted-service-runtime";
@@ -563,6 +563,38 @@ impl RuntimeLaunchRequest {
             launch_profile: record.launch_profile.clone(),
         })
     }
+
+    fn to_oci_launch_spec(&self) -> crate::trusted_service_oci::OciLaunchSpec {
+        crate::trusted_service_oci::OciLaunchSpec {
+            addon_id: self.addon_id.clone(),
+            activation_instance: self.activation_instance.clone(),
+            image: self.image.clone(),
+            image_digest: self.image_digest.clone(),
+            capabilities: self.capabilities.clone(),
+            storage_namespace: self.storage_namespace.clone(),
+            api_namespace: self.api_namespace.clone(),
+            gateway_socket_path: self.launch_profile.gateway_socket_path.clone(),
+            command: self.launch_profile.command.clone(),
+            environment: Vec::new(),
+            host_mounts: Vec::new(),
+            published_ports: Vec::new(),
+            policy: crate::trusted_service_oci::OciLaunchPolicy {
+                rootless: self.launch_profile.rootless,
+                non_root: self.launch_profile.non_root,
+                network_disabled: self.launch_profile.network_disabled,
+                read_only_rootfs: self.launch_profile.read_only_rootfs,
+                no_new_privileges: self.launch_profile.no_new_privileges,
+                drop_all_capabilities: self.launch_profile.drop_all_capabilities,
+                seccomp_default: self.launch_profile.seccomp_default,
+            },
+            resources: crate::trusted_service_oci::OciResourceLimits {
+                memory_bytes: self.launch_profile.memory_bytes,
+                cpu_millis: self.launch_profile.cpu_millis,
+                pids: self.launch_profile.pids,
+                writable_bytes: self.launch_profile.writable_bytes,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -594,6 +626,256 @@ pub trait TrustedServiceRuntime {
     fn start(&mut self, request: &RuntimeLaunchRequest) -> Result<RuntimeHandle, RuntimeError>;
     fn stop(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError>;
     fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError>;
+    fn supervise(&mut self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
+/// Rootless OCI process adapter. The activation gate is checked before any
+/// process boundary, so constructing this adapter is safe while execution is
+/// disabled. Image pulls remain disabled in the generated argv.
+pub struct RootlessOciRuntime {
+    runtime_path: PathBuf,
+    registry_policy: crate::trusted_service_oci::OciRegistryPolicy,
+    running: BTreeMap<String, RootlessOciProcess>,
+    known: BTreeMap<String, RuntimeHandle>,
+    terminal: BTreeMap<String, (RuntimeHandle, RuntimeStatus)>,
+}
+
+struct RootlessOciProcess {
+    child: Mutex<Child>,
+}
+
+impl RootlessOciRuntime {
+    pub fn new(
+        runtime_path: PathBuf,
+        registry_policy: crate::trusted_service_oci::OciRegistryPolicy,
+    ) -> Result<Self, RuntimeError> {
+        let report = crate::trusted_service_oci::probe_oci_runtime(&runtime_path);
+        if !report.executable_present
+            || !report
+                .runtime_name
+                .as_deref()
+                .is_some_and(|name| crate::trusted_service_oci::SUPPORTED_ROOTLESS_RUNTIMES.contains(&name))
+        {
+            return Err(RuntimeError::Invalid(
+                "Rootless OCI runtime executable is unavailable or unsupported".to_string(),
+            ));
+        }
+        crate::trusted_service_oci::validate_oci_registry_policy(&registry_policy)
+            .map_err(RuntimeError::Invalid)?;
+        Ok(Self {
+            runtime_path,
+            registry_policy,
+            running: BTreeMap::new(),
+            known: BTreeMap::new(),
+            terminal: BTreeMap::new(),
+        })
+    }
+
+    fn start_process(
+        &mut self,
+        request: &RuntimeLaunchRequest,
+    ) -> Result<RuntimeHandle, RuntimeError> {
+        if !EXECUTION_ENABLED {
+            return Err(RuntimeError::Blocked(
+                "Trusted service execution is disabled".to_string(),
+            ));
+        }
+        if self.known.contains_key(&request.activation_instance) {
+            return Err(RuntimeError::Conflict(
+                "Rootless OCI activation identity has already been used".to_string(),
+            ));
+        }
+        let spec = request.to_oci_launch_spec();
+        crate::trusted_service_oci::validate_oci_image_registry(
+            &spec.image,
+            &self.registry_policy,
+        )
+        .map_err(RuntimeError::Invalid)?;
+        let argv = crate::trusted_service_oci::build_rootless_argv_for_path(
+            &self.runtime_path,
+            &spec,
+        )
+        .map_err(RuntimeError::Invalid)?;
+        let program = argv
+            .first()
+            .ok_or_else(|| RuntimeError::Invalid("OCI argv is empty".to_string()))?;
+        let mut command = Command::new(program);
+        command
+            .args(argv.iter().skip(1))
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let child = command
+            .spawn()
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        let handle = RuntimeHandle {
+            addon_id: request.addon_id.clone(),
+            activation_instance: request.activation_instance.clone(),
+        };
+        self.known
+            .insert(handle.activation_instance.clone(), handle.clone());
+        self.terminal.remove(&handle.activation_instance);
+        self.running.insert(
+            handle.activation_instance.clone(),
+            RootlessOciProcess {
+                child: Mutex::new(child),
+            },
+        );
+        Ok(handle)
+    }
+
+    fn stop_process(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        addons::validate_addon_storage_namespace(&handle.addon_id).map_err(RuntimeError::Invalid)?;
+        addons::validate_addon_storage_namespace(&handle.activation_instance)
+            .map_err(RuntimeError::Invalid)?;
+        let Some(known_handle) = self.known.get(&handle.activation_instance) else {
+            return Err(RuntimeError::NotFound);
+        };
+        if known_handle.addon_id != handle.addon_id {
+            return Err(RuntimeError::Conflict(
+                "Runtime handle is not bound to the known addon".to_string(),
+            ));
+        }
+        let exited = {
+            let Some(process) = self.running.get(&handle.activation_instance) else {
+                return Err(RuntimeError::NotFound);
+            };
+            let mut child = process
+                .child
+                .lock()
+                .map_err(|_| RuntimeError::Conflict("OCI child state is poisoned".to_string()))?;
+            if child
+                .try_wait()
+                .map_err(|error| RuntimeError::Io(error.to_string()))?
+                .is_some()
+            {
+                true
+            } else {
+                child
+                    .kill()
+                    .map_err(|error| RuntimeError::Io(error.to_string()))?;
+                child
+                    .wait()
+                    .map_err(|error| RuntimeError::Io(error.to_string()))?;
+                false
+            }
+        };
+        self.running.remove(&handle.activation_instance);
+        if exited {
+            self.terminal.insert(
+                handle.activation_instance.clone(),
+                (handle.clone(), RuntimeStatus::Crashed),
+            );
+            return Err(RuntimeError::Conflict(
+                "Rootless OCI process exited before stop".to_string(),
+            ));
+        }
+        self.terminal.insert(
+            handle.activation_instance.clone(),
+            (handle.clone(), RuntimeStatus::Stopped),
+        );
+        Ok(())
+    }
+
+    fn supervise(&mut self) -> Result<(), RuntimeError> {
+        let mut exited = Vec::new();
+        for (activation_instance, process) in &self.running {
+            let mut child = process
+                .child
+                .lock()
+                .map_err(|_| RuntimeError::Conflict("OCI child state is poisoned".to_string()))?;
+            if child
+                .try_wait()
+                .map_err(|error| RuntimeError::Io(error.to_string()))?
+                .is_some()
+            {
+                exited.push(activation_instance.clone());
+            }
+        }
+        for activation_instance in exited {
+            if let Some(process) = self.running.remove(&activation_instance) {
+                drop(process);
+                if let Some(handle) = self.known.get(&activation_instance).cloned() {
+                    self.terminal
+                        .insert(activation_instance, (handle, RuntimeStatus::Crashed));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn status_process(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError> {
+        addons::validate_addon_storage_namespace(&handle.addon_id).map_err(RuntimeError::Invalid)?;
+        addons::validate_addon_storage_namespace(&handle.activation_instance)
+            .map_err(RuntimeError::Invalid)?;
+        if let Some(known_handle) = self.known.get(&handle.activation_instance) {
+            if known_handle.addon_id != handle.addon_id {
+                return Err(RuntimeError::Conflict(
+                    "Runtime handle is not bound to the known addon".to_string(),
+                ));
+            }
+        }
+        if let Some(process) = self.running.get(&handle.activation_instance) {
+            let mut child = process
+                .child
+                .lock()
+                .map_err(|_| RuntimeError::Conflict("OCI child state is poisoned".to_string()))?;
+            return Ok(if child
+                .try_wait()
+                .map_err(|error| RuntimeError::Io(error.to_string()))?
+                .is_some()
+            {
+                RuntimeStatus::Crashed
+            } else {
+                RuntimeStatus::Running
+            });
+        }
+        if let Some((terminal_handle, status)) = self.terminal.get(&handle.activation_instance) {
+            if terminal_handle.addon_id != handle.addon_id {
+                return Err(RuntimeError::Conflict(
+                    "Runtime handle is not bound to the terminal addon".to_string(),
+                ));
+            }
+            return Ok(*status);
+        }
+        if let Some(known_handle) = self.known.get(&handle.activation_instance) {
+            if known_handle.addon_id != handle.addon_id {
+                return Err(RuntimeError::Conflict(
+                    "Runtime handle is not bound to the known addon".to_string(),
+                ));
+            }
+            return Ok(RuntimeStatus::Stopped);
+        }
+        Err(RuntimeError::NotFound)
+    }
+}
+
+impl TrustedServiceRuntime for RootlessOciRuntime {
+    fn start(&mut self, request: &RuntimeLaunchRequest) -> Result<RuntimeHandle, RuntimeError> {
+        self.start_process(request)
+    }
+
+    fn stop(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
+        self.stop_process(handle)
+    }
+
+    fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, RuntimeError> {
+        self.status_process(handle)
+    }
+}
+
+impl Drop for RootlessOciRuntime {
+    fn drop(&mut self) {
+        for process in self.running.values() {
+            if let Ok(mut child) = process.child.lock() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -714,6 +996,32 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
         }
         self.runtime
             .start(&RuntimeLaunchRequest::from_approved_record(record)?)
+    }
+
+    pub fn supervise(&mut self) -> Result<(), RuntimeError> {
+        self.runtime.supervise()
+    }
+
+    pub fn replace(
+        &mut self,
+        old_handle: &RuntimeHandle,
+        record: &TrustedServiceRuntimeRecord,
+    ) -> Result<RuntimeHandle, RuntimeError> {
+        let plan = self.replacement_plan(old_handle, record)?;
+        if !plan.can_start {
+            return Err(RuntimeError::Blocked(format!(
+                "Trusted service replacement is blocked by: {}",
+                plan.blocked_by.join(", ")
+            )));
+        }
+        let new_handle = self.activate(record)?;
+        if let Err(stop_error) = self.deactivate(old_handle) {
+            let _rollback_result = self.deactivate(&new_handle);
+            return Err(RuntimeError::Conflict(format!(
+                "Activation replacement could not retire the old runtime: {stop_error}"
+            )));
+        }
+        Ok(new_handle)
     }
 
     pub fn deactivate(&mut self, handle: &RuntimeHandle) -> Result<(), RuntimeError> {
@@ -1695,6 +2003,70 @@ mod tests {
         assert_eq!(plan.old_activation_instance, "activation-1");
         assert_eq!(plan.new_activation_instance, "activation-replacement");
         assert!(!plan.can_start);
+    }
+
+    #[test]
+    fn blocked_replacement_preserves_the_running_old_activation() {
+        let root = std::env::temp_dir().join(format!("screentra-replace-{}", Uuid::new_v4()));
+        let mut runtime = FakeTrustedServiceRuntime::new(root.clone());
+        let request = RuntimeLaunchRequest {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-old".to_string(),
+            image: "registry.example/service".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.service".to_string(),
+            api_namespace: "example.service".to_string(),
+            launch_profile: test_launch_profile(),
+        };
+        let old_handle = runtime.start(&request).expect("old activation should start");
+        let mut supervisor = TrustedServiceSupervisor::new(runtime);
+        let mut replacement = test_record();
+        replacement.activation_instance = "activation-new".to_string();
+        assert!(matches!(
+            supervisor.replace(&old_handle, &replacement),
+            Err(RuntimeError::Blocked(_))
+        ));
+        assert_eq!(
+            supervisor.runtime().status(&old_handle).unwrap(),
+            RuntimeStatus::Running
+        );
+        drop(supervisor);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rootless_oci_runtime_never_spawns_while_execution_is_disabled() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("screentra-oci-supervisor-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let runtime_path = root.join("podman");
+        fs::write(&runtime_path, b"not executed").unwrap();
+        let mut permissions = fs::metadata(&runtime_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&runtime_path, permissions).unwrap();
+        let registry_policy = crate::trusted_service_oci::OciRegistryPolicy {
+            allowed_registries: ["registry.example".to_string()].into_iter().collect(),
+        };
+        let mut runtime = RootlessOciRuntime::new(runtime_path, registry_policy)
+            .expect("runtime fixture should validate");
+        let request = RuntimeLaunchRequest {
+            addon_id: "example.service".to_string(),
+            activation_instance: "supervisor-disabled".to_string(),
+            image: "registry.example/service".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.service".to_string(),
+            api_namespace: "example.service".to_string(),
+            launch_profile: test_launch_profile(),
+        };
+        assert!(matches!(
+            runtime.start(&request),
+            Err(RuntimeError::Blocked(_))
+        ));
+        assert!(runtime.running.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
