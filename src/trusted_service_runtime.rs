@@ -469,11 +469,7 @@ pub fn list() -> Result<Vec<TrustedServiceRuntimeRecord>, RuntimeError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(RuntimeError::Io(error.to_string())),
     };
-    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        return Err(RuntimeError::Invalid(
-            "Invalid trusted service runtime root".to_string(),
-        ));
-    }
+    validate_private_runtime_directory(&root_metadata, "Invalid trusted service runtime root")?;
     let mut records = Vec::new();
     for entry in fs::read_dir(&root).map_err(|error| RuntimeError::Io(error.to_string()))? {
         let entry = entry.map_err(|error| RuntimeError::Io(error.to_string()))?;
@@ -481,15 +477,12 @@ pub fn list() -> Result<Vec<TrustedServiceRuntimeRecord>, RuntimeError> {
         if name.starts_with('.') {
             continue;
         }
-        if !entry
-            .file_type()
-            .map_err(|error| RuntimeError::Io(error.to_string()))?
-            .is_dir()
-        {
-            return Err(RuntimeError::Invalid(
-                "Invalid trusted service runtime directory".to_string(),
-            ));
-        }
+        let metadata = fs::symlink_metadata(entry.path())
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        validate_private_runtime_directory(
+            &metadata,
+            "Invalid trusted service runtime directory",
+        )?;
         if records.len() >= MAX_RUNTIME_RECORDS {
             return Err(RuntimeError::Invalid(
                 "Too many trusted service runtime records".to_string(),
@@ -516,11 +509,10 @@ pub fn remove(addon_id: &str) -> Result<(), RuntimeError> {
     };
     match fs::symlink_metadata(&directory) {
         Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(RuntimeError::Invalid(
-                    "Invalid trusted service runtime directory".to_string(),
-                ));
-            }
+            validate_private_runtime_directory(
+                &metadata,
+                "Invalid trusted service runtime directory",
+            )?;
             fs::remove_dir_all(directory).map_err(|error| RuntimeError::Io(error.to_string()))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1775,6 +1767,7 @@ mod tests {
             ensure_runtime_directory("example.service"),
             Err(RuntimeError::Invalid(_))
         ));
+        assert!(matches!(list(), Err(RuntimeError::Invalid(_))));
         if let Some(value) = old_data_dir {
             unsafe {
                 std::env::set_var("SIGNAGE_DATA_DIR", value);
