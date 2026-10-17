@@ -193,6 +193,13 @@ fn write_atomic(path: &Path, value: &TrustedServiceRuntimeRecord) -> Result<(), 
         .parent()
         .ok_or_else(|| RuntimeError::Io("Runtime record parent is missing".to_string()))?;
     fs::create_dir_all(parent).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    let parent_metadata =
+        fs::symlink_metadata(parent).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(RuntimeError::Invalid(
+            "Invalid trusted service runtime record directory".to_string(),
+        ));
+    }
     let temporary = parent.join(format!(".runtime-{}.tmp", Uuid::new_v4()));
     let bytes =
         serde_json::to_vec_pretty(value).map_err(|error| RuntimeError::Io(error.to_string()))?;
@@ -1025,6 +1032,16 @@ mod tests {
             fs::remove_file(&path).unwrap();
             std::os::unix::fs::symlink(&target, &path).unwrap();
             assert!(matches!(read_record(&path), Err(RuntimeError::Invalid(_))));
+
+            let real_parent = root.join("real-parent");
+            let linked_parent = root.join("linked-parent");
+            fs::create_dir_all(&real_parent).unwrap();
+            std::os::unix::fs::symlink(&real_parent, &linked_parent).unwrap();
+            let linked_record = linked_parent.join(RUNTIME_FILE);
+            assert!(matches!(
+                write_atomic(&linked_record, &test_record()),
+                Err(RuntimeError::Invalid(_))
+            ));
         }
         let _ = fs::remove_dir_all(&root);
     }
