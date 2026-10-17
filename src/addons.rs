@@ -1546,6 +1546,11 @@ pub fn remove_trusted_service_stage(id: &str) -> Result<(), AddonError> {
             "Invalid staged trusted service directory".to_string(),
         ));
     }
+    #[cfg(unix)]
+    let original_identity = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino())
+    };
     match read_trusted_service_stage(&dir) {
         Ok(stage) if stage.manifest.id != id => {
             return Err(AddonError::Invalid(
@@ -1555,6 +1560,19 @@ pub fn remove_trusted_service_stage(id: &str) -> Result<(), AddonError> {
         Ok(_) | Err(_) => {
             // Explicit admin cleanup remains available for malformed staged
             // metadata; the directory was already verified as non-symlink.
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let current = fs::symlink_metadata(&dir).map_err(io_error)?;
+        if current.file_type().is_symlink()
+            || !current.is_dir()
+            || (current.dev(), current.ino()) != original_identity
+        {
+            return Err(AddonError::Invalid(
+                "Trusted service stage identity changed before removal".to_string(),
+            ));
         }
     }
     fs::remove_dir_all(dir).map_err(io_error)
