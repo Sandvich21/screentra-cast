@@ -798,6 +798,25 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
             activation_instance: request.activation_instance.clone(),
         };
         let marker = running_marker_path(&self.root, &handle);
+        fs::create_dir_all(&self.root)
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        let root_metadata = fs::symlink_metadata(&self.root)
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+            return Err(RuntimeError::Invalid(
+                "Fake runtime root is invalid".to_string(),
+            ));
+        }
+        let running_root = self.root.join("running");
+        fs::create_dir_all(&running_root)
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        let running_metadata = fs::symlink_metadata(&running_root)
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        if running_metadata.file_type().is_symlink() || !running_metadata.is_dir() {
+            return Err(RuntimeError::Invalid(
+                "Fake runtime running directory is invalid".to_string(),
+            ));
+        }
         let marker_parent = marker.parent().ok_or_else(|| {
             RuntimeError::Invalid("Fake runtime marker path is invalid".to_string())
         })?;
@@ -1201,6 +1220,31 @@ mod tests {
             .join("example.service")
             .join("activation-1").exists());
         assert_eq!(harness.supervisor.runtime().actions().len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fake_runtime_rejects_symlinked_running_directory() {
+        let mut harness = DisposableRuntimeHarness::new();
+        let redirected = harness.root.join("redirected-running");
+        fs::create_dir_all(&redirected).unwrap();
+        fs::remove_dir(harness.root.join("running")).unwrap_or(());
+        std::os::unix::fs::symlink(&redirected, harness.root.join("running")).unwrap();
+        let request = RuntimeLaunchRequest {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-symlink".to_string(),
+            image: "registry.example/service".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.service".to_string(),
+            api_namespace: "example.service".to_string(),
+            launch_profile: test_launch_profile(),
+        };
+        assert!(matches!(
+            harness.supervisor.runtime_mut().start(&request),
+            Err(RuntimeError::Invalid(_))
+        ));
+        assert!(!redirected.join("example.service").exists());
     }
 
     #[test]
