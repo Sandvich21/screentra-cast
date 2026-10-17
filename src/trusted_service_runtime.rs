@@ -803,7 +803,27 @@ impl TrustedServiceRuntime for FakeTrustedServiceRuntime {
         })?;
         fs::create_dir_all(marker_parent)
             .map_err(|error| RuntimeError::Io(error.to_string()))?;
-        fs::write(&marker, request.addon_id.as_bytes())
+        let parent_metadata = fs::symlink_metadata(marker_parent)
+            .map_err(|error| RuntimeError::Io(error.to_string()))?;
+        if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+            return Err(RuntimeError::Invalid(
+                "Fake runtime marker parent is invalid".to_string(),
+            ));
+        }
+        let mut marker_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    RuntimeError::Conflict("Fake runtime marker already exists".to_string())
+                } else {
+                    RuntimeError::Io(error.to_string())
+                }
+            })?;
+        use std::io::Write;
+        marker_file
+            .write_all(request.addon_id.as_bytes())
             .map_err(|error| RuntimeError::Io(error.to_string()))?;
         self.known
             .insert(handle.activation_instance.clone(), handle.clone());
