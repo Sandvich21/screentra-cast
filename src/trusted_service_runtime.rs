@@ -13,6 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const RUNTIME_DIR: &str = "trusted-service-runtime";
@@ -620,6 +621,44 @@ pub enum RuntimeStatus {
     Crashed,
     TimedOut,
     Replaced,
+}
+
+pub const MAX_RUNTIME_READINESS_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeReadinessStatus {
+    Pending,
+    Ready,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeReadinessDeadline {
+    deadline: Instant,
+}
+
+impl RuntimeReadinessDeadline {
+    pub fn new(started_at: Instant, timeout: Duration) -> Result<Self, RuntimeError> {
+        if timeout.is_zero() || timeout > MAX_RUNTIME_READINESS_TIMEOUT {
+            return Err(RuntimeError::Invalid(
+                "Trusted service readiness timeout is outside the allowed bound".to_string(),
+            ));
+        }
+        let deadline = started_at.checked_add(timeout).ok_or_else(|| {
+            RuntimeError::Invalid("Trusted service readiness deadline overflowed".to_string())
+        })?;
+        Ok(Self { deadline })
+    }
+
+    pub fn observe(&self, now: Instant, ready: bool) -> RuntimeReadinessStatus {
+        if ready {
+            RuntimeReadinessStatus::Ready
+        } else if now >= self.deadline {
+            RuntimeReadinessStatus::TimedOut
+        } else {
+            RuntimeReadinessStatus::Pending
+        }
+    }
 }
 
 pub trait TrustedServiceRuntime {
@@ -1365,6 +1404,36 @@ mod tests {
         assert!(gates
             .iter()
             .any(|gate| gate.name == "controlled_gateway" && !gate.passed));
+    }
+
+    #[test]
+    fn readiness_deadline_is_deterministic_and_bounded() {
+        let started_at = Instant::now();
+        let deadline = RuntimeReadinessDeadline::new(started_at, Duration::from_secs(5))
+            .expect("valid readiness timeout");
+        assert_eq!(
+            deadline.observe(started_at + Duration::from_secs(1), false),
+            RuntimeReadinessStatus::Pending
+        );
+        assert_eq!(
+            deadline.observe(started_at + Duration::from_secs(5), false),
+            RuntimeReadinessStatus::TimedOut
+        );
+        assert_eq!(
+            deadline.observe(started_at + Duration::from_secs(60), true),
+            RuntimeReadinessStatus::Ready
+        );
+        assert!(matches!(
+            RuntimeReadinessDeadline::new(started_at, Duration::ZERO),
+            Err(RuntimeError::Invalid(_))
+        ));
+        assert!(matches!(
+            RuntimeReadinessDeadline::new(
+                started_at,
+                MAX_RUNTIME_READINESS_TIMEOUT + Duration::from_secs(1)
+            ),
+            Err(RuntimeError::Invalid(_))
+        ));
     }
 
     #[test]
