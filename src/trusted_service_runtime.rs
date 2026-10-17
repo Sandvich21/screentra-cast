@@ -547,6 +547,26 @@ pub fn remove(addon_id: &str) -> Result<(), RuntimeError> {
                 &metadata,
                 "Invalid trusted service runtime directory",
             )?;
+            #[cfg(unix)]
+            let directory_identity = {
+                use std::os::unix::fs::MetadataExt;
+                (metadata.dev(), metadata.ino())
+            };
+            let current_metadata = fs::symlink_metadata(&directory)
+                .map_err(|error| RuntimeError::Io(error.to_string()))?;
+            validate_private_runtime_directory(
+                &current_metadata,
+                "Invalid trusted service runtime directory",
+            )?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if (current_metadata.dev(), current_metadata.ino()) != directory_identity {
+                    return Err(RuntimeError::Conflict(
+                        "Trusted service runtime directory changed".to_string(),
+                    ));
+                }
+            }
             fs::remove_dir_all(directory).map_err(|error| RuntimeError::Io(error.to_string()))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
