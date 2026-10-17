@@ -2169,7 +2169,13 @@ fn create_private_trusted_service_upload_dir(path: &StdPath) -> std::io::Result<
             "upload parent is not a real directory",
         ));
     }
-    fs::create_dir(path)?;
+    let mut directory_builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directory_builder.mode(0o700);
+    }
+    directory_builder.create(path)?;
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         let _ = fs::remove_dir(path);
@@ -2202,13 +2208,16 @@ fn create_private_trusted_service_upload_file(path: &StdPath) -> std::io::Result
             "upload parent is not a real directory",
         ));
     }
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut file_options = fs::OpenOptions::new();
+    file_options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::OpenOptionsExt;
+        file_options.mode(0o600);
+    }
+    let file = file_options.open(path)?;
+    #[cfg(unix)]
+    {
         let metadata = fs::symlink_metadata(path)?;
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             let _ = fs::remove_file(path);
@@ -2216,12 +2225,6 @@ fn create_private_trusted_service_upload_file(path: &StdPath) -> std::io::Result
                 std::io::ErrorKind::InvalidInput,
                 "upload target is not a regular file",
             ));
-        }
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(0o600);
-        if let Err(error) = fs::set_permissions(path, permissions) {
-            let _ = fs::remove_file(path);
-            return Err(error);
         }
     }
     Ok(file)
