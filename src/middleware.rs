@@ -589,6 +589,21 @@ mod authorization_tests {
             required_capability("/api/addons/trusted-service/staged/example", "DELETE"),
             "manage_addons"
         );
+        assert_eq!(
+            required_capability("/api/addons/weather-widget-standard-us-ca", "GET"),
+            "viewer"
+        );
+        assert_eq!(
+            required_capability("/api/addons/weather-widget-standard-us-ca", "PUT"),
+            "manage_addons"
+        );
+        assert_eq!(
+            required_capability("/api/addons/weather-widget-standard-us-ca", "DELETE"),
+            "manage_addons"
+        );
+        assert_eq!(required_capability("/api/addons/install", "POST"), "manage_addons");
+        assert_eq!(required_capability("/api/addons", "GET"), "viewer");
+        assert_eq!(required_capability("/api/addons", "POST"), "manage_addons");
         assert!(!role_has_capability("viewer", "manage_addons"));
         assert!(!role_has_capability("operator", "manage_addons"));
     }
