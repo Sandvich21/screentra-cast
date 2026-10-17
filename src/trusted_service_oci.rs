@@ -265,6 +265,14 @@ pub fn validate_oci_launch_spec_against_record_with_registry_policy(
     validate_oci_image_registry(&spec.image, registry_policy)
 }
 
+fn default_seccomp_option(runtime_name: &str) -> String {
+    match runtime_name {
+        "podman" => "--security-opt=seccomp=/usr/share/containers/seccomp.json".to_string(),
+        "nerdctl" => "--security-opt=seccomp=default".to_string(),
+        _ => "--security-opt=seccomp=default".to_string(),
+    }
+}
+
 pub fn build_rootless_argv(
     runtime_name: &str,
     spec: &OciLaunchSpec,
@@ -283,7 +291,7 @@ pub fn build_rootless_argv(
         "--user=65532:65532".to_string(),
         "--cap-drop=ALL".to_string(),
         "--security-opt=no-new-privileges".to_string(),
-        "--security-opt=seccomp=default".to_string(),
+        default_seccomp_option(runtime_name),
         format!("--tmpfs=/tmp:rw,size={}", spec.resources.writable_bytes),
         format!("--pids-limit={}", spec.resources.pids),
         format!("--memory={}", spec.resources.memory_bytes),
@@ -822,7 +830,7 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--user=65532:65532"));
         assert!(args
             .iter()
-            .any(|arg| arg == "--security-opt=seccomp=default"));
+            .any(|arg| arg == "--security-opt=seccomp=/usr/share/containers/seccomp.json"));
         assert!(args
             .iter()
             .any(|arg| arg == "--tmpfs=/tmp:rw,size=16777216"));
