@@ -1086,7 +1086,13 @@ fn checked_trusted_service_storage_dir(create: bool) -> Result<Option<PathBuf>, 
         ),
         Ok(_) => Ok(Some(root)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
-            fs::create_dir_all(&root).map_err(io_error)?;
+            let mut directory_builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                directory_builder.mode(0o700);
+            }
+            directory_builder.create(&root).map_err(io_error)?;
             let metadata = fs::symlink_metadata(&root).map_err(io_error)?;
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 return Err(AddonError::Invalid(
@@ -2141,6 +2147,18 @@ mod tests {
         assert_eq!(staged.manifest.id, "example.weather");
         let staged_dir = root.join("data/trusted-services/example.weather");
         assert!(staged_dir.join("manifest.json").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::symlink_metadata(root.join("data/trusted-services"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
