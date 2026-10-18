@@ -206,8 +206,8 @@ function renderWidget(w){
  else if(t==='image'){ el.innerHTML=`<img src="${esc(p.url||'')}" style="width:100%;height:100%;object-fit:cover">`; }
  else if(t==='video'){
   const url=p.url||'';
-  if(isYouTubeUrl(url)) el.innerHTML=`<iframe src="${esc(youtubeEmbedUrl(url,p))}" style="width:100%;height:100%;border:0;background:#000;" allow="autoplay; encrypted-media; picture-in-picture; fullscreen"></iframe>`;
-  else el.innerHTML=`<video src="${esc(url)}" autoplay loop playsinline ${p.mute?'muted':''} style="width:100%;height:100%;object-fit:cover"></video>`;
+  if(isYouTubeUrl(url)) { const fit=['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'; el.innerHTML=`<iframe src="/youtube.html?url=${encodeURIComponent(url)}&fit=${encodeURIComponent(fit)}&v=${Date.now()}" style="width:100%;height:100%;border:0;background:#000;" allow="autoplay; encrypted-media; picture-in-picture; fullscreen"></iframe>`; }
+  else el.innerHTML=`<video src="${esc(url)}" autoplay loop playsinline ${p.mute?'muted':''} style="width:100%;height:100%;object-fit:${['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'}"></video>`;
  }
  else if(t==='music'){ el.innerHTML=`<audio src="${esc(p.url||'')}" autoplay loop ${p.mute?'muted':''}></audio>`; }
  else if(t==='clock'){ const c=document.createElement('div'); c.className='text'; c.style.fontSize=(Number(p.font_size||48)*2)+'px'; c.style.color=p.color||'#fff'; setInterval(()=>c.textContent=new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}),1000); el.appendChild(c); }
