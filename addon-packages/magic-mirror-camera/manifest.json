@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "id": "magic-mirror-camera",
+  "name": "Magic Mirror camera",
+  "description": "Metadata-only camera preset backed by the trusted built-in renderer. Browser capture remains opt-in and local.",
+  "version": "1.0.0",
+  "kind": "declarative",
+  "min_server_version": "0.1.5",
+  "min_client_version": "1",
+  "widget_types": [
+    {
+      "id": "camera",
+      "name": "Camera",
+      "description": "Local browser camera preview with capture disabled by default.",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "capture_enabled": { "type": "boolean", "default": false },
+          "facing_mode": { "type": "string", "enum": ["environment", "user", "left", "right"] },
+          "filter": { "type": "string", "enum": ["none", "grayscale", "sepia", "halloween"] }
+        },
+        "additionalProperties": false
+      },
+      "host_renderer": "camera",
+      "icon": "📷",
+      "default_props": {
+        "capture_enabled": false,
+        "facing_mode": "environment",
+        "filter": "none"
+      }
+    }
+  ],
+  "permissions": [],
+  "client_capabilities": [],
+  "data_contract": null,
+  "client_entrypoint": null,
+  "server_entrypoint": null,
+  "trusted_service": null,
+  "client_service": null
+}

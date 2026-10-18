@@ -32,6 +32,7 @@ const HOST_RENDERERS: &[&str] = &[
     "sound",
     "embed",
     "calendar",
+    "camera",
     "news",
     "rectangle",
 ];
@@ -1032,6 +1033,7 @@ pub fn ensure_bundled_standard_addons() -> Result<Vec<AddonRecord>, AddonError> 
     let bundled = [
         include_str!("../addon-packages/weather-widget-standard-us-ca/manifest.json"),
         include_str!("../addon-packages/traffic-standard-us-ca/manifest.json"),
+        include_str!("../addon-packages/magic-mirror-camera/manifest.json"),
     ];
     let root = checked_addon_storage_dir(true)?.ok_or_else(|| {
         AddonError::Io("Addon storage directory is unavailable".to_string())
@@ -1067,7 +1069,11 @@ pub fn ensure_bundled_standard_addons() -> Result<Vec<AddonRecord>, AddonError> 
 /// serializer when an older install still stores `renderer_type`. The
 /// manifest update path is atomic and preserves the existing lifecycle state.
 fn migrate_legacy_standard_renderer_fields() -> Result<Vec<AddonRecord>, AddonError> {
-    const STANDARD_IDS: &[&str] = &["weather-widget-standard-us-ca", "traffic-standard-us-ca"];
+    const STANDARD_IDS: &[&str] = &[
+        "weather-widget-standard-us-ca",
+        "traffic-standard-us-ca",
+        "magic-mirror-camera",
+    ];
 
     for id in STANDARD_IDS {
         let dir = addon_dir(id)?;
@@ -2384,6 +2390,125 @@ mod tests {
             assert_eq!(manifest.kind, "declarative");
             assert!(manifest.data_contract.is_some());
         }
+        let camera: AddonManifest = serde_json::from_str(include_str!(
+            "../addon-packages/magic-mirror-camera/manifest.json"
+        ))
+        .expect("valid camera addon JSON");
+        validate_manifest(&camera).expect("bundled camera addon must validate");
+        assert_eq!(camera.kind, "declarative");
+        assert!(camera.data_contract.is_none());
+    }
+
+    #[test]
+    fn camera_preset_is_metadata_only_and_capture_off_by_default() {
+        let manifest: AddonManifest = serde_json::from_str(include_str!(
+            "../addon-packages/magic-mirror-camera/manifest.json"
+        ))
+        .expect("camera preset JSON should deserialize");
+
+        validate_manifest(&manifest).expect("camera preset must validate");
+        let widget = &manifest.widget_types[0];
+        assert_eq!(widget.id, "camera");
+        assert_eq!(widget.host_renderer, "camera");
+        assert_eq!(widget.default_props["capture_enabled"], false);
+        assert_eq!(widget.default_props["facing_mode"], "environment");
+        assert_eq!(widget.default_props["filter"], "none");
+        assert_eq!(widget.schema["additionalProperties"], false);
+        assert_eq!(
+            widget.schema["properties"]["facing_mode"]["enum"],
+            serde_json::json!(["environment", "user", "left", "right"])
+        );
+        assert_eq!(
+            widget.schema["properties"]["filter"]["enum"],
+            serde_json::json!(["none", "grayscale", "sepia", "halloween"])
+        );
+        assert!(manifest.permissions.is_empty());
+        assert!(manifest.client_capabilities.is_empty());
+        assert!(manifest.client_entrypoint.is_none());
+        assert!(manifest.server_entrypoint.is_none());
+        assert!(manifest.trusted_service.is_none());
+        assert!(manifest.client_service.is_none());
+        assert!(manifest.data_contract.is_none());
+    }
+
+    #[test]
+    fn bundled_camera_preset_seeds_and_supports_full_inert_lifecycle() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-cast-camera-addon-lifecycle-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+
+        ensure_bundled_standard_addons().unwrap();
+        let seeded = list().unwrap();
+        assert_eq!(seeded.len(), 3);
+        let camera = seeded
+            .iter()
+            .find(|addon| addon.manifest.id == "magic-mirror-camera")
+            .expect("camera preset should be first-seeded");
+        assert!(camera.enabled);
+        assert_eq!(camera.manifest.widget_types[0].host_renderer, "camera");
+        assert_eq!(camera.manifest.widget_types[0].default_props["capture_enabled"], false);
+        assert!(enabled_widget_registrations()
+            .unwrap()
+            .iter()
+            .any(|registration| registration.addon_id == "magic-mirror-camera"));
+
+        set_enabled("magic-mirror-camera", false).unwrap();
+        assert!(!enabled_widget_registrations()
+            .unwrap()
+            .iter()
+            .any(|registration| registration.addon_id == "magic-mirror-camera"));
+
+        let mut replacement: AddonManifest = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "id": "magic-mirror-camera",
+            "name": "Magic Mirror camera updated",
+            "version": "1.1.0",
+            "kind": "declarative",
+            "widget_types": [{
+                "id": "camera",
+                "name": "Camera",
+                "host_renderer": "camera",
+                "schema": {"type": "object"},
+                "default_props": {"capture_enabled": false, "facing_mode": "environment", "filter": "grayscale"}
+            }]
+        })).unwrap();
+        replacement.description = "Updated metadata-only camera preset".to_string();
+        let updated = update(replacement).unwrap();
+        assert_eq!(updated.manifest.version, "1.1.0");
+        assert!(!updated.enabled);
+        assert_eq!(updated.manifest.widget_types[0].default_props["capture_enabled"], false);
+
+        set_enabled("magic-mirror-camera", true).unwrap();
+        assert!(enabled_widget_registrations()
+            .unwrap()
+            .iter()
+            .any(|registration| registration.addon_id == "magic-mirror-camera"));
+        remove("magic-mirror-camera").unwrap();
+        assert!(!list()
+            .unwrap()
+            .iter()
+            .any(|addon| addon.manifest.id == "magic-mirror-camera"));
+        assert!(!root.join("addons/magic-mirror-camera").exists());
+
+        let after_remove = ensure_bundled_standard_addons().unwrap();
+        assert_eq!(after_remove.len(), 2);
+        assert!(!after_remove
+            .iter()
+            .any(|addon| addon.manifest.id == "magic-mirror-camera"));
+
+        let _ = fs::remove_dir_all(&root);
+        unsafe {
+            std::env::remove_var("SIGNAGE_DATA_DIR");
+        }
     }
 
     #[test]
@@ -3395,11 +3520,11 @@ mod tests {
         }
 
         let first = ensure_bundled_standard_addons().unwrap();
-        assert_eq!(first.len(), 2);
+        assert_eq!(first.len(), 3);
         assert!(first.iter().all(|addon| addon.enabled));
         let second = ensure_bundled_standard_addons().unwrap();
-        assert_eq!(second.len(), 2);
-        assert_eq!(list().unwrap().len(), 2);
+        assert_eq!(second.len(), 3);
+        assert_eq!(list().unwrap().len(), 3);
         assert!(list()
             .unwrap()
             .iter()
@@ -3408,22 +3533,29 @@ mod tests {
             .unwrap()
             .iter()
             .any(|addon| addon.manifest.id == "traffic-standard-us-ca"));
+        assert!(list()
+            .unwrap()
+            .iter()
+            .any(|addon| addon.manifest.id == "magic-mirror-camera"));
         let registrations = enabled_widget_registrations().unwrap();
-        assert_eq!(registrations.len(), 2);
+        assert_eq!(registrations.len(), 3);
         assert!(registrations
             .iter()
             .any(|registration| registration.id == "weather-standard"));
         assert!(registrations
             .iter()
             .any(|registration| registration.id == "traffic-standard"));
+        assert!(registrations
+            .iter()
+            .any(|registration| registration.id == "camera"));
 
         let weather_dir = root.join("addons/weather-widget-standard-us-ca");
         fs::remove_dir_all(weather_dir).unwrap();
         let after_remove = ensure_bundled_standard_addons().unwrap();
-        assert_eq!(after_remove.len(), 1);
+        assert_eq!(after_remove.len(), 2);
         assert!(after_remove
             .iter()
-            .all(|addon| addon.manifest.id == "traffic-standard-us-ca"));
+            .all(|addon| addon.manifest.id != "weather-widget-standard-us-ca"));
 
         let _ = fs::remove_dir_all(&root);
         unsafe {
