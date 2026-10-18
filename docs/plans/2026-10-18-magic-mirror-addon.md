@@ -22,6 +22,10 @@ camera or microphone permission, local inference, a running client service, or
 any other hardware or process activation; those require a separate reviewed
 runtime/permission gate.
 
+### Supervisor-plan evidence boundary
+
+The pure `screentra-client-service-supervisor-plan.py` contract composes the lifecycle and health identity validators for the Magic Mirror STT metadata. Its activation plans are metadata-only evidence: `execution_enabled` is false and `process_started`, `socket_bound`, and `model_loaded` are false. Health/status may bind a bounded observation; start/stop/update/rollback return structured `execution_disabled` results without changing lifecycle state. A plan is not evidence of a running service, bound socket, loaded model, installed package, or hardware readiness.
+
 ## Product scope
 
 ### Client-side AI service
