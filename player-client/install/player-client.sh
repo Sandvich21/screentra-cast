@@ -5397,8 +5397,6 @@ def apply_display_power(cache_dir: Path, display_index: int | None, state: str) 
     if rc != 0:
         details['stderr'] = err or out
         return False, f'compositor display power failed (rc={rc}): {err or out}', details
-    observed = next((o for o in _wlr_outputs() if o.get('name') == connector), None)
-    details['enabled'] = observed.get('enabled') if observed else None
     return True, f'display {display_index} ({connector}) power set to {state}', details
 
 
