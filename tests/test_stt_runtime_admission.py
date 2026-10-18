@@ -1,10 +1,24 @@
 import copy
+import dataclasses
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-runtime-admission.py'
+APPROVAL_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-approval-record.py'
+
+
+def load_approval_module():
+    spec = importlib.util.spec_from_file_location(
+        'screentra_stt_approval_record', APPROVAL_MODULE_PATH
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def load_module():
@@ -20,6 +34,7 @@ def load_module():
 
 
 admission = load_module()
+approval = load_approval_module()
 
 
 SERVICE_ID = 'magic-mirror-stt'
@@ -28,6 +43,26 @@ ACTIVATION_ID = 'activation-20261018-01'
 HOST_ID = 'client-56'
 MODEL_ID = 'whisper-tiny.en'
 MODEL_SHA256 = 'a' * 64
+
+
+def valid_approval_record(**overrides):
+    value = {
+        'record_type': 'stt_future_activation_approval',
+        'service_id': SERVICE_ID,
+        'service_version': SERVICE_VERSION,
+        'activation_id': ACTIVATION_ID,
+        'host_id': HOST_ID,
+        'model_id': MODEL_ID,
+        'model_sha256': MODEL_SHA256,
+        'approver': 'admin-alice',
+        'approved_at': '2026-10-18T14:30:00Z',
+        'gates': [
+            {'name': name, 'passed': True, 'reason': f'{name} evidence recorded'}
+            for name in approval.REQUIRED_STT_APPROVAL_GATES
+        ],
+    }
+    value.update(overrides)
+    return approval.validate_stt_approval_record(value)
 
 
 def valid_preflight(**overrides):
@@ -136,31 +171,10 @@ def valid_supervisor(**overrides):
 
 def valid_request(**overrides):
     value = {
-        'service_id': SERVICE_ID,
-        'service_version': SERVICE_VERSION,
-        'activation_id': ACTIVATION_ID,
-        'host_id': HOST_ID,
-        'model_id': MODEL_ID,
-        'model_sha256': MODEL_SHA256,
+        'approval_record': valid_approval_record(),
         'preflight_evidence': valid_preflight(),
         'model_staging_plan': valid_model_plan(),
         'supervisor_plan': valid_supervisor(),
-    }
-    value.update(overrides)
-    return value
-
-
-def approved_gate(**overrides):
-    value = {
-        'gate_type': 'approved_stt_runtime_activation_gate',
-        'approved': True,
-        'service_id': SERVICE_ID,
-        'service_version': SERVICE_VERSION,
-        'activation_id': ACTIVATION_ID,
-        'host_id': HOST_ID,
-        'model_id': MODEL_ID,
-        'model_sha256': MODEL_SHA256,
-        'execution_enabled': False,
     }
     value.update(overrides)
     return value
@@ -174,16 +188,20 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
         )
         return admission
 
-    def test_complete_composition_is_denied_without_separate_approved_gate(self):
+    def test_validated_approval_record_is_approved_for_future_review_and_inert(self):
         module = self.require_module()
 
         result = module.decide_runtime_admission(valid_request())
 
         self.assertEqual(result['decision_type'], 'stt_runtime_admission')
-        self.assertEqual(result['admission'], 'denied')
-        self.assertEqual(result['reason'], 'approved_activation_gate_missing')
+        self.assertEqual(result['admission'], 'approved_for_future_review')
+        self.assertEqual(result['reason'], 'approval_record_validated')
         self.assertFalse(result['runtime_activation_allowed'])
         self.assertFalse(result['execution_enabled'])
+        self.assertFalse(result['process_started'])
+        self.assertFalse(result['socket_bound'])
+        self.assertFalse(result['model_loaded'])
+        self.assertFalse(result['lifecycle_state_changed'])
         self.assertEqual(result['service_id'], SERVICE_ID)
         self.assertEqual(result['service_version'], SERVICE_VERSION)
         self.assertEqual(result['activation_id'], ACTIVATION_ID)
@@ -191,17 +209,52 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
         self.assertEqual(result['model_id'], MODEL_ID)
         self.assertEqual(result['model_sha256'], MODEL_SHA256)
 
-    def test_future_approved_gate_can_change_admission_but_never_enable_execution(self):
+    def test_raw_or_arbitrary_approval_mappings_are_rejected(self):
         module = self.require_module()
 
-        result = module.decide_runtime_admission(
-            valid_request(approved_activation_gate=approved_gate())
-        )
+        for record in (
+            valid_approval_record().as_dict(),
+            valid_approval_record().as_runtime_admission_input(),
+            {'record_type': 'stt_future_activation_approval'},
+            {'approval_record_valid': True},
+        ):
+            with self.subTest(record=record):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(valid_request(approval_record=record))
 
-        self.assertEqual(result['admission'], 'approved')
-        self.assertTrue(result['runtime_activation_allowed'])
+    def test_rejected_tampered_and_identity_drift_approval_remain_denied(self):
+        module = self.require_module()
+
+        rejected_gates = [
+            {'name': gate.name, 'passed': gate.passed, 'reason': gate.reason}
+            for gate in valid_approval_record().gates
+        ]
+        rejected_gates[0]['passed'] = False
+        rejected = valid_approval_record(gates=rejected_gates)
+        result = module.decide_runtime_admission(valid_request(approval_record=rejected))
+        self.assertEqual(result['admission'], 'denied')
+        self.assertFalse(result['runtime_activation_allowed'])
         self.assertFalse(result['execution_enabled'])
-        self.assertEqual(result['reason'], 'approved_activation_gate_present')
+
+        tampered = dataclasses.replace(valid_approval_record(), execution_enabled=True)
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(valid_request(approval_record=tampered))
+
+        drifted = dataclasses.replace(valid_approval_record(), activation_id='other-activation')
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(valid_request(approval_record=drifted))
+
+    def test_approval_binds_full_identity_tuple_and_exact_gate_inventory(self):
+        module = self.require_module()
+        result = module.decide_runtime_admission(valid_request())
+
+        self.assertEqual(
+            tuple(result['identity_tuple']),
+            (SERVICE_ID, SERVICE_VERSION, ACTIVATION_ID, HOST_ID, MODEL_ID, MODEL_SHA256),
+        )
+        self.assertEqual(
+            tuple(result['approval_gates']), approval.REQUIRED_STT_APPROVAL_GATES
+        )
 
     def test_all_identity_tuple_fields_must_match_across_outputs(self):
         module = self.require_module()
@@ -243,7 +296,7 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
             valid_request(preflight_evidence=preflight)
         )
 
-        self.assertEqual(result['admission'], 'denied')
+        self.assertEqual(result['admission'], 'approved_for_future_review')
         self.assertFalse(result['runtime_activation_allowed'])
 
     def test_preflight_requires_empty_blockers_audio_and_local_runtime(self):
@@ -321,10 +374,11 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
                 with self.assertRaises(module.RuntimeAdmissionError):
                     module.decide_runtime_admission(valid_request(**extra))
 
-        bad_gate = approved_gate(path='/tmp/approval')
+        bad_approval = valid_approval_record().as_dict()
+        bad_approval['path'] = '/tmp/approval'
         with self.assertRaises(module.RuntimeAdmissionError):
             module.decide_runtime_admission(
-                valid_request(approved_activation_gate=bad_gate)
+                valid_request(approval_record=bad_approval)
             )
 
     def test_malformed_component_objects_and_oversized_request_fail_closed(self):

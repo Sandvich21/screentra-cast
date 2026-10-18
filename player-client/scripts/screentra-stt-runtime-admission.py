@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """Pure, fail-closed composition boundary for future STT runtime admission.
 
-This module consumes already-produced preflight, model-verification, and
-supervisor-plan metadata. It performs no preflight, model verification,
-process work, hardware access, audio access, filesystem mutation, network work,
-or runtime activation. Even an approved future gate never enables execution.
+This module consumes already-produced preflight, model-verification, supervisor,
+and immutable approval-record metadata. It performs no preflight, model
+verification, process work, hardware access, audio access, filesystem mutation,
+network work, or runtime activation. Even an approved future review result never
+enables execution.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 from collections.abc import Mapping
+from pathlib import Path
+import sys
 from typing import Any, Final
 
 
@@ -37,11 +41,10 @@ _SECRET_RE: Final = re.compile(
 )
 
 _REQUEST_FIELDS: Final = frozenset({
-    'service_id', 'service_version', 'activation_id', 'host_id',
-    'model_id', 'model_sha256', 'preflight_evidence',
-    'model_staging_plan', 'supervisor_plan', 'approved_activation_gate',
+    'approval_record', 'preflight_evidence', 'model_staging_plan',
+    'supervisor_plan',
 })
-_REQUIRED_REQUEST_FIELDS: Final = _REQUEST_FIELDS - {'service_version', 'approved_activation_gate'}
+_REQUIRED_REQUEST_FIELDS: Final = _REQUEST_FIELDS
 _PREFLIGHT_FIELDS: Final = frozenset({
     'evidence_type', 'evaluation', 'live_preflight', 'readiness_claim',
     'evidence', 'blockers', 'warnings', 'execution_enabled', 'runtime_ready',
@@ -74,11 +77,8 @@ _VERIFICATION_FIELDS: Final = frozenset({'read_only', 'verified', 'model_path', 
 _STAGE_FIELDS: Final = frozenset({
     'effect', 'execution_enabled', 'requested_intent', 'filesystem_touched',
 })
-_GATE_FIELDS: Final = frozenset({
-    'gate_type', 'approved', 'service_id', 'service_version', 'activation_id',
-    'host_id', 'model_id', 'model_sha256', 'execution_enabled',
-})
-_GATE_REQUIRED_FIELDS: Final = _GATE_FIELDS - {'service_version'}
+
+
 class RuntimeAdmissionError(ValueError):
     """Raised when composed evidence is malformed or not identity-bound."""
 
@@ -325,33 +325,59 @@ def _validate_supervisor(value: Any, expected: dict[str, str]) -> None:
     _validate_observation(plan['observation'], expected)
 
 
-def _validate_gate(value: Any, expected: dict[str, str]) -> None:
-    if not isinstance(value, Mapping):
-        raise _fail('approved activation gate is malformed')
-    gate = dict(value)
-    if set(gate) - _GATE_FIELDS or not _GATE_REQUIRED_FIELDS.issubset(gate):
-        raise _fail('approved activation gate is malformed')
-    _bounded_json(gate, MAX_COMPONENT_BYTES, 'approved activation gate is malformed')
+def _approval_module() -> Any:
+    module_name = 'screentra_stt_approval_record'
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    module_path = Path(__file__).with_name('screentra-stt-approval-record.py')
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise _fail('runtime admission approval record is invalid')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise _fail('runtime admission approval record is invalid') from exc
+    return module
+
+
+def _validated_approval_record(value: Any) -> Any:
+    """Accept only the immutable result produced by the approval validator."""
+    module = _approval_module()
+    if type(value) is not module.STTApprovalRecord:
+        raise _fail('runtime admission approval record is invalid')
+    try:
+        raw = {
+            'record_type': value.record_type,
+            'service_id': value.service_id,
+            'service_version': value.service_version,
+            'activation_id': value.activation_id,
+            'host_id': value.host_id,
+            'model_id': value.model_id,
+            'model_sha256': value.model_sha256,
+            'approver': value.approver,
+            'approved_at': value.approved_at,
+            'gates': [
+                {'name': gate.name, 'passed': gate.passed, 'reason': gate.reason}
+                for gate in value.gates
+            ],
+        }
+        validated = module.validate_stt_approval_record(raw)
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        raise _fail('runtime admission approval record is invalid') from exc
+    if validated != value:
+        raise _fail('runtime admission approval record is invalid')
     if (
-        gate['gate_type'] != 'approved_stt_runtime_activation_gate'
-        or gate['approved'] is not True
-        or gate['service_id'] != expected['service_id']
-        or gate['activation_id'] != expected['activation_id']
-        or gate['host_id'] != expected['host_id']
-        or gate['model_id'] != expected['model_id']
-        or gate['model_sha256'] != expected['model_sha256']
+        value.approval_record_valid is not True
+        or value.execution_enabled is not False
+        or value.runtime_activation_allowed is not False
+        or value.effect != 'metadata_only'
     ):
-        raise _fail('approved activation gate identity is invalid')
-    if 'service_version' in gate and gate['service_version'] != expected['service_version']:
-        raise _fail('approved activation gate version mismatch')
-    _identifier(gate['service_id'], 'gate.service_id')
-    if 'service_version' in gate:
-        _version(gate['service_version'])
-    _identifier(gate['activation_id'], 'gate.activation_id')
-    _identifier(gate['host_id'], 'gate.host_id', MAX_HOST_ID_BYTES)
-    _model_id(gate['model_id'])
-    _digest(gate['model_sha256'])
-    _boolean(gate['execution_enabled'], 'gate.execution_enabled', False)
+        raise _fail('runtime admission approval record is invalid')
+    return value
 
 
 def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -361,55 +387,53 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     request = dict(request)
     if set(request) - _REQUEST_FIELDS or not _REQUIRED_REQUEST_FIELDS.issubset(request):
         raise _fail('runtime admission request fields are not allowlisted')
-    _bounded_json(request, MAX_REQUEST_BYTES, 'runtime admission request is not bounded')
-
+    approval = _validated_approval_record(request['approval_record'])
+    bounded_request = dict(request)
+    bounded_request['approval_record'] = approval.as_dict()
+    _bounded_json(bounded_request, MAX_REQUEST_BYTES, 'runtime admission request is not bounded')
     expected = {
-        'service_id': _identifier(request['service_id'], 'service_id'),
-        'activation_id': _identifier(request['activation_id'], 'activation_id'),
-        'host_id': _identifier(request['host_id'], 'host_id', MAX_HOST_ID_BYTES),
-        'model_id': _model_id(request['model_id']),
-        'model_sha256': _digest(request['model_sha256']),
+        'service_id': approval.service_id,
+        'service_version': approval.service_version,
+        'activation_id': approval.activation_id,
+        'host_id': approval.host_id,
+        'model_id': approval.model_id,
+        'model_sha256': approval.model_sha256,
     }
-    if 'service_version' in request:
-        expected['service_version'] = _version(request['service_version'])
-    else:
-        expected['service_version'] = None
+    try:
+        _validate_preflight(request['preflight_evidence'], expected)
+        _validate_model_plan(request['model_staging_plan'], expected)
+        _validate_supervisor(request['supervisor_plan'], expected)
+    except RuntimeAdmissionError as exc:
+        raise _fail('runtime admission evidence is invalid') from exc
 
-    _validate_preflight(request['preflight_evidence'], expected)
-    _validate_model_plan(request['model_staging_plan'], expected)
-
-    supervisor = request['supervisor_plan']
-    if not isinstance(supervisor, Mapping) or 'service_version' not in supervisor:
-        raise _fail('supervisor service version is required')
-    supervisor_version = _version(supervisor['service_version'])
-    if expected['service_version'] is None:
-        expected['service_version'] = supervisor_version
-    elif expected['service_version'] != supervisor_version:
-        raise _fail('service version mismatch')
-    _validate_supervisor(supervisor, expected)
-
-    gate_present = 'approved_activation_gate' in request
-    if gate_present:
-        _validate_gate(request['approved_activation_gate'], expected)
-
-    approved = gate_present
+    all_gates_passed = all(gate.passed for gate in approval.gates)
     return {
         'decision_type': 'stt_runtime_admission',
-        'admission': 'approved' if approved else 'denied',
-        'reason': 'approved_activation_gate_present' if approved else 'approved_activation_gate_missing',
-        'runtime_activation_allowed': approved,
+        'admission': 'approved_for_future_review' if all_gates_passed else 'denied',
+        'reason': 'approval_record_validated' if all_gates_passed else 'approval_gate_not_passed',
+        'runtime_activation_allowed': False,
         'execution_enabled': False,
+        'process_started': False,
+        'socket_bound': False,
+        'model_loaded': False,
+        'lifecycle_state_changed': False,
         'service_id': expected['service_id'],
         'service_version': expected['service_version'],
         'activation_id': expected['activation_id'],
         'host_id': expected['host_id'],
         'model_id': expected['model_id'],
         'model_sha256': expected['model_sha256'],
+        'identity_tuple': (
+            expected['service_id'], expected['service_version'],
+            expected['activation_id'], expected['host_id'],
+            expected['model_id'], expected['model_sha256'],
+        ),
+        'approval_gates': tuple(gate.name for gate in approval.gates),
         'evidence_composed': {
             'preflight': True,
             'model_verification': True,
             'supervisor': True,
-            'approved_activation_gate': approved,
+            'approval_record': True,
         },
     }
 
