@@ -120,6 +120,22 @@ pub struct AddonDataEndpoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientServiceSpec {
+    pub id: String,
+    pub image: String,
+    pub image_digest: String,
+    pub socket_name: String,
+    pub cpu_millis: u32,
+    pub memory_bytes: u64,
+    pub pids: u32,
+    pub writable_bytes: u64,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub model_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddonManifest {
     pub schema_version: u32,
     pub id: String,
@@ -154,6 +170,10 @@ pub struct AddonManifest {
     pub server_entrypoint: Option<String>,
     #[serde(default)]
     pub trusted_service: Option<TrustedServerServiceSpec>,
+    /// Signed client-service metadata. This is inert until the client runtime
+    /// and capability broker are separately enabled.
+    #[serde(default)]
+    pub client_service: Option<ClientServiceSpec>,
     #[serde(default)]
     pub client_sha256: Option<String>,
     #[serde(default)]
@@ -548,6 +568,58 @@ fn validate_token(value: &str, field: &str) -> Result<(), AddonError> {
     Ok(())
 }
 
+fn validate_client_service_spec(
+    service: &ClientServiceSpec,
+    requires_model: bool,
+) -> Result<(), AddonError> {
+    validate_token(&service.id, "Client service id")?;
+    validate_trusted_service_image_reference(&service.image).map_err(AddonError::Invalid)?;
+    validate_trusted_service_image_digest(&service.image_digest).map_err(AddonError::Invalid)?;
+    validate_token(&service.socket_name, "Client service socket name")?;
+    if !(1..=4_000).contains(&service.cpu_millis) {
+        return Err(AddonError::Invalid(
+            "Client service cpu_millis must be between 1 and 4000".to_string(),
+        ));
+    }
+    if !(64 * 1024 * 1024..=2 * 1024 * 1024 * 1024).contains(&service.memory_bytes) {
+        return Err(AddonError::Invalid(
+            "Client service memory_bytes is outside the bounded range".to_string(),
+        ));
+    }
+    if !(1..=256).contains(&service.pids) {
+        return Err(AddonError::Invalid(
+            "Client service pids must be between 1 and 256".to_string(),
+        ));
+    }
+    if service.writable_bytes > 512 * 1024 * 1024 {
+        return Err(AddonError::Invalid(
+            "Client service writable_bytes exceeds the bounded limit".to_string(),
+        ));
+    }
+    if service.model_id.is_some() != service.model_sha256.is_some() {
+        return Err(AddonError::Invalid(
+            "Client service model_id and model_sha256 must be declared together".to_string(),
+        ));
+    }
+    if requires_model && service.model_id.is_none() {
+        return Err(AddonError::Invalid(
+            "local_inference requires an explicit model identity and digest".to_string(),
+        ));
+    }
+    if let Some(model_id) = service.model_id.as_deref() {
+        validate_token(model_id, "Client service model id")?;
+    }
+    if let Some(model_sha256) = service.model_sha256.as_deref() {
+        if model_sha256.len() != 64 || !model_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(AddonError::Invalid(
+                "Client service model_sha256 must be a 64-character hexadecimal digest"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 const TRUSTED_SERVICE_CAPABILITIES: &[&str] = &[
     "storage",
     "read:clients",
@@ -794,6 +866,11 @@ pub fn validate_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
     if !manifest.client_capabilities.is_empty() {
         return Err(AddonError::Invalid(
             "Declarative addons cannot request client capabilities".to_string(),
+        ));
+    }
+    if manifest.client_service.is_some() {
+        return Err(AddonError::Invalid(
+            "Declarative addons cannot declare a client service".to_string(),
         ));
     }
     for widget in &manifest.widget_types {
@@ -1071,6 +1148,25 @@ pub fn validate_client_extension_manifest(manifest: &AddonManifest) -> Result<()
         return Err(AddonError::Invalid(
             "local_inference requires client_service".to_string(),
         ));
+    }
+    let requests_client_service = manifest
+        .client_capabilities
+        .iter()
+        .any(|capability| capability == "client_service");
+    if requests_client_service != manifest.client_service.is_some() {
+        return Err(AddonError::Invalid(
+            "client_service capability and client_service metadata must be declared together"
+                .to_string(),
+        ));
+    }
+    if let Some(service) = manifest.client_service.as_ref() {
+        validate_client_service_spec(
+            service,
+            manifest
+                .client_capabilities
+                .iter()
+                .any(|capability| capability == "local_inference"),
+        )?;
     }
     for widget in &manifest.widget_types {
         validate_token(&widget.id, "Widget type id")?;
@@ -2062,6 +2158,7 @@ mod tests {
             client_entrypoint: None,
             server_entrypoint: None,
             trusted_service: None,
+            client_service: None,
             client_sha256: None,
             client_api_version: None,
         }
@@ -2147,6 +2244,18 @@ mod tests {
             "local_inference".to_string(),
             "client_service".to_string(),
         ];
+        value.client_service = Some(ClientServiceSpec {
+            id: "speech-to-text".to_string(),
+            image: "registry.example/whisper".to_string(),
+            image_digest: format!("sha256:{}", "b".repeat(64)),
+            socket_name: "speech-to-text".to_string(),
+            cpu_millis: 500,
+            memory_bytes: 256 * 1024 * 1024,
+            pids: 32,
+            writable_bytes: 64 * 1024 * 1024,
+            model_id: Some("whisper-tiny.en".to_string()),
+            model_sha256: Some("c".repeat(64)),
+        });
 
         validate_client_extension_manifest(&value)
             .expect("Magic Mirror capability set should validate");
@@ -2167,6 +2276,34 @@ mod tests {
 
         value.client_capabilities.pop();
         value.client_capabilities.push("host_shell".to_string());
+        assert!(validate_client_extension_manifest(&value).is_err());
+    }
+
+    #[test]
+    fn magic_mirror_client_service_contract_requires_signed_bounded_resources() {
+        let mut value = client_manifest(&"a".repeat(64));
+        value.id = "magic-mirror".to_string();
+        value.client_capabilities = vec![
+            "microphone_capture".to_string(),
+            "local_inference".to_string(),
+            "client_service".to_string(),
+        ];
+        value.client_service = Some(ClientServiceSpec {
+            id: "speech-to-text".to_string(),
+            image: "registry.example/whisper".to_string(),
+            image_digest: format!("sha256:{}", "b".repeat(64)),
+            socket_name: "speech-to-text".to_string(),
+            cpu_millis: 500,
+            memory_bytes: 256 * 1024 * 1024,
+            pids: 32,
+            writable_bytes: 64 * 1024 * 1024,
+            model_id: Some("whisper-tiny.en".to_string()),
+            model_sha256: Some("c".repeat(64)),
+        });
+        validate_client_extension_manifest(&value)
+            .expect("bounded local speech service contract should validate");
+
+        value.client_service.as_mut().unwrap().memory_bytes = 1;
         assert!(validate_client_extension_manifest(&value).is_err());
     }
 

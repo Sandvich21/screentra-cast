@@ -40,6 +40,14 @@ The manifest must continue to declare:
   - `local_inference`;
   - `client_service`.
 
+A `client_service` request may include inert service metadata with a fixed OCI
+image reference plus exact digest, a local socket name, bounded CPU/memory/PID/
+writable-storage limits, and optional model ID plus SHA-256 digest. The metadata
+contains no command, host mount, port, credential, or arbitrary environment
+field. `local_inference` requires the model identity and digest. These fields
+are validated and signed as part of the manifest but are not pulled, started,
+or exposed by the current release.
+
 A client status report may also include capability observations for the same
 closed vocabulary. The heartbeat may report `available`, `unavailable`,
 `disabled`, or `error` plus a bounded diagnostic detail. These observations are

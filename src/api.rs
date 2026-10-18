@@ -10389,6 +10389,7 @@ mod audit_validation_tests {
             client_entrypoint: None,
             server_entrypoint: None,
             trusted_service: None,
+            client_service: None,
             client_sha256: None,
             client_api_version: None,
         };
