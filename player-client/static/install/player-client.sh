@@ -1864,7 +1864,7 @@ def write_pending_command(command, cache_dir):
     try:
         import subprocess, shutil
         if shutil.which('systemctl'):
-            subprocess.run(['systemctl', '--user', 'start', 'ripley-player-actor.service'], timeout=10)
+            subprocess.run(['systemctl', '--user', 'start', 'screentra-client-actor.service'], timeout=10)
     except Exception as e:
         print(f'actor start skipped/failed: {e}', flush=True)
 
@@ -3717,7 +3717,7 @@ def _write_display_count(max_displays) -> dict:
     pending.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(pending, json.dumps({'action':'set_display_count','payload':{'max_displays': override},'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
     _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service'], timeout=6)
-    actor = _safe_run(['systemctl', '--user', 'start', 'ripley-player-actor.service'], timeout=6)
+    actor = _safe_run(['systemctl', '--user', 'start', 'screentra-client-actor.service'], timeout=6)
     gov = _load_display_governance()
     return {'ok': True, 'max_displays': override, 'active_max_displays': gov['active_max_displays'], 'installer_detected_max_displays': installer, 'actor_start': actor}
 
@@ -3805,7 +3805,7 @@ def _write_touch_binding(payload: dict) -> dict:
     pending.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(pending, json.dumps({'action':'set_touch_binding','payload': binding,'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
     _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service'], timeout=6)
-    actor = _safe_run(['systemctl', '--user', 'start', 'ripley-player-actor.service'], timeout=6)
+    actor = _safe_run(['systemctl', '--user', 'start', 'screentra-client-actor.service'], timeout=6)
     return {'ok': True, 'touch_binding': binding, 'actor_start': actor}
 
 def _service_state(name: str) -> dict:
@@ -3879,7 +3879,7 @@ def _admin_logs(target: str) -> dict:
     cache = install / 'cache'
     targets = {
         'heartbeat': lambda: _journal_tail('screentra-client-heartbeat.service'),
-        'actor': lambda: _journal_tail('ripley-player-actor.service'),
+        'actor': lambda: _journal_tail('screentra-client-actor.service'),
         'renderer0': lambda: _journal_tail('screentra-client-renderer@0.service'),
         'kiosk0': lambda: _journal_tail('screentra-cast-kiosk-kiosk@0.service', system=True),
         'launcher': lambda: _read_tail(state / 'kiosk-launcher.log'),
@@ -3943,7 +3943,7 @@ def _refresh_ca_from_server() -> dict:
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(out.suffix + '.tmp'); tmp.write_bytes(data); os.chmod(tmp, 0o644); tmp.replace(out)
         verify = _cert_info().get('verify')
-        restart = _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service', 'ripley-player-actor.service'], timeout=8)
+        restart = _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service', 'screentra-client-actor.service'], timeout=8)
         return {'ok': True, 'url': url, 'ca_path': str(out), 'bytes': len(data), 'sha256': _sha256_file(out), 'verify': verify, 'restart': restart}
     except Exception as e:
         return {'ok': False, 'error': str(e), 'url': url}
@@ -4166,7 +4166,7 @@ def _admin_status() -> dict:
     labwc = _safe_run(['pgrep', '-af', '^labwc'], timeout=2)
     services = [_system_service_state('screentra-client-heartbeat.service'), _system_service_state('screentra-client-actor.service'), _system_service_state('screentra-client-admin.service'), _system_service_state('screentra-cast-kiosk@0.service'), _system_service_state('screentra-cast-kiosk@1.service')]
     for svc in services:
-        if svc.get('name') == 'ripley-player-actor.service' and svc.get('active') == 'inactive' and svc.get('enabled') == 'enabled':
+        if svc.get('name') == 'screentra-client-actor.service' and svc.get('active') == 'inactive' and svc.get('enabled') == 'enabled':
             svc['active'] = 'ready'
             svc['active_ok'] = True
             svc['note'] = 'one-shot command actor; inactive means no pending command'
@@ -4667,7 +4667,7 @@ class Handler(BaseHTTPRequestHandler):
             result = _create_client_software_backup()
             return self.send_text(200 if result.get('ok') else 500, json.dumps(result), 'application/json')
         if path == '/api/admin/services/restart':
-            r = _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service', 'ripley-player-actor.service'], timeout=8)
+            r = _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service', 'screentra-client-actor.service'], timeout=8)
             return self.send_text(200, json.dumps({'ok': r.get('ok'), 'restart': r}), 'application/json')
         # GET /api/client-config.json — current cached config (heartbeat's view of server state)
         if path == '/api/client-config.json':

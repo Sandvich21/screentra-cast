@@ -52,6 +52,8 @@ class PlayerClientAuditTests(unittest.TestCase):
             self.assertNotIn('--host 0.0.0.0', installer)
             self.assertIn('--host 127.0.0.1', installer)
             self.assertIn('RIPLEY_ADMIN_MODE', installer)
+            self.assertNotIn('ripley-player-actor.service', installer)
+            self.assertIn('screentra-client-actor.service', installer)
         deprecated = ROOT / 'static/install/screentra-cast-player-client.sh'
         mode = deprecated.stat().st_mode
         self.assertFalse(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))

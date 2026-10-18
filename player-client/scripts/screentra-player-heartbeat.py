@@ -580,7 +580,7 @@ def write_pending_command(command, cache_dir):
     try:
         import subprocess, shutil
         if shutil.which('systemctl'):
-            subprocess.run(['systemctl', '--user', 'start', 'ripley-player-actor.service'], timeout=10)
+            subprocess.run(['systemctl', '--user', 'start', 'screentra-client-actor.service'], timeout=10)
     except Exception as e:
         print(f'actor start skipped/failed: {e}', flush=True)
 
