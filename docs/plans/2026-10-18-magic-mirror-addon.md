@@ -58,6 +58,10 @@ only and always reports `execution_enabled: false` and
 or IPC/socket readiness and is not wired to startup, activation, hardware, or
 remote hosts.
 
+### STT resource-policy evidence boundary
+
+The pure `screentra-stt-resource-policy-evidence.py` validator accepts only the closed service/activation identity, four bounded client-service resource values, and an explicit policy version. Its frozen metadata result uses the manifest bounds (`cpu_millis` 1..4000, `memory_bytes` 64 MiB..2 GiB, `pids` 1..256, and `writable_bytes` 0..512 MiB), while forcing `execution_enabled`, `runtime_activation_allowed`, `process_started`, and `resource_enforced` false. Resource-policy evidence describes reviewed bounds; it is not resource enforcement and does not claim a process or container is running. The contract is not wired to heartbeat, installers, startup, deployment, hardware/audio, model/image loading, or listeners.
+
 ## Product scope
 
 ### Client-side AI service
