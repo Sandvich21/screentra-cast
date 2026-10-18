@@ -37,6 +37,10 @@ network work. Every result reports execution, download, staging, loading,
 process, and network flags as false. A verification or stage plan is metadata
 evidence only—it does not mean that a model was staged, loaded, or executed.
 
+### STT client preflight-evidence boundary
+
+The pure `screentra-stt-client-preflight-evidence.py` evaluator accepts only a bounded, already-collected/redacted evidence mapping. It validates the non-secret host label, supported architecture, bounded resource counts, audio/service booleans, paired model identity, local-runtime boolean, and optional camera boolean. It returns deterministic blockers and warnings as metadata-only evidence with execution, runtime-readiness, hardware-access, and model-staging flags forced false. This is evidence evaluation only—not a live preflight, readiness claim, command probe, hardware probe, server contact, or state change.
+
 ## Product scope
 
 ### Client-side AI service
