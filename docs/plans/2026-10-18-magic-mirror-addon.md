@@ -45,6 +45,19 @@ The pure `screentra-stt-client-preflight-evidence.py` evaluator accepts only a b
 
 The pure `screentra-stt-runtime-admission.py` module composes only the three existing metadata outputs, binds service/version/activation/model/host identities, and requires blocker-free audio/runtime evidence plus a verified read-only model plan and identity-matched supervisor plan. It rejects arbitrary, secret, path/URL/command/audio, and readiness-shaped fields. Without a separately supplied future approved activation gate it returns `admission: denied`; with one it may return an approval decision, but `execution_enabled` remains false. This is a fail-closed composition boundary, not runtime readiness or activation.
 
+### STT future-activation approval-record boundary
+
+The pure `screentra-stt-approval-record.py` validator accepts one bounded,
+identity-bound approval record for the future client-local STT lane. Its closed
+required gate inventory is `capability_admission`, `model_integrity`,
+`audio_permission`, `local_runtime`, `resource_policy`, `ipc_policy`, and
+`rollback_policy`; every gate must be unique, present, boolean, and carry a
+bounded non-empty reason. The frozen result records approval intent/evidence
+only and always reports `execution_enabled: false` and
+`runtime_activation_allowed: false`. It does not claim process, model, audio,
+or IPC/socket readiness and is not wired to startup, activation, hardware, or
+remote hosts.
+
 ## Product scope
 
 ### Client-side AI service
