@@ -66,6 +66,18 @@ The pure `screentra-stt-resource-policy-evidence.py` validator accepts only the 
 
 The pure `screentra-stt-ipc-policy-evidence.py` validator binds a closed local socket label, protocol version, codec-compatible frame/request/response limits, and only the `health`/`transcribe` operations to the service and activation identities. Its frozen result requires `local_only: true`, reports `policy_valid: true`, and forces `execution_enabled`, `runtime_activation_allowed`, `socket_bound`, and `ipc_enforced` false. IPC policy evidence is metadata-only: it is not a bound listener, transport enforcement, or transport readiness, and it performs no process, audio, credential, or network work.
 
+### STT rollback-policy evidence boundary
+
+The pure `screentra-stt-rollback-policy-evidence.py` validator accepts one closed,
+immutable service/version/activation-bound rollback policy with exactly one retained
+artifact and five explicit rollback controls. It rejects unknown or duplicate fields,
+secrets, paths, URLs, commands, mounts, ports, audio/model data, and oversized
+records. `policy_valid` is true only when every rollback control is true; every result
+still forces `execution_enabled`, `runtime_activation_allowed`, `rollback_executed`,
+`process_started`, and `state_changed` false. This is metadata-only policy evidence,
+not a claim that rollback occurred or that the runtime is ready, and it is not wired
+to startup, listeners, routes, installers, hardware, audio, models, or deployment.
+
 ## Product scope
 
 ### Client-side AI service
