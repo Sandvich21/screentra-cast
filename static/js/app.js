@@ -892,6 +892,7 @@ const App = {
                 const report = status && status.report;
                 const entries = report && Array.isArray(report.addons) ? report.addons : [];
                 const capabilities = report && Array.isArray(report.capabilities) ? report.capabilities : [];
+                const services = report && Array.isArray(report.services) ? report.services : [];
                 if (!status || !report) {
                     output.textContent = 'No addon status has been reported by this client.';
                     return;
@@ -899,10 +900,13 @@ const App = {
                 const capabilityRows = capabilities.length
                     ? `<div style="margin:0.5rem 0;"><strong>Client capabilities</strong>${capabilities.map(capability => `<div>${esc(capability.id || 'unknown')}: ${esc(capability.state || 'unknown')}${capability.detail ? ` — ${esc(capability.detail)}` : ''}</div>`).join('')}</div>`
                     : '';
+                const serviceRows = services.length
+                    ? `<div style="margin:0.5rem 0;"><strong>Trusted client services</strong>${services.map(service => `<div>${esc(service.id || 'unknown')} ${esc(service.version || '')}: ${esc(service.state || 'unknown')}${service.detail ? ` — ${esc(service.detail)}` : ''}${Number.isFinite(Number(service.restart_count)) && Number(service.restart_count) > 0 ? ` (restarts: ${esc(String(service.restart_count))})` : ''}</div>`).join('')}</div>`
+                    : '';
                 const rows = entries.length
                     ? entries.map(entry => `<div style="display:flex; justify-content:space-between; gap:1rem; padding:0.35rem 0; border-bottom:1px solid var(--border,#333);"><span>${esc(entry.id || 'Unknown addon')}</span><strong>${esc(entry.state || 'unknown')}</strong></div>`).join('')
                     : '<div>No client extensions are currently enabled.</div>';
-                output.innerHTML = `<div style="margin-bottom:0.5rem;">Last reported: ${esc(status.received_at || 'unknown')}</div>${capabilityRows}${rows}${report.error ? `<div style="margin-top:0.5rem; color:var(--danger,#e66);">${esc(report.error)}</div>` : ''}`;
+                output.innerHTML = `<div style="margin-bottom:0.5rem;">Last reported: ${esc(status.received_at || 'unknown')}</div>${capabilityRows}${serviceRows}${rows}${report.error ? `<div style="margin-top:0.5rem; color:var(--danger,#e66);">${esc(report.error)}</div>` : ''}`;
             } catch (e) {
                 output.textContent = 'Unable to load client addon status: ' + e.message;
             }
