@@ -2282,6 +2282,20 @@ fn replace_addon_directory_atomically(
     }
 }
 
+fn client_package_version_is_newer(candidate: &str, installed: &str) -> bool {
+    fn numeric_components(version: &str) -> Option<Vec<u64>> {
+        version
+            .split('.')
+            .map(|component| component.parse::<u64>().ok())
+            .collect()
+    }
+
+    match (numeric_components(candidate), numeric_components(installed)) {
+        (Some(candidate), Some(installed)) => candidate > installed,
+        _ => false,
+    }
+}
+
 /// Validate and atomically replace an installed signed client-extension
 /// package. This contract-only path preserves the installed lifecycle state;
 /// it never executes client JavaScript or enables a runtime.
@@ -2311,6 +2325,14 @@ pub fn update_signed_client_package(archive: &Path) -> Result<AddonRecord, Addon
             return Err(AddonError::Invalid(
                 "Signed client package update identity does not match installed package"
                     .to_string(),
+            ));
+        }
+        if !client_package_version_is_newer(
+            &staged.manifest.version,
+            &existing.manifest.version,
+        ) {
+            return Err(AddonError::Invalid(
+                "Signed client package update must use a strictly newer version".to_string(),
             ));
         }
         let state = AddonState {

@@ -10518,6 +10518,236 @@ fn interactive_validate_payload_checkbox_list_caps_items_and_strings() {
 }
 
 #[cfg(test)]
+mod signed_client_package_http_tests {
+    use super::*;
+    use axum::{body::{to_bytes, Body}, http::{header, Request}};
+    use flate2::{write::GzEncoder, Compression};
+    use sha2::{Digest, Sha256};
+    use std::{fs, path::{Path, PathBuf}, process::Command, sync::Mutex};
+    use tar::Builder;
+
+    struct Fixture {
+        root: PathBuf,
+        addon_dir: PathBuf,
+        old_data_root: Option<std::ffi::OsString>,
+        old_public_key: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+            unsafe {
+                match self.old_data_root.take() {
+                    Some(value) => std::env::set_var("SIGNAGE_DATA_DIR", value),
+                    None => std::env::remove_var("SIGNAGE_DATA_DIR"),
+                }
+                match self.old_public_key.take() {
+                    Some(value) => std::env::set_var("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY", value),
+                    None => std::env::remove_var("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY"),
+                }
+            }
+        }
+    }
+
+    fn setup_fixture() -> (Fixture, PathBuf) {
+        let root = std::env::temp_dir().join(format!("screentra-addon-http-{}", Uuid::new_v4()));
+        let data_root = root.join("data");
+        let private_key = root.join("addon-signing.key");
+        let public_key = root.join("addon-signing.pub");
+        fs::create_dir_all(&root).unwrap();
+        assert!(Command::new("/usr/bin/openssl")
+            .args(["genpkey", "-algorithm", "ED25519", "-out"])
+            .arg(&private_key)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("/usr/bin/openssl")
+            .args(["pkey", "-in"])
+            .arg(&private_key)
+            .args(["-pubout", "-out"])
+            .arg(&public_key)
+            .status()
+            .unwrap()
+            .success());
+        let fixture = Fixture {
+            addon_dir: data_root.join("addons/example.weather"),
+            old_data_root: std::env::var_os("SIGNAGE_DATA_DIR"),
+            old_public_key: std::env::var_os("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY"),
+            root,
+        };
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_root);
+            std::env::set_var("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY", &public_key);
+        }
+        (fixture, private_key)
+    }
+
+    fn package(
+        root: &Path,
+        private_key: &Path,
+        id: &str,
+        version: &str,
+        signed_payload: &[u8],
+        archive_payload: &[u8],
+    ) -> PathBuf {
+        let package_root = root.join(format!("package-{}", Uuid::new_v4()));
+        let client_root = package_root.join("client");
+        fs::create_dir_all(&client_root).unwrap();
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "id": id,
+            "name": "HTTP package",
+            "description": "signed HTTP test package",
+            "version": version,
+            "kind": "client_extension",
+            "widget_types": [],
+            "permissions": [],
+            "client_capabilities": [],
+            "client_entrypoint": "client/index.js",
+            "client_sha256": format!("{:x}", Sha256::digest(signed_payload)),
+            "client_api_version": "1"
+        });
+        let manifest_path = package_root.join("manifest.json");
+        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        let signature_path = package_root.join("manifest.sig");
+        assert!(Command::new("/usr/bin/openssl")
+            .args(["pkeyutl", "-sign", "-rawin", "-inkey"])
+            .arg(private_key)
+            .args(["-in"])
+            .arg(&manifest_path)
+            .args(["-out"])
+            .arg(&signature_path)
+            .status()
+            .unwrap()
+            .success());
+        fs::write(client_root.join("index.js"), archive_payload).unwrap();
+        let archive = root.join(format!("package-{}.tar.gz", Uuid::new_v4()));
+        let archive_file = fs::File::create(&archive).unwrap();
+        let encoder = GzEncoder::new(archive_file, Compression::default());
+        let mut builder = Builder::new(encoder);
+        builder.append_path_with_name(&manifest_path, "manifest.json").unwrap();
+        builder.append_path_with_name(&signature_path, "manifest.sig").unwrap();
+        builder.append_dir_all("client", &client_root).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        archive
+    }
+
+    fn multipart_request(method: &str, archive: &[u8]) -> Request<Body> {
+        let boundary = "signed-package-test-boundary";
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"package\"; filename=\"addon.tar.gz\"\r\nContent-Type: application/gzip\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(archive);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        Request::builder()
+            .method(method)
+            .uri("/api/addons/package")
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    async fn send(app: &Router, method: &str, archive: &Path) -> (StatusCode, String) {
+        let response = app
+            .clone()
+            .oneshot(multipart_request(method, &fs::read(archive).unwrap()))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn signed_client_package_http_update_is_install_only_and_inert() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let (fixture, private_key) = setup_fixture();
+        let old_payload = b"window.ScreentraAddon = { version: '0.1.0' };\\n";
+        let new_payload = b"window.ScreentraAddon = { version: '0.2.0' };\\n";
+        let app = Router::new().route(
+            "/api/addons/package",
+            post(upload_addon_package).put(update_addon_package),
+        );
+
+        let install = package(&fixture.root, &private_key, "example.weather", "0.1.0", old_payload, old_payload);
+        let (status, body) = send(&app, "POST", &install).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        crate::addons::set_enabled("example.weather", false).unwrap();
+
+        let attempted_post_update = package(
+            &fixture.root,
+            &private_key,
+            "example.weather",
+            "0.2.0",
+            new_payload,
+            new_payload,
+        );
+        let (status, _) = send(&app, "POST", &attempted_post_update).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), old_payload);
+
+        let update = package(
+            &fixture.root,
+            &private_key,
+            "example.weather",
+            "0.2.0",
+            new_payload,
+            new_payload,
+        );
+        let (status, body) = send(&app, "PUT", &update).await;
+        assert_eq!(status, StatusCode::OK);
+        let record: AddonRecord = serde_json::from_str(&body).unwrap();
+        assert_eq!(record.manifest.version, "0.2.0");
+        assert!(!record.enabled);
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
+        assert!(!fixture.root.join("javascript-executed").exists());
+
+        let tampered = package(
+            &fixture.root,
+            &private_key,
+            "example.weather",
+            "0.3.0",
+            b"signed payload",
+            b"tampered payload",
+        );
+        let (status, _) = send(&app, "PUT", &tampered).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
+
+        let mismatched = package(
+            &fixture.root,
+            &private_key,
+            "different.extension",
+            "0.3.0",
+            b"different identity",
+            b"different identity",
+        );
+        let (status, _) = send(&app, "PUT", &mismatched).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
+
+        let same_version = package(
+            &fixture.root,
+            &private_key,
+            "example.weather",
+            "0.2.0",
+            b"same version",
+            b"same version",
+        );
+        let (status, _) = send(&app, "PUT", &same_version).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
+    }
+}
+
+#[cfg(test)]
 mod audit_validation_tests {
     use super::*;
 
