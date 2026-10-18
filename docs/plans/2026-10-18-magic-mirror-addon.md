@@ -121,6 +121,7 @@ Start with face detection/landmarks plus deterministic overlays. Do not make a g
 
 - Perform a read-only preflight on `.56`.
 - Latest read-only probe: Debian 13 amd64, 4 CPUs, approximately 7.2 GiB RAM, approximately 101 GiB free on `/`; Docker, Podman, and FFmpeg are absent; no `/dev/video*` camera exists; ALSA capture devices `/dev/snd/pcmC1D0c` and `/dev/snd/pcmC1D2c` are present; PipeWire and WirePlumber system services are inactive.
+- Authorized read-only preflight on 2026-10-18 found `.56` online as `third-floor` (Debian 13 amd64, 4 CPUs, approximately 7.2 GiB RAM, approximately 101.5 GiB free on `/`). A Logitech HD Pro Webcam C920 is present as `/dev/video0` and `/dev/video1`, with PipeWire/WirePlumber user services active and both camera video and camera audio nodes visible. The `board` service account belongs to `audio`, `video`, `input`, and `render`; local renderer/admin health returned `ok`; Docker, Podman, FFmpeg, and a local model were absent. This is read-only host evidence, not camera capture, model readiness, or runtime activation; blockers remain the missing local runtime and model.
 - Install only explicitly approved prerequisites and preserve rollback copies.
 - Deploy to `.56` only after artifact and service checks pass.
 - Verify service health, audio transcription, camera display, privacy state, filter behavior, and layout stability.
