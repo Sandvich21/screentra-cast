@@ -26,6 +26,17 @@ runtime/permission gate.
 
 The pure `screentra-client-service-supervisor-plan.py` contract composes the lifecycle and health identity validators for the Magic Mirror STT metadata. Its activation plans are metadata-only evidence: `execution_enabled` is false and `process_started`, `socket_bound`, and `model_loaded` are false. Health/status may bind a bounded observation; start/stop/update/rollback return structured `execution_disabled` results without changing lifecycle state. A plan is not evidence of a running service, bound socket, loaded model, installed package, or hardware readiness.
 
+### Local-model staging-plan evidence boundary
+
+The pure `screentra-local-model-staging-plan.py` contract binds the service and
+activation identities to an exact lowercase model digest, an approved absolute
+root, and a bounded relative path. Its `verify` intent composes the existing
+read-only integrity helper only for a caller-supplied local path; `stage`,
+`download`, and `load` return `execution_disabled` without filesystem or
+network work. Every result reports execution, download, staging, loading,
+process, and network flags as false. A verification or stage plan is metadata
+evidence only—it does not mean that a model was staged, loaded, or executed.
+
 ## Product scope
 
 ### Client-side AI service
