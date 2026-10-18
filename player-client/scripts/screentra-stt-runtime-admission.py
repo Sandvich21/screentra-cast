@@ -42,7 +42,7 @@ _SECRET_RE: Final = re.compile(
 
 _REQUEST_FIELDS: Final = frozenset({
     'approval_record', 'preflight_evidence', 'model_staging_plan',
-    'supervisor_plan',
+    'supervisor_plan', 'resource_policy_evidence',
 })
 _REQUIRED_REQUEST_FIELDS: Final = _REQUEST_FIELDS
 _PREFLIGHT_FIELDS: Final = frozenset({
@@ -325,6 +325,61 @@ def _validate_supervisor(value: Any, expected: dict[str, str]) -> None:
     _validate_observation(plan['observation'], expected)
 
 
+def _resource_policy_module() -> Any:
+    module_name = 'screentra_stt_resource_policy_evidence'
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    module_path = Path(__file__).with_name('screentra-stt-resource-policy-evidence.py')
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise _fail('runtime admission resource policy is invalid')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise _fail('runtime admission resource policy is invalid') from exc
+    return module
+
+
+def _validated_resource_policy(value: Any, expected: dict[str, str]) -> Any:
+    """Accept only the immutable result produced by the resource-policy validator."""
+    module = _resource_policy_module()
+    if type(value) is not module.STTResourcePolicyEvidence:
+        raise _fail('runtime admission resource policy is invalid')
+    try:
+        raw = {
+            'service_id': value.service_id,
+            'activation_id': value.activation_id,
+            'cpu_millis': value.cpu_millis,
+            'memory_bytes': value.memory_bytes,
+            'pids': value.pids,
+            'writable_bytes': value.writable_bytes,
+            'policy_version': value.policy_version,
+        }
+        validated = module.validate_resource_policy_evidence(
+            raw,
+            expected_service_id=expected['service_id'],
+            expected_activation_id=expected['activation_id'],
+        )
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        raise _fail('runtime admission resource policy is invalid') from exc
+    if validated != value:
+        raise _fail('runtime admission resource policy is invalid')
+    if (
+        value.policy_valid is not True
+        or value.execution_enabled is not False
+        or value.runtime_activation_allowed is not False
+        or value.process_started is not False
+        or value.resource_enforced is not False
+        or value.effect != 'metadata_only'
+    ):
+        raise _fail('runtime admission resource policy is invalid')
+    return value
+
+
 def _approval_module() -> Any:
     module_name = 'screentra_stt_approval_record'
     module = sys.modules.get(module_name)
@@ -388,9 +443,6 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     if set(request) - _REQUEST_FIELDS or not _REQUIRED_REQUEST_FIELDS.issubset(request):
         raise _fail('runtime admission request fields are not allowlisted')
     approval = _validated_approval_record(request['approval_record'])
-    bounded_request = dict(request)
-    bounded_request['approval_record'] = approval.as_dict()
-    _bounded_json(bounded_request, MAX_REQUEST_BYTES, 'runtime admission request is not bounded')
     expected = {
         'service_id': approval.service_id,
         'service_version': approval.service_version,
@@ -399,6 +451,13 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'model_id': approval.model_id,
         'model_sha256': approval.model_sha256,
     }
+    resource_policy = _validated_resource_policy(
+        request['resource_policy_evidence'], expected
+    )
+    bounded_request = dict(request)
+    bounded_request['approval_record'] = approval.as_dict()
+    bounded_request['resource_policy_evidence'] = resource_policy.as_dict()
+    _bounded_json(bounded_request, MAX_REQUEST_BYTES, 'runtime admission request is not bounded')
     try:
         _validate_preflight(request['preflight_evidence'], expected)
         _validate_model_plan(request['model_staging_plan'], expected)
@@ -416,6 +475,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'process_started': False,
         'socket_bound': False,
         'model_loaded': False,
+        'resource_enforced': False,
         'lifecycle_state_changed': False,
         'service_id': expected['service_id'],
         'service_version': expected['service_version'],
@@ -434,6 +494,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             'model_verification': True,
             'supervisor': True,
             'approval_record': True,
+            'resource_policy': True,
         },
     }
 

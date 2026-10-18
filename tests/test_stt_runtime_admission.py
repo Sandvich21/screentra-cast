@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-runtime-admission.py'
 APPROVAL_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-approval-record.py'
+RESOURCE_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-resource-policy-evidence.py'
 
 
 def load_approval_module():
@@ -33,8 +34,20 @@ def load_module():
     return module
 
 
+def load_resource_policy_module():
+    spec = importlib.util.spec_from_file_location(
+        'screentra_stt_resource_policy_evidence', RESOURCE_POLICY_MODULE_PATH
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 admission = load_module()
 approval = load_approval_module()
+resource_policy = load_resource_policy_module()
 
 
 SERVICE_ID = 'magic-mirror-stt'
@@ -169,12 +182,27 @@ def valid_supervisor(**overrides):
     return value
 
 
+def valid_resource_policy(**overrides):
+    value = {
+        'service_id': SERVICE_ID,
+        'activation_id': ACTIVATION_ID,
+        'cpu_millis': 500,
+        'memory_bytes': 128 * 1024 * 1024,
+        'pids': 32,
+        'writable_bytes': 64 * 1024 * 1024,
+        'policy_version': 'resource-policy-v1',
+    }
+    value.update(overrides)
+    return resource_policy.validate_resource_policy_evidence(value)
+
+
 def valid_request(**overrides):
     value = {
         'approval_record': valid_approval_record(),
         'preflight_evidence': valid_preflight(),
         'model_staging_plan': valid_model_plan(),
         'supervisor_plan': valid_supervisor(),
+        'resource_policy_evidence': valid_resource_policy(),
     }
     value.update(overrides)
     return value
@@ -201,6 +229,7 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
         self.assertFalse(result['process_started'])
         self.assertFalse(result['socket_bound'])
         self.assertFalse(result['model_loaded'])
+        self.assertFalse(result['resource_enforced'])
         self.assertFalse(result['lifecycle_state_changed'])
         self.assertEqual(result['service_id'], SERVICE_ID)
         self.assertEqual(result['service_version'], SERVICE_VERSION)
@@ -208,6 +237,7 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
         self.assertEqual(result['host_id'], HOST_ID)
         self.assertEqual(result['model_id'], MODEL_ID)
         self.assertEqual(result['model_sha256'], MODEL_SHA256)
+        self.assertTrue(result['evidence_composed']['resource_policy'])
 
     def test_raw_or_arbitrary_approval_mappings_are_rejected(self):
         module = self.require_module()
@@ -285,6 +315,56 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
                     target[field] = 'other-service'
                 with self.assertRaises(module.RuntimeAdmissionError):
                     module.decide_runtime_admission(request)
+
+    def test_resource_policy_accepts_only_validated_immutable_identity_bound_result(self):
+        module = self.require_module()
+
+        result = module.decide_runtime_admission(valid_request())
+
+        self.assertEqual(result['admission'], 'approved_for_future_review')
+        self.assertEqual(result['service_id'], SERVICE_ID)
+        self.assertEqual(result['activation_id'], ACTIVATION_ID)
+        for field in (
+            'execution_enabled', 'runtime_activation_allowed', 'process_started',
+            'socket_bound', 'model_loaded', 'resource_enforced',
+            'lifecycle_state_changed',
+        ):
+            self.assertFalse(result[field], field)
+
+        for value in (
+            valid_resource_policy().as_dict(),
+            {'service_id': SERVICE_ID},
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(resource_policy_evidence=value)
+                    )
+
+        for tampered in (
+            dataclasses.replace(valid_resource_policy(), policy_valid=False),
+            dataclasses.replace(valid_resource_policy(), resource_enforced=True),
+            dataclasses.replace(valid_resource_policy(), execution_enabled=True),
+            dataclasses.replace(valid_resource_policy(), runtime_activation_allowed=True),
+        ):
+            with self.subTest(tampered=tampered):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(resource_policy_evidence=tampered)
+                    )
+
+    def test_resource_policy_service_and_activation_must_match_complete_identity_tuple(self):
+        module = self.require_module()
+        for overrides in (
+            {'service_id': 'other-service'},
+            {'activation_id': 'other-activation'},
+        ):
+            with self.subTest(overrides=overrides):
+                policy = valid_resource_policy(**overrides)
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(resource_policy_evidence=policy)
+                    )
 
     def test_preflight_camera_evidence_is_optional_for_stt_admission(self):
         module = self.require_module()
