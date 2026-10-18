@@ -28,6 +28,80 @@ from pathlib import Path
 
 MAX_PENDING_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
+MAX_COMMAND_PAYLOAD_BYTES = 64 * 1024
+MAX_CLIENT_ID_BYTES = 200
+CLIENT_SERVICE_IDENTIFIER_MAX_BYTES = 128
+CLIENT_SERVICE_REASON_MAX_BYTES = 256
+
+ALLOWED_CLIENT_COMMAND_ACTIONS = (
+    'restart_renderer', 'restart_kiosk', 'restart_kiosk_display',
+    'reload_layout', 'refresh_cache', 'update_client',
+    'set_display_count', 'set_touch_binding', 'bluetooth_scan',
+    'bluetooth_connect', 'audio_list', 'audio_set_default',
+    'audio_set_volume', 'restart_client', 'start_display_preview',
+    'stop_display_preview', 'ddc_set', 'display_power', 'cec_send',
+    'ir_send', 'client_service_status', 'client_service_rollback_request',
+)
+
+
+def _validate_client_service_identifier(value, field):
+    if (not isinstance(value, str) or not value or
+            len(value.encode('utf-8')) > CLIENT_SERVICE_IDENTIFIER_MAX_BYTES or
+            any(not (char.isascii() and (char.isalnum() or char in '._-')) for char in value)):
+        raise ValueError(f'{field} is invalid or exceeds its bound')
+
+
+def validate_client_service_payload(action, payload):
+    if payload is None:
+        if action == 'client_service_rollback_request':
+            raise ValueError('client service rollback request payload is required')
+        return
+    if not isinstance(payload, dict):
+        raise ValueError('client service payload must be a JSON object')
+    allowed = ({'service_id'} if action == 'client_service_status' else
+               {'service_id', 'activation_id', 'target_version', 'reason'}
+               if action == 'client_service_rollback_request' else None)
+    if allowed is None:
+        return
+    if set(payload) - allowed:
+        raise ValueError('client service payload contains an unsupported field')
+    required = {'service_id', 'activation_id'} if action == 'client_service_rollback_request' else set()
+    missing = required - set(payload)
+    if missing:
+        raise ValueError(f'client service payload is missing {sorted(missing)[0]}')
+    for field in ('service_id', 'activation_id', 'target_version'):
+        if field in payload:
+            _validate_client_service_identifier(payload[field], field)
+    if 'reason' in payload:
+        reason = payload['reason']
+        if (not isinstance(reason, str) or not reason or
+                len(reason.encode('utf-8')) > CLIENT_SERVICE_REASON_MAX_BYTES or
+                any(ord(char) < 32 or ord(char) == 127 for char in reason)):
+            raise ValueError('client service reason is invalid or exceeds its bound')
+
+
+def validate_pending_command(spec, expected_client_id):
+    if not isinstance(spec, dict):
+        raise ValueError('pending command must be a JSON object')
+    if (not isinstance(expected_client_id, str) or not expected_client_id or
+            len(expected_client_id.encode('utf-8')) > MAX_CLIENT_ID_BYTES):
+        raise ValueError('client identity is invalid')
+    if spec.get('client_id') != expected_client_id:
+        raise ValueError('pending command client identity mismatch')
+    action = spec.get('action')
+    if action not in ALLOWED_CLIENT_COMMAND_ACTIONS:
+        raise ValueError(f'unsupported client command action: {action}')
+    payload = spec.get('payload')
+    if payload is not None and not isinstance(payload, dict):
+        raise ValueError('client command payload must be a JSON object')
+    if payload is not None:
+        encoded = json.dumps(payload, separators=(',', ':')).encode('utf-8')
+        if len(encoded) > MAX_COMMAND_PAYLOAD_BYTES:
+            raise ValueError(f'client command payload exceeds {MAX_COMMAND_PAYLOAD_BYTES} bytes')
+        if 'client_id' in payload:
+            raise ValueError('client identity is bound to the command envelope')
+    validate_client_service_payload(action, payload)
+    return spec
 
 
 def _read_json_file(path: Path, default):
@@ -820,8 +894,49 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
 def execute(action: str, payload: dict | None, ctx: dict) -> dict:
     """Run a single command and return a result dict."""
     started = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z'
-    has_user = has_systemctl_user()
+    if action == 'client_service_status':
+        service_payload = payload if payload is not None else {}
+        try:
+            validate_client_service_payload(action, service_payload)
+        except ValueError as exc:
+            return {
+                'action': action, 'ok': False, 'code': 'invalid_payload',
+                'execution_enabled': False, 'message': str(exc), 'started_at': started,
+            }
+        return {
+            'action': action, 'ok': True, 'code': 'execution_disabled',
+            'execution_enabled': False, 'state': 'disabled',
+            'message': 'client service runtime execution is disabled',
+            'details': {'services': [], 'service_id': service_payload.get('service_id')},
+            'started_at': started,
+        }
+    if action == 'client_service_rollback_request':
+        try:
+            validate_client_service_payload(action, payload)
+        except ValueError as exc:
+            return {
+                'action': action, 'ok': False, 'code': 'invalid_payload',
+                'execution_enabled': False, 'message': str(exc), 'started_at': started,
+            }
+        return {
+            'action': action, 'ok': False, 'code': 'execution_disabled',
+            'execution_enabled': False, 'state': 'disabled',
+            'message': 'client service rollback is disabled',
+            'details': {
+                'service_id': payload.get('service_id'),
+                'activation_id': payload.get('activation_id'),
+                'rollback_requested': False,
+            },
+            'started_at': started,
+        }
     payload = payload or {}
+    if action not in ALLOWED_CLIENT_COMMAND_ACTIONS:
+        return {
+            'action': action, 'ok': False, 'code': 'unsupported_action',
+            'execution_enabled': False, 'message': f'unknown action: {action}',
+            'started_at': started,
+        }
+    has_user = has_systemctl_user()
     display_index = payload.get('display_index')
     try:
         display_index = int(display_index) if display_index is not None else None
@@ -982,7 +1097,9 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
                 'message': 'IR control not yet implemented. Set method to DDC or CEC.',
                 'started_at': started}
 
-    return {'action': action, 'display_index': display_index, 'ok': False, 'message': f'unknown action: {action}', 'started_at': started}
+    return {'action': action, 'display_index': display_index, 'ok': False,
+            'code': 'unsupported_action', 'execution_enabled': False,
+            'message': f'unknown action: {action}', 'started_at': started}
 
 
 def main() -> int:
@@ -1035,6 +1152,21 @@ def main() -> int:
             spec = json.loads(pending_path.read_text(encoding='utf-8'))
         except Exception as e:
             result = {'action': 'unknown', 'ok': False, 'message': f'bad pending file: {e}', 'started_at': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z'}
+            _atomic_write_text(result_path, json.dumps(result, indent=2))
+            try: pending_path.unlink()
+            except Exception: pass
+            return True
+        try:
+            validate_pending_command(spec, ctx['client_id'])
+        except Exception as e:
+            action = spec.get('action', 'unknown') if isinstance(spec, dict) else 'unknown'
+            result = {
+                'action': action, 'ok': False, 'code': 'invalid_command',
+                'execution_enabled': False, 'message': str(e),
+                'started_at': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z',
+                'client_id': ctx['client_id'] or None,
+                'requested_at': spec.get('requested_at') if isinstance(spec, dict) else None,
+            }
             _atomic_write_text(result_path, json.dumps(result, indent=2))
             try: pending_path.unlink()
             except Exception: pass

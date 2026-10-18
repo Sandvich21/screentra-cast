@@ -7527,7 +7527,110 @@ const ALLOWED_CLIENT_COMMAND_ACTIONS: &[&str] = &[
     "display_power",
     "cec_send",
     "ir_send",
+    "client_service_status",
+    "client_service_rollback_request",
 ];
+
+const CLIENT_SERVICE_IDENTIFIER_MAX_BYTES: usize = 128;
+const CLIENT_SERVICE_REASON_MAX_BYTES: usize = 256;
+
+fn validate_client_service_identifier(value: &str, field: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > CLIENT_SERVICE_IDENTIFIER_MAX_BYTES
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+        })
+    {
+        return Err(format!("{field} is invalid or exceeds its bound"));
+    }
+    Ok(())
+}
+
+fn validate_client_service_payload(
+    action: &str,
+    payload: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    let Some(value) = payload else {
+        if action == "client_service_rollback_request" {
+            return Err("client service rollback request payload is required".to_string());
+        }
+        return Ok(());
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| "client service payload must be a JSON object".to_string())?;
+    let allowed = match action {
+        "client_service_status" => &["service_id"][..],
+        "client_service_rollback_request" => {
+            &["service_id", "activation_id", "target_version", "reason"][..]
+        }
+        _ => return Ok(()),
+    };
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err("client service payload contains an unsupported field".to_string());
+    }
+    let required = if action == "client_service_rollback_request" {
+        &["service_id", "activation_id"][..]
+    } else {
+        &[][..]
+    };
+    for field in required {
+        if !object.contains_key(*field) {
+            return Err(format!("client service payload is missing {field}"));
+        }
+    }
+    for field in ["service_id", "activation_id", "target_version"] {
+        if let Some(value) = object.get(field) {
+            let value = value
+                .as_str()
+                .ok_or_else(|| format!("client service {field} must be a string"))?;
+            validate_client_service_identifier(value, field)?;
+        }
+    }
+    if let Some(reason) = object.get("reason") {
+        let reason = reason
+            .as_str()
+            .ok_or_else(|| "client service reason must be a string".to_string())?;
+        if reason.is_empty()
+            || reason.len() > CLIENT_SERVICE_REASON_MAX_BYTES
+            || reason.chars().any(|character| character.is_control())
+        {
+            return Err("client service reason is invalid or exceeds its bound".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_client_command_for_client(
+    client_id: &str,
+    action: &str,
+    payload: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    if !ALLOWED_CLIENT_COMMAND_ACTIONS.contains(&action) {
+        return Err(format!("unsupported client command action: {action}"));
+    }
+    if client_id.is_empty() || client_id.len() > 200 || client_id.chars().any(|character| character.is_control()) {
+        return Err("client command client identity is invalid".to_string());
+    }
+    if let Some(value) = payload {
+        if !value.is_object() {
+            return Err("client command payload must be a JSON object".to_string());
+        }
+        let size = serde_json::to_vec(value)
+            .map_err(|_| "client command payload could not be serialized".to_string())?
+            .len();
+        if size > MAX_CLIENT_COMMAND_PAYLOAD_BYTES {
+            return Err(format!(
+                "client command payload exceeds {} bytes",
+                MAX_CLIENT_COMMAND_PAYLOAD_BYTES
+            ));
+        }
+        if value.get("client_id").is_some() {
+            return Err("client identity is bound to the command envelope".to_string());
+        }
+    }
+    validate_client_service_payload(action, payload)
+}
 
 fn validate_client_command(
     action: &str,
@@ -7550,7 +7653,7 @@ fn validate_client_command(
             ));
         }
     }
-    Ok(())
+    validate_client_service_payload(action, payload)
 }
 
 fn command_is_stale(requested_at: &str) -> bool {
@@ -7571,7 +7674,7 @@ pub(crate) fn queue_command(
     payload: Option<&serde_json::Value>,
     requested_by: Option<&str>,
 ) -> Result<CommandRecord, String> {
-    validate_client_command(action, payload)?;
+    validate_client_command_for_client(client_id, action, payload)?;
     let now = Utc::now().to_rfc3339();
     let payload_str = payload.and_then(|v| serde_json::to_string(v).ok());
     db.queue_client_command(
@@ -7598,7 +7701,7 @@ async fn queue_repository_command(
     requested_by: Option<&str>,
 ) -> Result<CommandRecord, String> {
     let now = Utc::now().to_rfc3339();
-    if let Err(error) = validate_client_command(action, payload) {
+    if let Err(error) = validate_client_command_for_client(client_id, action, payload) {
         let _ = repository
             .record_audit_event(
                 requested_by,
@@ -9535,6 +9638,47 @@ mod tests {
         .is_err());
         let oversized = serde_json::json!({"data": "x".repeat(70_000)});
         assert!(validate_client_command("refresh_cache", Some(&oversized)).is_err());
+    }
+
+    #[test]
+    fn client_service_contract_is_bounded_identity_bound_and_inert() {
+        assert!(validate_client_command_for_client(
+            "client-a",
+            "client_service_status",
+            Some(&serde_json::json!({"service_id": "speech-to-text"})),
+        )
+        .is_ok());
+        assert!(validate_client_command_for_client(
+            "client-a",
+            "client_service_rollback_request",
+            Some(&serde_json::json!({
+                "service_id": "speech-to-text",
+                "activation_id": "activation-1",
+                "target_version": "1.0.0",
+                "reason": "operator-request",
+            })),
+        )
+        .is_ok());
+        assert!(validate_client_command_for_client(
+            "client-a",
+            "client_service_status",
+            Some(&serde_json::json!({"client_id": "client-b"})),
+        )
+        .is_err());
+        assert!(validate_client_command_for_client(
+            "client-a",
+            "client_service_rollback_request",
+            Some(&serde_json::json!({"service_id": "speech-to-text"})),
+        )
+        .is_err());
+        for action in [
+            "client_service_start",
+            "client_service_stop",
+            "client_service_update",
+            "client_service_rollback",
+        ] {
+            assert!(validate_client_command_for_client("client-a", action, None).is_err());
+        }
     }
 
     #[tokio::test]

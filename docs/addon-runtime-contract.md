@@ -58,6 +58,15 @@ The heartbeat currently sends an explicit empty service list because no trusted
 client supervisor is enabled. A missing service report must not be interpreted
 as a running service.
 
+The command queue also carries two metadata-only client-service actions. The
+`client_service_status` action returns the bounded disabled status without
+starting a process. `client_service_rollback_request` preserves the service and
+activation identity plus an optional bounded reason as a control request, then
+returns `execution_disabled`; it never stops, updates, or rolls back anything.
+The server and actor use the same closed action vocabulary, bind the command
+identity to the client envelope, and reject arbitrary lifecycle fields. Service
+start, stop, update, and rollback actions are not allowlisted and fail closed.
+
 The heartbeat may report `available`, `unavailable`,
 `disabled`, or `error` plus a bounded diagnostic detail. These observations are
 health metadata only: `available` means the local prerequisite was detected, not
