@@ -159,9 +159,24 @@ next renderer start.
 
 ## Rollback and reporting
 
+The current server-side signed-package lifecycle has a separate
+`rollback_signed_client_package(id)` path. It retains one previous, validated
+package under the checked addon root at `.rollback/<id>`. Rollback re-verifies
+the retained manifest signature, regular-file entrypoint, entrypoint digest,
+package identity, and persisted enabled/install state before atomically swapping
+the current and retained package directories. Missing, malformed, tampered, or
+symlinked rollback evidence fails closed and leaves the current package in
+place. This is package evidence and storage recovery only: it never loads or
+executes client JavaScript, starts a service, or changes `EXECUTION_ENABLED`.
+The declarative `update()` path and signed `update_signed_client_package()`
+semantics remain separate and are not runtime activation or rollback.
+
 A future active record should include the addon ID, version, package digest,
-entrypoint, activation timestamp, and previous known-good record. The player
-must report bounded states such as `staged`, `active`, `failed`, and
+entrypoint, activation timestamp, and previous known-good record. A future
+runtime rollback must be a distinct renderer/runtime operation with sandbox,
+watchdog, activation-state, and display-atomicity guarantees; it must not be
+inferred from or substituted by the current signed-package rollback evidence.
+The player must report bounded states such as `staged`, `active`, `failed`, and
 `rolled_back` only after the corresponding local transition has completed.
 
 The current `verified` and `verified_cached` states mean verification/staging

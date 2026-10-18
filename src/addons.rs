@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 const MANIFEST_FILE: &str = "manifest.json";
 const STATE_FILE: &str = "state.json";
+const ROLLBACK_DIR: &str = ".rollback";
 const SUPPORTED_CLIENT_API_VERSION: &str = "1";
 const MAX_ID_LEN: usize = 64;
 const MAX_NAME_LEN: usize = 80;
@@ -1419,6 +1420,12 @@ pub fn list() -> Result<Vec<AddonRecord>, AddonError> {
         if file_type.is_symlink() {
             return Err(AddonError::Invalid("Invalid addon directory".to_string()));
         }
+        if entry.file_name() == ROLLBACK_DIR {
+            if !file_type.is_dir() {
+                return Err(AddonError::Invalid("Invalid addon rollback directory".to_string()));
+            }
+            continue;
+        }
         if file_type.is_dir() {
             records.push(read_record(&entry.path())?);
         }
@@ -2259,24 +2266,66 @@ pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, Addo
     result
 }
 
+fn checked_addon_rollback_root(
+    root: &Path,
+    create: bool,
+) -> Result<Option<PathBuf>, AddonError> {
+    reject_symlinked_path_ancestors(root, "Invalid addon storage directory")?;
+    let rollback_root = root.join(ROLLBACK_DIR);
+    match fs::symlink_metadata(&rollback_root) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
+            AddonError::Invalid("Invalid addon rollback directory".to_string()),
+        ),
+        Ok(_) => Ok(Some(rollback_root)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            fs::create_dir(&rollback_root).map_err(io_error)?;
+            let metadata = fs::symlink_metadata(&rollback_root).map_err(io_error)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(AddonError::Invalid(
+                    "Invalid addon rollback directory".to_string(),
+                ));
+            }
+            Ok(Some(rollback_root))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
 fn replace_addon_directory_atomically(
     staged: &Path,
     destination: &Path,
+    backup: &Path,
 ) -> Result<(), AddonError> {
     let parent = destination
         .parent()
         .ok_or_else(|| AddonError::Io("Invalid addon directory path".to_string()))?;
     reject_symlinked_path_ancestors(parent, "Invalid addon storage directory")?;
+    let backup_parent = backup
+        .parent()
+        .ok_or_else(|| AddonError::Io("Invalid addon rollback path".to_string()))?;
+    reject_symlinked_path_ancestors(backup_parent, "Invalid addon rollback path")?;
+    let backup_parent_metadata = fs::symlink_metadata(backup_parent).map_err(io_error)?;
+    if backup_parent_metadata.file_type().is_symlink() || !backup_parent_metadata.is_dir() {
+        return Err(AddonError::Invalid("Invalid addon rollback path".to_string()));
+    }
     let destination_metadata = fs::symlink_metadata(destination).map_err(io_error)?;
     if destination_metadata.file_type().is_symlink() || !destination_metadata.is_dir() {
         return Err(AddonError::Invalid("Invalid addon directory".to_string()));
     }
-    let backup = parent.join(format!(".package-update-backup-{}", Uuid::new_v4()));
-    fs::rename(destination, &backup).map_err(io_error)?;
+    match fs::symlink_metadata(backup) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(AddonError::Invalid("Invalid addon rollback directory".to_string()));
+        }
+        Ok(_) => fs::remove_dir_all(backup).map_err(io_error)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(io_error(error)),
+    }
+    fs::rename(destination, backup).map_err(io_error)?;
     match fs::rename(staged, destination) {
-        Ok(()) => fs::remove_dir_all(&backup).map_err(io_error),
+        Ok(()) => Ok(()),
         Err(error) => {
-            let _ = fs::rename(&backup, destination);
+            let _ = fs::rename(backup, destination);
             Err(io_error(error))
         }
     }
@@ -2341,7 +2390,11 @@ pub fn update_signed_client_package(archive: &Path) -> Result<AddonRecord, Addon
         };
         let state_text = serde_json::to_string_pretty(&state).map_err(io_error)?;
         fs::write(staged.directory.join(STATE_FILE), state_text).map_err(io_error)?;
-        replace_addon_directory_atomically(&staged.directory, &destination)?;
+        let rollback_root = checked_addon_rollback_root(&root, true)?.ok_or_else(|| {
+            AddonError::Io("Addon rollback storage is unavailable".to_string())
+        })?;
+        let backup = rollback_root.join(&staged.manifest.id);
+        replace_addon_directory_atomically(&staged.directory, &destination, &backup)?;
         Ok(AddonRecord {
             manifest: staged.manifest,
             enabled: existing.enabled,
@@ -2352,6 +2405,58 @@ pub fn update_signed_client_package(archive: &Path) -> Result<AddonRecord, Addon
         let _ = fs::remove_dir_all(&staged.directory);
     }
     result
+}
+
+/// Atomically restore the one retained, signed package for a client extension.
+/// This is package evidence only; it never loads or executes client JavaScript.
+pub fn rollback_signed_client_package(id: &str) -> Result<AddonRecord, AddonError> {
+    validate_id(id).map_err(|_| {
+        AddonError::Invalid("Invalid signed client package identity".to_string())
+    })?;
+    let root = checked_addon_storage_dir(false)?.ok_or(AddonError::NotFound)?;
+    let rollback_root = checked_addon_rollback_root(&root, false)?.ok_or(AddonError::NotFound)?;
+    let destination = root.join(id);
+    let backup = rollback_root.join(id);
+    let rollback_error = || AddonError::Invalid("Signed client package rollback failed".to_string());
+
+    let current_metadata = fs::symlink_metadata(&destination).map_err(|_| rollback_error())?;
+    let backup_metadata = fs::symlink_metadata(&backup).map_err(|_| AddonError::NotFound)?;
+    if current_metadata.file_type().is_symlink()
+        || !current_metadata.is_dir()
+        || backup_metadata.file_type().is_symlink()
+        || !backup_metadata.is_dir()
+    {
+        return Err(rollback_error());
+    }
+    let current = read_record(&destination).map_err(|_| rollback_error())?;
+    let previous = read_record(&backup).map_err(|_| rollback_error())?;
+    if current.manifest.id != id
+        || current.manifest.kind != "client_extension"
+        || previous.manifest.id != id
+        || previous.manifest.kind != "client_extension"
+        || current.enabled != previous.enabled
+        || current.installed_at != previous.installed_at
+    {
+        return Err(rollback_error());
+    }
+
+    let temporary = root.join(format!(".rollback-swap-{}-{}", id, Uuid::new_v4()));
+    reject_symlinked_path_ancestors(&root, "Invalid addon storage directory")
+        .map_err(|_| rollback_error())?;
+    fs::rename(&destination, &temporary).map_err(|_| rollback_error())?;
+    if let Err(_error) = fs::rename(&backup, &destination) {
+        let _ = fs::rename(&temporary, &destination);
+        return Err(rollback_error());
+    }
+    if let Err(_error) = fs::rename(&temporary, &backup) {
+        let restored = fs::rename(&destination, &backup)
+            .and_then(|_| fs::rename(&temporary, &destination));
+        if restored.is_err() {
+            return Err(rollback_error());
+        }
+        return Err(rollback_error());
+    }
+    Ok(previous)
 }
 
 #[cfg(test)]
@@ -2646,6 +2751,180 @@ mod tests {
             .unwrap();
         assert!(!persisted.enabled);
         assert_eq!(persisted.manifest.version, "0.2.0");
+    }
+
+    #[test]
+    fn signed_client_package_rollback_restores_previous_package_and_preserves_state() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let fixture = installed_signed_client_package_fixture();
+        set_enabled("example.weather", false).unwrap();
+        let before_update = list()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.manifest.id == "example.weather")
+            .unwrap();
+        let new_payload = b"window.ScreentraAddon = { apiVersion: '1', version: '0.2.0' };\n";
+        let archive = signed_client_package_archive(
+            &fixture.root,
+            "example.weather",
+            "0.2.0",
+            new_payload,
+            new_payload,
+        );
+        update_signed_client_package(&archive).unwrap();
+        let old_payload = b"window.ScreentraAddon = { apiVersion: '1' };\\n";
+
+        let rolled_back = rollback_signed_client_package("example.weather").unwrap();
+
+        assert_eq!(rolled_back.manifest.version, "0.1.0");
+        assert!(!rolled_back.enabled);
+        assert_eq!(rolled_back.installed_at, before_update.installed_at);
+        assert_eq!(
+            fs::read(fixture.addon_dir.join("client/index.js")).unwrap(),
+            old_payload
+        );
+        let retained_current = read_record(
+            &fixture
+                .addon_dir
+                .parent()
+                .unwrap()
+                .join(".rollback/example.weather"),
+        )
+        .unwrap();
+        assert_eq!(retained_current.manifest.version, "0.2.0");
+        assert!(!retained_current.enabled);
+        assert_eq!(retained_current.installed_at, before_update.installed_at);
+    }
+
+    #[test]
+    fn signed_client_package_rollback_rejects_tampered_backup_without_changing_current() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let fixture = installed_signed_client_package_fixture();
+        let new_payload = b"window.ScreentraAddon = { apiVersion: '1', version: '0.2.0' };\n";
+        let archive = signed_client_package_archive(
+            &fixture.root,
+            "example.weather",
+            "0.2.0",
+            new_payload,
+            new_payload,
+        );
+        update_signed_client_package(&archive).unwrap();
+        let backup = fixture
+            .addon_dir
+            .parent()
+            .unwrap()
+            .join(".rollback/example.weather");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(backup.join(MANIFEST_FILE)).unwrap()).unwrap();
+        manifest["name"] = serde_json::Value::String("tampered rollback".to_string());
+        fs::write(backup.join(MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        assert!(rollback_signed_client_package("example.weather").is_err());
+        assert_eq!(
+            fs::read(fixture.addon_dir.join("client/index.js")).unwrap(),
+            new_payload
+        );
+        assert_eq!(read_record(&fixture.addon_dir).unwrap().manifest.version, "0.2.0");
+    }
+
+    #[test]
+    fn signed_client_package_rollback_rejects_missing_backup_and_malformed_identity() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let fixture = installed_signed_client_package_fixture();
+        let old_payload = fs::read(fixture.addon_dir.join("client/index.js")).unwrap();
+
+        assert!(rollback_signed_client_package("example.weather").is_err());
+        assert!(rollback_signed_client_package("../example.weather").is_err());
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), old_payload);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_client_package_rollback_rejects_symlinked_backup_without_changing_current() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let fixture = installed_signed_client_package_fixture();
+        let new_payload = b"window.ScreentraAddon = { apiVersion: '1', version: '0.2.0' };\n";
+        let archive = signed_client_package_archive(
+            &fixture.root,
+            "example.weather",
+            "0.2.0",
+            new_payload,
+            new_payload,
+        );
+        update_signed_client_package(&archive).unwrap();
+        let backup = fixture
+            .addon_dir
+            .parent()
+            .unwrap()
+            .join(".rollback/example.weather");
+        let outside = fixture.root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::remove_dir_all(&backup).unwrap();
+        symlink(&outside, &backup).unwrap();
+
+        assert!(rollback_signed_client_package("example.weather").is_err());
+        assert_eq!(read_record(&fixture.addon_dir).unwrap().manifest.version, "0.2.0");
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
+    }
+
+    #[test]
+    fn failed_signed_client_package_swap_restores_current_directory() {
+        let root = std::env::temp_dir().join(format!("screentra-addon-swap-{}", Uuid::new_v4()));
+        let destination = root.join("example.weather");
+        let backup_root = root.join(ROLLBACK_DIR);
+        let backup = backup_root.join("example.weather");
+        let staged = root.join("missing-stage");
+        fs::create_dir_all(&destination).unwrap();
+        fs::create_dir_all(&backup_root).unwrap();
+        fs::write(destination.join("marker"), b"current").unwrap();
+
+        assert!(replace_addon_directory_atomically(&staged, &destination, &backup).is_err());
+        assert_eq!(fs::read(destination.join("marker")).unwrap(), b"current");
+        assert!(!backup.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalid_signed_client_package_rollback_state_is_rejected_without_swap() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let fixture = installed_signed_client_package_fixture();
+        let new_payload = b"window.ScreentraAddon = { apiVersion: '1', version: '0.2.0' };\n";
+        let archive = signed_client_package_archive(
+            &fixture.root,
+            "example.weather",
+            "0.2.0",
+            new_payload,
+            new_payload,
+        );
+        update_signed_client_package(&archive).unwrap();
+        let backup = fixture
+            .addon_dir
+            .parent()
+            .unwrap()
+            .join(".rollback/example.weather");
+        fs::write(
+            backup.join(STATE_FILE),
+            serde_json::json!({"enabled": true, "installed_at": "wrong"}).to_string(),
+        )
+        .unwrap();
+
+        assert!(rollback_signed_client_package("example.weather").is_err());
+        assert_eq!(read_record(&fixture.addon_dir).unwrap().manifest.version, "0.2.0");
     }
 
     #[test]
