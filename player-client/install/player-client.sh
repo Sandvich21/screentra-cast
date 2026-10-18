@@ -60,7 +60,7 @@ is_ssh_session() {
     return 1
 }
 
-INTERVAL="${RIPLEY_HEARTBEAT_INTERVAL:-30}"
+INTERVAL="${RIPLEY_HEARTBEAT_INTERVAL:-5}"
 ROLE="${RIPLEY_CLIENT_ROLE:-player}"
 CLIENT_NAME="${RIPLEY_CLIENT_NAME:-$(hostname)}"
 VERSION="${RIPLEY_CLIENT_VERSION:-0.1.0}"
@@ -1549,7 +1549,7 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument('--server', default=_default_server())
-    ap.add_argument('--interval', type=int, default=int(os.environ.get('RIPLEY_HEARTBEAT_INTERVAL', '30')))
+    ap.add_argument('--interval', type=int, default=int(os.environ.get('RIPLEY_HEARTBEAT_INTERVAL', '5')))
     ap.add_argument('--once', action='store_true')
     ap.add_argument('--client-id', default=os.environ.get('RIPLEY_CLIENT_ID'))
     ap.add_argument('--name', default=os.environ.get('RIPLEY_CLIENT_NAME'))

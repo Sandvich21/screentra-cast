@@ -658,7 +658,7 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument('--server', default=_default_server())
-    ap.add_argument('--interval', type=int, default=int(os.environ.get('RIPLEY_HEARTBEAT_INTERVAL', '30')))
+    ap.add_argument('--interval', type=int, default=int(os.environ.get('RIPLEY_HEARTBEAT_INTERVAL', '5')))
     ap.add_argument('--once', action='store_true')
     ap.add_argument('--client-id', default=os.environ.get('RIPLEY_CLIENT_ID'))
     ap.add_argument('--name', default=os.environ.get('RIPLEY_CLIENT_NAME'))
