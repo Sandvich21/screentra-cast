@@ -1214,6 +1214,19 @@ pub fn validate_client_extension_manifest(manifest: &AddonManifest) -> Result<()
             "local_inference requires client_service".to_string(),
         ));
     }
+    if manifest
+        .client_capabilities
+        .iter()
+        .any(|capability| capability == "local_inference")
+        && !manifest
+            .client_capabilities
+            .iter()
+            .any(|capability| capability == "microphone_capture")
+    {
+        return Err(AddonError::Invalid(
+            "local_inference requires microphone_capture".to_string(),
+        ));
+    }
     let requests_client_service = manifest
         .client_capabilities
         .iter()
@@ -2370,6 +2383,69 @@ mod tests {
 
         value.client_service.as_mut().unwrap().memory_bytes = 1;
         assert!(validate_client_extension_manifest(&value).is_err());
+    }
+
+    #[test]
+    fn magic_mirror_local_stt_fixture_is_client_only_and_contract_validated() {
+        let fixture: AddonManifest = serde_json::from_str(include_str!(
+            "../addon-packages/magic-mirror-stt/manifest.json"
+        ))
+        .expect("Magic Mirror local STT fixture should be valid JSON");
+
+        validate_client_extension_manifest(&fixture)
+            .expect("Magic Mirror local STT client extension should validate");
+        assert_eq!(fixture.kind, "client_extension");
+        assert_eq!(
+            fixture.client_capabilities,
+            vec![
+                "microphone_capture".to_string(),
+                "local_inference".to_string(),
+                "client_service".to_string()
+            ]
+        );
+        assert_eq!(
+            fixture.client_entrypoint.as_deref(),
+            Some("client/index.js")
+        );
+        assert!(fixture.server_entrypoint.is_none());
+        assert_eq!(fixture.client_api_version.as_deref(), Some("1"));
+        let service = fixture
+            .client_service
+            .as_ref()
+            .expect("local STT fixture should declare client service metadata");
+        assert_eq!(service.socket_name, "magic-mirror-stt");
+        assert_eq!(service.model_id.as_deref(), Some("whisper-tiny.en"));
+        assert_eq!(service.model_sha256.as_deref().map(str::len), Some(64));
+
+        let mut declarative = fixture.clone();
+        declarative.kind = "declarative".to_string();
+        assert!(validate_manifest(&declarative).is_err());
+    }
+
+    #[test]
+    fn local_stt_requires_microphone_capture_capability() {
+        let fixture: AddonManifest = serde_json::from_str(include_str!(
+            "../addon-packages/magic-mirror-stt/manifest.json"
+        ))
+        .expect("Magic Mirror local STT fixture should be valid JSON");
+        let mut without_microphone = fixture;
+        without_microphone
+            .client_capabilities
+            .retain(|capability| capability != "microphone_capture");
+
+        assert!(validate_client_extension_manifest(&without_microphone).is_err());
+    }
+
+    #[test]
+    fn local_stt_rejects_invalid_service_identity() {
+        let fixture: AddonManifest = serde_json::from_str(include_str!(
+            "../addon-packages/magic-mirror-stt/manifest.json"
+        ))
+        .expect("Magic Mirror local STT fixture should be valid JSON");
+        let mut invalid = fixture;
+        invalid.client_service.as_mut().unwrap().socket_name = "../stt".to_string();
+
+        assert!(validate_client_extension_manifest(&invalid).is_err());
     }
 
     #[test]

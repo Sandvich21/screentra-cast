@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "magic-mirror-stt",
+  "name": "Magic Mirror local speech-to-text",
+  "description": "Signed metadata contract for push-to-talk local speech transcription.",
+  "version": "0.1.0",
+  "kind": "client_extension",
+  "permissions": [
+    "render_only"
+  ],
+  "client_capabilities": [
+    "microphone_capture",
+    "local_inference",
+    "client_service"
+  ],
+  "client_entrypoint": "client/index.js",
+  "server_entrypoint": null,
+  "client_sha256": "8f2d5a4e7c1b9a63d0e4f6a8b2c5d7e9f1a3c6e8b0d2f4a6c8e1b3d5f7a9c2e4",
+  "client_api_version": "1",
+  "client_service": {
+    "id": "magic-mirror-stt",
+    "image": "registry.example/whisper",
+    "image_digest": "sha256:5d41402abc4b2a76b9719d911017c592ea7f2b4c8f3a1d6e9b0c2f5a8d7e4b1c",
+    "socket_name": "magic-mirror-stt",
+    "cpu_millis": 500,
+    "memory_bytes": 134217728,
+    "pids": 32,
+    "writable_bytes": 67108864,
+    "model_id": "whisper-tiny.en",
+    "model_sha256": "4f3c2b1a0987654321fedcba9876543210abcdef1234567890abcdef12345678"
+  }
+}
