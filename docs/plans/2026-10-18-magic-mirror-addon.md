@@ -62,6 +62,10 @@ remote hosts.
 
 The pure `screentra-stt-resource-policy-evidence.py` validator accepts only the closed service/activation identity, four bounded client-service resource values, and an explicit policy version. Its frozen metadata result uses the manifest bounds (`cpu_millis` 1..4000, `memory_bytes` 64 MiB..2 GiB, `pids` 1..256, and `writable_bytes` 0..512 MiB), while forcing `execution_enabled`, `runtime_activation_allowed`, `process_started`, and `resource_enforced` false. Resource-policy evidence describes reviewed bounds; it is not resource enforcement and does not claim a process or container is running. The contract is not wired to heartbeat, installers, startup, deployment, hardware/audio, model/image loading, or listeners.
 
+### STT local-IPC policy evidence boundary
+
+The pure `screentra-stt-ipc-policy-evidence.py` validator binds a closed local socket label, protocol version, codec-compatible frame/request/response limits, and only the `health`/`transcribe` operations to the service and activation identities. Its frozen result requires `local_only: true`, reports `policy_valid: true`, and forces `execution_enabled`, `runtime_activation_allowed`, `socket_bound`, and `ipc_enforced` false. IPC policy evidence is metadata-only: it is not a bound listener, transport enforcement, or transport readiness, and it performs no process, audio, credential, or network work.
+
 ## Product scope
 
 ### Client-side AI service
