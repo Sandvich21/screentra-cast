@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-runtime-admission.py'
 APPROVAL_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-approval-record.py'
 RESOURCE_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-resource-policy-evidence.py'
+IPC_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-ipc-policy-evidence.py'
 
 
 def load_approval_module():
@@ -45,14 +46,27 @@ def load_resource_policy_module():
     return module
 
 
+def load_ipc_policy_module():
+    spec = importlib.util.spec_from_file_location(
+        'screentra_stt_ipc_policy_evidence', IPC_POLICY_MODULE_PATH
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 admission = load_module()
 approval = load_approval_module()
 resource_policy = load_resource_policy_module()
+ipc_policy = load_ipc_policy_module()
 
 
 SERVICE_ID = 'magic-mirror-stt'
 SERVICE_VERSION = '0.1.0'
 ACTIVATION_ID = 'activation-20261018-01'
+SOCKET_NAME = 'magic-mirror-stt'
 HOST_ID = 'client-56'
 MODEL_ID = 'whisper-tiny.en'
 MODEL_SHA256 = 'a' * 64
@@ -196,6 +210,27 @@ def valid_resource_policy(**overrides):
     return resource_policy.validate_resource_policy_evidence(value)
 
 
+def valid_ipc_policy(**overrides):
+    value = {
+        'service_id': SERVICE_ID,
+        'activation_id': ACTIVATION_ID,
+        'socket_name': SOCKET_NAME,
+        'protocol_version': 1,
+        'max_frame_bytes': 64 * 1024,
+        'max_request_bytes': 64 * 1024,
+        'max_response_bytes': 64 * 1024,
+        'allowed_operations': ['health', 'transcribe'],
+        'local_only': True,
+    }
+    value.update(overrides)
+    return ipc_policy.validate_stt_ipc_policy_evidence(
+        value,
+        expected_service_id=SERVICE_ID,
+        expected_activation_id=ACTIVATION_ID,
+        expected_socket_name=SOCKET_NAME,
+    )
+
+
 def valid_request(**overrides):
     value = {
         'approval_record': valid_approval_record(),
@@ -203,6 +238,7 @@ def valid_request(**overrides):
         'model_staging_plan': valid_model_plan(),
         'supervisor_plan': valid_supervisor(),
         'resource_policy_evidence': valid_resource_policy(),
+        'ipc_policy_evidence': valid_ipc_policy(),
     }
     value.update(overrides)
     return value
@@ -230,6 +266,7 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
         self.assertFalse(result['socket_bound'])
         self.assertFalse(result['model_loaded'])
         self.assertFalse(result['resource_enforced'])
+        self.assertFalse(result['ipc_enforced'])
         self.assertFalse(result['lifecycle_state_changed'])
         self.assertEqual(result['service_id'], SERVICE_ID)
         self.assertEqual(result['service_version'], SERVICE_VERSION)
@@ -238,6 +275,7 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
         self.assertEqual(result['model_id'], MODEL_ID)
         self.assertEqual(result['model_sha256'], MODEL_SHA256)
         self.assertTrue(result['evidence_composed']['resource_policy'])
+        self.assertTrue(result['evidence_composed']['ipc_policy'])
 
     def test_raw_or_arbitrary_approval_mappings_are_rejected(self):
         module = self.require_module()
@@ -365,6 +403,61 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
                     module.decide_runtime_admission(
                         valid_request(resource_policy_evidence=policy)
                     )
+
+    def test_ipc_policy_is_composed_only_from_validated_immutable_metadata(self):
+        module = self.require_module()
+        result = module.decide_runtime_admission(valid_request())
+
+        self.assertEqual(result['admission'], 'approved_for_future_review')
+        self.assertEqual(
+            tuple(result['ipc_identity_tuple']),
+            (SERVICE_ID, ACTIVATION_ID, SOCKET_NAME, 1, ('health', 'transcribe')),
+        )
+        self.assertFalse(result['ipc_enforced'])
+        self.assertFalse(result['socket_bound'])
+
+        for value in (
+            valid_ipc_policy().as_dict(),
+            {'service_id': SERVICE_ID},
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(ipc_policy_evidence=value)
+                    )
+
+        for tampered in (
+            dataclasses.replace(valid_ipc_policy(), policy_valid=False),
+            dataclasses.replace(valid_ipc_policy(), execution_enabled=True),
+            dataclasses.replace(valid_ipc_policy(), socket_bound=True),
+            dataclasses.replace(valid_ipc_policy(), ipc_enforced=True),
+        ):
+            with self.subTest(tampered=tampered):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(ipc_policy_evidence=tampered)
+                    )
+
+    def test_ipc_policy_binds_service_activation_socket_protocol_and_operations(self):
+        module = self.require_module()
+        for tampered in (
+            dataclasses.replace(valid_ipc_policy(), service_id='other-service'),
+            dataclasses.replace(valid_ipc_policy(), activation_id='other-activation'),
+            dataclasses.replace(valid_ipc_policy(), socket_name='other-socket'),
+            dataclasses.replace(valid_ipc_policy(), protocol_version=0),
+            dataclasses.replace(valid_ipc_policy(), allowed_operations=('health', 'shell')),
+        ):
+            with self.subTest(tampered=tampered):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(ipc_policy_evidence=tampered)
+                    )
+
+        supervisor = valid_supervisor(socket_name='other-socket')
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(
+                valid_request(supervisor_plan=supervisor)
+            )
 
     def test_preflight_camera_evidence_is_optional_for_stt_admission(self):
         module = self.require_module()

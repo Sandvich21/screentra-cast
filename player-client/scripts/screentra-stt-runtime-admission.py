@@ -2,7 +2,8 @@
 """Pure, fail-closed composition boundary for future STT runtime admission.
 
 This module consumes already-produced preflight, model-verification, supervisor,
-and immutable approval-record metadata. It performs no preflight, model
+resource-policy, local-IPC-policy, and immutable approval-record
+metadata. It performs no preflight, model
 verification, process work, hardware access, audio access, filesystem mutation,
 network work, or runtime activation. Even an approved future review result never
 enables execution.
@@ -42,7 +43,7 @@ _SECRET_RE: Final = re.compile(
 
 _REQUEST_FIELDS: Final = frozenset({
     'approval_record', 'preflight_evidence', 'model_staging_plan',
-    'supervisor_plan', 'resource_policy_evidence',
+    'supervisor_plan', 'resource_policy_evidence', 'ipc_policy_evidence',
 })
 _REQUIRED_REQUEST_FIELDS: Final = _REQUEST_FIELDS
 _PREFLIGHT_FIELDS: Final = frozenset({
@@ -288,7 +289,7 @@ def _validate_observation(value: Any, expected: dict[str, str]) -> None:
     _digest(observation['model_sha256'])
 
 
-def _validate_supervisor(value: Any, expected: dict[str, str]) -> None:
+def _validate_supervisor(value: Any, expected: dict[str, str]) -> str:
     plan = _mapping(value, _SUPERVISOR_FIELDS, 'supervisor evidence is malformed')
     _bounded_json(plan, MAX_COMPONENT_BYTES, 'supervisor evidence is malformed')
     if (
@@ -323,6 +324,7 @@ def _validate_supervisor(value: Any, expected: dict[str, str]) -> None:
     if result['lifecycle_state'] != plan['lifecycle_state']:
         raise _fail('supervisor lifecycle state mismatch')
     _validate_observation(plan['observation'], expected)
+    return plan['socket_name']
 
 
 def _resource_policy_module() -> Any:
@@ -377,6 +379,66 @@ def _validated_resource_policy(value: Any, expected: dict[str, str]) -> Any:
         or value.effect != 'metadata_only'
     ):
         raise _fail('runtime admission resource policy is invalid')
+    return value
+
+
+def _ipc_policy_module() -> Any:
+    module_name = 'screentra_stt_ipc_policy_evidence'
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    module_path = Path(__file__).with_name('screentra-stt-ipc-policy-evidence.py')
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise _fail('runtime admission IPC policy is invalid')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise _fail('runtime admission IPC policy is invalid') from exc
+    return module
+
+
+def _validated_ipc_policy(
+    value: Any, expected: dict[str, str], expected_socket_name: str
+) -> Any:
+    """Accept only the immutable result produced by the IPC-policy validator."""
+    module = _ipc_policy_module()
+    if type(value) is not module.STTIPCPolicyEvidence:
+        raise _fail('runtime admission IPC policy is invalid')
+    try:
+        raw = {
+            'service_id': value.service_id,
+            'activation_id': value.activation_id,
+            'socket_name': value.socket_name,
+            'protocol_version': value.protocol_version,
+            'max_frame_bytes': value.max_frame_bytes,
+            'max_request_bytes': value.max_request_bytes,
+            'max_response_bytes': value.max_response_bytes,
+            'allowed_operations': list(value.allowed_operations),
+            'local_only': value.local_only,
+        }
+        validated = module.validate_stt_ipc_policy_evidence(
+            raw,
+            expected_service_id=expected['service_id'],
+            expected_activation_id=expected['activation_id'],
+            expected_socket_name=expected_socket_name,
+        )
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        raise _fail('runtime admission IPC policy is invalid') from exc
+    if validated != value:
+        raise _fail('runtime admission IPC policy is invalid')
+    if (
+        value.policy_valid is not True
+        or value.execution_enabled is not False
+        or value.runtime_activation_allowed is not False
+        or value.socket_bound is not False
+        or value.ipc_enforced is not False
+        or value.effect != 'metadata_only'
+    ):
+        raise _fail('runtime admission IPC policy is invalid')
     return value
 
 
@@ -454,16 +516,20 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     resource_policy = _validated_resource_policy(
         request['resource_policy_evidence'], expected
     )
-    bounded_request = dict(request)
-    bounded_request['approval_record'] = approval.as_dict()
-    bounded_request['resource_policy_evidence'] = resource_policy.as_dict()
-    _bounded_json(bounded_request, MAX_REQUEST_BYTES, 'runtime admission request is not bounded')
     try:
         _validate_preflight(request['preflight_evidence'], expected)
         _validate_model_plan(request['model_staging_plan'], expected)
-        _validate_supervisor(request['supervisor_plan'], expected)
+        socket_name = _validate_supervisor(request['supervisor_plan'], expected)
     except RuntimeAdmissionError as exc:
         raise _fail('runtime admission evidence is invalid') from exc
+    ipc_policy = _validated_ipc_policy(
+        request['ipc_policy_evidence'], expected, socket_name
+    )
+    bounded_request = dict(request)
+    bounded_request['approval_record'] = approval.as_dict()
+    bounded_request['resource_policy_evidence'] = resource_policy.as_dict()
+    bounded_request['ipc_policy_evidence'] = ipc_policy.as_dict()
+    _bounded_json(bounded_request, MAX_REQUEST_BYTES, 'runtime admission request is not bounded')
 
     all_gates_passed = all(gate.passed for gate in approval.gates)
     return {
@@ -476,6 +542,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'socket_bound': False,
         'model_loaded': False,
         'resource_enforced': False,
+        'ipc_enforced': False,
         'lifecycle_state_changed': False,
         'service_id': expected['service_id'],
         'service_version': expected['service_version'],
@@ -483,10 +550,18 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'host_id': expected['host_id'],
         'model_id': expected['model_id'],
         'model_sha256': expected['model_sha256'],
+        'socket_name': ipc_policy.socket_name,
+        'protocol_version': ipc_policy.protocol_version,
+        'allowed_operations': tuple(ipc_policy.allowed_operations),
         'identity_tuple': (
             expected['service_id'], expected['service_version'],
             expected['activation_id'], expected['host_id'],
             expected['model_id'], expected['model_sha256'],
+        ),
+        'ipc_identity_tuple': (
+            ipc_policy.service_id, ipc_policy.activation_id,
+            ipc_policy.socket_name, ipc_policy.protocol_version,
+            tuple(ipc_policy.allowed_operations),
         ),
         'approval_gates': tuple(gate.name for gate in approval.gates),
         'evidence_composed': {
@@ -495,6 +570,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             'supervisor': True,
             'approval_record': True,
             'resource_policy': True,
+            'ipc_policy': True,
         },
     }
 
