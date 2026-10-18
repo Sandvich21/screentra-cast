@@ -5435,6 +5435,9 @@ ${_cmds.oneLiner}`;
               <option value="ir">IR (later)</option>
             </select>
           </div>
+          <p class="client-detail-display-note" style="margin:.35rem 0 .6rem;color:var(--text-muted,#94a3b8);font-size:.78rem;line-height:1.35;">
+            DDC/CI power and input switching are monitor-dependent. Some monitors may report a successful DDC command while remaining in standby or using the wrong input. For reliable DP wake, select DisplayPort manually and disable Auto Source Switch on the monitor, then use Wake (Display) for Linux DPMS.
+          </p>
           <div style="display:flex;gap:0.4rem;flex-wrap:wrap;margin-bottom:0.5rem;">
             <button class="btn btn-sm btn-secondary client-detail-display-power" data-state="on" title="Compositor DPMS: wake selected display">Wake (Display)</button>
             <button class="btn btn-sm btn-secondary client-detail-ddc" data-vcp="D6" data-val="1" title="DDC/CI: wake display from sleep">Power On (DDC)</button>

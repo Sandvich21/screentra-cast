@@ -5048,6 +5048,9 @@ def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, display
     """Set a DDC/CI VCP value via ddcutil. Returns (ok, message).
     If has_layout=True and the display is not initially detected (ddcutil_no_bus),
     runs ddcutil detect once and retries before returning failure."""
+    # DDC/CI behavior is monitor-dependent: some displays acknowledge a power
+    # or input command without visibly waking. A successful setvcp is therefore
+    # command acceptance, not proof that the panel selected the active input.
     args = ['sudo', '-n', 'ddcutil', 'setvcp']
     if bus:
         args.extend(['--bus', bus])
