@@ -1375,14 +1375,31 @@ fn read_record(dir: &Path) -> Result<AddonRecord, AddonError> {
     let state_path = dir.join(STATE_FILE);
     checked_addon_file(&manifest_path, "addon manifest")?;
     checked_addon_file(&state_path, "addon state")?;
-    let manifest_text = fs::read_to_string(manifest_path).map_err(io_error)?;
+    let manifest_text = fs::read_to_string(&manifest_path).map_err(io_error)?;
     let manifest: AddonManifest = serde_json::from_str(&manifest_text).map_err(io_error)?;
     if manifest.kind == "client_extension" {
         validate_client_extension_manifest(&manifest)?;
+        let signature_path = dir.join("manifest.sig");
+        checked_addon_file(&signature_path, "addon signature")?;
+        let entrypoint = manifest.client_entrypoint.as_deref().ok_or_else(|| {
+            AddonError::Invalid("Client package entrypoint is missing".to_string())
+        })?;
+        let client_path = dir.join(entrypoint);
+        checked_addon_file(&client_path, "client package entrypoint")?;
+        verify_manifest_signature(&manifest_path, &signature_path)?;
+        let expected_digest = manifest.client_sha256.as_deref().ok_or_else(|| {
+            AddonError::Invalid("Client package digest is missing".to_string())
+        })?;
+        let actual_digest = sha256_file(&client_path)?;
+        if !expected_digest.eq_ignore_ascii_case(&actual_digest) {
+            return Err(AddonError::Invalid(
+                "Client package entrypoint SHA-256 does not match manifest".to_string(),
+            ));
+        }
     } else {
         validate_manifest(&manifest)?;
     }
-    let state_text = fs::read_to_string(dir.join(STATE_FILE)).map_err(io_error)?;
+    let state_text = fs::read_to_string(&state_path).map_err(io_error)?;
     let state: AddonState = serde_json::from_str(&state_text).map_err(io_error)?;
     Ok(AddonRecord {
         manifest,
@@ -2332,6 +2349,151 @@ mod tests {
         value.client_api_version = Some("1".to_string());
         value.widget_types[0].host_renderer.clear();
         value
+    }
+
+    struct SignedClientPackageFixture {
+        root: PathBuf,
+        addon_dir: PathBuf,
+        old_data_root: Option<std::ffi::OsString>,
+        old_public_key: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for SignedClientPackageFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+            unsafe {
+                match self.old_data_root.take() {
+                    Some(value) => std::env::set_var("SIGNAGE_DATA_DIR", value),
+                    None => std::env::remove_var("SIGNAGE_DATA_DIR"),
+                }
+                match self.old_public_key.take() {
+                    Some(value) => std::env::set_var("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY", value),
+                    None => std::env::remove_var("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY"),
+                }
+            }
+        }
+    }
+
+    fn installed_signed_client_package_fixture() -> SignedClientPackageFixture {
+        let root = std::env::temp_dir().join(format!(
+            "screentra-cast-addon-package-readback-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let data_root = root.join("data");
+        let package_root = root.join("package-root");
+        let client_root = package_root.join("client");
+        fs::create_dir_all(&client_root).unwrap();
+        let client_bytes = b"window.ScreentraAddon = { apiVersion: '1' };\\n";
+        let client_path = client_root.join("index.js");
+        fs::write(&client_path, client_bytes).unwrap();
+        let digest = format!("{:x}", Sha256::digest(client_bytes));
+        let manifest = client_manifest(&digest);
+        let manifest_path = package_root.join(MANIFEST_FILE);
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let signature_path = package_root.join("manifest.sig");
+        let private_key = root.join("addon-signing.key");
+        let public_key = root.join("addon-signing.pub");
+        assert!(Command::new(trusted_service_signature_verifier_executable())
+            .args(["genpkey", "-algorithm", "ED25519", "-out"])
+            .arg(&private_key)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new(trusted_service_signature_verifier_executable())
+            .args(["pkey", "-in"])
+            .arg(&private_key)
+            .args(["-pubout", "-out"])
+            .arg(&public_key)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new(trusted_service_signature_verifier_executable())
+            .args(["pkeyutl", "-sign", "-rawin", "-inkey"])
+            .arg(&private_key)
+            .args(["-in"])
+            .arg(&manifest_path)
+            .args(["-out"])
+            .arg(&signature_path)
+            .status()
+            .unwrap()
+            .success());
+        let archive = root.join("addon.tar.gz");
+        let archive_file = fs::File::create(&archive).unwrap();
+        let encoder = flate2::write::GzEncoder::new(archive_file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        builder
+            .append_path_with_name(&manifest_path, MANIFEST_FILE)
+            .unwrap();
+        builder
+            .append_path_with_name(&signature_path, "manifest.sig")
+            .unwrap();
+        builder.append_dir_all("client", &client_root).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        let old_public_key = std::env::var_os("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY");
+        let fixture = SignedClientPackageFixture {
+            root,
+            addon_dir: data_root.join("addons/example.weather"),
+            old_data_root,
+            old_public_key,
+        };
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_root);
+            std::env::set_var("SCREENTRA_CAST_ADDON_SIGNING_PUBKEY", &public_key);
+        }
+        install_signed_client_package(&archive).unwrap();
+        fixture
+    }
+
+    fn assert_client_extension_readbacks_fail_closed() {
+        let list_error = list().expect_err("tampered client extension must not be listed");
+        let enabled_error = enabled_client_extensions()
+            .expect_err("tampered client extension must not be enabled");
+        let package_error = client_package("example.weather")
+            .expect_err("tampered client extension package must not be returned");
+        for error in [list_error, enabled_error, package_error] {
+            let message = error.to_string();
+            assert!(!message.contains("readback-tamper-marker"));
+            assert!(!message.contains("window.ScreentraAddon"));
+        }
+    }
+
+    #[test]
+    fn persisted_client_manifest_tampering_fails_closed_on_all_readbacks() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let fixture = installed_signed_client_package_fixture();
+        let manifest_path = fixture.addon_dir.join(MANIFEST_FILE);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["name"] = serde_json::Value::String("readback-tamper-marker".to_string());
+        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+
+        assert_client_extension_readbacks_fail_closed();
+    }
+
+    #[test]
+    fn persisted_client_entrypoint_tampering_fails_closed_on_all_readbacks() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let fixture = installed_signed_client_package_fixture();
+        fs::write(
+            fixture.addon_dir.join("client/index.js"),
+            b"window.ScreentraAddon = 'readback-tamper-marker';\\n",
+        )
+        .unwrap();
+
+        assert_client_extension_readbacks_fail_closed();
     }
 
     #[test]
