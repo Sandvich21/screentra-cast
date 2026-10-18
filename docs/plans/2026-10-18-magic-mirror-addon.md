@@ -41,6 +41,10 @@ evidence only—it does not mean that a model was staged, loaded, or executed.
 
 The pure `screentra-stt-client-preflight-evidence.py` evaluator accepts only a bounded, already-collected/redacted evidence mapping. It validates the non-secret host label, supported architecture, bounded resource counts, audio/service booleans, paired model identity, local-runtime boolean, and optional camera boolean. It returns deterministic blockers and warnings as metadata-only evidence with execution, runtime-readiness, hardware-access, and model-staging flags forced false. This is evidence evaluation only—not a live preflight, readiness claim, command probe, hardware probe, server contact, or state change.
 
+### STT runtime-admission evidence boundary
+
+The pure `screentra-stt-runtime-admission.py` module composes only the three existing metadata outputs, binds service/version/activation/model/host identities, and requires blocker-free audio/runtime evidence plus a verified read-only model plan and identity-matched supervisor plan. It rejects arbitrary, secret, path/URL/command/audio, and readiness-shaped fields. Without a separately supplied future approved activation gate it returns `admission: denied`; with one it may return an approval decision, but `execution_enabled` remains false. This is a fail-closed composition boundary, not runtime readiness or activation.
+
 ## Product scope
 
 ### Client-side AI service
