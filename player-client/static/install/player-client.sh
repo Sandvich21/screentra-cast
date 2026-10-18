@@ -1691,10 +1691,49 @@ def fetch_addon_bytes(server, client_id, addon_id):
     return package
 
 
+def client_capability_status():
+    """Report local capability observations without enabling any service."""
+    camera_nodes = sorted(Path('/dev').glob('video*'))
+    microphone_nodes = sorted(Path('/dev/snd').glob('pcm*C*D*c')) if Path('/dev/snd').is_dir() else []
+    return [
+        {
+            'id': 'render_only',
+            'state': 'available',
+            'detail': 'Built-in declarative renderer is available',
+        },
+        {
+            'id': 'camera_capture',
+            'state': 'available' if camera_nodes else 'unavailable',
+            'detail': ('Detected local video device' if camera_nodes
+                       else 'No local video capture device detected'),
+        },
+        {
+            'id': 'microphone_capture',
+            'state': 'available' if microphone_nodes else 'unavailable',
+            'detail': ('Detected local ALSA capture device' if microphone_nodes
+                       else 'No local ALSA capture device detected'),
+        },
+        {
+            'id': 'local_inference',
+            'state': 'disabled',
+            'detail': 'Signed client inference service is not enabled',
+        },
+        {
+            'id': 'client_service',
+            'state': 'disabled',
+            'detail': 'Trusted client service runtime is not enabled',
+        },
+    ]
+
+
 def sync_client_addons(server, client_id, cache_dir):
     """Fetch and verify enabled addon packages without executing their code."""
     status_path = Path(cache_dir) / 'addon-status.json'
-    status = {'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'addons': []}
+    status = {
+        'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'addons': [],
+        'capabilities': client_capability_status(),
+    }
     try:
         url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/addons'
         req = urllib.request.Request(url, headers=client_auth_headers())
@@ -5473,20 +5512,13 @@ def ddcutil_detect(bus: str | None = None) -> tuple[bool, str]:
     return False, err.strip() or out.strip()
 
 
-def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, display_index: int | None = None, has_layout: bool = False) -> tuple[bool, str]:
+def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_layout: bool = False) -> tuple[bool, str]:
     """Set a DDC/CI VCP value via ddcutil. Returns (ok, message).
     If has_layout=True and the display is not initially detected (ddcutil_no_bus),
     runs ddcutil detect once and retries before returning failure."""
-    # DDC/CI behavior is monitor-dependent: some displays acknowledge a power
-    # or input command without visibly waking. A successful setvcp is therefore
-    # command acceptance, not proof that the panel selected the active input.
     args = ['sudo', '-n', 'ddcutil', 'setvcp']
     if bus:
         args.extend(['--bus', bus])
-    elif display_index is not None and display_index >= 0:
-        # ddcutil display numbers are 1-based; the client API indexes
-        # displays from zero. Keep DDC scoped to the selected display.
-        args.extend(['--display', str(display_index + 1)])
     args.extend([vcp_code, str(value)])
 
     def _do_set():
@@ -5494,14 +5526,9 @@ def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, display
         if rc == 0:
             return True, f'DDC: {vcp_code}={value}' + (f' ({out.strip()})' if out.strip() else '')
         err_msg = err.strip() or out.strip()
-        # Distinguish a missing ddcutil executable from a monitor that is
-        # currently unavailable over DDC (for example after DPMS/full off).
-        if 'command not found' in err_msg.lower() or 'no such file or directory' in err_msg.lower():
+        if 'not found' in err_msg.lower() or 'no such file' in err_msg.lower():
             return False, f'ddcutil_not_installed: {err_msg}'
-        if ('display not found' in err_msg.lower() or 'no displays found' in err_msg.lower()
-                or 'no monitor detected' in err_msg.lower()
-                or 'unable to open' in err_msg.lower() or 'i2c' in err_msg.lower()
-                or 'no bus' in err_msg.lower()):
+        if 'unable to open' in err_msg.lower() or 'i2c' in err_msg.lower() or 'no bus' in err_msg.lower():
             return False, 'ddcutil_no_bus', err_msg
         if 'communication' in err_msg.lower() or 'timeout' in err_msg.lower():
             return False, f'ddcutil_no_support: {err_msg}'
@@ -5796,40 +5823,6 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
 
     ok = has_systemctl_user()
     return ok, f'active display count set to {active}', details
-
-
-def apply_display_power(cache_dir: Path, display_index: int | None, state: str) -> tuple[bool, str, dict]:
-    """Use compositor DPMS, not DDC power mode, for monitor standby."""
-    if display_index is None or display_index < 0 or display_index > 3:
-        return False, 'a display index from 0 to 3 is required', {}
-    if state not in {'on', 'off'}:
-        return False, 'display power state must be on or off', {}
-    if shutil.which('wlr-randr') is None:
-        return False, 'wlr-randr is not installed on this client', {}
-    config = _read_json_file(cache_dir.parent / 'config.json', {})
-    connectors = _display_connectors_for_indexes(config, [display_index])
-    if not connectors:
-        return False, f'no compositor output is mapped to display {display_index}', {'display_index': display_index}
-    connector = connectors[0]
-    args = ['wlr-randr', '--output', connector, '--on' if state == 'on' else '--off']
-    wayland_env = os.environ.copy()
-    runtime_dir = wayland_env.get('XDG_RUNTIME_DIR') or f"/run/{wayland_env.get('USER', 'board')}"
-    wayland_env['XDG_RUNTIME_DIR'] = runtime_dir
-    if not wayland_env.get('WAYLAND_DISPLAY'):
-        for candidate in ('wayland-1', 'wayland-0'):
-            if (Path(runtime_dir) / candidate).exists():
-                wayland_env['WAYLAND_DISPLAY'] = candidate
-                break
-    try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=10, env=wayland_env)
-        rc, out, err = proc.returncode, proc.stdout, proc.stderr
-    except Exception as exc:
-        return False, f'compositor display power failed: {exc}', {'display_index': display_index, 'connector': connector, 'state': state, 'command': args}
-    details = {'display_index': display_index, 'connector': connector, 'state': state, 'command': args}
-    if rc != 0:
-        details['stderr'] = err or out
-        return False, f'compositor display power failed (rc={rc}): {err or out}', details
-    return True, f'display {display_index} ({connector}) power set to {state}', details
 
 
 def _resolve_touch_name(device_path: str | None, device_name: str | None = None) -> str | None:
@@ -6409,13 +6402,8 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         value = payload.get('value', 0)
         bus = payload.get('bus')
         has_layout = payload.get('has_layout', False)
-        ok, msg = apply_ddc_control(str(vcp), int(value), bus=bus, display_index=display_index, has_layout=has_layout)
+        ok, msg = apply_ddc_control(str(vcp), int(value), bus=bus, has_layout=has_layout)
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
-
-    if action == 'display_power':
-        state = str(payload.get('state') or '')
-        ok, msg, details = apply_display_power(Path(ctx['cache_dir']), display_index, state)
-        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'details': details, 'started_at': started}
 
     if action == 'cec_send':
         # payload: { "cmd": "pow 0" }   power on OSD addr 0

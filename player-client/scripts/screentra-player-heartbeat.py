@@ -407,10 +407,49 @@ def fetch_addon_bytes(server, client_id, addon_id):
     return package
 
 
+def client_capability_status():
+    """Report local capability observations without enabling any service."""
+    camera_nodes = sorted(Path('/dev').glob('video*'))
+    microphone_nodes = sorted(Path('/dev/snd').glob('pcm*C*D*c')) if Path('/dev/snd').is_dir() else []
+    return [
+        {
+            'id': 'render_only',
+            'state': 'available',
+            'detail': 'Built-in declarative renderer is available',
+        },
+        {
+            'id': 'camera_capture',
+            'state': 'available' if camera_nodes else 'unavailable',
+            'detail': ('Detected local video device' if camera_nodes
+                       else 'No local video capture device detected'),
+        },
+        {
+            'id': 'microphone_capture',
+            'state': 'available' if microphone_nodes else 'unavailable',
+            'detail': ('Detected local ALSA capture device' if microphone_nodes
+                       else 'No local ALSA capture device detected'),
+        },
+        {
+            'id': 'local_inference',
+            'state': 'disabled',
+            'detail': 'Signed client inference service is not enabled',
+        },
+        {
+            'id': 'client_service',
+            'state': 'disabled',
+            'detail': 'Trusted client service runtime is not enabled',
+        },
+    ]
+
+
 def sync_client_addons(server, client_id, cache_dir):
     """Fetch and verify enabled addon packages without executing their code."""
     status_path = Path(cache_dir) / 'addon-status.json'
-    status = {'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'addons': []}
+    status = {
+        'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'addons': [],
+        'capabilities': client_capability_status(),
+    }
     try:
         url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/addons'
         req = urllib.request.Request(url, headers=client_auth_headers())

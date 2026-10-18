@@ -40,6 +40,15 @@ The manifest must continue to declare:
   - `local_inference`;
   - `client_service`.
 
+A client status report may also include capability observations for the same
+closed vocabulary. The heartbeat may report `available`, `unavailable`,
+`disabled`, or `error` plus a bounded diagnostic detail. These observations are
+health metadata only: `available` means the local prerequisite was detected, not
+that an add-on has permission to use it. The current heartbeat reports camera
+and ALSA microphone device presence, while `client_service` and
+`local_inference` remain disabled until the signed runtime and capability broker
+are separately implemented.
+
 `camera_capture`, `microphone_capture`, `local_inference`, and `client_service`
 are contract declarations only in the current release. They do not activate a
 camera, microphone, model, container, or client process by themselves. A future

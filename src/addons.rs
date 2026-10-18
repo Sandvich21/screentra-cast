@@ -206,12 +206,32 @@ pub struct ClientAddonStatus {
     pub error: Option<String>,
 }
 
+const CLIENT_CAPABILITIES: &[&str] = &[
+    "render_only",
+    "camera_capture",
+    "microphone_capture",
+    "local_inference",
+    "client_service",
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientCapabilityStatus {
+    pub id: String,
+    pub state: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientAddonStatusReport {
     #[serde(default)]
     pub at: Option<String>,
     #[serde(default)]
     pub addons: Vec<ClientAddonStatus>,
+    /// Hardware/runtime observations are report-only until a capability broker
+    /// and signed client service lifecycle are enabled.
+    #[serde(default)]
+    pub capabilities: Vec<ClientCapabilityStatus>,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -376,6 +396,41 @@ pub fn save_client_status(
         return Err(AddonError::Invalid(
             "Addon status contains too many entries".to_string(),
         ));
+    }
+    if report.capabilities.len() > CLIENT_CAPABILITIES.len() {
+        return Err(AddonError::Invalid(
+            "Client status contains too many capabilities".to_string(),
+        ));
+    }
+    let mut seen_capabilities = BTreeSet::new();
+    for capability in &report.capabilities {
+        if !CLIENT_CAPABILITIES.contains(&capability.id.as_str()) {
+            return Err(AddonError::Invalid(
+                "Unsupported client capability status".to_string(),
+            ));
+        }
+        if !seen_capabilities.insert(&capability.id) {
+            return Err(AddonError::Invalid(
+                "Duplicate client capability status".to_string(),
+            ));
+        }
+        if !matches!(
+            capability.state.as_str(),
+            "available" | "unavailable" | "disabled" | "error"
+        ) {
+            return Err(AddonError::Invalid(
+                "Unsupported client capability state".to_string(),
+            ));
+        }
+        if capability
+            .detail
+            .as_deref()
+            .map_or(false, |value| value.len() > 256)
+        {
+            return Err(AddonError::Invalid(
+                "Client capability detail is too long".to_string(),
+            ));
+        }
     }
     for addon in &report.addons {
         validate_id(&addon.id)?;
@@ -997,13 +1052,6 @@ pub fn validate_client_extension_manifest(manifest: &AddonManifest) -> Result<()
             )));
         }
     }
-    const CLIENT_CAPABILITIES: &[&str] = &[
-        "render_only",
-        "camera_capture",
-        "microphone_capture",
-        "local_inference",
-        "client_service",
-    ];
     let mut seen_capabilities = BTreeSet::new();
     for capability in &manifest.client_capabilities {
         if !CLIENT_CAPABILITIES.contains(&capability.as_str()) {
@@ -2774,6 +2822,7 @@ mod tests {
                     entrypoint: None,
                     error: None,
                 }],
+                capabilities: Vec::new(),
                 error: None,
             },
         );
@@ -2790,6 +2839,29 @@ mod tests {
         }
         let _ = fs::remove_dir_all(root);
     }
+    #[test]
+    fn client_capability_status_round_trip_is_bounded() {
+        let report = ClientAddonStatusReport {
+            at: Some("2026-10-18T12:00:00Z".to_string()),
+            addons: Vec::new(),
+            capabilities: vec![ClientCapabilityStatus {
+                id: "camera_capture".to_string(),
+                state: "available".to_string(),
+                detail: None,
+            }],
+            error: None,
+        };
+        let encoded = serde_json::to_value(&report).expect("capability status serializes");
+        assert_eq!(encoded["capabilities"][0]["id"], "camera_capture");
+        assert_eq!(
+            serde_json::from_value::<ClientAddonStatusReport>(encoded)
+                .expect("capability status deserializes")
+                .capabilities[0]
+                .state,
+            "available"
+        );
+    }
+
     #[test]
     fn saves_bounded_client_status_snapshot() {
         let _guard = crate::PROCESS_ENV_TEST_LOCK
@@ -2817,6 +2889,11 @@ mod tests {
                     entrypoint: Some("client/index.js".to_string()),
                     error: None,
                 }],
+                capabilities: vec![ClientCapabilityStatus {
+                    id: "render_only".to_string(),
+                    state: "available".to_string(),
+                    detail: None,
+                }],
                 error: None,
             },
         )
@@ -2832,6 +2909,7 @@ mod tests {
         assert_eq!(saved["client_id"], "client-1");
         let loaded = load_client_status("client-1").unwrap().unwrap();
         assert_eq!(loaded["report"]["addons"][0]["state"], "verified_cached");
+        assert_eq!(loaded["report"]["capabilities"][0]["id"], "render_only");
         if let Some(value) = old_data_root {
             unsafe {
                 std::env::set_var("SIGNAGE_DATA_DIR", value);
