@@ -69,6 +69,9 @@ const context = {
   setTimeout,
   clearTimeout,
   window: { addEventListener() {} },
+  esc: (value) => String(value ?? '').replace(/[&<>"'`]/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '`': '&#96;',
+  }[c])),
   document: {
     readyState: 'loading',
     addEventListener() {},
@@ -86,7 +89,12 @@ const context = {
         report: {
           addons: [],
           capabilities: [],
-          services: [{ id: 'speech-to-text', state: 'disabled' }],
+          services: [{
+            id: 'speech-to-text',
+            state: 'disabled',
+            model_id: 'whisper-tiny.en',
+            model_sha256: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+          }],
         },
       },
     }),
@@ -107,6 +115,8 @@ vm.runInNewContext(`${appSource}\n;globalThis.__App = App;`, context, {
   const select = elements.get('addon-client-status-select');
   select.value = 'client-a';
   await select.onchange();
+  assert.match(elements.get('addon-client-status').innerHTML, /model whisper-tiny\.en/);
+  assert.match(elements.get('addon-client-status').innerHTML, /verified SHA-256 abcdef012345/);
 
   elements.get('addon-client-service-id').value = 'speech-to-text';
   elements.get('addon-client-transcription-request-id').value = 'bad request id';

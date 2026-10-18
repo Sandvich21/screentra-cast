@@ -236,6 +236,10 @@ pub struct ClientServiceStatus {
     pub detail: Option<String>,
     #[serde(default)]
     pub restart_count: u32,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub model_sha256: Option<String>,
 }
 
 const CLIENT_SERVICE_STATES: &[&str] = &[
@@ -511,6 +515,10 @@ pub fn save_client_status(
                 "Client service detail is too long".to_string(),
             ));
         }
+        validate_client_service_model_identity(
+            service.model_id.as_deref(),
+            service.model_sha256.as_deref(),
+        )?;
     }
     for addon in &report.addons {
         validate_id(&addon.id)?;
@@ -628,6 +636,33 @@ fn validate_token(value: &str, field: &str) -> Result<(), AddonError> {
     Ok(())
 }
 
+fn validate_client_service_model_identity(
+    model_id: Option<&str>,
+    model_sha256: Option<&str>,
+) -> Result<(), AddonError> {
+    if model_id.is_some() != model_sha256.is_some() {
+        return Err(AddonError::Invalid(
+            "Client service model_id and model_sha256 must be declared together".to_string(),
+        ));
+    }
+    if let Some(model_id) = model_id {
+        validate_token(model_id, "Client service model id")?;
+    }
+    if let Some(model_sha256) = model_sha256 {
+        if model_sha256.len() != 64
+            || !model_sha256.bytes().all(|byte| {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            })
+        {
+            return Err(AddonError::Invalid(
+                "Client service model_sha256 must be a 64-character lowercase hexadecimal digest"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_client_service_spec(
     service: &ClientServiceSpec,
     requires_model: bool,
@@ -656,27 +691,15 @@ fn validate_client_service_spec(
             "Client service writable_bytes exceeds the bounded limit".to_string(),
         ));
     }
-    if service.model_id.is_some() != service.model_sha256.is_some() {
-        return Err(AddonError::Invalid(
-            "Client service model_id and model_sha256 must be declared together".to_string(),
-        ));
-    }
     if requires_model && service.model_id.is_none() {
         return Err(AddonError::Invalid(
             "local_inference requires an explicit model identity and digest".to_string(),
         ));
     }
-    if let Some(model_id) = service.model_id.as_deref() {
-        validate_token(model_id, "Client service model id")?;
-    }
-    if let Some(model_sha256) = service.model_sha256.as_deref() {
-        if model_sha256.len() != 64 || !model_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(AddonError::Invalid(
-                "Client service model_sha256 must be a 64-character hexadecimal digest"
-                    .to_string(),
-            ));
-        }
-    }
+    validate_client_service_model_identity(
+        service.model_id.as_deref(),
+        service.model_sha256.as_deref(),
+    )?;
     Ok(())
 }
 
@@ -3253,6 +3276,8 @@ mod tests {
                 state: "staged".to_string(),
                 detail: None,
                 restart_count: 0,
+                model_id: None,
+                model_sha256: None,
             }],
             error: None,
         };
@@ -3265,6 +3290,140 @@ mod tests {
                 .state,
             "available"
         );
+    }
+
+    #[test]
+    fn client_service_model_identity_round_trip_preserves_optional_metadata() {
+        let report: ClientAddonStatusReport = serde_json::from_value(serde_json::json!({
+            "services": [{
+                "id": "speech-to-text",
+                "version": "1.0.0",
+                "state": "running",
+                "model_id": "whisper-tiny.en",
+                "model_sha256": "a".repeat(64)
+            }]
+        }))
+        .expect("model identity status should deserialize");
+        let encoded = serde_json::to_value(&report).expect("model identity status serializes");
+        assert_eq!(encoded["services"][0]["model_id"], "whisper-tiny.en");
+        assert_eq!(encoded["services"][0]["model_sha256"], "a".repeat(64));
+
+        let legacy: ClientAddonStatusReport = serde_json::from_value(serde_json::json!({
+            "services": [{
+                "id": "speech-to-text",
+                "version": "1.0.0",
+                "state": "running"
+            }]
+        }))
+        .expect("legacy service status should remain readable");
+        let legacy_encoded = serde_json::to_value(legacy).expect("legacy status serializes");
+        assert!(legacy_encoded["services"][0]["model_id"].is_null());
+        assert!(legacy_encoded["services"][0]["model_sha256"].is_null());
+    }
+
+    #[test]
+    fn rejects_malformed_client_service_model_identity_without_echoing_values() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-cast-addon-model-status-validation-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let data_root = root.join("data");
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_root);
+        }
+
+        let cases = [
+            (serde_json::json!({"model_id": "whisper-tiny.en"}), "whisper-tiny.en"),
+            (serde_json::json!({"model_sha256": "a".repeat(64)}), &"a".repeat(64)),
+            (serde_json::json!({
+                "model_id": "whisper-tiny.en",
+                "model_sha256": "A".repeat(64)
+            }), &"A".repeat(64)),
+            (serde_json::json!({
+                "model_id": "whisper-tiny.en",
+                "model_sha256": "a".repeat(63)
+            }), &"a".repeat(63)),
+            (serde_json::json!({
+                "model_id": "whisper-tiny.en",
+                "model_sha256": "a".repeat(65)
+            }), &"a".repeat(65)),
+            (serde_json::json!({
+                "model_id": "Whisper-tiny.en",
+                "model_sha256": "a".repeat(64)
+            }), "Whisper-tiny.en"),
+            (serde_json::json!({
+                "model_id": "m".repeat(65),
+                "model_sha256": "a".repeat(64)
+            }), &"m".repeat(65)),
+        ];
+        for (identity, secret_value) in cases {
+            let mut service = serde_json::json!({
+                "id": "speech-to-text",
+                "version": "1.0.0",
+                "state": "running"
+            });
+            for (key, value) in identity.as_object().unwrap() {
+                service[key] = value.clone();
+            }
+            let report: ClientAddonStatusReport = serde_json::from_value(serde_json::json!({
+                "services": [service]
+            }))
+            .expect("model identity test status should deserialize");
+            let error = save_client_status("client-1", report).expect_err("malformed identity");
+            assert!(!error.to_string().contains(secret_value));
+        }
+
+        if let Some(value) = old_data_root {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn client_service_model_identity_persists_through_status_storage() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-cast-addon-model-status-round-trip-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let data_root = root.join("data");
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &data_root); }
+        let report: ClientAddonStatusReport = serde_json::from_value(serde_json::json!({
+            "services": [{
+                "id": "speech-to-text",
+                "version": "1.0.0",
+                "state": "running",
+                "model_id": "whisper-tiny.en",
+                "model_sha256": "b".repeat(64)
+            }]
+        }))
+        .expect("model identity report should deserialize");
+        save_client_status("client-1", report).expect("model identity report should persist");
+        let loaded = load_client_status("client-1")
+            .expect("model identity report should load")
+            .expect("model identity report should exist");
+        assert_eq!(loaded["report"]["services"][0]["model_id"], "whisper-tiny.en");
+        assert_eq!(loaded["report"]["services"][0]["model_sha256"], "b".repeat(64));
+
+        if let Some(value) = old_data_root {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3305,6 +3464,8 @@ mod tests {
                     state: "running".to_string(),
                     detail: Some("local-only".to_string()),
                     restart_count: 1,
+                    model_id: None,
+                    model_sha256: None,
                 }],
                 error: None,
             },
