@@ -117,6 +117,8 @@ class LocalAiCodecTests(unittest.TestCase):
             codec.encode_response('req-8', 'health', codec.HealthResponse(status='ok'))
         )
         self.assertEqual(health.result.status, 'ok')
+        self.assertIsNone(health.result.model_id)
+        self.assertIsNone(health.result.model_sha256)
         self.assertTrue(health.local_only)
 
         transcribe = codec.decode_response_frame(
@@ -134,6 +136,102 @@ class LocalAiCodecTests(unittest.TestCase):
         encoded = json.dumps(body, separators=(',', ':')).encode('utf-8')
         with self.assertRaises(codec.ProtocolError):
             codec.decode_response_frame(struct.pack('!I', len(encoded)) + encoded)
+
+    def test_health_response_round_trips_optional_verified_model_identity(self):
+        digest = 'a' * 64
+
+        health = codec.decode_response_frame(
+            codec.encode_response(
+                'req-identity',
+                'health',
+                codec.HealthResponse(
+                    status='ok',
+                    model_id='whisper-tiny.en',
+                    model_sha256=digest,
+                ),
+            )
+        )
+
+        self.assertEqual(health.result.status, 'ok')
+        self.assertEqual(health.result.model_id, 'whisper-tiny.en')
+        self.assertEqual(health.result.model_sha256, digest)
+
+    def test_health_model_identity_fields_must_be_paired_and_bounded(self):
+        digest = 'b' * 64
+        for model_id in (
+            '',
+            'x' * (codec.MAX_MODEL_ID_BYTES + 1),
+            '../whisper-tiny',
+            'whisper/tiny',
+            'whisper tiny',
+            'whisper\\x00tiny',
+        ):
+            with self.subTest(model_id=repr(model_id)), self.assertRaises(codec.ProtocolError):
+                codec.encode_response(
+                    'req-identity-invalid-id',
+                    'health',
+                    codec.HealthResponse(
+                        status='ok', model_id=model_id, model_sha256=digest
+                    ),
+                )
+
+        with self.assertRaises(codec.ProtocolError):
+            codec.encode_response(
+                'req-identity-unpaired-id',
+                'health',
+                codec.HealthResponse(status='ok', model_id='whisper-tiny'),
+            )
+        with self.assertRaises(codec.ProtocolError):
+            codec.encode_response(
+                'req-identity-unpaired-digest',
+                'health',
+                codec.HealthResponse(status='ok', model_sha256=digest),
+            )
+
+    def test_health_model_digest_must_be_exact_lowercase_sha256(self):
+        for digest in (
+            'A' * 64,
+            'g' * 64,
+            'a' * 63,
+            'a' * 65,
+            'sha256:' + ('a' * 64),
+        ):
+            with self.subTest(digest=repr(digest)), self.assertRaises(codec.ProtocolError):
+                codec.encode_response(
+                    'req-invalid-digest',
+                    'health',
+                    codec.HealthResponse(
+                        status='ok', model_id='whisper-tiny', model_sha256=digest
+                    ),
+                )
+
+    def test_health_response_rejects_sensitive_or_arbitrary_identity_fields(self):
+        frame = codec.encode_response(
+            'req-identity-fields',
+            'health',
+            codec.HealthResponse(
+                status='ok', model_id='whisper-tiny', model_sha256='c' * 64
+            ),
+        )
+        body = json.loads(frame[codec.FRAME_LENGTH_BYTES:])
+        for forbidden in (
+            'path',
+            'command',
+            'password',
+            'token',
+            'credential',
+            'audio',
+            'arbitrary',
+        ):
+            result = dict(body['result'])
+            result[forbidden] = 'forbidden'
+            candidate = dict(body)
+            candidate['result'] = result
+            encoded = json.dumps(candidate, separators=(',', ':')).encode('utf-8')
+            with self.subTest(forbidden=forbidden), self.assertRaises(codec.ProtocolError):
+                codec.decode_response_frame(
+                    struct.pack('!I', len(encoded)) + encoded
+                )
 
     def test_response_rejects_unknown_operation_and_malformed_result(self):
         with self.assertRaises(codec.ProtocolError):

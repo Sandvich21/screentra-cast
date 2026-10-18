@@ -35,17 +35,23 @@ class InMemoryLocalAiProtocolFixture:
 
     Transcription keys are ``(audio_bytes, language)`` pairs from the bounded
     typed request. A missing key returns a bounded ``unavailable`` response.
-    The fixture performs no service execution and must never be used as proof
-    that a client-local AI service is installed, running, or hardware-ready.
+    Optional health model identity metadata is deterministic protocol evidence
+    only; it is not proof of a staged, loaded, or running model. The fixture
+    performs no service execution and must never be used as proof that a
+    client-local AI service is installed, running, or hardware-ready.
     """
 
     def __init__(
         self,
         *,
         health_status: str = 'ok',
+        model_id: str | None = None,
+        model_sha256: str | None = None,
         transcriptions: Mapping[tuple[bytes, str | None], str] | None = None,
     ) -> None:
         self._health_status = health_status
+        self._model_id = model_id
+        self._model_sha256 = model_sha256
         self._transcriptions = dict(transcriptions or {})
 
     def handle_frame(self, frame: bytes) -> bytes:
@@ -55,7 +61,11 @@ class InMemoryLocalAiProtocolFixture:
             return codec.encode_response(
                 request.request_id,
                 request.operation,
-                codec.HealthResponse(status=self._health_status),
+                codec.HealthResponse(
+                    status=self._health_status,
+                    model_id=self._model_id,
+                    model_sha256=self._model_sha256,
+                ),
             )
 
         payload = request.payload

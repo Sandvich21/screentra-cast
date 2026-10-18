@@ -28,6 +28,8 @@ MAX_OPERATION_BYTES: Final = 32
 MAX_LANGUAGE_BYTES: Final = 32
 MAX_TEXT_BYTES: Final = 16 * 1024
 MAX_ERROR_CODE_BYTES: Final = 32
+MAX_MODEL_ID_BYTES: Final = 64
+SHA256_HEX_BYTES: Final = 64
 
 MAX_REQUEST_ENVELOPE_FIELDS: Final = 5
 MAX_RESPONSE_ENVELOPE_FIELDS: Final = 7
@@ -42,6 +44,8 @@ _ALLOWED_ERROR_CODES = frozenset(
 )
 _REQUEST_ID_RE = re.compile(r'^[A-Za-z0-9._:-]+$')
 _LANGUAGE_RE = re.compile(r'^[A-Za-z0-9-]+$')
+_MODEL_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+_SHA256_RE = re.compile(r'^[0-9a-f]{64}$')
 
 
 class ProtocolError(ValueError):
@@ -72,6 +76,8 @@ class Request:
 @dataclass(frozen=True)
 class HealthResponse:
     status: str
+    model_id: str | None = None
+    model_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -263,6 +269,34 @@ def _validate_status(status: Any) -> str:
     return status
 
 
+def _validate_model_id(model_id: Any) -> str:
+    if not isinstance(model_id, str):
+        raise ProtocolError('model_id is invalid or exceeds its bound')
+    try:
+        size = len(model_id.encode('ascii'))
+    except UnicodeEncodeError as exc:
+        raise ProtocolError('model_id is invalid or exceeds its bound') from exc
+    if size > MAX_MODEL_ID_BYTES or _MODEL_ID_RE.fullmatch(model_id) is None:
+        raise ProtocolError('model_id is invalid or exceeds its bound')
+    return model_id
+
+
+def _validate_model_sha256(model_sha256: Any) -> str:
+    if not isinstance(model_sha256, str) or _SHA256_RE.fullmatch(model_sha256) is None:
+        raise ProtocolError('model_sha256 is not an exact lowercase SHA-256 digest')
+    return model_sha256
+
+
+def _validate_model_identity(
+    model_id: Any, model_sha256: Any
+) -> tuple[str | None, str | None]:
+    if (model_id is None) != (model_sha256 is None):
+        raise ProtocolError('model_id and model_sha256 must be declared together')
+    if model_id is None:
+        return None, None
+    return _validate_model_id(model_id), _validate_model_sha256(model_sha256)
+
+
 def _validate_error(error: Any) -> ErrorResponse:
     if not isinstance(error, dict) or set(error) != {'code'}:
         raise ProtocolError('error fields are not exactly allowlisted')
@@ -284,10 +318,16 @@ def _decode_response(envelope: dict[str, Any]) -> Response:
         if error is not None or not isinstance(result, dict):
             raise ProtocolError('successful response must contain only a result')
         if operation == 'health':
-            if set(result) != {'status'}:
+            if set(result) not in (
+                {'status'},
+                {'status', 'model_id', 'model_sha256'},
+            ):
                 raise ProtocolError('health result fields are not allowlisted')
+            model_id, model_sha256 = _validate_model_identity(
+                result.get('model_id'), result.get('model_sha256')
+            )
             typed_result: HealthResponse | TranscribeResponse = HealthResponse(
-                _validate_status(result['status'])
+                _validate_status(result['status']), model_id, model_sha256
             )
         else:
             if set(result) != {'text'}:
@@ -321,7 +361,12 @@ def encode_response(
         result = None
         ok = False
     elif isinstance(response, HealthResponse) and operation == 'health':
+        model_id, model_sha256 = _validate_model_identity(
+            response.model_id, response.model_sha256
+        )
         result = {'status': _validate_status(response.status)}
+        if model_id is not None:
+            result.update({'model_id': model_id, 'model_sha256': model_sha256})
         error = None
         ok = True
     elif isinstance(response, TranscribeResponse) and operation == 'transcribe':
@@ -356,8 +401,10 @@ __all__ = [
     'LOCAL_ONLY',
     'MAX_AUDIO_BYTES',
     'MAX_FRAME_BYTES',
+    'MAX_MODEL_ID_BYTES',
     'MAX_REQUEST_ID_BYTES',
     'PROTOCOL_VERSION',
+    'SHA256_HEX_BYTES',
     'ProtocolError',
     'TranscribeRequest',
     'TranscribeResponse',

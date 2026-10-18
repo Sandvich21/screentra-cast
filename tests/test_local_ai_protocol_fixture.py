@@ -31,6 +31,26 @@ class LocalAiProtocolFixtureTests(unittest.TestCase):
         self.assertEqual(response.result.status, 'degraded')
         self.assertTrue(response.local_only)
 
+    def test_health_identity_metadata_is_deterministic_protocol_evidence(self):
+        digest = 'd' * 64
+        fixture = InMemoryLocalAiProtocolFixture(
+            model_id='whisper-tiny', model_sha256=digest
+        )
+        request = codec.encode_request('health-identity-1', codec.HealthRequest())
+
+        response = codec.decode_response_frame(fixture.handle_frame(request))
+
+        self.assertEqual(response.result.status, 'ok')
+        self.assertEqual(response.result.model_id, 'whisper-tiny')
+        self.assertEqual(response.result.model_sha256, digest)
+
+    def test_fixture_health_identity_fields_must_be_paired(self):
+        fixture = InMemoryLocalAiProtocolFixture(model_id='whisper-tiny')
+        request = codec.encode_request('health-identity-2', codec.HealthRequest())
+
+        with self.assertRaises(codec.ProtocolError):
+            fixture.handle_frame(request)
+
     def test_transcription_is_deterministic_for_bounded_audio_and_language_only(self):
         fixture = InMemoryLocalAiProtocolFixture(
             transcriptions={(b'pcm-a', 'en-US'): 'fixed transcript'}
