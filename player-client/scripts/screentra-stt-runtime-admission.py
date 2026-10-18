@@ -44,6 +44,7 @@ _SECRET_RE: Final = re.compile(
 _REQUEST_FIELDS: Final = frozenset({
     'approval_record', 'preflight_evidence', 'model_staging_plan',
     'supervisor_plan', 'resource_policy_evidence', 'ipc_policy_evidence',
+    'rollback_policy_evidence',
 })
 _REQUIRED_REQUEST_FIELDS: Final = _REQUEST_FIELDS
 _PREFLIGHT_FIELDS: Final = frozenset({
@@ -442,6 +443,66 @@ def _validated_ipc_policy(
     return value
 
 
+def _rollback_policy_module() -> Any:
+    module_name = 'screentra_stt_rollback_policy_evidence'
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    module_path = Path(__file__).with_name('screentra-stt-rollback-policy-evidence.py')
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise _fail('runtime admission rollback policy is invalid')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise _fail('runtime admission rollback policy is invalid') from exc
+    return module
+
+
+def _validated_rollback_policy(value: Any, expected: dict[str, str]) -> Any:
+    """Accept only the immutable result produced by the rollback-policy validator."""
+    module = _rollback_policy_module()
+    if type(value) is not module.STTRollbackPolicyEvidence:
+        raise _fail('runtime admission rollback policy is invalid')
+    try:
+        raw = {
+            'service_id': value.service_id,
+            'activation_id': value.activation_id,
+            'service_version': value.service_version,
+            'retention_count': value.retention_count,
+            'rollback_artifact_verified': value.rollback_artifact_verified,
+            'rollback_identity_bound': value.rollback_identity_bound,
+            'atomic_swap_supported': value.atomic_swap_supported,
+            'state_preservation_supported': value.state_preservation_supported,
+            'cleanup_supported': value.cleanup_supported,
+            'policy_version': value.policy_version,
+        }
+        validated = module.validate_stt_rollback_policy_evidence(
+            raw,
+            expected_service_id=expected['service_id'],
+            expected_activation_id=expected['activation_id'],
+            expected_service_version=expected['service_version'],
+        )
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        raise _fail('runtime admission rollback policy is invalid') from exc
+    if validated != value:
+        raise _fail('runtime admission rollback policy is invalid')
+    if (
+        value.policy_valid is not True
+        or value.execution_enabled is not False
+        or value.runtime_activation_allowed is not False
+        or value.rollback_executed is not False
+        or value.process_started is not False
+        or value.state_changed is not False
+        or value.effect != 'metadata_only'
+    ):
+        raise _fail('runtime admission rollback policy is invalid')
+    return value
+
+
 def _approval_module() -> Any:
     module_name = 'screentra_stt_approval_record'
     module = sys.modules.get(module_name)
@@ -516,6 +577,9 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     resource_policy = _validated_resource_policy(
         request['resource_policy_evidence'], expected
     )
+    rollback_policy = _validated_rollback_policy(
+        request['rollback_policy_evidence'], expected
+    )
     try:
         _validate_preflight(request['preflight_evidence'], expected)
         _validate_model_plan(request['model_staging_plan'], expected)
@@ -529,6 +593,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     bounded_request['approval_record'] = approval.as_dict()
     bounded_request['resource_policy_evidence'] = resource_policy.as_dict()
     bounded_request['ipc_policy_evidence'] = ipc_policy.as_dict()
+    bounded_request['rollback_policy_evidence'] = rollback_policy.as_dict()
     _bounded_json(bounded_request, MAX_REQUEST_BYTES, 'runtime admission request is not bounded')
 
     all_gates_passed = all(gate.passed for gate in approval.gates)
@@ -543,6 +608,8 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'model_loaded': False,
         'resource_enforced': False,
         'ipc_enforced': False,
+        'rollback_executed': False,
+        'state_changed': False,
         'lifecycle_state_changed': False,
         'service_id': expected['service_id'],
         'service_version': expected['service_version'],
@@ -563,6 +630,10 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             ipc_policy.socket_name, ipc_policy.protocol_version,
             tuple(ipc_policy.allowed_operations),
         ),
+        'rollback_identity_tuple': (
+            rollback_policy.service_id, rollback_policy.service_version,
+            rollback_policy.activation_id,
+        ),
         'approval_gates': tuple(gate.name for gate in approval.gates),
         'evidence_composed': {
             'preflight': True,
@@ -571,6 +642,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             'approval_record': True,
             'resource_policy': True,
             'ipc_policy': True,
+            'rollback_policy': True,
         },
     }
 

@@ -10,6 +10,7 @@ MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-runtime-admission.py'
 APPROVAL_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-approval-record.py'
 RESOURCE_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-resource-policy-evidence.py'
 IPC_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-ipc-policy-evidence.py'
+ROLLBACK_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-rollback-policy-evidence.py'
 
 
 def load_approval_module():
@@ -57,10 +58,22 @@ def load_ipc_policy_module():
     return module
 
 
+def load_rollback_policy_module():
+    spec = importlib.util.spec_from_file_location(
+        'screentra_stt_rollback_policy_evidence', ROLLBACK_POLICY_MODULE_PATH
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 admission = load_module()
 approval = load_approval_module()
 resource_policy = load_resource_policy_module()
 ipc_policy = load_ipc_policy_module()
+rollback_policy = load_rollback_policy_module()
 
 
 SERVICE_ID = 'magic-mirror-stt'
@@ -70,6 +83,7 @@ SOCKET_NAME = 'magic-mirror-stt'
 HOST_ID = 'client-56'
 MODEL_ID = 'whisper-tiny.en'
 MODEL_SHA256 = 'a' * 64
+ROLLBACK_POLICY_VERSION = 'rollback-policy-v1'
 
 
 def valid_approval_record(**overrides):
@@ -231,6 +245,29 @@ def valid_ipc_policy(**overrides):
     )
 
 
+def valid_rollback_policy(**overrides):
+    value = {
+        'service_id': SERVICE_ID,
+        'activation_id': ACTIVATION_ID,
+        'service_version': SERVICE_VERSION,
+        'retention_count': 1,
+        'rollback_artifact_verified': True,
+        'rollback_identity_bound': True,
+        'atomic_swap_supported': True,
+        'state_preservation_supported': True,
+        'cleanup_supported': True,
+        'policy_version': ROLLBACK_POLICY_VERSION,
+    }
+    value.update(overrides)
+    return rollback_policy.validate_stt_rollback_policy_evidence(
+        value,
+        expected_service_id=SERVICE_ID,
+        expected_activation_id=ACTIVATION_ID,
+        expected_service_version=SERVICE_VERSION,
+        expected_policy_version=ROLLBACK_POLICY_VERSION,
+    )
+
+
 def valid_request(**overrides):
     value = {
         'approval_record': valid_approval_record(),
@@ -239,6 +276,7 @@ def valid_request(**overrides):
         'supervisor_plan': valid_supervisor(),
         'resource_policy_evidence': valid_resource_policy(),
         'ipc_policy_evidence': valid_ipc_policy(),
+        'rollback_policy_evidence': valid_rollback_policy(),
     }
     value.update(overrides)
     return value
@@ -402,6 +440,55 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
                 with self.assertRaises(module.RuntimeAdmissionError):
                     module.decide_runtime_admission(
                         valid_request(resource_policy_evidence=policy)
+                    )
+
+    def test_rollback_policy_is_composed_as_validated_inert_identity_bound_evidence(self):
+        module = self.require_module()
+
+        result = module.decide_runtime_admission(valid_request())
+
+        self.assertEqual(result['admission'], 'approved_for_future_review')
+        self.assertTrue(result['evidence_composed']['rollback_policy'])
+        self.assertEqual(
+            tuple(result['rollback_identity_tuple']),
+            (SERVICE_ID, SERVICE_VERSION, ACTIVATION_ID),
+        )
+        for field in (
+            'execution_enabled', 'runtime_activation_allowed', 'process_started',
+            'socket_bound', 'model_loaded', 'resource_enforced', 'ipc_enforced',
+            'rollback_executed', 'state_changed', 'lifecycle_state_changed',
+        ):
+            self.assertFalse(result[field], field)
+
+    def test_rollback_policy_requires_exact_validated_type_and_full_identity(self):
+        module = self.require_module()
+
+        for value in (
+            valid_rollback_policy().as_dict(),
+            {'service_id': SERVICE_ID},
+            None,
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(rollback_policy_evidence=value)
+                    )
+
+        for tampered in (
+            valid_rollback_policy(cleanup_supported=False),
+            dataclasses.replace(valid_rollback_policy(), policy_valid=False),
+            dataclasses.replace(valid_rollback_policy(), execution_enabled=True),
+            dataclasses.replace(valid_rollback_policy(), runtime_activation_allowed=True),
+            dataclasses.replace(valid_rollback_policy(), rollback_executed=True),
+            dataclasses.replace(valid_rollback_policy(), state_changed=True),
+            dataclasses.replace(valid_rollback_policy(), service_id='other-service'),
+            dataclasses.replace(valid_rollback_policy(), activation_id='other-activation'),
+            dataclasses.replace(valid_rollback_policy(), service_version='9.9.9'),
+        ):
+            with self.subTest(tampered=tampered):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(rollback_policy_evidence=tampered)
                     )
 
     def test_ipc_policy_is_composed_only_from_validated_immutable_metadata(self):
