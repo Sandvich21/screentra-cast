@@ -14,11 +14,20 @@ assert.match(playerSource, /capture_enabled === true/);
 assert.match(playerSource, /width: \{ ideal: 1280, max: 1280 \}/);
 assert.match(playerSource, /height: \{ ideal: 720, max: 720 \}/);
 assert.match(playerSource, /frameRate: \{ ideal: 30, max: 30 \}/);
+assert.match(playerSource, /grayscale\(1\)/);
+assert.match(playerSource, /sepia\(1\)/);
+assert.match(playerSource, /hue-rotate\(300deg\)/);
 assert.match(previewSource, /initCameraWidgets\(layout\.widgets\|\|\[\], stage\)/);
 assert.match(editorSource, /type: 'camera'/);
 assert.match(editorSource, /w\.type === 'camera'/);
+assert.match(editorSource, /filter: 'none'/);
+assert.match(editorSource, /data-prop="filter"/);
+assert.match(editorSource, /value="halloween"/);
 assert.match(cachedRendererSource, /t==='camera'/);
 assert.match(cachedRendererSource, /capture_enabled/);
+assert.match(cachedRendererSource, /grayscale\(1\)/);
+assert.match(cachedRendererSource, /sepia\(1\)/);
+assert.match(cachedRendererSource, /hue-rotate\(300deg\)/);
 
 const context = {
   console,
@@ -46,6 +55,19 @@ assert.match(placeholder, /data-camera-widget-id="camera-1"/);
 assert.match(placeholder, /Camera preview/);
 assert.match(placeholder, /capture disabled/);
 assert.doesNotMatch(placeholder, /<video/);
+assert.doesNotMatch(placeholder, /data-camera-filter-overlay/);
+
+const cameraMarkup = (filter) => context.buildWidgetHTML({
+  ...widget,
+  props: { capture_enabled: true, filter },
+});
+assert.match(cameraMarkup('none'), /filter:none/);
+assert.match(cameraMarkup('grayscale'), /filter:grayscale\(1\)/);
+assert.match(cameraMarkup('sepia'), /filter:sepia\(1\)/);
+assert.match(cameraMarkup('halloween'), /filter:saturate\(1\.35\) contrast\(1\.15\) hue-rotate\(300deg\)/);
+assert.match(cameraMarkup('halloween'), /data-camera-filter-overlay="halloween"/);
+assert.match(cameraMarkup('not-css'), /filter:none/);
+assert.doesNotMatch(cameraMarkup('not-css'), /not-css/);
 
 let captureCalls = 0;
 const videoNode = {

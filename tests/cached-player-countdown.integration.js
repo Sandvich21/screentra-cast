@@ -107,6 +107,28 @@ async function checkCachedPlayer(file) {
   assert.strictEqual(videoNode.src, 'two.mp4', `${file}: cached video did not advance`);
   videoNode.onended();
   assert.strictEqual(videoNode.src, 'one.mp4', `${file}: cached video did not loop`);
+
+  const cameraMarkup = await context.renderWidget({
+    id: 'camera-1',
+    widget_type: 'camera',
+    props: { capture_enabled: true, filter: 'halloween' },
+  });
+  assert.match(cameraMarkup, /filter:saturate\(1\.35\) contrast\(1\.15\) hue-rotate\(300deg\)/, `${file}: halloween filter missing`);
+  assert.match(cameraMarkup, /data-camera-filter-overlay="halloween"/, `${file}: halloween overlay missing`);
+  const cameraPlaceholder = await context.renderWidget({
+    id: 'camera-placeholder',
+    widget_type: 'camera',
+    props: { capture_enabled: false, filter: 'halloween' },
+  });
+  assert.doesNotMatch(cameraPlaceholder, /<video/, `${file}: disabled camera created video`);
+  assert.doesNotMatch(cameraPlaceholder, /data-camera-filter-overlay/, `${file}: disabled camera created overlay`);
+  const untrustedFilter = await context.renderWidget({
+    id: 'camera-invalid',
+    widget_type: 'camera',
+    props: { capture_enabled: true, filter: 'url(javascript:bad)' },
+  });
+  assert.match(untrustedFilter, /filter:none/, `${file}: invalid camera filter was not rejected`);
+  assert.doesNotMatch(untrustedFilter, /javascript:bad/, `${file}: arbitrary camera CSS reached markup`);
 }
 
 (async () => {

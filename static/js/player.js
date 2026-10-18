@@ -1008,8 +1008,11 @@ function buildWidgetHTML(w) {
     }
   } else if (w.widget_type === 'camera') {
     var cameraCaptureEnabled = p.capture_enabled === true;
+    var cameraFilter = ripleyCameraFilterName(p.filter);
+    var cameraFilterCss = ripleyCameraFilterCss(cameraFilter);
+    var cameraFilterOverlay = ripleyCameraFilterOverlay(cameraFilter, w.id);
     if (cameraCaptureEnabled) {
-      html += '<div style="width:100%;height:100%;position:relative;background:#111827;overflow:hidden;display:flex;align-items:center;justify-content:center;"><video data-camera-widget-id="' + ripleyTplEsc(w.id) + '" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;background:#111827;"></video><span data-camera-status="' + ripleyTplEsc(w.id) + '" style="position:absolute;left:.5rem;bottom:.5rem;padding:.25rem .45rem;border-radius:.35rem;background:rgba(15,23,42,.8);color:#cbd5e1;font:600 12px system-ui,sans-serif;">Starting local camera…</span></div>';
+      html += '<div style="width:100%;height:100%;position:relative;background:#111827;overflow:hidden;display:flex;align-items:center;justify-content:center;"><video data-camera-widget-id="' + ripleyTplEsc(w.id) + '" data-camera-filter="' + cameraFilter + '" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;background:#111827;filter:' + cameraFilterCss + ';"></video>' + cameraFilterOverlay + '<span data-camera-status="' + ripleyTplEsc(w.id) + '" style="position:absolute;left:.5rem;bottom:.5rem;padding:.25rem .45rem;border-radius:.35rem;background:rgba(15,23,42,.8);color:#cbd5e1;font:600 12px system-ui,sans-serif;">Starting local camera…</span></div>';
     } else {
       html += '<div data-camera-widget-id="' + ripleyTplEsc(w.id) + '" data-camera-placeholder="' + ripleyTplEsc(w.id) + '" style="width:100%;height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.4rem;background:#111827;border:1px dashed #64748b;color:#cbd5e1;font:600 clamp(12px,2cqw,22px) system-ui,sans-serif;text-align:center;"><div>📷 Camera preview</div><small style="color:#94a3b8;font-size:.7em;">capture disabled</small></div>';
     }
@@ -1310,6 +1313,24 @@ function initImageWidgets(widgets, root) {
   });
 }
 function shuffleImagePlaylist(arr) { var a = arr.slice(); for (var i=a.length-1;i>0;i--) { var j=Math.floor(Math.random()*(i+1)), t=a[i]; a[i]=a[j]; a[j]=t; } return a; }
+
+// Camera filters are a closed, renderer-owned vocabulary. The selected
+// value never becomes CSS; it is mapped to one of these fixed effects.
+function ripleyCameraFilterName(value) {
+  return ['none', 'grayscale', 'sepia', 'halloween'].indexOf(value) >= 0 ? value : 'none';
+}
+function ripleyCameraFilterCss(value) {
+  return ({
+    none: 'none',
+    grayscale: 'grayscale(1)',
+    sepia: 'sepia(1)',
+    halloween: 'saturate(1.35) contrast(1.15) hue-rotate(300deg)',
+  })[ripleyCameraFilterName(value)];
+}
+function ripleyCameraFilterOverlay(value, id) {
+  if (ripleyCameraFilterName(value) !== 'halloween') return '';
+  return '<span data-camera-filter-overlay="halloween" data-camera-filter-overlay-id="' + ripleyTplEsc(id) + '" aria-hidden="true" style="position:absolute;inset:0;pointer-events:none;background:linear-gradient(135deg,rgba(249,115,22,.34),rgba(88,28,135,.42));mix-blend-mode:screen;opacity:.8;"></span>';
+}
 
 // Camera capture is deliberately browser-local and disabled unless the
 // persisted widget explicitly opts in. No frame is serialized or uploaded.

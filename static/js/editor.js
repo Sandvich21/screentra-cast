@@ -1933,7 +1933,7 @@ const Editor = {
     if (type === 'text') return { ...base, w: 40, h: 15, props: { content: 'text widget', font_size: 18, color: '#ffffff', font_family: 'sans-serif' } };
     if (type === 'image') return { ...base, w: 40, h: 30, props: { url: '', playlist: [], loop: true, shuffle: false, slide_duration: 10, alt: 'Image', fit: 'cover', radius: 0, radius_tl: 0, radius_tr: 0, radius_br: 0, radius_bl: 0 } };
     if (type === 'video') return { ...base, w: 50, h: 30, props: { url: '', playlist: [], loop: true, shuffle: false, muted: false, fit: 'cover' } };
-    if (type === 'camera') return { ...base, w: 40, h: 30, props: { capture_enabled: false, facing_mode: 'environment' } };
+    if (type === 'camera') return { ...base, w: 40, h: 30, props: { capture_enabled: false, facing_mode: 'environment', filter: 'none' } };
     if (type === 'clock') return { ...base, w: 20, h: 12, props: { format: 'HH:mm', font_size: 36, color: '#ffffff' } };
     if (type === 'date') return { ...base, w: 25, h: 10, props: { format: 'dddd, MMMM D', font_size: 24 } };
     if (type === 'weather') {
@@ -2447,6 +2447,7 @@ const Editor = {
       defaultsHtml = `
         <div class="prop-group"><label><input type="checkbox" data-prop="capture_enabled" ${p.capture_enabled === true ? 'checked' : ''}> Enable local browser camera</label><small class="tpl-field-help" style="display:block;margin-top:.35rem;color:#888;">Off by default. When enabled, the browser requests local camera access; frames stay in this browser and are never uploaded.</small></div>
         <div class="prop-group"><label>Facing</label><select data-prop="facing_mode" class="select" style="width:100%;"><option value="environment" ${(p.facing_mode || 'environment') === 'environment' ? 'selected' : ''}>Back / environment</option><option value="user" ${p.facing_mode === 'user' ? 'selected' : ''}>Front / user</option></select></div>
+        <div class="prop-group"><label>Camera filter</label><select data-prop="filter" class="select" style="width:100%;"><option value="none" ${(p.filter || 'none') === 'none' ? 'selected' : ''}>None</option><option value="grayscale" ${p.filter === 'grayscale' ? 'selected' : ''}>Grayscale</option><option value="sepia" ${p.filter === 'sepia' ? 'selected' : ''}>Sepia</option><option value="halloween" ${p.filter === 'halloween' ? 'selected' : ''}>Halloween</option></select><small class="tpl-field-help" style="display:block;margin-top:.35rem;color:#888;">Fixed local effect only; no custom CSS.</small></div>
       `;
     } else if (w.type === 'clock') {
       defaultsHtml = `

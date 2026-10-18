@@ -2891,6 +2891,12 @@ MAX_REQUEST_BODY_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
 
 
+def client_pairing_code(client_id):
+    """Return the short physical-confirmation code for a client ID."""
+    digest = hashlib.sha256(b'screentra-cast-pairing-v1\0' + str(client_id).encode('utf-8')).digest()
+    return f'{int.from_bytes(digest[:4], "big") % 1_000_000:06d}'
+
+
 def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
@@ -3228,7 +3234,7 @@ def _write_display_count(max_displays) -> dict:
     pending.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(pending, json.dumps({'action':'set_display_count','payload':{'max_displays': override},'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
     _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service'], timeout=6)
-    actor = _safe_run(['systemctl', '--user', 'start', 'ripley-player-actor.service'], timeout=6)
+    actor = _safe_run(['systemctl', '--user', 'start', 'screentra-client-actor.service'], timeout=6)
     gov = _load_display_governance()
     return {'ok': True, 'max_displays': override, 'active_max_displays': gov['active_max_displays'], 'installer_detected_max_displays': installer, 'actor_start': actor}
 
@@ -3316,7 +3322,7 @@ def _write_touch_binding(payload: dict) -> dict:
     pending.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(pending, json.dumps({'action':'set_touch_binding','payload': binding,'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
     _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service'], timeout=6)
-    actor = _safe_run(['systemctl', '--user', 'start', 'ripley-player-actor.service'], timeout=6)
+    actor = _safe_run(['systemctl', '--user', 'start', 'screentra-client-actor.service'], timeout=6)
     return {'ok': True, 'touch_binding': binding, 'actor_start': actor}
 
 def _service_state(name: str) -> dict:
@@ -3390,7 +3396,7 @@ def _admin_logs(target: str) -> dict:
     cache = install / 'cache'
     targets = {
         'heartbeat': lambda: _journal_tail('screentra-client-heartbeat.service'),
-        'actor': lambda: _journal_tail('ripley-player-actor.service'),
+        'actor': lambda: _journal_tail('screentra-client-actor.service'),
         'renderer0': lambda: _journal_tail('screentra-client-renderer@0.service'),
         'kiosk0': lambda: _journal_tail('screentra-cast-kiosk-kiosk@0.service', system=True),
         'launcher': lambda: _read_tail(state / 'kiosk-launcher.log'),
@@ -3454,7 +3460,7 @@ def _refresh_ca_from_server() -> dict:
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(out.suffix + '.tmp'); tmp.write_bytes(data); os.chmod(tmp, 0o644); tmp.replace(out)
         verify = _cert_info().get('verify')
-        restart = _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service', 'ripley-player-actor.service'], timeout=8)
+        restart = _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service', 'screentra-client-actor.service'], timeout=8)
         return {'ok': True, 'url': url, 'ca_path': str(out), 'bytes': len(data), 'sha256': _sha256_file(out), 'verify': verify, 'restart': restart}
     except Exception as e:
         return {'ok': False, 'error': str(e), 'url': url}
@@ -3677,7 +3683,7 @@ def _admin_status() -> dict:
     labwc = _safe_run(['pgrep', '-af', '^labwc'], timeout=2)
     services = [_system_service_state('screentra-client-heartbeat.service'), _system_service_state('screentra-client-actor.service'), _system_service_state('screentra-client-admin.service'), _system_service_state('screentra-cast-kiosk@0.service'), _system_service_state('screentra-cast-kiosk@1.service')]
     for svc in services:
-        if svc.get('name') == 'ripley-player-actor.service' and svc.get('active') == 'inactive' and svc.get('enabled') == 'enabled':
+        if svc.get('name') == 'screentra-client-actor.service' and svc.get('active') == 'inactive' and svc.get('enabled') == 'enabled':
             svc['active'] = 'ready'
             svc['active_ok'] = True
             svc['note'] = 'one-shot command actor; inactive means no pending command'
@@ -3875,6 +3881,10 @@ async function loadWeather(p){const lat=Number(p.lat||0),lon=Number(p.lon||0);if
 function countdownFontSize(p){return Math.max(8,Math.min(160,Number(p.font_size||p.fontSize||48)||48))*2;}
 function countdownText(node,now){const get=(name)=>node.getAttribute?node.getAttribute(name):(node.dataset||{})[name.slice(5).split('-').map((part,i)=>i?part[0].toUpperCase()+part.slice(1):part).join('')]||'',mode=get('data-countdown-mode')||'date',unit=get('data-countdown-duration-unit')||'minutes',value=Math.max(1,Number(get('data-countdown-duration-value'))||1),started=Number(get('data-countdown-started-at'))||now,target=mode==='duration'?started+value*({seconds:1000,minutes:60000,hours:3600000,days:86400000}[unit]||60000):new Date(get('data-countdown-target-date')||'').getTime(),diff=Math.max(0,target-now),expiry=get('data-countdown-expiry-text')||'Time\u2019s up!';if(!Number.isFinite(target)||target<=0)return get('data-countdown-invalid-text')||'Choose a date and time';if(diff<=0)return expiry;const d=Math.floor(diff/86400000),h=Math.floor(diff%86400000/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000);return d?d+'d '+h+'h':h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s';}
 function tickCountdowns(){const now=Date.now();document.querySelectorAll('[data-countdown-widget]').forEach(node=>{const value=node.querySelector('.countdown-value');if(value)value.textContent=countdownText(node,now);});}
+function cachedCameraFilterName(value){return ['none','grayscale','sepia','halloween'].includes(value)?value:'none';}
+function cachedCameraFilterCss(value){return ({none:'none',grayscale:'grayscale(1)',sepia:'sepia(1)',halloween:'saturate(1.35) contrast(1.15) hue-rotate(300deg)'})[cachedCameraFilterName(value)];}
+function cachedCameraFilterOverlay(value,id){return cachedCameraFilterName(value)==='halloween'?`<span data-camera-filter-overlay="halloween" data-camera-filter-overlay-id="${esc(id||'')}" aria-hidden="true" style="position:absolute;inset:0;pointer-events:none;background:linear-gradient(135deg,rgba(249,115,22,.34),rgba(88,28,135,.42));mix-blend-mode:screen;opacity:.8;"></span>`:'';}
+function initCachedCameraWidgets(widgets){const nodes=document.querySelectorAll('[data-camera-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-camera-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget);if(!p||p.capture_enabled!==true||!navigator.mediaDevices||typeof navigator.mediaDevices.getUserMedia!=='function'||node.tagName!=='VIDEO')return;const facing=['user','environment','left','right'].includes(p.facing_mode)?p.facing_mode:'environment';const constraints={video:{facingMode:{ideal:facing},width:{ideal:1280,max:1280},height:{ideal:720,max:720},frameRate:{ideal:30,max:30}},audio:false};node.muted=true;node.autoplay=true;node.playsInline=true;navigator.mediaDevices.getUserMedia(constraints).then(stream=>{node.srcObject=stream;const result=typeof node.play==='function'?node.play():null;if(result&&typeof result.catch==='function')result.catch(()=>{});}).catch(()=>{});});}
 function initCachedVideoWidgets(widgets){const nodes=document.querySelectorAll('[data-video-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-video-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget),list=p&&Array.isArray(p.playlist)?p.playlist:[];if(!list.length)return;let index=0;const advance=()=>{index=(index+1)%list.length;node.src=String(list[index].url||'');if(typeof node.load==='function')node.load();const result=typeof node.play==='function'?node.play():null;if(result&&typeof result.catch==='function')result.catch(()=>{});};node.src=String(list[0].url||'');node.loop=list.length===1&&p.loop!==false;node.onended=list.length>1?advance:null;node.onerror=list.length>1?advance:null;});}
 async function renderWidget(w){const p=props(w),t=normWidgetType(w);if(t==='weather')await loadWeather(p);let inner='';
  if(t==='weather'&&Array.isArray(p.template_elements)&&p.template_elements.length) inner=templateHtml(w);
@@ -3882,6 +3892,7 @@ async function renderWidget(w){const p=props(w),t=normWidgetType(w);if(t==='weat
  else if(t==='countdown') { const target=p.countdown_mode==='duration' ? Date.now() + Math.max(1,Number(p.duration_value||1))*({seconds:1000,minutes:60000,hours:3600000,days:86400000}[p.duration_unit||'minutes']||60000) : new Date(p.targetDate||'').getTime(); const diff=Math.max(0,target-Date.now()); const d=Math.floor(diff/86400000),h=Math.floor(diff%86400000/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000); const text=Number.isFinite(target)&&target>0?(d?d+'d '+h+'h':h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s'):(p.expiry_text||'Choose a date and time'); inner=`<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;padding:1rem;color:${p.color||'#fff'};font-size:${countdownFontSize(p)}px;font-weight:800;line-height:1;text-align:center;overflow:hidden;white-space:nowrap;">${esc(text)}</div>`; }
  else if(t==='video') { const list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url?[{url:p.url}]:[]),u=String((list[0]||{}).url||''); const fit=['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'; inner=`<video data-video-widget-id="${esc(w.id||'')}" src="${esc(u)}" autoplay playsinline preload="auto" ${p.loop !== false && list.length === 1 ? 'loop' : ''} ${p.muted||p.mute?'muted':''} style="width:100%;height:100%;object-fit:${fit};background:#000;"></video>`;}
  else if(t==='image') inner=`<img src="${esc(p.url||p.src||'')}" style="width:100%;height:100%;object-fit:${p.fit||'cover'};">`;
+ else if(t==='camera') { const cameraFilter=cachedCameraFilterName(p.filter); const facing=['user','environment','left','right'].includes(p.facing_mode)?p.facing_mode:'environment'; if(p.capture_enabled===true) inner=`<div style="position:relative;width:100%;height:100%;background:#020617;color:#cbd5e1;"><video data-camera-widget-id="${esc(w.id||'')}" data-camera-filter="${cameraFilter}" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;background:#020617;filter:${cachedCameraFilterCss(cameraFilter)};"></video>${cachedCameraFilterOverlay(cameraFilter,w.id)}<span style="position:absolute;left:.5rem;bottom:.5rem;padding:.2rem .45rem;border-radius:.25rem;background:rgba(2,6,23,.75);font:600 12px system-ui;">Camera · ${esc(facing)}</span></div>`; else inner=`<div data-camera-widget-id="${esc(w.id||'')}" style="width:100%;height:100%;display:grid;place-items:center;border:1px dashed #334155;background:#020617;color:#94a3b8;font:600 14px system-ui;text-align:center;">📷 Camera preview<br><small style="font-weight:400;">capture disabled</small></div>`;}
  else if(t==='video') { const list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url?[{url:p.url}]:[]), u=String((list[0]||{}).url||''); if(isYouTubeUrl(u)){ inner=`<iframe src="${esc(youtubeEmbedUrl(u,Object.assign({},p,{muted:true})))}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:0;background:#000;"></iframe>`; } else { const fit=['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'; inner=`<video src="${esc(u)}" autoplay playsinline preload="auto" ${p.loop !== false && list.length === 1 ? 'loop' : ''} ${p.muted||p.mute?'muted':''} style="width:100%;height:100%;object-fit:${fit};background:#000;"></video>`; } }
  else if(t==='clock') inner=`<div class="clock" data-clock style="color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||48)*2}px"></div>`;
  else if(t==='datetime'||t==='date') inner=`<div class="date" data-date style="color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||36)*2}px"></div>`;
@@ -3894,7 +3905,7 @@ async function renderWidget(w){const p=props(w),t=normWidgetType(w);if(t==='weat
  return `<div class="widget" style="${styleFor(w)}">${inner}</div>`;}
 function tickClocks(){const now=new Date();document.querySelectorAll('[data-clock]').forEach(e=>e.textContent=now.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}));document.querySelectorAll('[data-date]').forEach(e=>e.textContent=now.toLocaleDateString());tickCountdowns();}
 function applyOrientation(value){const v=String(value||'normal');document.body.dataset.orientation=['normal','flipped','rotated_left','rotated_right'].includes(v)?v:'normal';}
-async function loadLayout(){try{const r=await fetch('/assigned-layout.json?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('no assigned layout');const txt=await r.text();try{const c=await fetch('/api/client-config.json?ts='+Date.now(),{cache:'no-store'});if(c.ok)applyOrientation((await c.json()).orientation);}catch(_e){}if(txt===currentHash)return;currentHash=txt;const layout=JSON.parse(txt);const ws=(layout.widgets||[]).slice().sort((a,b)=>(a.z||0)-(b.z||0));const rendered=await Promise.all(ws.map(renderWidget));document.getElementById('player').innerHTML=rendered.join('')||'<div class="fallback"><div><strong>Empty Layout</strong></div></div>';tickClocks();initCachedVideoWidgets(ws);}catch(e){if(!currentHash)document.getElementById('player').innerHTML='<div class="fallback"><div><strong>Waiting for cached assigned layout</strong><span>'+esc(e.message)+'</span></div></div>';}}
+async function loadLayout(){try{const r=await fetch('/assigned-layout.json?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('no assigned layout');const txt=await r.text();try{const c=await fetch('/api/client-config.json?ts='+Date.now(),{cache:'no-store'});if(c.ok)applyOrientation((await c.json()).orientation);}catch(_e){}if(txt===currentHash)return;currentHash=txt;const layout=JSON.parse(txt);const ws=(layout.widgets||[]).slice().sort((a,b)=>(a.z||0)-(b.z||0));const rendered=await Promise.all(ws.map(renderWidget));document.getElementById('player').innerHTML=rendered.join('')||'<div class="fallback"><div><strong>Empty Layout</strong></div></div>';tickClocks();initCachedVideoWidgets(ws);initCachedCameraWidgets(ws);}catch(e){if(!currentHash)document.getElementById('player').innerHTML='<div class="fallback"><div><strong>Waiting for cached assigned layout</strong><span>'+esc(e.message)+'</span></div></div>';}}
 setInterval(tickClocks,1000);setInterval(loadLayout,5000);setInterval(()=>{currentHash='';loadLayout().catch(()=>{});},15*60*1000);loadLayout();
 
 // === Cursor auto-hide (3.5s default, configurable via /api/cursor-config.json) ===
@@ -4178,7 +4189,7 @@ class Handler(BaseHTTPRequestHandler):
             result = _create_client_software_backup()
             return self.send_text(200 if result.get('ok') else 500, json.dumps(result), 'application/json')
         if path == '/api/admin/services/restart':
-            r = _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service', 'ripley-player-actor.service'], timeout=8)
+            r = _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service', 'screentra-client-actor.service'], timeout=8)
             return self.send_text(200, json.dumps({'ok': r.get('ok'), 'restart': r}), 'application/json')
         # GET /api/client-config.json — current cached config (heartbeat's view of server state)
         if path == '/api/client-config.json':
