@@ -14,6 +14,7 @@ assert spec.loader is not None
 sys.modules[spec.name] = codec
 spec.loader.exec_module(codec)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from local_ai_protocol_fixture import InMemoryLocalAiProtocolFixture
 
 
