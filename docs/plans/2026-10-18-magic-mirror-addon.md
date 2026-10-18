@@ -6,6 +6,10 @@ Deliver a bounded Magic Mirror add-on for a designated test client first, with l
 
 The first target is client `11.1.1.56`; the server remains `.25`. No fleet rollout is included until the test client passes.
 
+## Implementation status (2026-10-18)
+
+The metadata-only trusted add-on lane now reports bounded client capabilities and service health, carries inert client-service status/rollback requests through the existing closed command path, and includes a built-in Camera widget with opt-in browser-local capture plus fixed local filters (`none`, `grayscale`, `sepia`, `halloween`). The actual client supervisor, speech-to-text service, model staging, camera hardware verification, and filter inference remain deferred and execution-disabled.
+
 ## Product scope
 
 ### Client-side AI service
