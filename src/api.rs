@@ -1280,6 +1280,10 @@ pub fn router(runtime_state: RuntimeState) -> Router {
                 .layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
         )
         .route(
+            "/api/addons/package/{id}/rollback",
+            post(rollback_signed_client_package_handler),
+        )
+        .route(
             "/api/addons/trusted-service/stage",
             post(stage_trusted_service_manifest).layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
@@ -2452,6 +2456,16 @@ async fn update_addon_package(
     multipart: Multipart,
 ) -> Result<(StatusCode, AxumJson<AddonRecord>), (StatusCode, String)> {
     upload_addon_package_with_mode(multipart, true).await
+}
+
+async fn rollback_signed_client_package_handler(
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    Path(id): Path<String>,
+) -> Result<AxumJson<AddonRecord>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    crate::addons::rollback_signed_client_package(&id)
+        .map(AxumJson)
+        .map_err(addon_error_response)
 }
 
 async fn upload_addon_package_with_mode(
@@ -10660,6 +10674,166 @@ mod signed_client_package_http_tests {
         let status = response.status();
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    fn rollback_request(id: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/addons/package/{id}/rollback"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    async fn send_rollback(app: &Router, id: &str) -> (StatusCode, String) {
+        let response = app.clone().oneshot(rollback_request(id)).await.unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    fn rollback_app(role: &str) -> Router {
+        Router::new()
+            .route(
+                "/api/addons/package",
+                post(upload_addon_package).put(update_addon_package),
+            )
+            .route(
+                "/api/addons/package/{id}/rollback",
+                post(rollback_signed_client_package_handler),
+            )
+            .layer(Extension(crate::middleware::AuthenticatedPrincipal {
+                username: "test-user".to_string(),
+                role: role.to_string(),
+            }))
+    }
+
+    #[tokio::test]
+    async fn signed_client_package_http_rollback_is_inert_and_preserves_state() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let (fixture, private_key) = setup_fixture();
+        let old_payload = b"window.ScreentraAddon = { version: '0.1.0' };\\n";
+        let new_payload = b"window.ScreentraAddon = { version: '0.2.0' };\\n";
+        let app = rollback_app("admin");
+
+        let install = package(
+            &fixture.root,
+            &private_key,
+            "example.weather",
+            "0.1.0",
+            old_payload,
+            old_payload,
+        );
+        let (status, body) = send(&app, "POST", &install).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        crate::addons::set_enabled("example.weather", false).unwrap();
+
+        let update = package(
+            &fixture.root,
+            &private_key,
+            "example.weather",
+            "0.2.0",
+            new_payload,
+            new_payload,
+        );
+        let (status, body) = send(&app, "PUT", &update).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!serde_json::from_str::<AddonRecord>(&body).unwrap().enabled);
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
+
+        let (status, body) = send_rollback(&app, "example.weather").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let restored: AddonRecord = serde_json::from_str(&body).unwrap();
+        assert_eq!(restored.manifest.version, "0.1.0");
+        assert!(!restored.enabled);
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), old_payload);
+        assert!(!fixture.root.join("javascript-executed").exists());
+        assert!(!fixture.root.join("process-executed").exists());
+    }
+
+    #[tokio::test]
+    async fn signed_client_package_http_rollback_rejects_tampered_or_missing_backup() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let (fixture, private_key) = setup_fixture();
+        let app = rollback_app("admin");
+        let old_payload = b"window.ScreentraAddon = { version: '0.1.0' };\\n";
+        let new_payload = b"window.ScreentraAddon = { version: '0.2.0' };\\n";
+        let install = package(
+            &fixture.root,
+            &private_key,
+            "example.weather",
+            "0.1.0",
+            old_payload,
+            old_payload,
+        );
+        let (status, body) = send(&app, "POST", &install).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        crate::addons::set_enabled("example.weather", false).unwrap();
+        let update = package(
+            &fixture.root,
+            &private_key,
+            "example.weather",
+            "0.2.0",
+            new_payload,
+            new_payload,
+        );
+        let (status, body) = send(&app, "PUT", &update).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let rollback_dir = fixture
+            .addon_dir
+            .parent()
+            .unwrap()
+            .join(".rollback")
+            .join("example.weather");
+        let manifest_path = rollback_dir.join("manifest.json");
+        let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["name"] = serde_json::Value::String("tampered rollback".to_string());
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let (status, _) = send_rollback(&app, "example.weather").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
+
+        fs::remove_dir_all(&rollback_dir).unwrap();
+        let (status, _) = send_rollback(&app, "example.weather").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
+    }
+
+    #[tokio::test]
+    async fn signed_client_package_http_rollback_rejects_bad_identity_and_non_admin() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let (fixture, private_key) = setup_fixture();
+        let admin_app = rollback_app("admin");
+        let old_payload = b"window.ScreentraAddon = { version: '0.1.0' };\\n";
+        let install = package(
+            &fixture.root,
+            &private_key,
+            "example.weather",
+            "0.1.0",
+            old_payload,
+            old_payload,
+        );
+        let (status, body) = send(&admin_app, "POST", &install).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let (status, _) = send_rollback(&admin_app, "bad%20identity").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = send_rollback(&admin_app, "%2e%2e%2fexample.weather").await;
+        assert!(matches!(status, StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND));
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), old_payload);
+
+        let operator_app = rollback_app("operator");
+        let (status, _) = send_rollback(&operator_app, "example.weather").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), old_payload);
     }
 
     #[tokio::test]
