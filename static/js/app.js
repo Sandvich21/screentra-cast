@@ -5438,6 +5438,7 @@ ${_cmds.oneLiner}`;
           <div style="display:flex;gap:0.4rem;flex-wrap:wrap;margin-bottom:0.5rem;">
             <button class="btn btn-sm btn-secondary client-detail-display-power" data-state="on" title="Compositor DPMS: wake selected display">Wake (Display)</button>
             <button class="btn btn-sm btn-secondary client-detail-ddc" data-vcp="D6" data-val="1" title="DDC/CI: wake display from sleep">Power On (DDC)</button>
+            <button class="btn btn-sm btn-secondary client-detail-ddc" data-vcp="D6" data-val="2" title="DDC/CI: request standby (may be unsupported by some displays)">Standby (DDC)</button>
             <button class="btn btn-sm btn-secondary client-detail-display-power" data-state="off" title="Compositor DPMS: put selected display into standby">Standby (Display)</button>
             <button class="btn btn-sm btn-secondary client-detail-cec" data-cmd="pow 0" title="CEC: send power-on to TV">CEC On</button>
             <button class="btn btn-sm btn-secondary client-detail-cec" data-cmd="standby 0" title="CEC: send standby to TV">CEC Off</button>
