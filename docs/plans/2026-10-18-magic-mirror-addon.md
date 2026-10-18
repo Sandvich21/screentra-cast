@@ -10,6 +10,18 @@ The first target is client `11.1.1.56`; the server remains `.25`. No fleet rollo
 
 The metadata-only trusted add-on lane now reports bounded client capabilities and service health, carries inert client-service status/rollback and push-to-talk transcription requests through the existing closed command path, and includes a dashboard surface for authenticated queued status and rollback-assessment requests. It also includes a built-in Camera widget with opt-in browser-local capture plus fixed local filters (`none`, `grayscale`, `sepia`, `halloween`). A bounded local-only AI IPC codec now defines future `health`/`transcribe` frames without opening a listener or running inference. A test-only in-memory local AI protocol fixture now decodes complete requests through that typed codec and returns deterministic bounded health, transcription, and error frames; its focused protocol tests are fixture evidence only, not service execution or runtime-readiness evidence. A contract-only Magic Mirror local STT client-extension manifest fixture now covers signed metadata shape, microphone/local-inference/client-service capabilities, digest-pinned bounded service metadata, and declarative rejection. A read-only local model identity/integrity helper now validates bounded model IDs, exact lowercase SHA-256 digests, approved-root containment, regular non-symlink files, and bounded hashing; it does not stage, download, execute, or activate a model. A pure client-service lifecycle contract now validates bounded identity/version metadata and the closed state graph, including explicit rollback-ready metadata; its tests are contract evidence only and do not provide runtime or process-execution evidence. The local AI health response may also carry a paired, bounded model ID and exact lowercase SHA-256 digest; this is protocol identity metadata only and does not prove a model is staged, loaded, or running. A pure health-observation binding helper now checks decoded or serialized observations against the expected service/version/activation tuple and optional model identity, returning metadata-only evidence rather than runtime health. The actual client supervisor, speech-to-text service, model staging, camera hardware verification, and filter inference remain deferred and execution-disabled.
 
+### Capability policy/admission evidence
+
+The pure client capability-admission helper is contract evidence for a future
+capability broker, not permission activation. It validates bounded client and
+add-on identities, the closed unique capability set, dependency rules, and an
+explicit administrator policy whose approved set is empty by default. A
+metadata-only admission result can admit only a requested subset of that
+policy and always reports `execution_enabled: false`. Admission does not claim
+camera or microphone permission, local inference, a running client service, or
+any other hardware or process activation; those require a separate reviewed
+runtime/permission gate.
+
 ## Product scope
 
 ### Client-side AI service
@@ -48,6 +60,7 @@ Start with face detection/landmarks plus deterministic overlays. Do not make a g
 - Declarative manifests may describe the widget and its defaults but cannot execute code.
 - The Magic Mirror client package must be signed, versioned, digest-checked, and explicitly targeted to a client capability profile.
 - Camera and microphone are separate capabilities and default to disabled until an administrator enables them for a client.
+- Capability policy approval/admission is evidence of an allowed declaration only; it does not activate camera or microphone permission, local inference, or a client service runtime.
 - The server sends data-only configuration and named commands; it never sends shell text or arbitrary container arguments.
 - The client agent validates every command again and returns structured results.
 - The AI service receives only the local audio stream through a bounded IPC path; it receives no server credentials, database paths, or unrestricted host filesystem.
