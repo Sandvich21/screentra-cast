@@ -51,8 +51,10 @@ or exposed by the current release.
 A client status report may also include bounded service observations. Service
 states are report-only and currently include `staged`, `starting`, `running`,
 `degraded`, `stopped`, `failed`, and `rollback_ready`; they do not start or
-stop anything. Restart counts and diagnostic details are bounded, and duplicate
-service IDs are rejected.
+stop anything. The pure client-service lifecycle module and its focused tests
+validate only bounded metadata and explicit state transitions; they are contract
+evidence, not runtime or process-execution evidence. Restart counts and diagnostic
+details are bounded, and duplicate service IDs are rejected.
 
 The heartbeat currently sends an explicit empty service list because no trusted
 client supervisor is enabled. A missing service report must not be interpreted
