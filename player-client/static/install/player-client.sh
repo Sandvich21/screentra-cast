@@ -1589,6 +1589,25 @@ MAX_ADDON_PACKAGE_BYTES = 8 * 1024 * 1024
 MAX_ADDON_MEMBER_BYTES = 4 * 1024 * 1024
 ADDON_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 ADDON_VERSION_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}$')
+CLIENT_CAPABILITIES = frozenset({
+    'render_only',
+    'camera_capture',
+    'microphone_capture',
+    'local_inference',
+    'client_service',
+})
+CLIENT_SERVICE_FIELDS = frozenset({
+    'id',
+    'image',
+    'image_digest',
+    'socket_name',
+    'cpu_millis',
+    'memory_bytes',
+    'pids',
+    'writable_bytes',
+    'model_id',
+    'model_sha256',
+})
 GENERIC_ADDON_ERROR = 'signed addon cache update failed'
 GENERIC_INVENTORY_ERROR = 'addon inventory unavailable'
 
@@ -1670,6 +1689,99 @@ def _validate_addon_version(version):
     if not isinstance(version, str) or not ADDON_VERSION_RE.fullmatch(version):
         raise ValueError('addon inventory contains an unsafe version')
     return version
+
+
+def _validate_client_service_token(value, field):
+    if not isinstance(value, str) or not 0 < len(value) <= 64 or not re.fullmatch(r'[a-z0-9._-]+', value):
+        raise ValueError(f'invalid client service {field}')
+
+
+def _validate_client_service_image(value):
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 255
+        or '..' in value
+        or '://' in value
+        or ':' in value
+        or '@' in value
+        or '//' in value
+        or value.startswith('/')
+        or value.endswith('/')
+        or any(not (character.isascii() and (character.isalnum() or character in '._-/')) for character in value)
+        or any(
+            not component
+            or component in ('.', '..')
+            or not component[0].isascii()
+            or not component[0].isalnum()
+            or not component[-1].isascii()
+            or not component[-1].isalnum()
+            for component in value.split('/')
+        )
+    ):
+        raise ValueError('invalid client service image reference')
+
+
+def _validate_client_service_model_identity(service):
+    model_id = service.get('model_id')
+    model_sha256 = service.get('model_sha256')
+    if (model_id is None) != (model_sha256 is None):
+        raise ValueError('client service model_id and model_sha256 must be declared together')
+    if model_id is not None:
+        _validate_client_service_token(model_id, 'model id')
+        if not isinstance(model_sha256, str) or not re.fullmatch(r'[0-9a-f]{64}', model_sha256):
+            raise ValueError('client service model_sha256 must be a lowercase hexadecimal digest')
+
+
+def _validate_client_extension_capabilities(manifest):
+    capabilities = manifest.get('client_capabilities', [])
+    if not isinstance(capabilities, list):
+        raise ValueError('client_capabilities must be a list')
+    seen = set()
+    for capability in capabilities:
+        if not isinstance(capability, str) or capability not in CLIENT_CAPABILITIES:
+            raise ValueError('unsupported client capability')
+        if capability in seen:
+            raise ValueError('duplicate client capability')
+        seen.add(capability)
+    if 'local_inference' in seen and 'microphone_capture' not in seen:
+        raise ValueError('local_inference requires microphone_capture')
+    if 'local_inference' in seen and 'client_service' not in seen:
+        raise ValueError('local_inference requires client_service')
+    requests_service = 'client_service' in seen
+    service = manifest.get('client_service')
+    if requests_service != (service is not None):
+        raise ValueError('client_service capability and metadata must be declared together')
+    if service is None:
+        return
+    if not isinstance(service, dict) or set(service) - CLIENT_SERVICE_FIELDS:
+        raise ValueError('client service metadata contains unsupported fields')
+    required = {
+        'id', 'image', 'image_digest', 'socket_name',
+        'cpu_millis', 'memory_bytes', 'pids', 'writable_bytes',
+    }
+    if not required.issubset(service):
+        raise ValueError('client service metadata is incomplete')
+    _validate_client_service_token(service['id'], 'id')
+    _validate_client_service_token(service['socket_name'], 'socket name')
+    _validate_client_service_image(service['image'])
+    if not isinstance(service['image_digest'], str) or not re.fullmatch(
+            r'sha256:[0-9a-f]{64}', service['image_digest']):
+        raise ValueError('invalid client service image digest')
+    for field, minimum, maximum in (
+        ('cpu_millis', 1, 4000),
+        ('memory_bytes', 64 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+        ('pids', 1, 256),
+    ):
+        value = service[field]
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            raise ValueError(f'client service {field} is outside the bounded range')
+    writable_bytes = service['writable_bytes']
+    if isinstance(writable_bytes, bool) or not isinstance(writable_bytes, int) or not 0 <= writable_bytes <= 512 * 1024 * 1024:
+        raise ValueError('client service writable_bytes is outside the bounded range')
+    if 'local_inference' in seen and service.get('model_id') is None:
+        raise ValueError('local_inference requires an explicit model identity and digest')
+    _validate_client_service_model_identity(service)
 
 
 def _atomic_exchange(left, right):
@@ -1777,6 +1889,7 @@ def _extract_verified_addon_package(package_bytes, expected, staging_parent=None
         )
         if result.returncode != 0:
             raise ValueError('addon manifest signature verification failed')
+        _validate_client_extension_capabilities(manifest)
         return staging, manifest, entrypoint
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
@@ -1956,14 +2069,15 @@ def sync_client_addons(server, client_id, cache_dir):
                 status['addons'].append(item_status)
                 continue
 
+            package = fetch_addon_bytes(server, client_id, expected['id'])
+            staging, manifest, entrypoint = _extract_verified_addon_package(
+                package, expected, staging_parent=addon_root)
+            if manifest['version'] != version:
+                raise ValueError('addon package version changed during verification')
+            _validate_client_extension_capabilities(manifest)
             _ensure_real_directory(id_dir, create=True)
             if _path_exists(target):
                 _ensure_real_directory(target)
-            package = fetch_addon_bytes(server, client_id, expected['id'])
-            staging, manifest, entrypoint = _extract_verified_addon_package(
-                package, expected, staging_parent=id_dir)
-            if manifest['version'] != version:
-                raise ValueError('addon package version changed during verification')
             _publish_verified_addon(
                 target,
                 staging,

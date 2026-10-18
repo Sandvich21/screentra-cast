@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import hashlib
 import importlib.util
+import io
 import json
 import os
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,6 +56,157 @@ class HeartbeatAddonCacheTests(unittest.TestCase):
         cache_dir = Path(temp) / 'cache'
         with mock.patch.object(heartbeat, 'urlopen_ripley', return_value=InventoryResponse(inventory)):
             return heartbeat.sync_client_addons('https://server.example', 'client-a', cache_dir)
+
+    def package_manifest(self, capabilities=None, service=None, payload=b'console.log("inert");\\n'):
+        return {
+            'schema_version': 1,
+            'id': 'demo.addon',
+            'name': 'Demo addon',
+            'description': 'Signed client extension fixture',
+            'version': '1.0.0',
+            'kind': 'client_extension',
+            'permissions': ['render_only'],
+            'client_capabilities': [] if capabilities is None else capabilities,
+            'client_entrypoint': 'client/index.js',
+            'server_entrypoint': None,
+            'client_sha256': hashlib.sha256(payload).hexdigest(),
+            'client_api_version': '1',
+            'client_service': service,
+        }
+
+    def signed_package(self, manifest, payload=b'console.log("inert");\\n'):
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode='w:gz') as archive:
+            for name, content in (
+                ('manifest.json', json.dumps(manifest).encode('utf-8')),
+                ('manifest.sig', b'inert signature'),
+                ('client/index.js', payload),
+            ):
+                info = tarfile.TarInfo(name)
+                info.size = len(content)
+                archive.addfile(info, io.BytesIO(content))
+        return output.getvalue()
+
+    def assert_package_rejected_without_addon_cache_state(self, manifest):
+        package = self.signed_package(manifest)
+        with tempfile.TemporaryDirectory() as temp:
+            staging_parent = Path(temp) / 'addons'
+            staging_parent.mkdir()
+            public_key = Path(temp) / 'addon-signing.pub'
+            public_key.write_text('test key', encoding='utf-8')
+            with mock.patch.object(heartbeat, 'addon_public_key_path', return_value=public_key), \
+                    mock.patch.object(heartbeat.subprocess, 'run', return_value=mock.Mock(returncode=0)):
+                with self.assertRaises(ValueError):
+                    heartbeat._extract_verified_addon_package(
+                        package,
+                        self.inventory(digest=manifest['client_sha256'])['addons'][0],
+                        staging_parent=staging_parent,
+                    )
+            self.assertEqual(list(staging_parent.iterdir()), [])
+
+    def test_rejects_malformed_or_unapproved_client_capabilities_before_cache_state(self):
+        invalid_capabilities = [
+            'render_only',
+            ['render_only', 'render_only'],
+            ['host_shell'],
+            ['local_inference', 'client_service'],
+            ['local_inference', 'microphone_capture'],
+            ['client_service'],
+        ]
+        for capabilities in invalid_capabilities:
+            with self.subTest(capabilities=capabilities):
+                self.assert_package_rejected_without_addon_cache_state(
+                    self.package_manifest(capabilities=capabilities)
+                )
+
+    def test_accepts_bounded_client_capabilities_and_service_metadata(self):
+        service = {
+            'id': 'speech-to-text',
+            'image': 'registry.example/whisper',
+            'image_digest': 'sha256:' + ('b' * 64),
+            'socket_name': 'speech-to-text',
+            'cpu_millis': 500,
+            'memory_bytes': 128 * 1024 * 1024,
+            'pids': 32,
+            'writable_bytes': 64 * 1024 * 1024,
+            'model_id': 'whisper-tiny.en',
+            'model_sha256': 'c' * 64,
+        }
+        manifest = self.package_manifest(
+            capabilities=['microphone_capture', 'local_inference', 'client_service'],
+            service=service,
+        )
+        package = self.signed_package(manifest)
+        with tempfile.TemporaryDirectory() as temp:
+            staging_parent = Path(temp) / 'addons'
+            staging_parent.mkdir()
+            public_key = Path(temp) / 'addon-signing.pub'
+            public_key.write_text('test key', encoding='utf-8')
+            with mock.patch.object(heartbeat, 'addon_public_key_path', return_value=public_key), \
+                    mock.patch.object(heartbeat.subprocess, 'run', return_value=mock.Mock(returncode=0)):
+                staging, verified, entrypoint = heartbeat._extract_verified_addon_package(
+                    package,
+                    self.inventory(digest=manifest['client_sha256'])['addons'][0],
+                    staging_parent=staging_parent,
+                )
+            self.assertEqual(verified['client_capabilities'], manifest['client_capabilities'])
+            self.assertEqual(verified['client_service']['model_sha256'], 'c' * 64)
+            self.assertEqual(entrypoint, 'client/index.js')
+            self.assertEqual(list(staging_parent.iterdir()), [staging])
+            import shutil
+            shutil.rmtree(staging)
+
+    def test_rejects_unsafe_client_service_metadata_before_staging(self):
+        base_service = {
+            'id': 'speech-to-text',
+            'image': 'registry.example/whisper',
+            'image_digest': 'sha256:' + ('b' * 64),
+            'socket_name': 'speech-to-text',
+            'cpu_millis': 500,
+            'memory_bytes': 128 * 1024 * 1024,
+            'pids': 32,
+            'writable_bytes': 64 * 1024 * 1024,
+        }
+        for field, value in (
+            ('command', ['/bin/sh']),
+            ('mounts', ['/host:/container']),
+            ('ports', [8080]),
+            ('credentials', {'token': 'secret'}),
+            ('environment', {'PATH': '/tmp'}),
+            ('socket_name', '../unsafe-socket'),
+        ):
+            with self.subTest(field=field):
+                service = dict(base_service)
+                service[field] = value
+                manifest = self.package_manifest(
+                    capabilities=['client_service'],
+                    service=service,
+                )
+                self.assert_package_rejected_without_addon_cache_state(manifest)
+
+    def test_rejects_unpaired_or_malformed_client_service_model_identity(self):
+        base_service = {
+            'id': 'speech-to-text',
+            'image': 'registry.example/whisper',
+            'image_digest': 'sha256:' + ('b' * 64),
+            'socket_name': 'speech-to-text',
+            'cpu_millis': 500,
+            'memory_bytes': 128 * 1024 * 1024,
+            'pids': 32,
+            'writable_bytes': 64 * 1024 * 1024,
+        }
+        for update in (
+            {'model_id': 'whisper-tiny.en'},
+            {'model_sha256': 'c' * 63},
+            {'model_sha256': 'C' * 64},
+            {'model_id': '../unsafe', 'model_sha256': 'c' * 64},
+        ):
+            with self.subTest(update=update):
+                service = dict(base_service)
+                service.update(update)
+                self.assert_package_rejected_without_addon_cache_state(
+                    self.package_manifest(capabilities=['client_service'], service=service)
+                )
 
     def test_rejects_unsafe_inventory_versions_before_creating_addon_cache(self):
         for version in ('../escape', '/absolute', 'nested/version', r'nested\\version', 'bad\n', 'x' * 65):
