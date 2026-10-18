@@ -2285,6 +2285,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
             "datetime" => WidgetType::DateTime,
             "calendar" => WidgetType::Calendar,
             "weather" => WidgetType::Weather,
+            "camera" => WidgetType::Camera,
             "traffic" => WidgetType::Traffic,
             "music" => WidgetType::Music,
             "sound" => WidgetType::Sound,
@@ -4713,6 +4714,20 @@ mod tests {
         // `rename_all = "lowercase"` so the JSON form is "news".
         let s = serde_json::to_string(&WidgetType::News).expect("serialize");
         assert_eq!(s, "\"news\"");
+    }
+
+    #[test]
+    fn camera_widget_type_round_trip() {
+        use crate::models::WidgetType;
+
+        assert!(matches!(
+            Database::widget_type_from_db_str("camera"),
+            WidgetType::Camera
+        ));
+        assert_eq!(
+            serde_json::to_string(&WidgetType::Camera).expect("serialize camera"),
+            "\"camera\""
+        );
     }
 
     #[test]

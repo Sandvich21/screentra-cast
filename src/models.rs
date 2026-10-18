@@ -39,6 +39,9 @@ pub enum WidgetType {
     DateTime,
     Calendar,
     Weather,
+    /// Browser-local camera widget. Capture is opt-in in the renderer and
+    /// never uploads frames to the server.
+    Camera,
     Traffic,
     Music,
     Sound,

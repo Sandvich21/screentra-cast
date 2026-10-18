@@ -1006,6 +1006,13 @@ function buildWidgetHTML(w) {
     } else {
       html += '<div data-image-widget-id="' + ripleyTplEsc(w.id) + '" aria-hidden="true" style="width:100%;height:100%;"></div>';
     }
+  } else if (w.widget_type === 'camera') {
+    var cameraCaptureEnabled = p.capture_enabled === true;
+    if (cameraCaptureEnabled) {
+      html += '<div style="width:100%;height:100%;position:relative;background:#111827;overflow:hidden;display:flex;align-items:center;justify-content:center;"><video data-camera-widget-id="' + ripleyTplEsc(w.id) + '" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;background:#111827;"></video><span data-camera-status="' + ripleyTplEsc(w.id) + '" style="position:absolute;left:.5rem;bottom:.5rem;padding:.25rem .45rem;border-radius:.35rem;background:rgba(15,23,42,.8);color:#cbd5e1;font:600 12px system-ui,sans-serif;">Starting local camera…</span></div>';
+    } else {
+      html += '<div data-camera-widget-id="' + ripleyTplEsc(w.id) + '" data-camera-placeholder="' + ripleyTplEsc(w.id) + '" style="width:100%;height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.4rem;background:#111827;border:1px dashed #64748b;color:#cbd5e1;font:600 clamp(12px,2cqw,22px) system-ui,sans-serif;text-align:center;"><div>📷 Camera preview</div><small style="color:#94a3b8;font-size:.7em;">capture disabled</small></div>';
+    }
   } else if (w.widget_type === 'traffic') {
     var trafficAllEvents = Array.isArray(p._traffic_data && p._traffic_data.events) ? p._traffic_data.events : [];
     var trafficDefaultKey = p.traffic_variable || 'traffic_summary';
@@ -1242,6 +1249,7 @@ async function startCountdownRuntime(root, currentLayout, clientId, layoutCache,
     ripleyFitTrafficTemplateText(root);
     injectInstalledFontsIntoIframes(root);
     initVideoWidgets(target.widgets || [], root);
+    initCameraWidgets(target.widgets || [], root);
     initImageWidgets(target.widgets || [], root);
     cacheLayout(target);
     await startCountdownRuntime(root, target, clientId, layoutCache, fetchAndCacheLayout, cacheLayout, wireInteractiveRuntime);
@@ -1302,6 +1310,43 @@ function initImageWidgets(widgets, root) {
   });
 }
 function shuffleImagePlaylist(arr) { var a = arr.slice(); for (var i=a.length-1;i>0;i--) { var j=Math.floor(Math.random()*(i+1)), t=a[i]; a[i]=a[j]; a[j]=t; } return a; }
+
+// Camera capture is deliberately browser-local and disabled unless the
+// persisted widget explicitly opts in. No frame is serialized or uploaded.
+function initCameraWidgets(widgets, root) {
+  root = root || document;
+  var nodes = root.querySelectorAll ? root.querySelectorAll('[data-camera-widget-id]') : [];
+  (widgets || []).forEach(function(w) {
+    if (w.widget_type !== 'camera' || (w.props || {}).capture_enabled !== true) return;
+    var p = w.props || {}, node = null;
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].getAttribute('data-camera-widget-id') === String(w.id)) { node = nodes[i]; break; }
+    }
+    if (!node && root.querySelector) node = root.querySelector('[data-camera-widget-id="' + ripleyTplEsc(w.id) + '"]');
+    if (!node || !navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') return;
+    var facing = ['user', 'environment', 'left', 'right'].indexOf(p.facing_mode) >= 0 ? p.facing_mode : 'environment';
+    var constraints = {
+      video: {
+        facingMode: { ideal: facing },
+        width: { ideal: 1280, max: 1280 },
+        height: { ideal: 720, max: 720 },
+        frameRate: { ideal: 30, max: 30 },
+      },
+      audio: false,
+    };
+    node.muted = true;
+    node.autoplay = true;
+    node.playsInline = true;
+    navigator.mediaDevices.getUserMedia(constraints).then(function(stream) {
+      node.srcObject = stream;
+      var attempt = node.play();
+      if (attempt && typeof attempt.catch === 'function') attempt.catch(function(){});
+    }).catch(function() {
+      var status = root.querySelector ? root.querySelector('[data-camera-status="' + ripleyTplEsc(w.id) + '"]') : null;
+      if (status) status.textContent = 'Camera unavailable';
+    });
+  });
+}
 
 // Video playlist support is shared by the live player and standalone Layout Preview.
 // Keep this initializer at top level so preview.js can invoke the canonical runtime.
@@ -1561,6 +1606,7 @@ async function init() {
           ripleyFitTrafficTemplateText(rg);
           injectInstalledFontsIntoIframes(rg);
           initVideoWidgets(target.widgets || [], rg);
+          initCameraWidgets(target.widgets || [], rg);
           initImageWidgets(target.widgets || [], rg);
           cacheLayout(target);
           wireInteractiveRuntime(rg, target, clientId);
@@ -1629,6 +1675,7 @@ async function init() {
       injectInstalledFontsIntoIframes(layer);
       initMusicWidgets(ws);
       initVideoWidgets(ws, layer);
+      initCameraWidgets(ws, layer);
       initImageWidgets(ws, layer);
       // Wire interactive runtime if this layer is the active one and the
       // layout is interactive (the slideshow engine for non-interactive

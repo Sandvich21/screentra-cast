@@ -4,6 +4,7 @@ const vm = require('vm');
 
 const files = [
   'static/install/player-client.sh',
+  'player-client/static/install/player-client.sh',
 ];
 
 async function checkCachedPlayer(file) {

@@ -104,6 +104,7 @@ function renderShared(layout){
  }).join('');
  if(typeof ripleyFitTrafficTemplateText==='function') ripleyFitTrafficTemplateText(stage);
  if(typeof initVideoWidgets==='function') initVideoWidgets(layout.widgets||[], stage);
+ if(typeof initCameraWidgets==='function') initCameraWidgets(layout.widgets||[], stage);
  preparePreviewVideoPlayback(stage);
  if(typeof initImageWidgets==='function') initImageWidgets(layout.widgets||[], stage);
  if(typeof injectInstalledFontsIntoIframes==='function') injectInstalledFontsIntoIframes(stage);

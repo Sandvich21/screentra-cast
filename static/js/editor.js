@@ -861,6 +861,7 @@ const Editor = {
       { type: 'text', icon: '📝', label: 'Text' },
       { type: 'image', icon: '🖼️', label: 'Image' },
       { type: 'video', icon: '🎬', label: 'Video' },
+      { type: 'camera', icon: '📷', label: 'Camera' },
       { type: 'clock', icon: '🕐', label: 'Clock' },
       { type: 'date', icon: '📅', label: 'Date' },
       { type: 'countdown', icon: '⏱️', label: 'Countdown' },
@@ -1521,6 +1522,7 @@ const Editor = {
       return `<div style="width:100%;height:100%;background:${hasImage ? 'transparent' : '#222'};display:flex;align-items:center;justify-content:center;font-size:12px;color:#888;overflow:hidden;border-radius:${radius};">${hasImage ? `<img src="${this.esc(p.url)}" style="display:block;width:100%;height:100%;object-fit:${fit};border-radius:${radius};">` : '📷 Image'}</div>`;
     }
     if (w.type === 'video') return `<div style="width:100%;height:100%;background:#111;display:flex;align-items:center;justify-content:center;font-size:12px;color:#666;">▶ Video</div>`;
+    if (w.type === 'camera') return `<div style="width:100%;height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.4rem;background:#111827;border:1px dashed #64748b;color:#cbd5e1;font-size:12px;text-align:center;"><div>📷 Camera preview</div><small style="color:#94a3b8;">capture disabled</small></div>`;
     if (w.type === 'clock') {
       const fontFamily = this.esc(p.font_family || p.fontFamily || 'sans-serif');
       const color = this.esc(p.color || '#ffffff');
@@ -1931,6 +1933,7 @@ const Editor = {
     if (type === 'text') return { ...base, w: 40, h: 15, props: { content: 'text widget', font_size: 18, color: '#ffffff', font_family: 'sans-serif' } };
     if (type === 'image') return { ...base, w: 40, h: 30, props: { url: '', playlist: [], loop: true, shuffle: false, slide_duration: 10, alt: 'Image', fit: 'cover', radius: 0, radius_tl: 0, radius_tr: 0, radius_br: 0, radius_bl: 0 } };
     if (type === 'video') return { ...base, w: 50, h: 30, props: { url: '', playlist: [], loop: true, shuffle: false, muted: false, fit: 'cover' } };
+    if (type === 'camera') return { ...base, w: 40, h: 30, props: { capture_enabled: false, facing_mode: 'environment' } };
     if (type === 'clock') return { ...base, w: 20, h: 12, props: { format: 'HH:mm', font_size: 36, color: '#ffffff' } };
     if (type === 'date') return { ...base, w: 25, h: 10, props: { format: 'dddd, MMMM D', font_size: 24 } };
     if (type === 'weather') {
@@ -2439,6 +2442,11 @@ const Editor = {
         <div class="prop-group"><label><input type="checkbox" data-prop="muted" ${p.muted ? 'checked' : ''}> Muted</label></div>
         <div class="prop-group"><label>Scaling</label><select data-prop="fit" class="select" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--border,#30363d);background:var(--bg,#0d1117);color:var(--text,#e6edf3);"><option value="cover" ${(p.fit || 'cover') === 'cover' ? 'selected' : ''}>Cover</option><option value="contain" ${p.fit === 'contain' ? 'selected' : ''}>Contain</option><option value="fill" ${p.fit === 'fill' ? 'selected' : ''}>Fill</option></select></div>
         <div class="prop-group"><label>Video URL</label><input data-prop="url" value="${this.esc(p.url || '')}" placeholder="YouTube or direct .mp4" class="text-input" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--border,#30363d);background:var(--bg,#0d1117);color:var(--text,#e6edf3);"></div>
+      `;
+    } else if (w.type === 'camera') {
+      defaultsHtml = `
+        <div class="prop-group"><label><input type="checkbox" data-prop="capture_enabled" ${p.capture_enabled === true ? 'checked' : ''}> Enable local browser camera</label><small class="tpl-field-help" style="display:block;margin-top:.35rem;color:#888;">Off by default. When enabled, the browser requests local camera access; frames stay in this browser and are never uploaded.</small></div>
+        <div class="prop-group"><label>Facing</label><select data-prop="facing_mode" class="select" style="width:100%;"><option value="environment" ${(p.facing_mode || 'environment') === 'environment' ? 'selected' : ''}>Back / environment</option><option value="user" ${p.facing_mode === 'user' ? 'selected' : ''}>Front / user</option></select></div>
       `;
     } else if (w.type === 'clock') {
       defaultsHtml = `
