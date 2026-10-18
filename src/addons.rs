@@ -1529,10 +1529,10 @@ pub fn remove(id: &str) -> Result<(), AddonError> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(AddonError::Invalid("Invalid addon directory".to_string()));
     }
-    let record = read_record(&dir)?;
-    if record.manifest.kind == "client_extension" {
-        remove_signed_client_package_rollback(id)?;
-    }
+    // Removal is administrative cleanup: after validating the requested path,
+    // treat the installed directory as opaque and do not read untrusted files.
+    // Rollback storage is validated separately before it is removed.
+    remove_signed_client_package_rollback(id)?;
     fs::remove_dir_all(dir).map_err(io_error)
 }
 
@@ -2962,6 +2962,62 @@ mod tests {
         assert_eq!(read_record(&fixture.addon_dir).unwrap().manifest.version, "0.2.0");
         assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
         assert!(backup.is_file());
+    }
+
+    fn assert_remove_cleans_tampered_signed_client_package(
+        tampered_path: &str,
+        tampered_contents: &[u8],
+    ) {
+        let fixture = installed_signed_client_package_fixture();
+        let new_payload = b"window.ScreentraAddon = { apiVersion: '1', version: '0.2.0' };\n";
+        let archive = signed_client_package_archive(
+            &fixture.root,
+            "example.weather",
+            "0.2.0",
+            new_payload,
+            new_payload,
+        );
+        update_signed_client_package(&archive).unwrap();
+        let rollback = fixture
+            .addon_dir
+            .parent()
+            .unwrap()
+            .join(ROLLBACK_DIR)
+            .join("example.weather");
+        assert!(rollback.is_dir());
+        fs::write(fixture.addon_dir.join(tampered_path), tampered_contents).unwrap();
+
+        remove("example.weather").unwrap();
+
+        assert!(!fixture.addon_dir.exists());
+        assert!(!rollback.exists());
+    }
+
+    #[test]
+    fn signed_client_package_remove_cleans_tampered_manifest() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        assert_remove_cleans_tampered_signed_client_package(MANIFEST_FILE, b"not json");
+    }
+
+    #[test]
+    fn signed_client_package_remove_cleans_tampered_signature() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        assert_remove_cleans_tampered_signed_client_package("manifest.sig", b"not a signature");
+    }
+
+    #[test]
+    fn signed_client_package_remove_cleans_tampered_client_entrypoint() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        assert_remove_cleans_tampered_signed_client_package("client/index.js", b"tampered");
     }
 
     #[test]

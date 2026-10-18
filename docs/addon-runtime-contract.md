@@ -168,13 +168,15 @@ the current and retained package directories. Missing, malformed, tampered, or
 symlinked rollback evidence fails closed and leaves the current package in
 place. This is package evidence and storage recovery only: it never loads or
 executes client JavaScript, starts a service, or changes `EXECUTION_ENABLED`.
-Removing a signed client-extension validates the installed package first, clears
-its retained rollback evidence under the same checked addon root, and fails
-closed without deleting the installed package if that rollback target is
-symlinked or not a directory. Removal therefore leaves no inert rollback
-evidence that could be restored after a later reinstall.
-The declarative `update()` path and signed `update_signed_client_package()`
-semantics remain separate and are not runtime activation or rollback.
+Removing a signed client-extension treats the already path-validated installed
+directory as opaque administrative state: it does not parse, verify, or execute
+package contents merely to delete them. It separately validates the retained
+rollback path and target under the same checked addon root, clears that evidence,
+and fails closed without deleting the installed package if the rollback target is
+symlinked or not a directory. Removal therefore leaves no inert rollback evidence
+that could be restored after a later reinstall. The declarative `update()` path
+and signed `update_signed_client_package()` semantics remain separate and are not
+runtime activation or rollback.
 
 A future active record should include the addon ID, version, package digest,
 entrypoint, activation timestamp, and previous known-good record. A future
