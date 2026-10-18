@@ -32,7 +32,19 @@ The manifest must continue to declare:
 - `client_api_version`;
 - one safe `client_entrypoint`;
 - the SHA-256 digest of that entrypoint;
-- explicit widget registrations and bounded permissions.
+- explicit widget registrations and bounded permissions;
+- optional `client_capabilities` from the closed allowlist:
+  - `render_only`;
+  - `camera_capture`;
+  - `microphone_capture`;
+  - `local_inference`;
+  - `client_service`.
+
+`camera_capture`, `microphone_capture`, `local_inference`, and `client_service`
+are contract declarations only in the current release. They do not activate a
+camera, microphone, model, container, or client process by themselves. A future
+capability broker must bind them to an administrator-approved client target,
+resource limits, and a signed service/runtime record.
 
 A future runtime may reject a package with additional members even if its
 signature is valid. The signature authenticates the package contract; it does

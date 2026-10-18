@@ -137,6 +137,10 @@ pub struct AddonManifest {
     pub widget_types: Vec<AddonWidgetType>,
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// Explicit client-side capability requests. These are metadata only until
+    /// the signed client runtime and capability broker are enabled.
+    #[serde(default)]
+    pub client_capabilities: Vec<String>,
     /// Optional host API contract used by declarative widget packages. This
     /// describes existing, read-only server endpoints; it does not grant the
     /// addon arbitrary network, database, or server-code execution access.
@@ -732,6 +736,11 @@ pub fn validate_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
             "Declarative addons cannot request runtime permissions".to_string(),
         ));
     }
+    if !manifest.client_capabilities.is_empty() {
+        return Err(AddonError::Invalid(
+            "Declarative addons cannot request client capabilities".to_string(),
+        ));
+    }
     for widget in &manifest.widget_types {
         validate_token(&widget.id, "Widget type id")?;
         if widget.name.trim().is_empty() || widget.name.len() > MAX_NAME_LEN {
@@ -987,6 +996,33 @@ pub fn validate_client_extension_manifest(manifest: &AddonManifest) -> Result<()
                 "Unsupported client addon permission '{permission}'"
             )));
         }
+    }
+    const CLIENT_CAPABILITIES: &[&str] = &[
+        "render_only",
+        "camera_capture",
+        "microphone_capture",
+        "local_inference",
+        "client_service",
+    ];
+    let mut seen_capabilities = BTreeSet::new();
+    for capability in &manifest.client_capabilities {
+        if !CLIENT_CAPABILITIES.contains(&capability.as_str()) {
+            return Err(AddonError::Invalid(format!(
+                "Unsupported client capability '{capability}'"
+            )));
+        }
+        if !seen_capabilities.insert(capability) {
+            return Err(AddonError::Invalid(format!(
+                "Duplicate client capability '{capability}'"
+            )));
+        }
+    }
+    if manifest.client_capabilities.iter().any(|capability| capability == "local_inference")
+        && !manifest.client_capabilities.iter().any(|capability| capability == "client_service")
+    {
+        return Err(AddonError::Invalid(
+            "local_inference requires client_service".to_string(),
+        ));
     }
     for widget in &manifest.widget_types {
         validate_token(&widget.id, "Widget type id")?;
@@ -1973,6 +2009,7 @@ mod tests {
                 default_props: serde_json::json!({"units": "metric"}),
             }],
             permissions: Vec::new(),
+            client_capabilities: Vec::new(),
             data_contract: None,
             client_entrypoint: None,
             server_entrypoint: None,
@@ -2049,6 +2086,47 @@ mod tests {
         value.client_api_version = Some("1".to_string());
         value.widget_types[0].host_renderer.clear();
         value
+    }
+
+    #[test]
+    fn magic_mirror_client_capabilities_are_bounded_and_round_trip() {
+        let mut value = client_manifest(&"a".repeat(64));
+        value.id = "magic-mirror".to_string();
+        value.client_capabilities = vec![
+            "render_only".to_string(),
+            "camera_capture".to_string(),
+            "microphone_capture".to_string(),
+            "local_inference".to_string(),
+            "client_service".to_string(),
+        ];
+
+        validate_client_extension_manifest(&value)
+            .expect("Magic Mirror capability set should validate");
+        let encoded = serde_json::to_value(&value).expect("capabilities should serialize");
+        assert_eq!(
+            encoded["client_capabilities"],
+            serde_json::json!([
+                "render_only",
+                "camera_capture",
+                "microphone_capture",
+                "local_inference",
+                "client_service"
+            ])
+        );
+
+        value.client_capabilities.push("camera_capture".to_string());
+        assert!(validate_client_extension_manifest(&value).is_err());
+
+        value.client_capabilities.pop();
+        value.client_capabilities.push("host_shell".to_string());
+        assert!(validate_client_extension_manifest(&value).is_err());
+    }
+
+    #[test]
+    fn declarative_addon_cannot_request_client_capabilities() {
+        let mut value = manifest();
+        value.client_capabilities = vec!["camera_capture".to_string()];
+        assert!(validate_manifest(&value).is_err());
     }
 
     #[test]
