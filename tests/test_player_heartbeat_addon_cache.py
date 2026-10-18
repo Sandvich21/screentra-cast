@@ -87,6 +87,121 @@ class HeartbeatAddonCacheTests(unittest.TestCase):
                 archive.addfile(info, io.BytesIO(content))
         return output.getvalue()
 
+    def write_cached_addon(self, temp, manifest=None, active=None, payload=b'console.log("inert");\\n'):
+        manifest = manifest or self.package_manifest(payload=payload)
+        addon_root = Path(temp) / 'addons'
+        target = addon_root / manifest['id'] / manifest['version']
+        (target / 'client').mkdir(parents=True)
+        (target / 'client/index.js').write_bytes(payload)
+        (target / 'manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
+        (target / 'manifest.sig').write_bytes(b'cached signature')
+        active = active or {
+            'id': manifest['id'],
+            'version': manifest['version'],
+            'client_sha256': manifest['client_sha256'],
+            'entrypoint': manifest['client_entrypoint'],
+        }
+        (target.parent / 'active.json').write_text(json.dumps(active), encoding='utf-8')
+        return addon_root, target
+
+    def cached_sync(self, temp, inventory, fetch=None, signature_result=0):
+        cache_dir = Path(temp) / 'cache'
+        public_key = Path(temp) / 'addon-signing.pub'
+        public_key.write_text('test key', encoding='utf-8')
+        patches = [
+            mock.patch.dict(os.environ, {'RIPLEY_CLIENT_ADDONS_DIR': str(Path(temp) / 'addons')}, clear=False),
+            mock.patch.object(heartbeat, 'urlopen_ripley', return_value=InventoryResponse(inventory)),
+            mock.patch.object(heartbeat, 'addon_public_key_path', return_value=public_key),
+            mock.patch.object(
+                heartbeat.subprocess, 'run', return_value=mock.Mock(returncode=signature_result)
+            ),
+        ]
+        if fetch is not None:
+            patches.append(mock.patch.object(heartbeat, 'fetch_addon_bytes', side_effect=fetch))
+        with patches[0], patches[1], patches[2], patches[3]:
+            if fetch is None:
+                return heartbeat.sync_client_addons('https://server.example', 'client-a', cache_dir)
+            with patches[4]:
+                return heartbeat.sync_client_addons('https://server.example', 'client-a', cache_dir)
+
+    def test_cached_readback_revalidates_manifest_and_signature(self):
+        with tempfile.TemporaryDirectory() as temp:
+            payload = b'console.log("inert");\\n'
+            manifest = self.package_manifest(payload=payload)
+            self.write_cached_addon(temp, manifest=manifest, payload=payload)
+            with mock.patch.object(heartbeat, 'fetch_addon_bytes', side_effect=AssertionError('cache should be accepted')):
+                status = self.cached_sync(temp, self.inventory(digest=manifest['client_sha256']))
+            self.assertEqual(status['addons'][0]['state'], 'verified_cached')
+
+    def test_tampered_cached_manifest_fails_closed_and_preserves_cache(self):
+        with tempfile.TemporaryDirectory() as temp:
+            payload = b'console.log("inert");\\n'
+            manifest = self.package_manifest(payload=payload)
+            addon_root, target = self.write_cached_addon(temp, manifest=manifest, payload=payload)
+            tampered = dict(manifest, kind='not-a-client-extension')
+            (target / 'manifest.json').write_text(json.dumps(tampered), encoding='utf-8')
+            with mock.patch.object(heartbeat, 'fetch_addon_bytes', side_effect=OSError('offline')) as fetch:
+                status = self.cached_sync(temp, self.inventory(digest=manifest['client_sha256']))
+            fetch.assert_not_called()
+            self.assertEqual(status['addons'][0]['state'], 'failed')
+            self.assertEqual((target / 'manifest.json').read_text(encoding='utf-8'), json.dumps(tampered))
+            self.assertEqual((target / 'client/index.js').read_bytes(), payload)
+            self.assertTrue((addon_root / 'demo.addon' / 'active.json').is_file())
+
+    def test_tampered_cached_signature_fails_closed_and_preserves_cache(self):
+        with tempfile.TemporaryDirectory() as temp:
+            payload = b'console.log("inert");\\n'
+            manifest = self.package_manifest(payload=payload)
+            _, target = self.write_cached_addon(temp, manifest=manifest, payload=payload)
+            (target / 'manifest.sig').write_bytes(b'tampered signature')
+            with mock.patch.object(heartbeat, 'fetch_addon_bytes', side_effect=OSError('offline')) as fetch:
+                status = self.cached_sync(
+                    temp,
+                    self.inventory(digest=manifest['client_sha256']),
+                    signature_result=1,
+                )
+            fetch.assert_not_called()
+            self.assertEqual(status['addons'][0]['state'], 'failed')
+            self.assertEqual((target / 'manifest.sig').read_bytes(), b'tampered signature')
+            self.assertEqual((target / 'client/index.js').read_bytes(), payload)
+
+    def test_tampered_cached_active_metadata_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            payload = b'console.log("inert");\\n'
+            manifest = self.package_manifest(payload=payload)
+            _, target = self.write_cached_addon(
+                temp,
+                manifest=manifest,
+                active={
+                    'id': manifest['id'],
+                    'version': manifest['version'],
+                    'client_sha256': manifest['client_sha256'],
+                    'entrypoint': manifest['client_entrypoint'],
+                    'unexpected': 'tampered',
+                },
+                payload=payload,
+            )
+            with mock.patch.object(heartbeat, 'fetch_addon_bytes', side_effect=OSError('offline')) as fetch:
+                status = self.cached_sync(temp, self.inventory(digest=manifest['client_sha256']))
+            fetch.assert_not_called()
+            self.assertEqual(status['addons'][0]['state'], 'failed')
+            self.assertIn('unexpected', (target.parent / 'active.json').read_text(encoding='utf-8'))
+
+    def test_cached_readback_rejects_symlinked_manifest_and_signature(self):
+        for name in ('manifest.json', 'manifest.sig'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                payload = b'console.log("inert");\\n'
+                manifest = self.package_manifest(payload=payload)
+                _, target = self.write_cached_addon(temp, manifest=manifest, payload=payload)
+                outside = Path(temp) / name
+                outside.write_bytes((target / name).read_bytes())
+                (target / name).unlink()
+                (target / name).symlink_to(outside)
+                with mock.patch.object(heartbeat, 'fetch_addon_bytes', side_effect=OSError('offline')):
+                    status = self.cached_sync(temp, self.inventory(digest=manifest['client_sha256']))
+                self.assertEqual(status['addons'][0]['state'], 'failed')
+                self.assertTrue((target / name).is_symlink())
+
     def assert_package_rejected_without_addon_cache_state(self, manifest):
         package = self.signed_package(manifest)
         with tempfile.TemporaryDirectory() as temp:

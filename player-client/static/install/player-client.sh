@@ -1587,6 +1587,8 @@ def client_auth_headers(token=None):
 ADDON_API_VERSION = '1'
 MAX_ADDON_PACKAGE_BYTES = 8 * 1024 * 1024
 MAX_ADDON_MEMBER_BYTES = 4 * 1024 * 1024
+MAX_ADDON_MANIFEST_BYTES = 256 * 1024
+MAX_ADDON_SIGNATURE_BYTES = 16 * 1024
 ADDON_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 ADDON_VERSION_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}$')
 CLIENT_CAPABILITIES = frozenset({
@@ -1784,6 +1786,73 @@ def _validate_client_extension_capabilities(manifest):
     _validate_client_service_model_identity(service)
 
 
+def _validate_addon_manifest_metadata(manifest, expected):
+    """Validate signed addon metadata against the server inventory contract."""
+    if not isinstance(manifest, dict) or manifest.get('schema_version') != 1:
+        raise ValueError('unsupported addon manifest schema')
+    if manifest.get('kind') != 'client_extension' or manifest.get('client_api_version') != ADDON_API_VERSION:
+        raise ValueError('unsupported client addon API version or kind')
+    addon_id = manifest.get('id')
+    if not isinstance(addon_id, str) or not ADDON_ID_RE.fullmatch(addon_id):
+        raise ValueError('invalid addon id')
+    if addon_id != expected.get('id') or manifest.get('version') != expected.get('version'):
+        raise ValueError('addon package does not match the server inventory')
+    if manifest.get('server_entrypoint') is not None:
+        raise ValueError('client addon contains a server entrypoint')
+    entrypoint = manifest.get('client_entrypoint')
+    digest = manifest.get('client_sha256')
+    if not isinstance(entrypoint, str) or not entrypoint.startswith('client/'):
+        raise ValueError('invalid addon entrypoint')
+    if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', digest):
+        raise ValueError('invalid addon entrypoint digest')
+    if digest.lower() != str(expected.get('client_sha256', '')).lower():
+        raise ValueError('addon package digest does not match inventory')
+    _validate_client_extension_capabilities(manifest)
+    return entrypoint, digest
+
+
+def _verify_addon_manifest_signature(manifest_path, signature_path):
+    """Verify detached manifest bytes with the configured addon public key."""
+    _read_real_file(signature_path, MAX_ADDON_SIGNATURE_BYTES)
+    public_key = addon_public_key_path()
+    if not public_key.is_file():
+        raise ValueError('addon signing public key is unavailable')
+    result = subprocess.run(
+        ['openssl', 'pkeyutl', '-verify', '-rawin', '-pubin', '-inkey', str(public_key),
+         '-sigfile', str(signature_path), '-in', str(manifest_path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError('addon manifest signature verification failed')
+
+
+def _verify_cached_addon(target, active, expected):
+    """Revalidate persisted addon files before accepting verified_cached."""
+    if set(active) != {'id', 'version', 'client_sha256', 'entrypoint'}:
+        raise ValueError('addon cache metadata is invalid')
+    manifest_path = target / 'manifest.json'
+    signature_path = target / 'manifest.sig'
+    manifest_bytes = _read_real_file(manifest_path, MAX_ADDON_MANIFEST_BYTES)
+    try:
+        manifest = json.loads(manifest_bytes.decode('utf-8'))
+    except (UnicodeError, ValueError, json.JSONDecodeError):
+        raise ValueError('addon cache manifest is invalid')
+    entrypoint, digest = _validate_addon_manifest_metadata(manifest, expected)
+    if (active['id'] != expected['id'] or active['version'] != expected['version'] or
+            str(active['client_sha256']).lower() != expected['client_sha256'].lower() or
+            active['entrypoint'] != entrypoint):
+        raise ValueError('addon cache metadata does not match the signed manifest')
+    client_path = target / entrypoint
+    client_bytes = _read_real_file(client_path, MAX_ADDON_MEMBER_BYTES)
+    if hashlib.sha256(client_bytes).hexdigest().lower() != digest.lower():
+        raise ValueError('addon entrypoint SHA-256 verification failed')
+    _verify_addon_manifest_signature(manifest_path, signature_path)
+    return entrypoint
+
+
 def _atomic_exchange(left, right):
     """Atomically exchange two same-filesystem paths on Linux."""
     if sys.platform != 'linux':
@@ -1851,45 +1920,14 @@ def _extract_verified_addon_package(package_bytes, expected, staging_parent=None
         if not manifest_path.is_file() or not signature_path.is_file():
             raise ValueError('addon package is missing its manifest or signature')
         manifest_bytes = manifest_path.read_bytes()
-        if len(manifest_bytes) > 256 * 1024:
+        if len(manifest_bytes) > MAX_ADDON_MANIFEST_BYTES:
             raise ValueError('addon manifest is too large')
         manifest = json.loads(manifest_bytes.decode('utf-8'))
-        if not isinstance(manifest, dict) or manifest.get('schema_version') != 1:
-            raise ValueError('unsupported addon manifest schema')
-        if manifest.get('kind') != 'client_extension' or manifest.get('client_api_version') != ADDON_API_VERSION:
-            raise ValueError('unsupported client addon API version or kind')
-        addon_id = manifest.get('id')
-        if not isinstance(addon_id, str) or not ADDON_ID_RE.fullmatch(addon_id):
-            raise ValueError('invalid addon id')
-        if addon_id != expected.get('id') or manifest.get('version') != expected.get('version'):
-            raise ValueError('addon package does not match the server inventory')
-        if manifest.get('server_entrypoint') is not None:
-            raise ValueError('client addon contains a server entrypoint')
-        entrypoint = manifest.get('client_entrypoint')
-        digest = manifest.get('client_sha256')
-        if not isinstance(entrypoint, str) or not entrypoint.startswith('client/'):
-            raise ValueError('invalid addon entrypoint')
-        if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', digest):
-            raise ValueError('invalid addon entrypoint digest')
-        if digest.lower() != str(expected.get('client_sha256', '')).lower():
-            raise ValueError('addon package digest does not match inventory')
+        entrypoint, digest = _validate_addon_manifest_metadata(manifest, expected)
         client_path = staging / entrypoint
         if not client_path.is_file() or hashlib.sha256(client_path.read_bytes()).hexdigest().lower() != digest.lower():
             raise ValueError('addon entrypoint SHA-256 verification failed')
-        public_key = addon_public_key_path()
-        if not public_key.is_file():
-            raise ValueError('addon signing public key is unavailable')
-        result = subprocess.run(
-            ['openssl', 'pkeyutl', '-verify', '-rawin', '-pubin', '-inkey', str(public_key),
-             '-sigfile', str(signature_path), '-in', str(manifest_path)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise ValueError('addon manifest signature verification failed')
-        _validate_client_extension_capabilities(manifest)
+        _verify_addon_manifest_signature(manifest_path, signature_path)
         return staging, manifest, entrypoint
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
@@ -2051,8 +2089,14 @@ def sync_client_addons(server, client_id, cache_dir):
                 _ensure_real_directory(target)
             active_path = id_dir / 'active.json'
             active = _read_cache_json(active_path, {}) if _path_exists(id_dir) else {}
-            if not isinstance(active, dict):
-                raise ValueError('addon cache metadata is invalid')
+            target_exists = _path_exists(target)
+            if target_exists:
+                if (not isinstance(active, dict) or active.get('id') != expected['id'] or
+                        active.get('version') != version or
+                        str(active.get('client_sha256', '')).lower() != expected['client_sha256'].lower()):
+                    item_status.update({'state': 'failed', 'error': GENERIC_ADDON_ERROR})
+                    status['addons'].append(item_status)
+                    continue
             cached_entrypoint = active.get('entrypoint')
             if cached_entrypoint is not None:
                 if not isinstance(cached_entrypoint, str) or not cached_entrypoint.startswith('client/'):
@@ -2062,9 +2106,13 @@ def sync_client_addons(server, client_id, cache_dir):
             cached_file = target / cached_entrypoint if cached_entrypoint and _path_exists(target) else None
             if (active.get('id') == expected['id'] and active.get('version') == version and
                     str(active.get('client_sha256', '')).lower() == expected['client_sha256'].lower() and
-                    cached_file is not None and
-                    hashlib.sha256(_read_real_file(cached_file, MAX_ADDON_MEMBER_BYTES)).hexdigest().lower() ==
-                    expected['client_sha256'].lower()):
+                    cached_file is not None):
+                try:
+                    _verify_cached_addon(target, active, expected)
+                except Exception:
+                    item_status.update({'state': 'failed', 'error': GENERIC_ADDON_ERROR})
+                    status['addons'].append(item_status)
+                    continue
                 item_status.update({'state': 'verified_cached', 'entrypoint': cached_entrypoint})
                 status['addons'].append(item_status)
                 continue

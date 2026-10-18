@@ -167,6 +167,25 @@ must report bounded states such as `staged`, `active`, `failed`, and
 The current `verified` and `verified_cached` states mean verification/staging
 only; they must not be renamed to `active`.
 
+## Persisted cache readback verification
+
+Before reporting `verified_cached`, the heartbeat treats the on-disk package as
+untrusted persisted state and repeats the package checks. It requires regular,
+non-symlink `manifest.json`, `manifest.sig`, and the declared
+`client/<entrypoint>` file, bounds the manifest and signature reads, parses the
+manifest, and revalidates its schema, kind, client API, addon identity/version,
+server-entrypoint absence, entrypoint digest, closed client-capability list, and
+optional client-service metadata against the current server inventory. It also
+checks the active record's exact identity, version, digest, and entrypoint
+fields, recomputes the entrypoint digest, and verifies the detached manifest
+signature with the configured addon public key.
+
+A readback failure reports the same bounded generic addon-cache error, leaves the
+persisted cache in place for diagnosis or recovery, and does not load or execute
+JavaScript. This readback gate is deliberately separate from any future runtime
+activation gate: a package can be readback-verified and staged while remaining
+inert and unavailable to a renderer runtime.
+
 ## Implementation gate
 
 Do not add runtime loading until there is a concrete sandbox mechanism, a
