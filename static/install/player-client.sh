@@ -39,7 +39,7 @@ is_ssh_session() {
     return 1
 }
 
-INTERVAL="${RIPLEY_HEARTBEAT_INTERVAL:-5}"
+INTERVAL="${RIPLEY_HEARTBEAT_INTERVAL:-30}"
 ROLE="${RIPLEY_CLIENT_ROLE:-player}"
 CLIENT_NAME="${RIPLEY_CLIENT_NAME:-$(hostname)}"
 VERSION="${RIPLEY_CLIENT_VERSION:-0.1.0}"
@@ -1517,7 +1517,7 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument('--server', default=_default_server())
-    ap.add_argument('--interval', type=int, default=int(os.environ.get('RIPLEY_HEARTBEAT_INTERVAL', '5')))
+    ap.add_argument('--interval', type=int, default=int(os.environ.get('RIPLEY_HEARTBEAT_INTERVAL', '30')))
     ap.add_argument('--once', action='store_true')
     ap.add_argument('--client-id', default=os.environ.get('RIPLEY_CLIENT_ID'))
     ap.add_argument('--name', default=os.environ.get('RIPLEY_CLIENT_NAME'))
@@ -1586,8 +1586,15 @@ def main():
         except Exception:
             previous_layout_id = None
         cfg = fetch_config(args.server, data['client_id'], args.cache_dir, display_index=0, config_pattern=args.display_config_pattern)
-        current_layout_id = (cfg or {}).get('assigned_layout_id')
-        current_orientation = (cfg or {}).get('orientation', previous_orientation)
+        if cfg is None:
+            # A transient 429/network failure must not turn a valid cached
+            # assignment into "No layout assigned" on the renderer.
+            cached_cfg = _read_json_file(Path(args.cache_dir) / 'client-config.json', {})
+            current_layout_id = cached_cfg.get('assigned_layout_id') or previous_layout_id
+            current_orientation = cached_cfg.get('orientation', previous_orientation)
+        else:
+            current_layout_id = cfg.get('assigned_layout_id')
+            current_orientation = cfg.get('orientation', previous_orientation)
         # Restart kiosk on layout assignment change (e.g. after server nudge or editor assign).
         if cfg and current_layout_id and current_layout_id != previous_layout_id:
             try:
@@ -1606,7 +1613,7 @@ def main():
                 print(f'orientation restart failed: {e}', flush=True)
         fetch_all_displays(args.server, data['client_id'], args.cache_dir, len(data.get('displays') or []), args.display_config_pattern)
         fetch_admin_users(args.server, data['client_id'], args.cache_dir)
-        assigned = cfg.get('assigned_layout_id') if cfg else None
+        assigned = current_layout_id
         cmd = poll_command(args.server, data['client_id'], client_auth_token())
         if cmd:
             write_pending_command(cmd, args.cache_dir)
