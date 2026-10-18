@@ -5623,6 +5623,27 @@ ${_cmds.oneLiner}`;
         // Initial load
         await loadControlMethod(dispSelect.value);
 
+        const waitForDisplayCommandResult = async (action, requestedAt, timeoutMs = 30000) => {
+          const requestedMs = Date.parse(requestedAt || '');
+          const deadline = Date.now() + timeoutMs;
+          while (Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 2500));
+            try {
+              const clients = await API.getConnectedClients(false);
+              const current = clients.find(item => item.id === client.id);
+              const result = current && current.last_command_result;
+              const completedAt = Date.parse(current?.last_command_at || '');
+              if (result && result.action === action
+                && (result.requested_at === requestedAt || (!Number.isNaN(requestedMs) && completedAt >= requestedMs))) {
+                return result;
+              }
+            } catch (_) {
+              // Keep the queued state on transient client-list failures.
+            }
+          }
+          return null;
+        };
+
         const sendCommand = async (action, payload, displayIdx) => {
           const method = methodSelect.value;
           setDisplayStatus('Sending...');
@@ -5631,13 +5652,21 @@ ${_cmds.oneLiner}`;
             fallback = action === 'ddc_set' ? 'cec' : 'ddc';
           }
           const trySend = async (act, pay) => {
-            const r = await API.sendDisplayCommand(client.id, Number(displayIdx), act, pay);
-            if (!r.result?.ok) throw new Error(r.result?.message || 'Command failed');
-            return r.result?.message || 'OK';
+            const queued = await API.sendDisplayCommand(client.id, Number(displayIdx), act, pay);
+            const result = queued.result || await waitForDisplayCommandResult(act, queued.requested_at);
+            if (!result) return { queued: true, requestedAt: queued.requested_at };
+            if (!result.ok) {
+              const error = new Error(result.message || 'Client reported command failure');
+              error.commandResult = result;
+              throw error;
+            }
+            return { queued: false, message: result.message || 'OK' };
           };
           try {
-            const msg = await trySend(action, payload);
-            setDisplayStatus(msg, 'ok');
+            const outcome = await trySend(action, payload);
+            setDisplayStatus(outcome.queued
+              ? `Queued ${action}; client result is still pending.`
+              : outcome.message, 'ok');
           } catch(e) {
             const errMsg = e.message;
             const isDdcFail = errMsg.startsWith('ddcutil_') || ['not found', 'No such file', 'unable', 'communication', 'timeout'].some(t => errMsg.includes(t));
@@ -5652,8 +5681,8 @@ ${_cmds.oneLiner}`;
                 : { vcp: payload.cmd.startsWith('pow') ? 'D6' : payload.cmd.startsWith('vol') ? '62' : '10', value: payload.cmd.includes('up') ? 70 : payload.cmd.includes('down') ? 30 : 0 };
               setDisplayStatus(`DDC failed (${errMsg}). Trying CEC...`);
               try {
-                const msg = await trySend(altAction, altPayload);
-                setDisplayStatus('CEC fallback: ' + msg, 'ok');
+                const outcome = await trySend(altAction, altPayload);
+                setDisplayStatus(outcome.queued ? 'CEC fallback queued; client result is still pending.' : 'CEC fallback: ' + outcome.message, 'ok');
               } catch(e2) {
                 setDisplayStatus(`Both failed. DDC: ${errMsg} | CEC: ${e2.message}`, 'err');
               }
