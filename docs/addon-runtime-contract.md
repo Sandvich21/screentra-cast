@@ -48,8 +48,17 @@ field. `local_inference` requires the model identity and digest. These fields
 are validated and signed as part of the manifest but are not pulled, started,
 or exposed by the current release.
 
-A client status report may also include capability observations for the same
-closed vocabulary. The heartbeat may report `available`, `unavailable`,
+A client status report may also include bounded service observations. Service
+states are report-only and currently include `staged`, `starting`, `running`,
+`degraded`, `stopped`, `failed`, and `rollback_ready`; they do not start or
+stop anything. Restart counts and diagnostic details are bounded, and duplicate
+service IDs are rejected.
+
+The heartbeat currently sends an explicit empty service list because no trusted
+client supervisor is enabled. A missing service report must not be interpreted
+as a running service.
+
+The heartbeat may report `available`, `unavailable`,
 `disabled`, or `error` plus a bounded diagnostic detail. These observations are
 health metadata only: `available` means the local prerequisite was detected, not
 that an add-on has permission to use it. The current heartbeat reports camera

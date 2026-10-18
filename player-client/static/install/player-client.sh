@@ -1733,6 +1733,9 @@ def sync_client_addons(server, client_id, cache_dir):
         'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
         'addons': [],
         'capabilities': client_capability_status(),
+        # No trusted client supervisor is enabled yet. Keep this explicit so a
+        # missing service report cannot be mistaken for a running service.
+        'services': [],
     }
     try:
         url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/addons'

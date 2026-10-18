@@ -226,6 +226,27 @@ pub struct ClientAddonStatus {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientServiceStatus {
+    pub id: String,
+    pub version: String,
+    pub state: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub restart_count: u32,
+}
+
+const CLIENT_SERVICE_STATES: &[&str] = &[
+    "staged",
+    "starting",
+    "running",
+    "degraded",
+    "stopped",
+    "failed",
+    "rollback_ready",
+];
+
 const CLIENT_CAPABILITIES: &[&str] = &[
     "render_only",
     "camera_capture",
@@ -252,6 +273,10 @@ pub struct ClientAddonStatusReport {
     /// and signed client service lifecycle are enabled.
     #[serde(default)]
     pub capabilities: Vec<ClientCapabilityStatus>,
+    /// Signed client-service observations are report-only until the trusted
+    /// client supervisor and capability broker are enabled.
+    #[serde(default)]
+    pub services: Vec<ClientServiceStatus>,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -449,6 +474,40 @@ pub fn save_client_status(
         {
             return Err(AddonError::Invalid(
                 "Client capability detail is too long".to_string(),
+            ));
+        }
+    }
+    if report.services.len() > 16 {
+        return Err(AddonError::Invalid(
+            "Client status contains too many services".to_string(),
+        ));
+    }
+    let mut seen_services = BTreeSet::new();
+    for service in &report.services {
+        validate_token(&service.id, "Client service status id")?;
+        validate_token(&service.version, "Client service status version")?;
+        if !CLIENT_SERVICE_STATES.contains(&service.state.as_str()) {
+            return Err(AddonError::Invalid(
+                "Unsupported client service status".to_string(),
+            ));
+        }
+        if !seen_services.insert(&service.id) {
+            return Err(AddonError::Invalid(
+                "Duplicate client service status".to_string(),
+            ));
+        }
+        if service.restart_count > 32 {
+            return Err(AddonError::Invalid(
+                "Client service restart count exceeds the bounded limit".to_string(),
+            ));
+        }
+        if service
+            .detail
+            .as_deref()
+            .map_or(false, |value| value.len() > 256)
+        {
+            return Err(AddonError::Invalid(
+                "Client service detail is too long".to_string(),
             ));
         }
     }
@@ -2960,6 +3019,7 @@ mod tests {
                     error: None,
                 }],
                 capabilities: Vec::new(),
+                services: Vec::new(),
                 error: None,
             },
         );
@@ -2985,6 +3045,13 @@ mod tests {
                 id: "camera_capture".to_string(),
                 state: "available".to_string(),
                 detail: None,
+            }],
+            services: vec![ClientServiceStatus {
+                id: "speech-to-text".to_string(),
+                version: "1.0.0".to_string(),
+                state: "staged".to_string(),
+                detail: None,
+                restart_count: 0,
             }],
             error: None,
         };
@@ -3031,6 +3098,13 @@ mod tests {
                     state: "available".to_string(),
                     detail: None,
                 }],
+                services: vec![ClientServiceStatus {
+                    id: "speech-to-text".to_string(),
+                    version: "1.0.0".to_string(),
+                    state: "running".to_string(),
+                    detail: Some("local-only".to_string()),
+                    restart_count: 1,
+                }],
                 error: None,
             },
         )
@@ -3047,6 +3121,7 @@ mod tests {
         let loaded = load_client_status("client-1").unwrap().unwrap();
         assert_eq!(loaded["report"]["addons"][0]["state"], "verified_cached");
         assert_eq!(loaded["report"]["capabilities"][0]["id"], "render_only");
+        assert_eq!(loaded["report"]["services"][0]["state"], "running");
         if let Some(value) = old_data_root {
             unsafe {
                 std::env::set_var("SIGNAGE_DATA_DIR", value);
