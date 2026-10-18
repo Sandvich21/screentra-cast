@@ -8,7 +8,7 @@ The first target is client `11.1.1.56`; the server remains `.25`. No fleet rollo
 
 ## Implementation status (2026-10-18)
 
-The metadata-only trusted add-on lane now reports bounded client capabilities and service health, carries inert client-service status/rollback and push-to-talk transcription requests through the existing closed command path, and includes a dashboard surface for authenticated queued status and rollback-assessment requests. It also includes a built-in Camera widget with opt-in browser-local capture plus fixed local filters (`none`, `grayscale`, `sepia`, `halloween`). A bounded local-only AI IPC codec now defines future `health`/`transcribe` frames without opening a listener or running inference. A contract-only Magic Mirror local STT client-extension manifest fixture now covers signed metadata shape, microphone/local-inference/client-service capabilities, digest-pinned bounded service metadata, and declarative rejection. The actual client supervisor, speech-to-text service, model staging, camera hardware verification, and filter inference remain deferred and execution-disabled.
+The metadata-only trusted add-on lane now reports bounded client capabilities and service health, carries inert client-service status/rollback and push-to-talk transcription requests through the existing closed command path, and includes a dashboard surface for authenticated queued status and rollback-assessment requests. It also includes a built-in Camera widget with opt-in browser-local capture plus fixed local filters (`none`, `grayscale`, `sepia`, `halloween`). A bounded local-only AI IPC codec now defines future `health`/`transcribe` frames without opening a listener or running inference. A contract-only Magic Mirror local STT client-extension manifest fixture now covers signed metadata shape, microphone/local-inference/client-service capabilities, digest-pinned bounded service metadata, and declarative rejection. A read-only local model identity/integrity helper now validates bounded model IDs, exact lowercase SHA-256 digests, approved-root containment, regular non-symlink files, and bounded hashing; it does not stage, download, execute, or activate a model. The actual client supervisor, speech-to-text service, model staging, camera hardware verification, and filter inference remain deferred and execution-disabled.
 
 ## Product scope
 
@@ -66,7 +66,7 @@ Start with face detection/landmarks plus deterministic overlays. Do not make a g
 ### M2 — Client-local AI service
 
 - Add the service source/package and bounded local IPC.
-- Add model staging and integrity checks.
+- Add model identity/integrity contract and focused read-only verification tests; model staging and runtime use remain deferred.
 - Add client actor commands for service lifecycle and transcription requests.
 - Add health/capability reporting through the existing heartbeat/status path.
 - Add installer artifacts without installing them on a client until the package passes focused tests.
