@@ -268,6 +268,36 @@ window.API = {
         return res.json();
     },
 
+    async sendClientCommand(clientId, action, payload = {}) {
+        const serviceActions = new Set(['client_service_status', 'client_service_rollback_request']);
+        if (serviceActions.has(action)) {
+            const fields = action === 'client_service_status'
+                ? ['service_id']
+                : ['service_id', 'activation_id'];
+            if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+                || Object.keys(payload).some(key => !fields.includes(key))) {
+                throw new Error('Invalid bounded client service command payload');
+            }
+            for (const field of fields) {
+                const value = payload[field];
+                if (typeof value !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(value)) {
+                    throw new Error(`Invalid client service ${field}`);
+                }
+            }
+        }
+        const res = await fetch(`/api/clients/${encodeURIComponent(clientId)}/command`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ action, payload }),
+        });
+        if (!res.ok) {
+            const detail = await res.text().catch(() => '');
+            throw new Error(detail || `Failed to queue client command (HTTP ${res.status})`);
+        }
+        return res.json();
+    },
+
     async installAddon(manifest) {
         const res = await fetch('/api/addons', {
             method: 'POST',

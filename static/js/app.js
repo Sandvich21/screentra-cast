@@ -866,8 +866,127 @@ const App = {
     async loadAddonClientStatuses() {
         const select = document.getElementById('addon-client-status-select');
         const output = document.getElementById('addon-client-status');
+        const serviceIdInput = document.getElementById('addon-client-service-id');
+        const activationIdInput = document.getElementById('addon-client-activation-id');
+        const serviceOptions = document.getElementById('addon-client-service-options');
+        const activationOptions = document.getElementById('addon-client-activation-options');
+        const statusButton = document.getElementById('btn-client-service-status');
+        const rollbackButton = document.getElementById('btn-client-service-rollback');
+        const refreshButton = document.getElementById('btn-client-service-refresh');
+        const commandStatus = document.getElementById('addon-client-service-command-status');
         if (!select || !output || select.dataset.wired === 'true') return;
         select.dataset.wired = 'true';
+
+        const serviceIdPattern = /^[A-Za-z0-9._-]{1,128}$/;
+        let selectedClientId = '';
+        let reportedServices = [];
+        const setCommandStatus = (message, bad = false) => {
+            if (!commandStatus) return;
+            commandStatus.textContent = message || '';
+            commandStatus.style.color = bad ? 'var(--danger,#e66)' : 'var(--text-dim,#888)';
+        };
+        const setControlsDisabled = (disabled) => {
+            [serviceIdInput, activationIdInput, statusButton, rollbackButton, refreshButton]
+                .filter(Boolean).forEach(element => { element.disabled = disabled; });
+        };
+        const renderServiceOptions = (services) => {
+            reportedServices = Array.isArray(services) ? services.filter(service => service && service.id) : [];
+            if (serviceOptions) {
+                serviceOptions.innerHTML = reportedServices
+                    .map(service => `<option value="${esc(service.id)}">${esc(service.id)}</option>`)
+                    .join('');
+            }
+            const renderActivationOptions = () => {
+                const selected = reportedServices.find(service => String(service.id) === String(serviceIdInput?.value || ''));
+                const activationId = selected && (selected.activation_id || selected.activation_instance);
+                if (activationIdInput && activationId && !activationIdInput.value) activationIdInput.value = String(activationId);
+                if (activationOptions) {
+                    activationOptions.innerHTML = reportedServices
+                        .map(service => service.activation_id || service.activation_instance)
+                        .filter(value => value)
+                        .map(value => `<option value="${esc(value)}">${esc(value)}</option>`)
+                        .join('');
+                }
+            };
+            if (serviceIdInput) serviceIdInput.oninput = renderActivationOptions;
+            renderActivationOptions();
+        };
+        const loadSelectedClientStatus = async (clientId) => {
+            selectedClientId = clientId || '';
+            if (!selectedClientId) {
+                setControlsDisabled(true);
+                output.textContent = 'Select a client to inspect its latest verified addon state.';
+                setCommandStatus('');
+                return;
+            }
+            setControlsDisabled(false);
+            setCommandStatus('');
+            output.textContent = 'Loading client addon status…';
+            try {
+                const payload = await API.getClientAddons(selectedClientId);
+                const status = payload && payload.status;
+                const report = status && status.report;
+                const entries = report && Array.isArray(report.addons) ? report.addons : [];
+                const capabilities = report && Array.isArray(report.capabilities) ? report.capabilities : [];
+                const services = report && Array.isArray(report.services) ? report.services : [];
+                if (!status || !report) {
+                    renderServiceOptions([]);
+                    output.textContent = 'No addon status has been reported by this client.';
+                    return;
+                }
+                renderServiceOptions(services);
+                const capabilityRows = capabilities.length
+                    ? `<div style="margin:0.5rem 0;"><strong>Client capabilities</strong>${capabilities.map(capability => `<div>${esc(capability.id || 'unknown')}: ${esc(capability.state || 'unknown')}${capability.detail ? ` — ${esc(capability.detail)}` : ''}</div>`).join('')}</div>`
+                    : '';
+                const serviceRows = services.length
+                    ? `<div style="margin:0.5rem 0;"><strong>Trusted client services</strong>${services.map(service => `<div>${esc(service.id || 'unknown')} ${esc(service.version || '')}: ${esc(service.state || 'unknown')}${service.activation_id || service.activation_instance ? ` — activation ${esc(service.activation_id || service.activation_instance)}` : ''}${service.detail ? ` — ${esc(service.detail)}` : ''}${Number.isFinite(Number(service.restart_count)) && Number(service.restart_count) > 0 ? ` (restarts: ${esc(String(service.restart_count))})` : ''}</div>`).join('')}</div>`
+                    : '';
+                const rows = entries.length
+                    ? entries.map(entry => `<div style="display:flex; justify-content:space-between; gap:1rem; padding:0.35rem 0; border-bottom:1px solid var(--border,#333);"><span>${esc(entry.id || 'Unknown addon')}</span><strong>${esc(entry.state || 'unknown')}</strong></div>`).join('')
+                    : '<div>No client extensions are currently enabled.</div>';
+                output.innerHTML = `<div style="margin-bottom:0.5rem;">Last reported: ${esc(status.received_at || 'unknown')}</div>${capabilityRows}${serviceRows}${rows}${report.error ? `<div style="margin-top:0.5rem; color:var(--danger,#e66);">${esc(report.error)}</div>` : ''}`;
+            } catch (e) {
+                output.textContent = 'Unable to load client addon status: ' + e.message;
+            }
+        };
+        const queueServiceRequest = async (action) => {
+            if (!selectedClientId) {
+                setCommandStatus('Select an enrolled client first.', true);
+                return;
+            }
+            const serviceId = String(serviceIdInput?.value || '').trim();
+            const activationId = String(activationIdInput?.value || '').trim();
+            if (!serviceIdPattern.test(serviceId)) {
+                setCommandStatus('Enter or select a valid service ID (letters, numbers, dot, underscore, hyphen).', true);
+                serviceIdInput?.focus();
+                return;
+            }
+            if (action === 'client_service_rollback_request' && !serviceIdPattern.test(activationId)) {
+                setCommandStatus('Enter or select a valid activation ID for the rollback assessment.', true);
+                activationIdInput?.focus();
+                return;
+            }
+            const button = action === 'client_service_status' ? statusButton : rollbackButton;
+            if (button) button.disabled = true;
+            try {
+                const payload = action === 'client_service_status'
+                    ? { service_id: serviceId }
+                    : { service_id: serviceId, activation_id: activationId };
+                const queued = await API.sendClientCommand(selectedClientId, action, payload);
+                const requestedAt = queued && queued.requested_at ? ` (${String(queued.requested_at)})` : '';
+                const label = action === 'client_service_status' ? 'Service status request' : 'Rollback assessment request';
+                setCommandStatus(`${label} queued${requestedAt}. Request accepted; client execution remains disabled. Refresh reported status later for readback.`);
+            } catch (e) {
+                setCommandStatus('Unable to queue request: ' + e.message, true);
+            } finally {
+                if (button) button.disabled = false;
+            }
+        };
+
+        setControlsDisabled(true);
+        if (statusButton) statusButton.onclick = () => queueServiceRequest('client_service_status');
+        if (rollbackButton) rollbackButton.onclick = () => queueServiceRequest('client_service_rollback_request');
+        if (refreshButton) refreshButton.onclick = () => loadSelectedClientStatus(selectedClientId);
         try {
             const clients = await API.getClients();
             const enrolled = (clients || [])
@@ -879,38 +998,7 @@ const App = {
         } catch (e) {
             output.textContent = 'Unable to load clients: ' + e.message;
         }
-        select.onchange = async () => {
-            const clientId = select.value;
-            if (!clientId) {
-                output.textContent = 'Select a client to inspect its latest verified addon state.';
-                return;
-            }
-            output.textContent = 'Loading client addon status…';
-            try {
-                const payload = await API.getClientAddons(clientId);
-                const status = payload && payload.status;
-                const report = status && status.report;
-                const entries = report && Array.isArray(report.addons) ? report.addons : [];
-                const capabilities = report && Array.isArray(report.capabilities) ? report.capabilities : [];
-                const services = report && Array.isArray(report.services) ? report.services : [];
-                if (!status || !report) {
-                    output.textContent = 'No addon status has been reported by this client.';
-                    return;
-                }
-                const capabilityRows = capabilities.length
-                    ? `<div style="margin:0.5rem 0;"><strong>Client capabilities</strong>${capabilities.map(capability => `<div>${esc(capability.id || 'unknown')}: ${esc(capability.state || 'unknown')}${capability.detail ? ` — ${esc(capability.detail)}` : ''}</div>`).join('')}</div>`
-                    : '';
-                const serviceRows = services.length
-                    ? `<div style="margin:0.5rem 0;"><strong>Trusted client services</strong>${services.map(service => `<div>${esc(service.id || 'unknown')} ${esc(service.version || '')}: ${esc(service.state || 'unknown')}${service.detail ? ` — ${esc(service.detail)}` : ''}${Number.isFinite(Number(service.restart_count)) && Number(service.restart_count) > 0 ? ` (restarts: ${esc(String(service.restart_count))})` : ''}</div>`).join('')}</div>`
-                    : '';
-                const rows = entries.length
-                    ? entries.map(entry => `<div style="display:flex; justify-content:space-between; gap:1rem; padding:0.35rem 0; border-bottom:1px solid var(--border,#333);"><span>${esc(entry.id || 'Unknown addon')}</span><strong>${esc(entry.state || 'unknown')}</strong></div>`).join('')
-                    : '<div>No client extensions are currently enabled.</div>';
-                output.innerHTML = `<div style="margin-bottom:0.5rem;">Last reported: ${esc(status.received_at || 'unknown')}</div>${capabilityRows}${serviceRows}${rows}${report.error ? `<div style="margin-top:0.5rem; color:var(--danger,#e66);">${esc(report.error)}</div>` : ''}`;
-            } catch (e) {
-                output.textContent = 'Unable to load client addon status: ' + e.message;
-            }
-        };
+        select.onchange = () => loadSelectedClientStatus(select.value);
     },
     wireAddonManager() {
         const button = document.getElementById('btn-addon-install');
@@ -6145,14 +6233,6 @@ ${_cmds.oneLiner}`;
   if (App._commandBroadcastMounted) return;
   App._commandBroadcastMounted = true;
 
-  API.sendClientCommand = async function(id, action, payload){
-    const res = await fetch(`/api/clients/${encodeURIComponent(id)}/command`, {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({action, payload: payload || undefined, requested_by:'web-ui'}),
-    });
-    if (!res.ok) throw new Error(await res.text());
-    return res.json();
-  };
   API.setClientDisplayCount = async function(id, maxDisplays){
     const res = await fetch(`/api/clients/${encodeURIComponent(id)}/display-count`, {
       method:'POST', headers:{'Content-Type':'application/json'},
