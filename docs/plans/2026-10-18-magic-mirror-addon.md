@@ -87,6 +87,7 @@ Start with face detection/landmarks plus deterministic overlays. Do not make a g
 ### M5 — Test-client integration
 
 - Perform a read-only preflight on `.56`.
+- Latest read-only probe: Debian 13 amd64, 4 CPUs, approximately 7.2 GiB RAM, approximately 101 GiB free on `/`; Docker, Podman, and FFmpeg are absent; no `/dev/video*` camera exists; ALSA capture devices `/dev/snd/pcmC1D0c` and `/dev/snd/pcmC1D2c` are present; PipeWire and WirePlumber system services are inactive.
 - Install only explicitly approved prerequisites and preserve rollback copies.
 - Deploy to `.56` only after artifact and service checks pass.
 - Verify service health, audio transcription, camera display, privacy state, filter behavior, and layout stability.
