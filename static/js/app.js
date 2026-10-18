@@ -867,11 +867,13 @@ const App = {
         const select = document.getElementById('addon-client-status-select');
         const output = document.getElementById('addon-client-status');
         const serviceIdInput = document.getElementById('addon-client-service-id');
+        const requestIdInput = document.getElementById('addon-client-transcription-request-id');
         const activationIdInput = document.getElementById('addon-client-activation-id');
         const serviceOptions = document.getElementById('addon-client-service-options');
         const activationOptions = document.getElementById('addon-client-activation-options');
         const statusButton = document.getElementById('btn-client-service-status');
         const rollbackButton = document.getElementById('btn-client-service-rollback');
+        const transcriptionButton = document.getElementById('btn-client-service-transcription');
         const refreshButton = document.getElementById('btn-client-service-refresh');
         const commandStatus = document.getElementById('addon-client-service-command-status');
         if (!select || !output || select.dataset.wired === 'true') return;
@@ -886,7 +888,7 @@ const App = {
             commandStatus.style.color = bad ? 'var(--danger,#e66)' : 'var(--text-dim,#888)';
         };
         const setControlsDisabled = (disabled) => {
-            [serviceIdInput, activationIdInput, statusButton, rollbackButton, refreshButton]
+            [serviceIdInput, requestIdInput, activationIdInput, statusButton, rollbackButton, transcriptionButton, refreshButton]
                 .filter(Boolean).forEach(element => { element.disabled = disabled; });
         };
         const renderServiceOptions = (services) => {
@@ -955,10 +957,16 @@ const App = {
                 return;
             }
             const serviceId = String(serviceIdInput?.value || '').trim();
+            const requestId = String(requestIdInput?.value || '').trim();
             const activationId = String(activationIdInput?.value || '').trim();
             if (!serviceIdPattern.test(serviceId)) {
                 setCommandStatus('Enter or select a valid service ID (letters, numbers, dot, underscore, hyphen).', true);
                 serviceIdInput?.focus();
+                return;
+            }
+            if (action === 'client_service_transcribe_request' && !serviceIdPattern.test(requestId)) {
+                setCommandStatus('Enter a valid push-to-talk request ID (letters, numbers, dot, underscore, hyphen).', true);
+                requestIdInput?.focus();
                 return;
             }
             if (action === 'client_service_rollback_request' && !serviceIdPattern.test(activationId)) {
@@ -966,16 +974,22 @@ const App = {
                 activationIdInput?.focus();
                 return;
             }
-            const button = action === 'client_service_status' ? statusButton : rollbackButton;
+            const button = action === 'client_service_status'
+                ? statusButton
+                : action === 'client_service_rollback_request' ? rollbackButton : transcriptionButton;
             if (button) button.disabled = true;
             try {
                 const payload = action === 'client_service_status'
                     ? { service_id: serviceId }
-                    : { service_id: serviceId, activation_id: activationId };
+                    : action === 'client_service_rollback_request'
+                        ? { service_id: serviceId, activation_id: activationId }
+                        : { service_id: serviceId, request_id: requestId, push_to_talk: true };
                 const queued = await API.sendClientCommand(selectedClientId, action, payload);
                 const requestedAt = queued && queued.requested_at ? ` (${String(queued.requested_at)})` : '';
-                const label = action === 'client_service_status' ? 'Service status request' : 'Rollback assessment request';
-                setCommandStatus(`${label} queued${requestedAt}. Request accepted; client execution remains disabled. Refresh reported status later for readback.`);
+                const label = action === 'client_service_status'
+                    ? 'Service status request'
+                    : action === 'client_service_rollback_request' ? 'Rollback assessment request' : 'Push-to-talk transcription request';
+                setCommandStatus(`${label} queued${requestedAt}. Request accepted; client execution remains disabled.`);
             } catch (e) {
                 setCommandStatus('Unable to queue request: ' + e.message, true);
             } finally {
@@ -986,6 +1000,7 @@ const App = {
         setControlsDisabled(true);
         if (statusButton) statusButton.onclick = () => queueServiceRequest('client_service_status');
         if (rollbackButton) rollbackButton.onclick = () => queueServiceRequest('client_service_rollback_request');
+        if (transcriptionButton) transcriptionButton.onclick = () => queueServiceRequest('client_service_transcribe_request');
         if (refreshButton) refreshButton.onclick = () => loadSelectedClientStatus(selectedClientId);
         try {
             const clients = await API.getClients();

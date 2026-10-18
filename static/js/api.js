@@ -269,18 +269,26 @@ window.API = {
     },
 
     async sendClientCommand(clientId, action, payload = {}) {
-        const serviceActions = new Set(['client_service_status', 'client_service_rollback_request']);
+        const serviceActions = new Set([
+            'client_service_status',
+            'client_service_rollback_request',
+            'client_service_transcribe_request',
+        ]);
         if (serviceActions.has(action)) {
             const fields = action === 'client_service_status'
                 ? ['service_id']
-                : ['service_id', 'activation_id'];
+                : action === 'client_service_rollback_request'
+                    ? ['service_id', 'activation_id']
+                    : ['service_id', 'request_id', 'push_to_talk'];
             if (!payload || typeof payload !== 'object' || Array.isArray(payload)
                 || Object.keys(payload).some(key => !fields.includes(key))) {
                 throw new Error('Invalid bounded client service command payload');
             }
             for (const field of fields) {
                 const value = payload[field];
-                if (typeof value !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(value)) {
+                if (field === 'push_to_talk') {
+                    if (value !== true) throw new Error('Push-to-talk transcription must be explicitly enabled');
+                } else if (typeof value !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(value)) {
                     throw new Error(`Invalid client service ${field}`);
                 }
             }

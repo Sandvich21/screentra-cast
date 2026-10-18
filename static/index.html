@@ -1007,11 +1007,14 @@
                             <div id="addon-client-status" style="margin-top:0.75rem; font-size:0.82rem; color:var(--text-dim,#888);">Select a client to inspect its latest verified addon state.</div>
                             <div class="sys-card" style="margin-top:0.75rem; padding:0.75rem 1rem;">
                                 <div style="font-weight:600; margin-bottom:0.5rem;">Client service contract</div>
-                                <div style="font-size:0.78rem; color:var(--text-dim,#888); margin-bottom:0.65rem;">These controls only queue bounded status or rollback-assessment requests. Client service execution is currently disabled; use a later status readback to verify what the client reported.</div>
+                                <div style="font-size:0.78rem; color:var(--text-dim,#888); margin-bottom:0.65rem;">These controls only queue bounded status, rollback-assessment, or push-to-talk transcription requests. Client service execution is currently disabled; queued transcription requests never collect audio or open a microphone. Use a later status readback to verify what the client reported.</div>
                                 <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(12rem,1fr)); gap:0.6rem;">
                                     <label style="font-size:0.8rem;">Service ID
                                         <input id="addon-client-service-id" class="select" type="text" list="addon-client-service-options" maxlength="128" pattern="[A-Za-z0-9._-]+" autocomplete="off" placeholder="service.id" style="width:100%; box-sizing:border-box;">
                                         <datalist id="addon-client-service-options"></datalist>
+                                    </label>
+                                    <label style="font-size:0.8rem;">Push-to-talk request ID
+                                        <input id="addon-client-transcription-request-id" class="select" type="text" maxlength="128" pattern="[A-Za-z0-9._-]+" autocomplete="off" placeholder="request-001" style="width:100%; box-sizing:border-box;">
                                     </label>
                                     <label style="font-size:0.8rem;">Activation ID (rollback assessment)
                                         <input id="addon-client-activation-id" class="select" type="text" list="addon-client-activation-options" maxlength="128" pattern="[A-Za-z0-9._-]+" autocomplete="off" placeholder="activation-id" style="width:100%; box-sizing:border-box;">
@@ -1021,6 +1024,7 @@
                                 <div style="display:flex; gap:0.5rem; flex-wrap:wrap; margin-top:0.65rem; align-items:center;">
                                     <button id="btn-client-service-status" class="btn btn-secondary btn-sm" type="button">Request service status</button>
                                     <button id="btn-client-service-rollback" class="btn btn-secondary btn-sm" type="button">Request rollback assessment</button>
+                                    <button id="btn-client-service-transcription" class="btn btn-secondary btn-sm" type="button">Request push-to-talk transcription</button>
                                     <button id="btn-client-service-refresh" class="btn btn-secondary btn-sm" type="button">Refresh reported status</button>
                                     <span id="addon-client-service-command-status" role="status" aria-live="polite" style="font-size:0.78rem; color:var(--text-dim,#888);"></span>
                                 </div>
