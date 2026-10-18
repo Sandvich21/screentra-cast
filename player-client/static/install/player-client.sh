@@ -1289,6 +1289,7 @@ Posts system metrics to the Screentra Cast signage server so the Connected Clien
 can show enrolled player uptime and usage.
 """
 import argparse
+import ctypes
 import hashlib
 import io
 import json
@@ -1298,6 +1299,7 @@ import re
 import shutil
 import ssl
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -1586,6 +1588,104 @@ ADDON_API_VERSION = '1'
 MAX_ADDON_PACKAGE_BYTES = 8 * 1024 * 1024
 MAX_ADDON_MEMBER_BYTES = 4 * 1024 * 1024
 ADDON_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+ADDON_VERSION_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}$')
+GENERIC_ADDON_ERROR = 'signed addon cache update failed'
+GENERIC_INVENTORY_ERROR = 'addon inventory unavailable'
+
+
+def _absolute_path(path):
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _ensure_real_directory(path, create=False):
+    """Validate or create a directory without following symlinked ancestors."""
+    current = Path(_absolute_path(path).anchor)
+    parts = _absolute_path(path).parts[1:]
+    for part in parts:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            if not create:
+                return False
+            current.mkdir()
+            metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError('addon cache directory is not a real directory')
+    return True
+
+
+def _path_exists(path):
+    try:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _reject_symlinked_ancestors(path):
+    current = Path(_absolute_path(path).anchor)
+    for part in _absolute_path(path).parts[1:]:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError('addon cache path contains a symlink')
+
+
+def _require_real_file(path):
+    """Reject symlinks and non-regular files before cache reads."""
+    _reject_symlinked_ancestors(path)
+    metadata = os.lstat(path)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ValueError('addon cache file is not a regular file')
+    return metadata
+
+
+def _read_real_file(path, max_bytes=MAX_JSON_FILE_BYTES):
+    _require_real_file(path)
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+    descriptor = os.open(os.fspath(path), flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > max_bytes:
+            raise ValueError('addon cache file exceeds its bound')
+        return os.read(descriptor, max_bytes + 1)
+    finally:
+        os.close(descriptor)
+
+
+def _read_cache_json(path, default):
+    if not _path_exists(path):
+        return default
+    try:
+        return json.loads(_read_real_file(path).decode('utf-8'))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        raise ValueError('addon cache metadata is invalid')
+
+
+def _validate_addon_version(version):
+    if not isinstance(version, str) or not ADDON_VERSION_RE.fullmatch(version):
+        raise ValueError('addon inventory contains an unsafe version')
+    return version
+
+
+def _atomic_exchange(left, right):
+    """Atomically exchange two same-filesystem paths on Linux."""
+    if sys.platform != 'linux':
+        raise OSError('atomic directory exchange is unavailable')
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, 'renameat2', None)
+    if renameat2 is None:
+        raise OSError('atomic directory exchange is unavailable')
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(-100, os.fsencode(left), -100, os.fsencode(right), 0x2)
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
 
 
 def addon_public_key_path():
@@ -1604,10 +1704,13 @@ def _safe_addon_member(name):
     return normalized
 
 
-def _extract_verified_addon_package(package_bytes, expected):
+def _extract_verified_addon_package(package_bytes, expected, staging_parent=None):
     if len(package_bytes) > MAX_ADDON_PACKAGE_BYTES:
         raise ValueError('addon package exceeds the client limit')
-    staging = Path(tempfile.mkdtemp(prefix='.addon-verify-'))
+    staging = Path(tempfile.mkdtemp(
+        prefix='.addon-verify-',
+        dir=os.fspath(staging_parent) if staging_parent is not None else None,
+    ))
     try:
         seen = set()
         with tarfile.open(fileobj=io.BytesIO(package_bytes), mode='r:gz') as archive:
@@ -1680,6 +1783,43 @@ def _extract_verified_addon_package(package_bytes, expected):
         raise
 
 
+def _publish_verified_addon(target, staging, active_path, active_text):
+    """Publish a verified directory with rollback-safe active metadata."""
+    _ensure_real_directory(target.parent)
+    _ensure_real_directory(staging)
+    target_exists = _path_exists(target)
+    if target_exists:
+        _ensure_real_directory(target)
+    old_active = _read_real_file(active_path) if _path_exists(active_path) else None
+    try:
+        if target_exists:
+            _atomic_exchange(staging, target)
+        else:
+            os.replace(staging, target)
+        _atomic_write_text(active_path, active_text)
+    except Exception:
+        try:
+            if target_exists:
+                _atomic_exchange(staging, target)
+            elif _path_exists(target):
+                _ensure_real_directory(target)
+                shutil.rmtree(target)
+            if old_active is None:
+                if _path_exists(active_path):
+                    _require_real_file(active_path)
+                    Path(active_path).unlink()
+            else:
+                _atomic_write_text(active_path, old_active.decode('utf-8'))
+        finally:
+            if _path_exists(staging):
+                _ensure_real_directory(staging)
+                shutil.rmtree(staging)
+        raise
+    if _path_exists(staging):
+        _ensure_real_directory(staging)
+        shutil.rmtree(staging)
+
+
 def fetch_addon_bytes(server, client_id, addon_id):
     url = (server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') +
            '/addons/' + quote(addon_id, safe='') + '/package')
@@ -1745,70 +1885,113 @@ def sync_client_addons(server, client_id, cache_dir):
         addons = inventory.get('addons') if isinstance(inventory, dict) else None
         if not isinstance(addons, list):
             raise ValueError('server returned an invalid addon inventory')
-    except Exception as error:
-        status['error'] = str(error)[:256]
+    except Exception:
+        status['error'] = GENERIC_INVENTORY_ERROR
         _atomic_write_text(status_path, json.dumps(status, indent=2))
         return status
-    addon_root = Path(os.environ.get('RIPLEY_CLIENT_ADDONS_DIR', str(Path(cache_dir).parent / 'addons')))
-    addon_root.mkdir(parents=True, exist_ok=True)
-    desired_ids = {
-        str(expected['id']) for expected in addons
-        if isinstance(expected, dict) and ADDON_ID_RE.fullmatch(str(expected.get('id', '')))
-    }
-    inventory_ids_valid = len(desired_ids) == len(addons)
-    for expected in addons:
-        item_status = {}
-        try:
+
+    validated = []
+    try:
+        for expected in addons:
             if not isinstance(expected, dict) or not ADDON_ID_RE.fullmatch(str(expected.get('id', ''))):
                 raise ValueError('invalid addon inventory entry')
-            item_status.update({'id': expected.get('id'), 'version': expected.get('version')})
+            version = _validate_addon_version(expected.get('version'))
             if expected.get('client_api_version') != ADDON_API_VERSION:
                 raise ValueError('unsupported addon API version')
-            if not expected.get('client_sha256'):
-                raise ValueError('addon inventory is missing its digest')
-            version = expected.get('version')
-            if not isinstance(version, str) or not version:
-                raise ValueError('addon inventory is missing its version')
-            target = addon_root / expected['id'] / version
-            active = _read_json_file(target.parent / 'active.json', {})
+            if not isinstance(expected.get('client_sha256'), str) or not re.fullmatch(
+                    r'[0-9a-fA-F]{64}', expected['client_sha256']):
+                raise ValueError('invalid addon inventory digest')
+            validated.append((expected, version))
+    except Exception:
+        for expected in addons:
+            item_status = {}
+            if isinstance(expected, dict) and ADDON_ID_RE.fullmatch(str(expected.get('id', ''))):
+                item_status['id'] = expected['id']
+            item_status.update({'state': 'failed', 'error': GENERIC_ADDON_ERROR})
+            status['addons'].append(item_status)
+        status['error'] = GENERIC_INVENTORY_ERROR
+        _atomic_write_text(status_path, json.dumps(status, indent=2))
+        return status
+
+    addon_root = Path(os.environ.get('RIPLEY_CLIENT_ADDONS_DIR', str(Path(cache_dir).parent / 'addons')))
+    desired_ids = {expected['id'] for expected, _ in validated}
+    try:
+        _ensure_real_directory(addon_root, create=True)
+    except Exception:
+        for expected, version in validated:
+            status['addons'].append({
+                'id': expected['id'], 'version': version,
+                'state': 'failed', 'error': GENERIC_ADDON_ERROR,
+            })
+        status['error'] = GENERIC_ADDON_ERROR
+        _atomic_write_text(status_path, json.dumps(status, indent=2))
+        return status
+
+    for expected, version in validated:
+        item_status = {'id': expected['id'], 'version': version}
+        try:
+            id_dir = addon_root / expected['id']
+            if _path_exists(id_dir):
+                _ensure_real_directory(id_dir)
+            target = id_dir / version
+            if _path_exists(target):
+                _ensure_real_directory(target)
+            active_path = id_dir / 'active.json'
+            active = _read_cache_json(active_path, {}) if _path_exists(id_dir) else {}
             if not isinstance(active, dict):
-                active = {}
+                raise ValueError('addon cache metadata is invalid')
             cached_entrypoint = active.get('entrypoint')
-            try:
-                if not isinstance(cached_entrypoint, str) or _safe_addon_member(cached_entrypoint) != cached_entrypoint or not cached_entrypoint.startswith('client/'):
-                    cached_entrypoint = None
-            except Exception:
-                cached_entrypoint = None
-            cached_file = target / cached_entrypoint if cached_entrypoint else None
+            if cached_entrypoint is not None:
+                if not isinstance(cached_entrypoint, str) or not cached_entrypoint.startswith('client/'):
+                    raise ValueError('addon cache entrypoint is unsafe')
+                if _safe_addon_member(cached_entrypoint) != cached_entrypoint:
+                    raise ValueError('addon cache entrypoint is unsafe')
+            cached_file = target / cached_entrypoint if cached_entrypoint and _path_exists(target) else None
             if (active.get('id') == expected['id'] and active.get('version') == version and
-                    str(active.get('client_sha256', '')).lower() == str(expected['client_sha256']).lower() and
-                    cached_file is not None and cached_file.is_file() and
-                    hashlib.sha256(cached_file.read_bytes()).hexdigest().lower() == str(expected['client_sha256']).lower()):
+                    str(active.get('client_sha256', '')).lower() == expected['client_sha256'].lower() and
+                    cached_file is not None and
+                    hashlib.sha256(_read_real_file(cached_file, MAX_ADDON_MEMBER_BYTES)).hexdigest().lower() ==
+                    expected['client_sha256'].lower()):
                 item_status.update({'state': 'verified_cached', 'entrypoint': cached_entrypoint})
                 status['addons'].append(item_status)
                 continue
+
+            _ensure_real_directory(id_dir, create=True)
+            if _path_exists(target):
+                _ensure_real_directory(target)
             package = fetch_addon_bytes(server, client_id, expected['id'])
-            staging, manifest, entrypoint = _extract_verified_addon_package(package, expected)
-            target = addon_root / expected['id'] / manifest['version']
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if target.exists():
-                shutil.rmtree(target)
-            os.replace(staging, target)
-            _atomic_write_text(target.parent / 'active.json', json.dumps({
-                'id': manifest['id'], 'version': manifest['version'],
-                'client_sha256': manifest['client_sha256'],
-                'entrypoint': entrypoint,
-            }, indent=2))
+            staging, manifest, entrypoint = _extract_verified_addon_package(
+                package, expected, staging_parent=id_dir)
+            if manifest['version'] != version:
+                raise ValueError('addon package version changed during verification')
+            _publish_verified_addon(
+                target,
+                staging,
+                active_path,
+                json.dumps({
+                    'id': manifest['id'], 'version': manifest['version'],
+                    'client_sha256': manifest['client_sha256'],
+                    'entrypoint': entrypoint,
+                }, indent=2),
+            )
             item_status.update({'state': 'verified', 'entrypoint': entrypoint})
-        except Exception as error:
-            item_status.update({'state': 'failed', 'error': str(error)[:256]})
+        except Exception:
+            item_status.update({'state': 'failed', 'error': GENERIC_ADDON_ERROR})
         status['addons'].append(item_status)
-    if inventory_ids_valid:
+
+    if len(desired_ids) == len(validated):
         for child in addon_root.iterdir():
-            if not child.is_dir() or not ADDON_ID_RE.fullmatch(child.name) or child.name in desired_ids:
+            if child.is_symlink() or not child.is_dir() or not ADDON_ID_RE.fullmatch(child.name) or child.name in desired_ids:
                 continue
-            if (child / 'active.json').is_file():
+            active_path = child / 'active.json'
+            if not _path_exists(active_path):
+                continue
+            try:
+                _ensure_real_directory(child)
+                _require_real_file(active_path)
                 shutil.rmtree(child)
+            except Exception:
+                continue
     _atomic_write_text(status_path, json.dumps(status, indent=2))
     return status
 

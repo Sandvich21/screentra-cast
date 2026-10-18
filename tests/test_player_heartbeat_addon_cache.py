@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+import hashlib
+import importlib.util
+import json
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+heartbeat = load_module(
+    ROOT / 'player-client/scripts/screentra-player-heartbeat.py',
+    'screentra_player_heartbeat_addon_cache',
+)
+
+
+class InventoryResponse:
+    def __init__(self, payload):
+        self.payload = json.dumps(payload).encode('utf-8')
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def read(self, limit=None):
+        return self.payload
+
+
+class HeartbeatAddonCacheTests(unittest.TestCase):
+    def inventory(self, version='1.0.0', digest=None):
+        return {
+            'addons': [{
+                'id': 'demo.addon',
+                'version': version,
+                'client_api_version': '1',
+                'client_sha256': digest or ('a' * 64),
+            }],
+        }
+
+    def sync(self, temp, inventory):
+        cache_dir = Path(temp) / 'cache'
+        with mock.patch.object(heartbeat, 'urlopen_ripley', return_value=InventoryResponse(inventory)):
+            return heartbeat.sync_client_addons('https://server.example', 'client-a', cache_dir)
+
+    def test_rejects_unsafe_inventory_versions_before_creating_addon_cache(self):
+        for version in ('../escape', '/absolute', 'nested/version', r'nested\\version', 'bad\n', 'x' * 65):
+            with self.subTest(version=repr(version)), tempfile.TemporaryDirectory() as temp:
+                addon_root = Path(temp) / 'addons'
+                with mock.patch.dict(os.environ, {'RIPLEY_CLIENT_ADDONS_DIR': str(addon_root)}, clear=False):
+                    status = self.sync(temp, self.inventory(version=version))
+                self.assertEqual(status['addons'][0]['state'], 'failed')
+                self.assertFalse(addon_root.exists(), version)
+
+    def test_rejects_symlinked_addon_root_and_does_not_write_through_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            outside = Path(temp) / 'outside'
+            outside.mkdir()
+            addon_root = Path(temp) / 'addons'
+            addon_root.symlink_to(outside, target_is_directory=True)
+            with mock.patch.dict(os.environ, {'RIPLEY_CLIENT_ADDONS_DIR': str(addon_root)}, clear=False):
+                status = self.sync(temp, self.inventory())
+            self.assertEqual(status['addons'][0]['state'], 'failed')
+            self.assertEqual(status['addons'][0]['error'], heartbeat.GENERIC_ADDON_ERROR)
+            self.assertNotIn(str(outside), json.dumps(status))
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_rejects_symlinked_addon_id_and_version_directories(self):
+        for link_name in ('id', 'version'):
+            with self.subTest(link_name=link_name), tempfile.TemporaryDirectory() as temp:
+                addon_root = Path(temp) / 'addons'
+                addon_root.mkdir()
+                outside = Path(temp) / 'outside'
+                outside.mkdir()
+                if link_name == 'id':
+                    (addon_root / 'demo.addon').symlink_to(outside, target_is_directory=True)
+                else:
+                    id_dir = addon_root / 'demo.addon'
+                    id_dir.mkdir()
+                    (id_dir / '1.0.0').symlink_to(outside, target_is_directory=True)
+                with mock.patch.dict(os.environ, {'RIPLEY_CLIENT_ADDONS_DIR': str(addon_root)}, clear=False):
+                    status = self.sync(temp, self.inventory())
+                self.assertEqual(status['addons'][0]['state'], 'failed')
+                self.assertEqual(list(outside.iterdir()), [])
+
+    def test_rejects_symlinked_cache_parent_for_entrypoint(self):
+        with tempfile.TemporaryDirectory() as temp:
+            addon_root = Path(temp) / 'addons'
+            version_dir = addon_root / 'demo.addon' / '1.0.0'
+            version_dir.mkdir(parents=True)
+            payload = b'console.log("inert");\n'
+            digest = hashlib.sha256(payload).hexdigest()
+            outside = Path(temp) / 'outside'
+            outside.mkdir()
+            (outside / 'index.js').write_bytes(payload)
+            (version_dir.parent / 'active.json').write_text(json.dumps({
+                'id': 'demo.addon', 'version': '1.0.0',
+                'client_sha256': digest, 'entrypoint': 'client/index.js',
+            }), encoding='utf-8')
+            (version_dir / 'client').symlink_to(outside, target_is_directory=True)
+            with mock.patch.dict(os.environ, {'RIPLEY_CLIENT_ADDONS_DIR': str(addon_root)}, clear=False):
+                status = self.sync(temp, self.inventory(digest=digest))
+            self.assertEqual(status['addons'][0]['state'], 'failed')
+            self.assertTrue((version_dir / 'client').is_symlink())
+
+    def test_rejects_symlinked_active_and_entrypoint_cache_targets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            addon_root = Path(temp) / 'addons'
+            version_dir = addon_root / 'demo.addon' / '1.0.0'
+            version_dir.mkdir(parents=True)
+            payload = b'console.log("inert");\n'
+            digest = hashlib.sha256(payload).hexdigest()
+            outside = Path(temp) / 'outside.js'
+            outside.write_bytes(payload)
+            active = {
+                'id': 'demo.addon',
+                'version': '1.0.0',
+                'client_sha256': digest,
+                'entrypoint': 'client/index.js',
+            }
+            active_target = version_dir.parent / 'active-target.json'
+            active_target.write_text(json.dumps(active), encoding='utf-8')
+            (version_dir.parent / 'active.json').symlink_to(active_target)
+            (version_dir / 'client').mkdir()
+            (version_dir / 'client/index.js').symlink_to(outside)
+            with mock.patch.dict(os.environ, {'RIPLEY_CLIENT_ADDONS_DIR': str(addon_root)}, clear=False):
+                status = self.sync(temp, self.inventory(digest=digest))
+            self.assertEqual(status['addons'][0]['state'], 'failed')
+            self.assertTrue((version_dir.parent / 'active.json').is_symlink())
+            self.assertTrue((version_dir / 'client/index.js').is_symlink())
+
+    def test_failed_active_metadata_write_preserves_previous_verified_version(self):
+        with tempfile.TemporaryDirectory() as temp:
+            addon_root = Path(temp) / 'addons'
+            version_dir = addon_root / 'demo.addon' / '1.0.0'
+            client_dir = version_dir / 'client'
+            client_dir.mkdir(parents=True)
+            old_payload = b'old verified payload\n'
+            client_file = client_dir / 'index.js'
+            client_file.write_bytes(old_payload)
+            old_digest = hashlib.sha256(old_payload).hexdigest()
+            (version_dir.parent / 'active.json').write_text(json.dumps({
+                'id': 'demo.addon',
+                'version': '1.0.0',
+                'client_sha256': old_digest,
+                'entrypoint': 'client/index.js',
+            }), encoding='utf-8')
+            new_payload = b'new verified payload\n'
+            new_digest = hashlib.sha256(new_payload).hexdigest()
+            staging = Path(temp) / 'verified-stage'
+            (staging / 'client').mkdir(parents=True)
+            (staging / 'client/index.js').write_bytes(new_payload)
+            manifest = {
+                'id': 'demo.addon',
+                'version': '1.0.0',
+                'client_sha256': new_digest,
+            }
+            real_atomic_write = heartbeat._atomic_write_text
+
+            def fail_active_write(path, text, mode=0o600):
+                if Path(path).name == 'active.json':
+                    raise OSError('simulated metadata publication failure')
+                return real_atomic_write(path, text, mode)
+
+            with mock.patch.dict(os.environ, {'RIPLEY_CLIENT_ADDONS_DIR': str(addon_root)}, clear=False), \
+                    mock.patch.object(heartbeat, 'fetch_addon_bytes', return_value=b'inert package'), \
+                    mock.patch.object(heartbeat, '_extract_verified_addon_package', return_value=(
+                        staging,
+                        manifest,
+                        'client/index.js',
+                    )), \
+                    mock.patch.object(heartbeat, '_atomic_write_text', side_effect=fail_active_write):
+                status = self.sync(temp, self.inventory(digest=new_digest))
+            self.assertEqual(status['addons'][0]['state'], 'failed')
+            self.assertEqual(client_file.read_bytes(), old_payload)
+            self.assertEqual(json.loads((version_dir.parent / 'active.json').read_text()), {
+                'id': 'demo.addon',
+                'version': '1.0.0',
+                'client_sha256': old_digest,
+                'entrypoint': 'client/index.js',
+            })
+
+
+if __name__ == '__main__':
+    unittest.main()
