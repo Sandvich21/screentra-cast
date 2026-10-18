@@ -2173,13 +2173,18 @@ fn sha256_file(path: &Path) -> Result<String, AddonError> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Validate and persist a signed client-extension package. The package is
-/// never executed by the server; the client-loader phase will consume the
-/// stored manifest and client directory after its own signature verification.
-pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, AddonError> {
-    let root = checked_addon_storage_dir(true)?
-        .ok_or_else(|| AddonError::Io("Addon storage directory is unavailable".to_string()))?;
-    let stage = root.join(format!(".package-install-{}", Uuid::new_v4()));
+struct StagedSignedClientPackage {
+    directory: PathBuf,
+    manifest: AddonManifest,
+}
+
+fn stage_signed_client_package(
+    archive: &Path,
+    root: &Path,
+    stage_prefix: &str,
+) -> Result<StagedSignedClientPackage, AddonError> {
+    reject_symlinked_path_ancestors(root, "Invalid addon storage directory")?;
+    let stage = root.join(format!(".{stage_prefix}-{}", Uuid::new_v4()));
     if let Err(error) = crate::safe_archive::extract_tar_gz(archive, &stage, 0) {
         let _ = fs::remove_dir_all(&stage);
         return Err(AddonError::Invalid(error));
@@ -2187,11 +2192,8 @@ pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, Addo
     let result = (|| {
         let manifest_path = stage.join(MANIFEST_FILE);
         let signature_path = stage.join("manifest.sig");
-        if !manifest_path.is_file() || !signature_path.is_file() {
-            return Err(AddonError::Invalid(
-                "Addon package must contain manifest.json and manifest.sig at its root".to_string(),
-            ));
-        }
+        checked_addon_file(&manifest_path, "addon package manifest")?;
+        checked_addon_file(&signature_path, "addon package signature")?;
         verify_manifest_signature(&manifest_path, &signature_path)?;
         let manifest_bytes = fs::read(&manifest_path).map_err(io_error)?;
         let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
@@ -2200,11 +2202,7 @@ pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, Addo
             AddonError::Invalid("Client package entrypoint is missing".to_string())
         })?;
         let client_file = stage.join(entrypoint);
-        if !client_file.is_file() {
-            return Err(AddonError::Invalid(format!(
-                "Client package entrypoint is missing: {entrypoint}"
-            )));
-        }
+        checked_addon_file(&client_file, "client package entrypoint")?;
         let actual_digest = sha256_file(&client_file)?;
         if !manifest
             .client_sha256
@@ -2216,7 +2214,26 @@ pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, Addo
                 "Client package entrypoint SHA-256 does not match manifest".to_string(),
             ));
         }
-        let destination = addon_dir(&manifest.id)?;
+        Ok(StagedSignedClientPackage {
+            directory: stage.clone(),
+            manifest,
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&stage);
+    }
+    result
+}
+
+/// Validate and persist a signed client-extension package. The package is
+/// never executed by the server; the client-loader phase will consume the
+/// stored manifest and client directory after its own signature verification.
+pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, AddonError> {
+    let root = checked_addon_storage_dir(true)?
+        .ok_or_else(|| AddonError::Io("Addon storage directory is unavailable".to_string()))?;
+    let staged = stage_signed_client_package(archive, &root, "package-install")?;
+    let result = (|| {
+        let destination = addon_dir(&staged.manifest.id)?;
         match fs::symlink_metadata(&destination) {
             Ok(_) => return Err(AddonError::AlreadyInstalled),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2228,16 +2245,89 @@ pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, Addo
             installed_at: installed_at.clone(),
         };
         let state_text = serde_json::to_string_pretty(&state).map_err(io_error)?;
-        fs::write(stage.join(STATE_FILE), state_text).map_err(io_error)?;
-        fs::rename(&stage, &destination).map_err(io_error)?;
+        fs::write(staged.directory.join(STATE_FILE), state_text).map_err(io_error)?;
+        fs::rename(&staged.directory, &destination).map_err(io_error)?;
         Ok(AddonRecord {
-            manifest,
+            manifest: staged.manifest,
             enabled: true,
             installed_at,
         })
     })();
     if result.is_err() {
-        let _ = fs::remove_dir_all(&stage);
+        let _ = fs::remove_dir_all(&staged.directory);
+    }
+    result
+}
+
+fn replace_addon_directory_atomically(
+    staged: &Path,
+    destination: &Path,
+) -> Result<(), AddonError> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| AddonError::Io("Invalid addon directory path".to_string()))?;
+    reject_symlinked_path_ancestors(parent, "Invalid addon storage directory")?;
+    let destination_metadata = fs::symlink_metadata(destination).map_err(io_error)?;
+    if destination_metadata.file_type().is_symlink() || !destination_metadata.is_dir() {
+        return Err(AddonError::Invalid("Invalid addon directory".to_string()));
+    }
+    let backup = parent.join(format!(".package-update-backup-{}", Uuid::new_v4()));
+    fs::rename(destination, &backup).map_err(io_error)?;
+    match fs::rename(staged, destination) {
+        Ok(()) => fs::remove_dir_all(&backup).map_err(io_error),
+        Err(error) => {
+            let _ = fs::rename(&backup, destination);
+            Err(io_error(error))
+        }
+    }
+}
+
+/// Validate and atomically replace an installed signed client-extension
+/// package. This contract-only path preserves the installed lifecycle state;
+/// it never executes client JavaScript or enables a runtime.
+pub fn update_signed_client_package(archive: &Path) -> Result<AddonRecord, AddonError> {
+    let root = checked_addon_storage_dir(false)?.ok_or(AddonError::NotFound)?;
+    let staged = stage_signed_client_package(archive, &root, "package-update")?;
+    let result = (|| {
+        let destination = addon_dir(&staged.manifest.id)?;
+        let existing = match fs::symlink_metadata(&destination) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(AddonError::Invalid("Invalid addon directory".to_string()));
+                }
+                read_record(&destination)?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(AddonError::Invalid(
+                    "Signed client package update identity does not match an installed package"
+                        .to_string(),
+                ));
+            }
+            Err(error) => return Err(io_error(error)),
+        };
+        if existing.manifest.id != staged.manifest.id
+            || existing.manifest.kind != "client_extension"
+        {
+            return Err(AddonError::Invalid(
+                "Signed client package update identity does not match installed package"
+                    .to_string(),
+            ));
+        }
+        let state = AddonState {
+            enabled: existing.enabled,
+            installed_at: existing.installed_at.clone(),
+        };
+        let state_text = serde_json::to_string_pretty(&state).map_err(io_error)?;
+        fs::write(staged.directory.join(STATE_FILE), state_text).map_err(io_error)?;
+        replace_addon_directory_atomically(&staged.directory, &destination)?;
+        Ok(AddonRecord {
+            manifest: staged.manifest,
+            enabled: existing.enabled,
+            installed_at: existing.installed_at,
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staged.directory);
     }
     result
 }
@@ -2449,6 +2539,162 @@ mod tests {
         }
         install_signed_client_package(&archive).unwrap();
         fixture
+    }
+
+    fn signed_client_package_archive(
+        root: &Path,
+        id: &str,
+        version: &str,
+        manifest_payload: &[u8],
+        archive_payload: &[u8],
+    ) -> PathBuf {
+        let package_root = root.join(format!("update-package-{}-{}", id, Uuid::new_v4()));
+        let client_root = package_root.join("client");
+        fs::create_dir_all(&client_root).unwrap();
+        let digest = format!("{:x}", Sha256::digest(manifest_payload));
+        let mut manifest = client_manifest(&digest);
+        manifest.id = id.to_string();
+        manifest.version = version.to_string();
+        manifest.name = format!("Updated {id}");
+        let manifest_path = package_root.join(MANIFEST_FILE);
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let client_path = client_root.join("index.js");
+        fs::write(&client_path, archive_payload).unwrap();
+        let signature_path = package_root.join("manifest.sig");
+        let private_key = root.join("addon-signing.key");
+        assert!(Command::new(trusted_service_signature_verifier_executable())
+            .args(["pkeyutl", "-sign", "-rawin", "-inkey"])
+            .arg(&private_key)
+            .args(["-in"])
+            .arg(&manifest_path)
+            .args(["-out"])
+            .arg(&signature_path)
+            .status()
+            .unwrap()
+            .success());
+        let archive = root.join(format!("update-{}.tar.gz", Uuid::new_v4()));
+        let archive_file = fs::File::create(&archive).unwrap();
+        let encoder = flate2::write::GzEncoder::new(archive_file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        builder
+            .append_path_with_name(&manifest_path, MANIFEST_FILE)
+            .unwrap();
+        builder
+            .append_path_with_name(&signature_path, "manifest.sig")
+            .unwrap();
+        builder.append_dir_all("client", &client_root).unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        archive
+    }
+
+    #[test]
+    fn signed_client_package_update_replaces_same_identity_and_preserves_disabled_state() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let fixture = installed_signed_client_package_fixture();
+        set_enabled("example.weather", false).unwrap();
+        let new_payload = b"window.ScreentraAddon = { apiVersion: '1', version: '0.2.0' };\n";
+        let archive = signed_client_package_archive(
+            &fixture.root,
+            "example.weather",
+            "0.2.0",
+            new_payload,
+            new_payload,
+        );
+
+        let updated = update_signed_client_package(&archive).unwrap();
+
+        assert_eq!(updated.manifest.id, "example.weather");
+        assert_eq!(updated.manifest.version, "0.2.0");
+        assert!(!updated.enabled);
+        assert_eq!(
+            fs::read(fixture.addon_dir.join("client/index.js")).unwrap(),
+            new_payload
+        );
+        let persisted = list()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.manifest.id == "example.weather")
+            .unwrap();
+        assert!(!persisted.enabled);
+        assert_eq!(persisted.manifest.version, "0.2.0");
+    }
+
+    #[test]
+    fn invalid_signed_client_package_update_keeps_existing_package_intact() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let fixture = installed_signed_client_package_fixture();
+        set_enabled("example.weather", false).unwrap();
+        let old_manifest = fs::read(fixture.addon_dir.join(MANIFEST_FILE)).unwrap();
+        let old_payload = fs::read(fixture.addon_dir.join("client/index.js")).unwrap();
+        let archive = signed_client_package_archive(
+            &fixture.root,
+            "example.weather",
+            "0.2.0",
+            b"signed payload",
+            b"tampered payload",
+        );
+
+        assert!(update_signed_client_package(&archive).is_err());
+        assert_eq!(
+            fs::read(fixture.addon_dir.join(MANIFEST_FILE)).unwrap(),
+            old_manifest
+        );
+        assert_eq!(
+            fs::read(fixture.addon_dir.join("client/index.js")).unwrap(),
+            old_payload
+        );
+        assert!(!list()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.manifest.id == "example.weather")
+            .unwrap()
+            .enabled);
+    }
+
+    #[test]
+    fn signed_client_package_update_rejects_identity_mismatch() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let fixture = installed_signed_client_package_fixture();
+        let old_manifest = fs::read(fixture.addon_dir.join(MANIFEST_FILE)).unwrap();
+        let old_payload = fs::read(fixture.addon_dir.join("client/index.js")).unwrap();
+        let archive = signed_client_package_archive(
+            &fixture.root,
+            "different.extension",
+            "0.2.0",
+            b"different identity",
+            b"different identity",
+        );
+
+        assert!(update_signed_client_package(&archive).is_err());
+        assert_eq!(
+            fs::read(fixture.addon_dir.join(MANIFEST_FILE)).unwrap(),
+            old_manifest
+        );
+        assert_eq!(
+            fs::read(fixture.addon_dir.join("client/index.js")).unwrap(),
+            old_payload
+        );
+        assert_eq!(
+            list()
+                .unwrap()
+                .into_iter()
+                .filter(|record| record.manifest.id == "different.extension")
+                .count(),
+            0
+        );
     }
 
     fn assert_client_extension_readbacks_fail_closed() {

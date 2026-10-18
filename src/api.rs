@@ -1275,7 +1275,9 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route("/api/addons/widget-types", get(list_addon_widget_types))
         .route(
             "/api/addons/package",
-            post(upload_addon_package).layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
+            post(upload_addon_package)
+                .put(update_addon_package)
+                .layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
         )
         .route(
             "/api/addons/trusted-service/stage",
@@ -2441,7 +2443,20 @@ async fn stage_trusted_service_manifest(
 }
 
 async fn upload_addon_package(
+    multipart: Multipart,
+) -> Result<(StatusCode, AxumJson<AddonRecord>), (StatusCode, String)> {
+    upload_addon_package_with_mode(multipart, false).await
+}
+
+async fn update_addon_package(
+    multipart: Multipart,
+) -> Result<(StatusCode, AxumJson<AddonRecord>), (StatusCode, String)> {
+    upload_addon_package_with_mode(multipart, true).await
+}
+
+async fn upload_addon_package_with_mode(
     mut multipart: Multipart,
+    update: bool,
 ) -> Result<(StatusCode, AxumJson<AddonRecord>), (StatusCode, String)> {
     let package_path = std::env::temp_dir().join(format!("screentra-addon-{}.tar.gz", Uuid::new_v4()));
     let mut received = false;
@@ -2473,10 +2488,21 @@ async fn upload_addon_package(
             "Addon package upload is empty".to_string(),
         ));
     }
-    let result = crate::addons::install_signed_client_package(&package_path);
+    let result = if update {
+        crate::addons::update_signed_client_package(&package_path)
+    } else {
+        crate::addons::install_signed_client_package(&package_path)
+    };
     let _ = fs::remove_file(&package_path);
     result
-        .map(|record| (StatusCode::CREATED, AxumJson(record)))
+        .map(|record| {
+            let status = if update {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            };
+            (status, AxumJson(record))
+        })
         .map_err(addon_error_response)
 }
 
