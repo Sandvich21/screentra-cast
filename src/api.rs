@@ -2459,13 +2459,27 @@ async fn update_addon_package(
 }
 
 async fn rollback_signed_client_package_handler(
+    State(state): State<RuntimeState>,
     Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<AddonRecord>, (StatusCode, String)> {
     require_addon_storage_admin(&principal)?;
-    crate::addons::rollback_signed_client_package(&id)
-        .map(AxumJson)
-        .map_err(addon_error_response)
+    let record = crate::addons::rollback_signed_client_package(&id)
+        .map_err(addon_error_response)?;
+    audit_trusted_service_stage_event(
+        &state,
+        &principal,
+        "signed_client_package_rollback",
+        &id,
+        "success",
+        None,
+    )
+    .await
+    .map_err(|error| {
+        log::error!("signed client package rollback audit persistence failed: {error}");
+        internal_server_error()
+    })?;
+    Ok(AxumJson(record))
 }
 
 async fn upload_addon_package_with_mode(
@@ -10692,6 +10706,11 @@ mod signed_client_package_http_tests {
     }
 
     fn rollback_app(role: &str) -> Router {
+        let db = Arc::new(Database::open(":memory:").expect("open in-memory test database"));
+        rollback_app_with_state(role, RuntimeState::sqlite(db))
+    }
+
+    fn rollback_app_with_state(role: &str, state: RuntimeState) -> Router {
         Router::new()
             .route(
                 "/api/addons/package",
@@ -10705,6 +10724,63 @@ mod signed_client_package_http_tests {
                 username: "test-user".to_string(),
                 role: role.to_string(),
             }))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn signed_client_package_http_rollback_audits_success_without_package_contents() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let (fixture, private_key) = setup_fixture();
+        let db_path = std::env::temp_dir().join(format!("screentra-addon-audit-{}.db", Uuid::new_v4()));
+        let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open audit test database"));
+        let state = RuntimeState::sqlite(db);
+        let app = rollback_app_with_state("admin", state.clone());
+        let old_payload = b"window.ScreentraAddon = { version: '0.1.0' };\\n";
+        let new_payload = b"window.ScreentraAddon = { version: '0.2.0' };\\n";
+
+        let install = package(
+            &fixture.root,
+            &private_key,
+            "example.weather",
+            "0.1.0",
+            old_payload,
+            old_payload,
+        );
+        let (status, body) = send(&app, "POST", &install).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let update = package(
+            &fixture.root,
+            &private_key,
+            "example.weather",
+            "0.2.0",
+            new_payload,
+            new_payload,
+        );
+        let (status, body) = send(&app, "PUT", &update).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (status, body) = send_rollback(&app, "example.weather").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let events = state
+            .client_repository()
+            .list_audit_events(10)
+            .await
+            .expect("read rollback audit row");
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.actor.as_deref(), Some("test-user"));
+        assert_eq!(event.role.as_deref(), Some("admin"));
+        assert_eq!(event.event_type, "signed_client_package_rollback");
+        assert_eq!(event.target.as_deref(), Some("example.weather"));
+        assert_eq!(event.outcome, "success");
+        assert_eq!(event.detail, None);
+        assert!(!event.event_type.contains("window.ScreentraAddon"));
+        assert!(!event.target.as_deref().unwrap().contains("client/index.js"));
+        drop(state);
+        let _ = fs::remove_file(db_path);
     }
 
     #[tokio::test]
