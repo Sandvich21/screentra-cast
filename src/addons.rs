@@ -1529,6 +1529,10 @@ pub fn remove(id: &str) -> Result<(), AddonError> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(AddonError::Invalid("Invalid addon directory".to_string()));
     }
+    let record = read_record(&dir)?;
+    if record.manifest.kind == "client_extension" {
+        remove_signed_client_package_rollback(id)?;
+    }
     fs::remove_dir_all(dir).map_err(io_error)
 }
 
@@ -2292,6 +2296,23 @@ fn checked_addon_rollback_root(
     }
 }
 
+fn remove_signed_client_package_rollback(id: &str) -> Result<(), AddonError> {
+    let root = checked_addon_storage_dir(false)?.ok_or(AddonError::NotFound)?;
+    let Some(rollback_root) = checked_addon_rollback_root(&root, false)? else {
+        return Ok(());
+    };
+    let backup = rollback_root.join(id);
+    reject_symlinked_path_ancestors(&backup, "Invalid addon rollback path")?;
+    match fs::symlink_metadata(&backup) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
+            AddonError::Invalid("Invalid addon rollback directory".to_string()),
+        ),
+        Ok(_) => fs::remove_dir_all(backup).map_err(io_error),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
 fn replace_addon_directory_atomically(
     staged: &Path,
     destination: &Path,
@@ -2877,6 +2898,110 @@ mod tests {
         assert!(rollback_signed_client_package("example.weather").is_err());
         assert_eq!(read_record(&fixture.addon_dir).unwrap().manifest.version, "0.2.0");
         assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_client_package_remove_rejects_symlinked_rollback_without_deleting_current() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let fixture = installed_signed_client_package_fixture();
+        let new_payload = b"window.ScreentraAddon = { apiVersion: '1', version: '0.2.0' };\n";
+        let archive = signed_client_package_archive(
+            &fixture.root,
+            "example.weather",
+            "0.2.0",
+            new_payload,
+            new_payload,
+        );
+        update_signed_client_package(&archive).unwrap();
+        let backup = fixture
+            .addon_dir
+            .parent()
+            .unwrap()
+            .join(".rollback/example.weather");
+        let outside = fixture.root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::remove_dir_all(&backup).unwrap();
+        symlink(&outside, &backup).unwrap();
+
+        assert!(remove("example.weather").is_err());
+        assert_eq!(read_record(&fixture.addon_dir).unwrap().manifest.version, "0.2.0");
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
+        assert!(backup.is_symlink());
+        assert!(outside.is_dir());
+    }
+
+    #[test]
+    fn signed_client_package_remove_rejects_non_directory_rollback_without_deleting_current() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let fixture = installed_signed_client_package_fixture();
+        let new_payload = b"window.ScreentraAddon = { apiVersion: '1', version: '0.2.0' };\n";
+        let archive = signed_client_package_archive(
+            &fixture.root,
+            "example.weather",
+            "0.2.0",
+            new_payload,
+            new_payload,
+        );
+        update_signed_client_package(&archive).unwrap();
+        let backup = fixture
+            .addon_dir
+            .parent()
+            .unwrap()
+            .join(".rollback/example.weather");
+        fs::remove_dir_all(&backup).unwrap();
+        fs::write(&backup, b"not a rollback directory").unwrap();
+
+        assert!(remove("example.weather").is_err());
+        assert_eq!(read_record(&fixture.addon_dir).unwrap().manifest.version, "0.2.0");
+        assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
+        assert!(backup.is_file());
+    }
+
+    #[test]
+    fn signed_client_package_remove_clears_rollback_and_allows_clean_reinstall() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let fixture = installed_signed_client_package_fixture();
+        let new_payload = b"window.ScreentraAddon = { apiVersion: '1', version: '0.2.0' };\n";
+        let update_archive = signed_client_package_archive(
+            &fixture.root,
+            "example.weather",
+            "0.2.0",
+            new_payload,
+            new_payload,
+        );
+        update_signed_client_package(&update_archive).unwrap();
+        let rollback_root = fixture
+            .addon_dir
+            .parent()
+            .unwrap()
+            .join(ROLLBACK_DIR);
+        assert!(rollback_root.join("example.weather").is_dir());
+
+        remove("example.weather").unwrap();
+
+        assert!(!fixture.addon_dir.exists());
+        assert!(!rollback_root.join("example.weather").exists());
+        let reinstall_payload = b"window.ScreentraAddon = { apiVersion: '1', version: '0.3.0' };\n";
+        let reinstall_archive = signed_client_package_archive(
+            &fixture.root,
+            "example.weather",
+            "0.3.0",
+            reinstall_payload,
+            reinstall_payload,
+        );
+        let reinstalled = install_signed_client_package(&reinstall_archive).unwrap();
+        assert_eq!(reinstalled.manifest.version, "0.3.0");
+        assert!(!rollback_root.join("example.weather").exists());
     }
 
     #[test]
