@@ -39,9 +39,11 @@ class ClientServiceContractTests(unittest.TestCase):
         generated = (ROOT / 'player-client/static/install/player-client.sh').read_text(encoding='utf-8')
         self.assertIn("'client_service_status'", generated)
         self.assertIn("'client_service_rollback_request'", generated)
+        self.assertIn("'client_service_transcribe_request'", generated)
         self.assertIn("'execution_disabled'", generated)
         self.assertIn('client_service_status', server_actions())
         self.assertIn('client_service_rollback_request', server_actions())
+        self.assertIn('client_service_transcribe_request', server_actions())
         for action in (
             'client_service_start',
             'client_service_stop',
@@ -76,6 +78,55 @@ class ClientServiceContractTests(unittest.TestCase):
                 {**valid, 'payload': {'service_id': 'x' * (actor.MAX_COMMAND_PAYLOAD_BYTES + 1)}},
                 'client-a',
             )
+
+    def test_transcribe_request_payload_is_strictly_bounded(self):
+        valid = {
+            'client_id': 'client-a',
+            'action': 'client_service_transcribe_request',
+            'payload': {
+                'service_id': 'speech-to-text',
+                'request_id': 'request-001',
+                'push_to_talk': True,
+            },
+            'requested_at': '2026-10-18T18:00:00Z',
+        }
+        self.assertEqual(actor.validate_pending_command(valid, 'client-a'), valid)
+        for payload in (
+            {'service_id': 'speech-to-text', 'request_id': 'request-001'},
+            {'service_id': 'speech-to-text', 'request_id': 'request-001', 'push_to_talk': 'true'},
+            {'service_id': 'speech/to-text', 'request_id': 'request-001', 'push_to_talk': True},
+            {'service_id': 'speech-to-text', 'request_id': 'request 001', 'push_to_talk': True},
+            {'service_id': 'speech-to-text', 'request_id': 'request-001', 'push_to_talk': True, 'audio': 'raw'},
+        ):
+            with self.assertRaises(ValueError):
+                actor.validate_pending_command({**valid, 'payload': payload}, 'client-a')
+        with self.assertRaises(ValueError):
+            actor.validate_pending_command(
+                {**valid, 'payload': {**valid['payload'], 'request_id': 'x' * (actor.CLIENT_SERVICE_REQUEST_ID_MAX_BYTES + 1)}},
+                'client-a',
+            )
+
+    def test_transcribe_request_execution_is_disabled_without_local_side_effects(self):
+        result = actor.execute(
+            'client_service_transcribe_request',
+            {
+                'service_id': 'speech-to-text',
+                'request_id': 'request-001',
+                'push_to_talk': True,
+            },
+            {},
+        )
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['code'], 'execution_disabled')
+        self.assertFalse(result['execution_enabled'])
+        self.assertEqual(result['state'], 'disabled')
+        self.assertEqual(result['details'], {
+            'service_id': 'speech-to-text',
+            'request_id': 'request-001',
+            'push_to_talk': True,
+            'audio_bytes': 0,
+            'transcript': None,
+        })
 
     def test_client_service_execution_is_disabled_and_structured(self):
         status = actor.execute(

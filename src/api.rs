@@ -1364,7 +1364,8 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             "/api/clients/{id}/command",
             get(get_client_command)
                 .post(set_client_command)
-                .delete(clear_client_command),
+                .delete(clear_client_command)
+                .layer(DefaultBodyLimit::max(MAX_CLIENT_COMMAND_PAYLOAD_BYTES)),
         )
         .route(
             "/api/clients/{id}/command/ack",
@@ -7529,9 +7530,12 @@ const ALLOWED_CLIENT_COMMAND_ACTIONS: &[&str] = &[
     "ir_send",
     "client_service_status",
     "client_service_rollback_request",
+    "client_service_transcribe_request",
 ];
 
 const CLIENT_SERVICE_IDENTIFIER_MAX_BYTES: usize = 128;
+const CLIENT_SERVICE_REQUEST_ID_MAX_BYTES: usize = 128;
+const CLIENT_SERVICE_TRANSCRIBE_ENVELOPE_MAX_BYTES: usize = 512;
 const CLIENT_SERVICE_REASON_MAX_BYTES: usize = 256;
 
 fn validate_client_service_identifier(value: &str, field: &str) -> Result<(), String> {
@@ -7551,8 +7555,8 @@ fn validate_client_service_payload(
     payload: Option<&serde_json::Value>,
 ) -> Result<(), String> {
     let Some(value) = payload else {
-        if action == "client_service_rollback_request" {
-            return Err("client service rollback request payload is required".to_string());
+        if matches!(action, "client_service_rollback_request" | "client_service_transcribe_request") {
+            return Err("client service request payload is required".to_string());
         }
         return Ok(());
     };
@@ -7564,6 +7568,9 @@ fn validate_client_service_payload(
         "client_service_rollback_request" => {
             &["service_id", "activation_id", "target_version", "reason"][..]
         }
+        "client_service_transcribe_request" => {
+            &["service_id", "request_id", "push_to_talk"][..]
+        }
         _ => return Ok(()),
     };
     if object.keys().any(|key| !allowed.contains(&key.as_str())) {
@@ -7571,6 +7578,8 @@ fn validate_client_service_payload(
     }
     let required = if action == "client_service_rollback_request" {
         &["service_id", "activation_id"][..]
+    } else if action == "client_service_transcribe_request" {
+        &["service_id", "request_id", "push_to_talk"][..]
     } else {
         &[][..]
     };
@@ -7579,13 +7588,42 @@ fn validate_client_service_payload(
             return Err(format!("client service payload is missing {field}"));
         }
     }
-    for field in ["service_id", "activation_id", "target_version"] {
+    for field in ["service_id", "activation_id", "target_version", "request_id"] {
         if let Some(value) = object.get(field) {
             let value = value
                 .as_str()
                 .ok_or_else(|| format!("client service {field} must be a string"))?;
-            validate_client_service_identifier(value, field)?;
+            if field == "request_id" {
+                if value.is_empty()
+                    || value.len() > CLIENT_SERVICE_REQUEST_ID_MAX_BYTES
+                    || !value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+                    })
+                {
+                    return Err(format!("{field} is invalid or exceeds its bound"));
+                }
+            } else {
+                validate_client_service_identifier(value, field)?;
+            }
         }
+    }
+    if action == "client_service_transcribe_request"
+        && !object
+            .get("push_to_talk")
+            .is_some_and(serde_json::Value::is_boolean)
+    {
+        return Err("client service push_to_talk must be a boolean".to_string());
+    }
+    if action == "client_service_transcribe_request"
+        && serde_json::to_vec(value)
+            .map_err(|_| "client service payload could not be serialized".to_string())?
+            .len()
+            > CLIENT_SERVICE_TRANSCRIBE_ENVELOPE_MAX_BYTES
+    {
+        return Err(format!(
+            "client service transcribe request exceeds {} bytes",
+            CLIENT_SERVICE_TRANSCRIBE_ENVELOPE_MAX_BYTES
+        ));
     }
     if let Some(reason) = object.get("reason") {
         let reason = reason
@@ -9678,6 +9716,33 @@ mod tests {
             "client_service_rollback",
         ] {
             assert!(validate_client_command_for_client("client-a", action, None).is_err());
+        }
+
+        let transcribe = serde_json::json!({
+            "service_id": "speech-to-text",
+            "request_id": "request-001",
+            "push_to_talk": true,
+        });
+        assert!(validate_client_command_for_client(
+            "client-a",
+            "client_service_transcribe_request",
+            Some(&transcribe),
+        )
+        .is_ok());
+        for payload in [
+            serde_json::json!({"service_id": "speech-to-text", "request_id": "request-001"}),
+            serde_json::json!({"service_id": "speech-to-text", "request_id": "request-001", "push_to_talk": "true"}),
+            serde_json::json!({"service_id": "speech/to-text", "request_id": "request-001", "push_to_talk": true}),
+            serde_json::json!({"service_id": "speech-to-text", "request_id": "request 001", "push_to_talk": true}),
+            serde_json::json!({"service_id": "speech-to-text", "request_id": "request-001", "push_to_talk": true, "audio": "raw"}),
+            serde_json::json!({"service_id": "speech-to-text", "request_id": "x".repeat(129), "push_to_talk": true}),
+        ] {
+            assert!(validate_client_command_for_client(
+                "client-a",
+                "client_service_transcribe_request",
+                Some(&payload),
+            )
+            .is_err());
         }
     }
 

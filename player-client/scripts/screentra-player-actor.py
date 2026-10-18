@@ -31,6 +31,8 @@ MAX_JSON_FILE_BYTES = 1 << 20
 MAX_COMMAND_PAYLOAD_BYTES = 64 * 1024
 MAX_CLIENT_ID_BYTES = 200
 CLIENT_SERVICE_IDENTIFIER_MAX_BYTES = 128
+CLIENT_SERVICE_REQUEST_ID_MAX_BYTES = 128
+CLIENT_SERVICE_TRANSCRIBE_ENVELOPE_MAX_BYTES = 512
 CLIENT_SERVICE_REASON_MAX_BYTES = 256
 
 ALLOWED_CLIENT_COMMAND_ACTIONS = (
@@ -41,6 +43,7 @@ ALLOWED_CLIENT_COMMAND_ACTIONS = (
     'audio_set_volume', 'restart_client', 'start_display_preview',
     'stop_display_preview', 'ddc_set', 'display_power', 'cec_send',
     'ir_send', 'client_service_status', 'client_service_rollback_request',
+    'client_service_transcribe_request',
 )
 
 
@@ -53,31 +56,49 @@ def _validate_client_service_identifier(value, field):
 
 def validate_client_service_payload(action, payload):
     if payload is None:
-        if action == 'client_service_rollback_request':
-            raise ValueError('client service rollback request payload is required')
+        if action in ('client_service_rollback_request', 'client_service_transcribe_request'):
+            raise ValueError('client service request payload is required')
         return
     if not isinstance(payload, dict):
         raise ValueError('client service payload must be a JSON object')
     allowed = ({'service_id'} if action == 'client_service_status' else
                {'service_id', 'activation_id', 'target_version', 'reason'}
-               if action == 'client_service_rollback_request' else None)
+               if action == 'client_service_rollback_request' else
+               {'service_id', 'request_id', 'push_to_talk'}
+               if action == 'client_service_transcribe_request' else None)
     if allowed is None:
         return
     if set(payload) - allowed:
         raise ValueError('client service payload contains an unsupported field')
-    required = {'service_id', 'activation_id'} if action == 'client_service_rollback_request' else set()
+    required = ({'service_id', 'activation_id'} if action == 'client_service_rollback_request' else
+                {'service_id', 'request_id', 'push_to_talk'}
+                if action == 'client_service_transcribe_request' else set())
     missing = required - set(payload)
     if missing:
         raise ValueError(f'client service payload is missing {sorted(missing)[0]}')
     for field in ('service_id', 'activation_id', 'target_version'):
         if field in payload:
             _validate_client_service_identifier(payload[field], field)
+    if 'request_id' in payload:
+        request_id = payload['request_id']
+        if (not isinstance(request_id, str) or not request_id or
+                len(request_id.encode('utf-8')) > CLIENT_SERVICE_REQUEST_ID_MAX_BYTES or
+                any(not (char.isascii() and (char.isalnum() or char in '._-')) for char in request_id)):
+            raise ValueError('request_id is invalid or exceeds its bound')
+    if action == 'client_service_transcribe_request' and not isinstance(payload.get('push_to_talk'), bool):
+        raise ValueError('client service push_to_talk must be a boolean')
     if 'reason' in payload:
         reason = payload['reason']
         if (not isinstance(reason, str) or not reason or
                 len(reason.encode('utf-8')) > CLIENT_SERVICE_REASON_MAX_BYTES or
                 any(ord(char) < 32 or ord(char) == 127 for char in reason)):
             raise ValueError('client service reason is invalid or exceeds its bound')
+    if action == 'client_service_transcribe_request':
+        encoded = json.dumps(payload, separators=(',', ':'), ensure_ascii=True).encode('utf-8')
+        if len(encoded) > CLIENT_SERVICE_TRANSCRIBE_ENVELOPE_MAX_BYTES:
+            raise ValueError(
+                f'client service transcribe request exceeds {CLIENT_SERVICE_TRANSCRIBE_ENVELOPE_MAX_BYTES} bytes'
+            )
 
 
 def validate_pending_command(spec, expected_client_id):
@@ -926,6 +947,27 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
                 'service_id': payload.get('service_id'),
                 'activation_id': payload.get('activation_id'),
                 'rollback_requested': False,
+            },
+            'started_at': started,
+        }
+    if action == 'client_service_transcribe_request':
+        try:
+            validate_client_service_payload(action, payload)
+        except ValueError as exc:
+            return {
+                'action': action, 'ok': False, 'code': 'invalid_payload',
+                'execution_enabled': False, 'message': str(exc), 'started_at': started,
+            }
+        return {
+            'action': action, 'ok': False, 'code': 'execution_disabled',
+            'execution_enabled': False, 'state': 'disabled',
+            'message': 'client service transcription is disabled',
+            'details': {
+                'service_id': payload['service_id'],
+                'request_id': payload['request_id'],
+                'push_to_talk': payload['push_to_talk'],
+                'audio_bytes': 0,
+                'transcript': None,
             },
             'started_at': started,
         }
