@@ -191,7 +191,8 @@ next renderer start.
 The ordinary addon storage root is a checked private directory with exact `0700`
 permissions. Newly installed addon directories use exact `0700` permissions,
 and their manifest/state/signature metadata files are published atomically with exact `0600`
-permissions. Signed package staging normalizes only regular, single-link manifest and
+permissions. The standard-addon seed marker is also required to be a regular,
+single-link `0600` metadata file. Signed package staging normalizes only regular, single-link manifest and
 signature files to that mode before persistence; hard-linked or non-file metadata is
 rejected. The root is created with that mode and every listing, install, update,
 enable/disable, package-read, removal, and rollback path rejects a symlink,

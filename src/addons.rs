@@ -1177,12 +1177,15 @@ pub fn ensure_bundled_standard_addons() -> Result<Vec<AddonRecord>, AddonError> 
     })?;
     let marker = root.join(".standard-addons-seeded");
     match fs::symlink_metadata(&marker) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            return Err(AddonError::Invalid(
-                "Invalid standard addon seed marker".to_string(),
-            ));
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(AddonError::Invalid(
+                    "Invalid standard addon seed marker".to_string(),
+                ));
+            }
+            validate_private_addon_metadata_file(&marker, "standard addon seed marker")?;
+            return migrate_legacy_standard_renderer_fields();
         }
-        Ok(_) => return migrate_legacy_standard_renderer_fields(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(io_error(error)),
     }
@@ -3908,6 +3911,43 @@ mod tests {
         assert!(manifest.trusted_service.is_none());
         assert!(manifest.client_service.is_none());
         assert!(manifest.data_contract.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standard_addon_seed_marker_rejects_insecure_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-cast-standard-seed-marker-{}",
+            Uuid::new_v4()
+        ));
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        let addons_root = checked_addon_storage_dir(true).unwrap().unwrap();
+        let marker = addons_root.join(".standard-addons-seeded");
+        fs::write(&marker, b"seeded\n").unwrap();
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let result = ensure_bundled_standard_addons();
+
+        if let Some(value) = old_data_dir {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        assert!(matches!(result, Err(AddonError::Invalid(_))));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
