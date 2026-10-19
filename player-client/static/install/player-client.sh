@@ -16,6 +16,7 @@ PREFLIGHT="$INSTALL_DIR/screentra-client-preflight.py"
 DISPLAY_GOVERNANCE="$INSTALL_DIR/screentra-display-governance.py"
 STATUS="$BIN_DIR/screentra-client-status"
 ACTOR="$INSTALL_DIR/screentra-client-actor.py"
+TRANSCRIPTION_ADMISSION="$INSTALL_DIR/screentra-stt-transcription-request-admission.py"
 ACTOR_SERVICE_FILE="$SYSTEMD_USER_DIR/screentra-client-actor.service"
 ACTOR_SERVICE_NAME="screentra-client-actor.service"
 SERVICE="$SYSTEMD_USER_DIR/screentra-client-heartbeat.service"
@@ -5786,6 +5787,163 @@ ln -sf "$DISPLAY_GOVERNANCE" "$BIN_DIR/ripley-display-governance"
 
 ln -sf "$RENDERER" "$BIN_DIR/screentra-client-renderer"
 
+cat > "$TRANSCRIPTION_ADMISSION" <<'PY_TRANSCRIPTION_ADMISSION'
+#!/usr/bin/env python3
+"""Pure, bounded admission for one inert transcription request.
+
+The request mapping is closed and immutable.  Admission returns metadata-only
+state and never performs work outside this module.
+"""
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Any, Final
+
+
+MAX_SERVICE_ID_BYTES: Final = 64
+MAX_REQUEST_ID_BYTES: Final = 128
+MAX_REQUEST_BYTES: Final = 512
+MAX_EVIDENCE_BYTES: Final = 2048
+
+TRANSCRIPTION_REQUEST_FIELDS: Final = (
+    'service_id',
+    'request_id',
+    'push_to_talk',
+)
+STT_TRANSCRIPTION_REQUEST_FIELDS: Final = frozenset(TRANSCRIPTION_REQUEST_FIELDS)
+_TRANSCRIPTION_REQUEST_FIELD_SET: Final = STT_TRANSCRIPTION_REQUEST_FIELDS
+_TRANSCRIPTION_EVIDENCE_FIELDS: Final = frozenset({
+    'service_id',
+    'request_id',
+    'push_to_talk',
+    'request_valid',
+    'execution_enabled',
+    'request_queued',
+    'audio_accessed',
+    'transcription_started',
+    'status',
+})
+_SERVICE_ID_RE: Final = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}$')
+_REQUEST_ID_RE: Final = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
+_UNSAFE_IDENTIFIER_RE: Final = re.compile(
+    r'(?:password|passwd|secret|token|credential|bearer|api[_-]?key|apikey)',
+    re.IGNORECASE,
+)
+
+
+class STTTranscriptionRequestError(ValueError):
+    """Raised when a transcription request is not the closed contract."""
+
+
+def _fail(message: str = 'transcription request is invalid') -> STTTranscriptionRequestError:
+    return STTTranscriptionRequestError(message)
+
+
+def _bounded_json(value: Mapping[str, Any], limit: int, message: str) -> None:
+    try:
+        encoded = json.dumps(
+            dict(value),
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(',', ':'),
+        ).encode('utf-8')
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise _fail(message) from exc
+    if len(encoded) > limit:
+        raise _fail(message)
+
+
+def _identifier(value: Any, field: str, pattern: re.Pattern[str], maximum: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or not value.isascii()
+        or len(value.encode('utf-8')) > maximum
+        or pattern.fullmatch(value) is None
+        or _UNSAFE_IDENTIFIER_RE.search(value) is not None
+    ):
+        raise _fail(f'{field} is invalid or exceeds its bound')
+    return value
+
+
+def _request_values(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise _fail('transcription request must be a mapping')
+    try:
+        keys = list(value.keys())
+        if len(keys) != len(set(keys)):
+            raise _fail('transcription request contains duplicate keys')
+        values = dict(value)
+    except STTTranscriptionRequestError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise _fail('transcription request is not a bounded mapping') from exc
+    if set(values) != _TRANSCRIPTION_REQUEST_FIELD_SET:
+        raise _fail('transcription request fields are not allowlisted')
+    _bounded_json(values, MAX_REQUEST_BYTES, 'transcription request is oversized')
+    _identifier(values['service_id'], 'service_id', _SERVICE_ID_RE, MAX_SERVICE_ID_BYTES)
+    _identifier(values['request_id'], 'request_id', _REQUEST_ID_RE, MAX_REQUEST_ID_BYTES)
+    if values['push_to_talk'] is not True:
+        raise _fail('push_to_talk must be the real boolean true')
+    return values
+
+
+def validate_transcription_request(payload: Mapping[str, Any]) -> MappingProxyType:
+    """Return the exact immutable request mapping after pure validation."""
+    values = _request_values(payload)
+    return MappingProxyType({field: values[field] for field in TRANSCRIPTION_REQUEST_FIELDS})
+
+
+def build_transcription_request_evidence(request: Mapping[str, Any]) -> MappingProxyType:
+    """Return only bounded metadata for the exact immutable validated request."""
+    if type(request) is not MappingProxyType:
+        raise _fail('transcription request must be the immutable validated result')
+    values = _request_values(request)
+    evidence = {
+        'service_id': values['service_id'],
+        'request_id': values['request_id'],
+        'push_to_talk': values['push_to_talk'],
+        'request_valid': True,
+        'execution_enabled': False,
+        'request_queued': False,
+        'audio_accessed': False,
+        'transcription_started': False,
+        'status': 'disabled',
+    }
+    if set(evidence) != _TRANSCRIPTION_EVIDENCE_FIELDS:
+        raise _fail('transcription evidence fields are not allowlisted')
+    _bounded_json(evidence, MAX_EVIDENCE_BYTES, 'transcription evidence is oversized')
+    return MappingProxyType(evidence)
+
+
+admit_transcription_request = validate_transcription_request
+transcription_request_evidence = build_transcription_request_evidence
+validate_stt_transcription_request = validate_transcription_request
+build_stt_transcription_request_evidence = build_transcription_request_evidence
+
+
+__all__ = [
+    'MAX_EVIDENCE_BYTES',
+    'MAX_REQUEST_BYTES',
+    'MAX_REQUEST_ID_BYTES',
+    'MAX_SERVICE_ID_BYTES',
+    'STTTranscriptionRequestError',
+    'STT_TRANSCRIPTION_REQUEST_FIELDS',
+    'TRANSCRIPTION_REQUEST_FIELDS',
+    'admit_transcription_request',
+    'build_stt_transcription_request_evidence',
+    'build_transcription_request_evidence',
+    'transcription_request_evidence',
+    'validate_stt_transcription_request',
+    'validate_transcription_request',
+]
+
+PY_TRANSCRIPTION_ADMISSION
+chmod +x "$TRANSCRIPTION_ADMISSION"
+
 cat > "$ACTOR" <<'PY_ACTOR'
 #!/usr/bin/env python3
 """Screentra Cast client command actor.
@@ -5800,6 +5958,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import datetime as _d
+import importlib.util
 import json
 import os
 import re
@@ -5814,6 +5973,23 @@ import urllib.parse
 import urllib.request
 from urllib.parse import urlparse
 from pathlib import Path
+
+
+def _load_transcription_request_admission():
+    module_path = Path(__file__).with_name(
+        'screentra-stt-transcription-request-admission.py'
+    )
+    spec = importlib.util.spec_from_file_location(
+        'screentra_stt_transcription_request_admission', module_path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError('transcription request admission contract is unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_TRANSCRIPTION_REQUEST_ADMISSION = _load_transcription_request_admission()
 
 MAX_PENDING_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
@@ -5844,50 +6020,35 @@ def _validate_client_service_identifier(value, field):
 
 
 def validate_client_service_payload(action, payload):
+    if action == 'client_service_transcribe_request':
+        _TRANSCRIPTION_REQUEST_ADMISSION.validate_transcription_request(payload)
+        return
     if payload is None:
-        if action in ('client_service_rollback_request', 'client_service_transcribe_request'):
+        if action == 'client_service_rollback_request':
             raise ValueError('client service request payload is required')
         return
     if not isinstance(payload, dict):
         raise ValueError('client service payload must be a JSON object')
     allowed = ({'service_id'} if action == 'client_service_status' else
                {'service_id', 'activation_id', 'target_version', 'reason'}
-               if action == 'client_service_rollback_request' else
-               {'service_id', 'request_id', 'push_to_talk'}
-               if action == 'client_service_transcribe_request' else None)
+               if action == 'client_service_rollback_request' else None)
     if allowed is None:
         return
     if set(payload) - allowed:
         raise ValueError('client service payload contains an unsupported field')
-    required = ({'service_id', 'activation_id'} if action == 'client_service_rollback_request' else
-                {'service_id', 'request_id', 'push_to_talk'}
-                if action == 'client_service_transcribe_request' else set())
+    required = {'service_id', 'activation_id'} if action == 'client_service_rollback_request' else set()
     missing = required - set(payload)
     if missing:
         raise ValueError(f'client service payload is missing {sorted(missing)[0]}')
     for field in ('service_id', 'activation_id', 'target_version'):
         if field in payload:
             _validate_client_service_identifier(payload[field], field)
-    if 'request_id' in payload:
-        request_id = payload['request_id']
-        if (not isinstance(request_id, str) or not request_id or
-                len(request_id.encode('utf-8')) > CLIENT_SERVICE_REQUEST_ID_MAX_BYTES or
-                any(not (char.isascii() and (char.isalnum() or char in '._-')) for char in request_id)):
-            raise ValueError('request_id is invalid or exceeds its bound')
-    if action == 'client_service_transcribe_request' and not isinstance(payload.get('push_to_talk'), bool):
-        raise ValueError('client service push_to_talk must be a boolean')
     if 'reason' in payload:
         reason = payload['reason']
         if (not isinstance(reason, str) or not reason or
                 len(reason.encode('utf-8')) > CLIENT_SERVICE_REASON_MAX_BYTES or
                 any(ord(char) < 32 or ord(char) == 127 for char in reason)):
             raise ValueError('client service reason is invalid or exceeds its bound')
-    if action == 'client_service_transcribe_request':
-        encoded = json.dumps(payload, separators=(',', ':'), ensure_ascii=True).encode('utf-8')
-        if len(encoded) > CLIENT_SERVICE_TRANSCRIBE_ENVELOPE_MAX_BYTES:
-            raise ValueError(
-                f'client service transcribe request exceeds {CLIENT_SERVICE_TRANSCRIBE_ENVELOPE_MAX_BYTES} bytes'
-            )
 
 
 def validate_pending_command(spec, expected_client_id):
@@ -6741,23 +6902,20 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         }
     if action == 'client_service_transcribe_request':
         try:
-            validate_client_service_payload(action, payload)
+            request = _TRANSCRIPTION_REQUEST_ADMISSION.validate_transcription_request(payload)
+            evidence = _TRANSCRIPTION_REQUEST_ADMISSION.build_transcription_request_evidence(request)
         except ValueError as exc:
             return {
                 'action': action, 'ok': False, 'code': 'invalid_payload',
                 'execution_enabled': False, 'message': str(exc), 'started_at': started,
             }
+        details = dict(evidence)
+        details.update({'audio_bytes': 0, 'transcript': None})
         return {
             'action': action, 'ok': False, 'code': 'execution_disabled',
-            'execution_enabled': False, 'state': 'disabled',
+            'execution_enabled': False, 'state': 'disabled', 'status': evidence['status'],
             'message': 'client service transcription is disabled',
-            'details': {
-                'service_id': payload['service_id'],
-                'request_id': payload['request_id'],
-                'push_to_talk': payload['push_to_talk'],
-                'audio_bytes': 0,
-                'transcript': None,
-            },
+            'details': details,
             'started_at': started,
         }
     payload = payload or {}

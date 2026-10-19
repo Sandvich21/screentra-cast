@@ -120,10 +120,17 @@ class ClientServiceContractTests(unittest.TestCase):
         self.assertEqual(result['code'], 'execution_disabled')
         self.assertFalse(result['execution_enabled'])
         self.assertEqual(result['state'], 'disabled')
+        self.assertEqual(result['status'], 'disabled')
         self.assertEqual(result['details'], {
             'service_id': 'speech-to-text',
             'request_id': 'request-001',
             'push_to_talk': True,
+            'request_valid': True,
+            'execution_enabled': False,
+            'request_queued': False,
+            'audio_accessed': False,
+            'transcription_started': False,
+            'status': 'disabled',
             'audio_bytes': 0,
             'transcript': None,
         })

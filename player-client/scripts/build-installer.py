@@ -15,6 +15,7 @@ SECTIONS = {
     "PY_DETECT_FILE":         PLAYER_ROOT / "scripts/screentra-display-detect.py",
     "PY_DISPLAY_GOVERNANCE":  PLAYER_ROOT / "scripts/screentra-display-governance.py",
     "PY_ACTOR":               PLAYER_ROOT / "scripts/screentra-player-actor.py",
+    "PY_TRANSCRIPTION_ADMISSION": PLAYER_ROOT / "scripts/screentra-stt-transcription-request-admission.py",
     "SH_STATUS":              PLAYER_ROOT / "scripts/screentra-player-status.sh",
     "SH_KIOSK":               PLAYER_ROOT / "install/screentra-kiosk.sh",
     "PY_NOLAYOUT":            PLAYER_ROOT / "static/no-layout.html",
