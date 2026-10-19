@@ -4516,6 +4516,26 @@ fn validate_schedule_entry(entry: &ScheduleEntry) -> Result<(), (StatusCode, Str
                 }
             }
         }
+        "display_settings" => {
+            if entry
+                .target_client
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(bad("Display settings schedules require a target client"));
+            }
+            if entry.control_method.as_deref() != Some("ddc") {
+                return Err(bad("Display settings schedules require DDC/CI control"));
+            }
+            if entry.brightness.is_none() && entry.contrast.is_none() {
+                return Err(bad("Display settings schedules require brightness or contrast"));
+            }
+            if entry.brightness.is_some_and(|value| !(0..=100).contains(&value))
+                || entry.contrast.is_some_and(|value| !(0..=100).contains(&value))
+            {
+                return Err(bad("Display settings values must be between 0 and 100"));
+            }
+        }
         _ => return Err(bad("Invalid schedule action")),
     }
     if let Some(method) = entry.control_method.as_deref() {
@@ -7584,6 +7604,7 @@ const ALLOWED_CLIENT_COMMAND_ACTIONS: &[&str] = &[
     "start_display_preview",
     "stop_display_preview",
     "ddc_set",
+    "display_settings",
     "display_power",
     "cec_send",
     "ir_send",
@@ -11061,6 +11082,8 @@ mod audit_validation_tests {
             display_name: None,
             control_method: None,
             display_index: None,
+            brightness: None,
+            contrast: None,
         }
     }
 
@@ -11088,11 +11111,40 @@ mod audit_validation_tests {
     }
 
     #[test]
+    fn schedule_validation_accepts_brightness_only_display_settings() {
+        let mut entry = layout_schedule();
+        entry.action = "display_settings".into();
+        entry.layout_id.clear();
+        entry.target_client = Some("client-1".into());
+        entry.control_method = Some("ddc".into());
+        entry.display_index = Some(2);
+        entry.brightness = Some(0);
+        assert!(validate_schedule_entry(&entry).is_ok());
+    }
+
+    #[test]
+    fn schedule_validation_rejects_invalid_display_settings_contract() {
+        let mut entry = layout_schedule();
+        entry.action = "display_settings".into();
+        entry.layout_id.clear();
+        entry.target_client = Some("client-1".into());
+        entry.control_method = Some("auto".into());
+        entry.brightness = Some(50);
+        assert!(validate_schedule_entry(&entry).is_err());
+
+        entry.control_method = Some("ddc".into());
+        entry.brightness = None;
+        entry.contrast = None;
+        assert!(validate_schedule_entry(&entry).is_err());
+
+        entry.brightness = Some(101);
+        assert!(validate_schedule_entry(&entry).is_err());
+    }
+    #[test]
     fn schedule_validation_rejects_invalid_power_actions_and_states() {
         let mut entry = layout_schedule();
         entry.layout_id.clear();
         entry.target_client = Some("client-1".into());
-
         entry.action = "display_sleep".into();
         entry.power_state = Some("on".into());
         assert!(validate_schedule_entry(&entry).is_err());

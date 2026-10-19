@@ -11,6 +11,8 @@ ALTER TABLE schedules ADD COLUMN IF NOT EXISTS updated_at text;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS display_name text;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS control_method text NOT NULL DEFAULT 'auto';
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS display_index integer NOT NULL DEFAULT 0;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS brightness integer;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS contrast integer;
 ALTER TABLE clients ADD COLUMN IF NOT EXISTS assigned_layout_id text;
 ALTER TABLE clients ADD COLUMN IF NOT EXISTS enrolled boolean NOT NULL DEFAULT false;
 ALTER TABLE clients ADD COLUMN IF NOT EXISTS max_displays integer;

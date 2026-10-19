@@ -150,7 +150,7 @@
 // Global HTML escape helper. Prefer this over inline regex substitutions.
 window.esc = window.esc || function (v) { return String(v == null ? "" : v).replace(/[&<>"'`]/g, function (c) { return ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;", "`":"&#96;" })[c]; }); };
 
-function buildPowerSchedulePayload({ targetClient, displayOption, action, controlMethod }) {
+function buildPowerSchedulePayload({ targetClient, displayOption, action, controlMethod, brightness, contrast }) {
     const client = String(targetClient || '').trim();
     const rawIndex = displayOption && displayOption.value != null
         ? String(displayOption.value).trim() : '';
@@ -162,6 +162,18 @@ function buildPowerSchedulePayload({ targetClient, displayOption, action, contro
     ).trim();
     const displayName = (connector || `Display ${displayIndex}`).slice(0, 256);
     const display = `${client}:${displayName}`.slice(0, 256);
+    if (action === 'display_settings') {
+        if (controlMethod !== 'ddc') return null;
+        const supplied = value => value !== null && value !== undefined && value !== '';
+        const valid = value => Number.isInteger(value) && value >= 0 && value <= 100;
+        if ((!supplied(brightness) && !supplied(contrast)) || (supplied(brightness) && !valid(brightness)) || (supplied(contrast) && !valid(contrast))) return null;
+        return {
+            display, display_name: displayName, display_index: displayIndex,
+            action, power_state: null, control_method: 'ddc',
+            ...(supplied(brightness) ? { brightness } : {}),
+            ...(supplied(contrast) ? { contrast } : {}),
+        };
+    }
     return {
         display,
         display_name: displayName,
@@ -2164,9 +2176,10 @@ const App = {
             return days.length ? days.join(', ') : 'Never';
         }
 
-        // Separate power vs layout schedules
-        const powerSchedules = schedules.filter(s => ['power_on', 'power_off', 'display_sleep'].includes(s.action));
-        const layoutSchedules = schedules.filter(s => !['power_on', 'power_off', 'display_sleep'].includes(s.action));
+        // Separate display vs layout schedules
+        const displayActions = ['power_on', 'power_off', 'display_sleep', 'display_settings'];
+        const powerSchedules = schedules.filter(s => displayActions.includes(s.action));
+        const layoutSchedules = schedules.filter(s => !displayActions.includes(s.action));
 
         container.innerHTML = '';
 
@@ -2175,7 +2188,7 @@ const App = {
         if (powerSchedules.length > 0) {
             const powerHeader = document.createElement('div');
             powerHeader.style.cssText = 'font-size:0.85rem; font-weight:bold; color:var(--accent); margin:1rem 0 0.5rem;';
-            powerHeader.textContent = '⚡ Display Power Schedules';
+            powerHeader.textContent = '⚡ Display Schedules';
             container.appendChild(powerHeader);
 
             const methodLabels = { auto: 'Auto', cec: 'HDMI-CEC', ddc: 'DDC/CI', dpms: 'Linux DPMS (KMS)', ir: 'IR', none: 'None', '': 'Auto' };
@@ -2186,15 +2199,18 @@ const App = {
                 const isSleep = s.action === 'display_sleep';
                 const method = methodLabels[s.control_method || 'auto'] || 'Auto';
                 const displayIdx = s.display_index !== undefined && s.display_index !== null ? s.display_index : 0;
+                const isSettings = s.action === 'display_settings';
+                const actionLabel = isSettings ? 'DDC Brightness / Contrast' : s.action === 'power_on' ? 'Power On' : s.action === 'display_sleep' ? 'Display Sleep' : 'Power Off';
+                const settingSummary = isSettings ? ` &nbsp;|&nbsp; Brightness <strong>${s.brightness === null || s.brightness === undefined ? '—' : esc(String(s.brightness))}</strong> · Contrast <strong>${s.contrast === null || s.contrast === undefined ? '—' : esc(String(s.contrast))}</strong>` : '';
                 card.innerHTML = `
                     <div style="display:flex; flex-direction:column; gap:0.2rem;">
                         <div style="font-weight:bold; font-size:1rem;">
-                            ${s.action === 'power_on' ? '🔆' : s.action === 'display_sleep' ? '😴' : '⏻'} ${esc(dayLabel(s.day_of_week))}, ${esc(s.start_time)} – ${esc(s.end_time)}
+                            ${isSettings ? '☀️' : s.action === 'power_on' ? '🔆' : s.action === 'display_sleep' ? '😴' : '⏻'} ${esc(dayLabel(s.day_of_week))}, ${esc(s.start_time)} – ${esc(s.end_time)}
                         </div>
                         <div style="font-size:0.85rem; color:var(--text-dim);">
                             Client: <strong>${esc(s.target_client || '—')}</strong> &nbsp;|&nbsp;
                             Display <strong>${esc(String(displayIdx))}</strong> &nbsp;|&nbsp;
-                            <strong>${s.action === 'power_on' ? 'Power On' : s.action === 'display_sleep' ? 'Display Sleep' : 'Power Off'}</strong> via <strong>${esc(method)}</strong>
+                            <strong>${actionLabel}</strong> via <strong>${esc(method)}</strong>${settingSummary}
                         </div>
                     </div>
                     <div style="display:flex; gap:0.5rem;">
@@ -2244,13 +2260,13 @@ const App = {
 
         // Empty state
         if (schedules.length === 0) {
-            container.innerHTML = '<p style="color:var(--text-dim)">No schedules yet. Click "+ New Layout Schedule" to add a layout switch, or "+ New Display Power Schedule" to add a display power schedule.</p>';
+            container.innerHTML = '<p style="color:var(--text-dim)">No schedules yet. Click "+ New Layout Schedule" to add a layout switch, or "+ New Display Schedule" to add a display schedule.';
         }
 
         // Wire up buttons — power schedules open in 'power' mode, layout in 'layout'
         container.querySelectorAll('.edit-schedule-btn').forEach(btn => {
             const action = btn.dataset.action;
-            const mode = ['power_on', 'power_off', 'display_sleep'].includes(action) ? 'power' : 'layout';
+            const mode = displayActions.includes(action) ? 'power' : 'layout';
             btn.onclick = () => this.openScheduleModal(btn.dataset.id, schedules, mode, action);
         });
         container.querySelectorAll('.delete-schedule-btn').forEach(btn => {
@@ -2401,14 +2417,16 @@ const App = {
                         </div>
                     </div>`;
         } else if (mode === 'power') {
-            // Display Power Schedule: client → display → action → method → warning
-            modalTitle = existing ? 'Edit Display Power Schedule' : 'New Display Power Schedule';
+            // Display Schedule: client → display → action → method → settings
+            modalTitle = existing ? 'Edit Display Schedule' : 'New Display Schedule';
             const existingAction = defaultAction || (existing ? existing.action : 'power_on');
             const existingMethod = existing ? (existing.control_method || 'auto') : 'auto';
             const existingClientId = existing ? (existing.target_client || '') : '';
             const existingDisplayIdx = existing ? (existing.display_index !== undefined && existing.display_index !== null ? String(existing.display_index) : '0') : '0';
             const existingPowerState = existing ? (existing.power_state || 'on') : 'on';
             const isDdcWake = existingMethod === 'ddc';
+            const existingBrightness = existing && existing.brightness !== undefined && existing.brightness !== null ? String(existing.brightness) : '';
+            const existingContrast = existing && existing.contrast !== undefined && existing.contrast !== null ? String(existing.contrast) : '';
             targetSection = `
                     <div class="prop-group">
                         <label>Client</label>
@@ -2425,11 +2443,12 @@ const App = {
                         <div style="font-size:0.75rem; color:var(--text-dim); margin-top:0.25rem;" id="sched-display-hint">Choose a client first</div>
                     </div>
                     <div class="prop-group">
-                        <label>Power Action</label>
+                        <label>Schedule Action</label>
                         <select id="sched-power-action" class="select">
                             <option value="power_on" ${existingAction === 'power_on' ? 'selected' : ''}>Power On</option>
                             <option value="display_sleep" ${existingAction === 'display_sleep' ? 'selected' : ''}>Display Sleep</option>
                             <option value="power_off" ${existingAction === 'power_off' ? 'selected' : ''}>Power Off</option>
+                            <option value="display_settings" ${existingAction === 'display_settings' ? 'selected' : ''}>DDC Brightness / Contrast</option>
                         </select>
                     </div>
                     <div class="prop-group">
@@ -2442,9 +2461,23 @@ const App = {
                             <option value="ir" ${existingMethod === 'ir' ? 'selected' : ''}>IR (coming later)</option>
                             <option value="none" ${existingMethod === 'none' ? 'selected' : ''}>None (disabled)</option>
                         </select>
+                        <div id="sched-ddc-method-note" style="display:${existingAction === 'display_settings' ? 'block' : 'none'}; font-size:0.75rem; color:var(--text-dim); margin-top:0.25rem;">DDC/CI is required for brightness and contrast schedules.</div>
                         <div id="sched-method-warning" style="display:${isDdcWake ? 'block' : 'none'}; font-size:0.75rem; color:#f59e0b; background:rgba(245,158,11,0.1); border:1px solid rgba(245,158,11,0.3); border-radius:4px; padding:0.5rem; margin-top:0.25rem;">
                             ⚠️ DDC/CI cannot wake a fully-powered-off display. Use "Power On" with CEC or Auto to cold-boot the display.
                         </div>
+                    </div>
+                    <div id="sched-display-settings" style="display:${existingAction === 'display_settings' ? 'block' : 'none'};">
+                        <div class="prop-row">
+                            <div class="prop-group">
+                                <label for="sched-brightness">Brightness (0–100)</label>
+                                <input type="number" id="sched-brightness" class="text-input" min="0" max="100" step="1" value="${existingBrightness}">
+                            </div>
+                            <div class="prop-group">
+                                <label for="sched-contrast">Contrast (0–100)</label>
+                                <input type="number" id="sched-contrast" class="text-input" min="0" max="100" step="1" value="${existingContrast}">
+                            </div>
+                        </div>
+                        <div style="font-size:0.75rem; color:var(--text-dim);">Set either or both values. DDC/CI VCP 10 and VCP 12 are used.</div>
                     </div>
                     <div id="sched-power-state-preview" style="font-size:0.85rem; color:var(--text-dim); padding:0.5rem; background:var(--bg-elev); border-radius:4px; text-align:center;">
                         Will send: <strong id="sched-cmd-preview">—</strong> via <strong id="sched-method-preview">—</strong>
@@ -2671,6 +2704,9 @@ ${targetSection}
             const methodPreview = overlay.querySelector('#sched-method-preview');
             const actionSel = overlay.querySelector('#sched-power-action');
 
+            const settingsSection = overlay.querySelector('#sched-display-settings');
+            const ddcNote = overlay.querySelector('#sched-ddc-method-note');
+
             // Load clients
             const clients = await API.getClients();
             const connectedClients = clients.filter(c => c.status === 'connected' || c.status === 'online');
@@ -2693,8 +2729,9 @@ ${targetSection}
                     const idx = selectedIdx !== undefined ? String(selectedIdx) : '0';
                     displaySel.innerHTML = '<option value="">— Select a display —</option>' +
                         displays.map((d, i) => {
-                            const label = d.connector || d.label || ('Display ' + i);
-                            return `<option value="${i}" data-connector="${esc(label)}" ${String(i) === idx ? 'selected' : ''}>${esc(label)}</option>`;
+                            const index = d.display_index !== undefined && d.display_index !== null ? d.display_index : i;
+                            const label = d.connector || d.label || ('Display ' + index);
+                            return `<option value="${index}" data-connector="${esc(label)}" ${String(index) === idx ? 'selected' : ''}>${esc(label)}</option>`;
                         }).join('');
                     displaySel.disabled = false;
                     hint.textContent = displays.length ? `${displays.length} display(s) found` : 'No displays detected on this client';
@@ -2703,30 +2740,32 @@ ${targetSection}
                 }
             }
 
-            clientSel.onchange = () => loadDisplaysForClient(clientSel.value);
-            actionSel.onchange = updatePreview;
-            methodSel.onchange = () => {
-                const isDdcWake = methodSel.value === 'ddc' && actionSel.value === 'power_on';
-                warning.style.display = isDdcWake ? 'block' : 'none';
-                updatePreview();
-            };
-
             function updatePreview() {
-                const method = methodSel.value;
                 const action = actionSel.value;
+                const isSettings = action === 'display_settings';
+                settingsSection.style.display = isSettings ? 'block' : 'none';
+                ddcNote.style.display = isSettings ? 'block' : 'none';
+                methodSel.disabled = isSettings;
+                if (isSettings) methodSel.value = 'ddc';
+                const method = methodSel.value;
                 const labels = { auto: 'Auto', cec: 'HDMI-CEC', ddc: 'DDC/CI', dpms: 'Linux DPMS (KMS)', ir: 'IR', none: 'None' };
                 let cmd;
-                if (action === 'power_on') {
+                if (isSettings) {
+                    cmd = 'DDC/CI VCP 10/12';
+                } else if (action === 'power_on') {
                     cmd = method === 'dpms' ? 'wlr-randr --output <selected connector> --on' : (method === 'cec' || method === 'auto') ? 'cec pow 0' : 'ddcutil VCP 6=1';
                 } else if (action === 'display_sleep') {
                     cmd = 'wlr-randr --output <selected connector> --off';
                 } else {
-                    // power_off
                     cmd = method === 'dpms' ? 'wlr-randr --output <selected connector> --off' : (method === 'cec' || method === 'auto') ? 'cec standby 0' : 'ddcutil VCP 6=4';
                 }
                 cmdPreview.textContent = cmd;
                 methodPreview.textContent = labels[method] || method;
+                warning.style.display = !isSettings && method === 'ddc' && action === 'power_on' ? 'block' : 'none';
             }
+            clientSel.onchange = () => loadDisplaysForClient(clientSel.value);
+            actionSel.onchange = updatePreview;
+            methodSel.onchange = updatePreview;
             updatePreview();
 
             // If editing existing, load its displays
@@ -2750,24 +2789,32 @@ ${targetSection}
             // task_id. The backend doesn't have a "task" concept yet; we still create a
             // schedule row with a placeholder display/layout so the schedule can be tracked.
             // Future work: add a `tasks` table and proper task_id foreign key.
-            let display, layout_id, action, target_client, power_state, control_method, display_index, display_name;
+            let display, layout_id, action, target_client, power_state, control_method, display_index, display_name, brightness, contrast;
             if (mode === 'power') {
                 const clientSel = overlay.querySelector('#sched-power-client');
                 const displaySel = overlay.querySelector('#sched-power-display');
                 target_client = clientSel.value;
                 action = overlay.querySelector('#sched-power-action').value;
-                control_method = overlay.querySelector('#sched-power-method').value;
+                control_method = action === 'display_settings' ? 'ddc' : overlay.querySelector('#sched-power-method').value;
+                const parseSetting = id => {
+                    const value = overlay.querySelector(id)?.value ?? '';
+                    return value === '' ? null : Number.parseInt(value, 10);
+                };
+                brightness = action === 'display_settings' ? parseSetting('#sched-brightness') : null;
+                contrast = action === 'display_settings' ? parseSetting('#sched-contrast') : null;
                 const powerPayload = buildPowerSchedulePayload({
                     targetClient: target_client,
                     displayOption: displaySel.options[displaySel.selectedIndex],
                     action,
                     controlMethod: control_method,
+                    brightness,
+                    contrast,
                 });
                 if (!powerPayload) {
-                    alert('Please select a client and display.');
+                    alert(action === 'display_settings' ? 'Select a client and display, then enter brightness or contrast from 0 to 100.' : 'Please select a client and display.');
                     return;
                 }
-                ({ display, display_name, display_index, power_state, control_method } = powerPayload);
+                ({ display, display_name, display_index, power_state, control_method, brightness, contrast } = powerPayload);
                 layout_id = '';
                 if (!target_client) {
                     alert('Please select a client.');
@@ -2816,6 +2863,8 @@ ${targetSection}
                 power_state,
                 control_method,
                 display_index,
+                brightness: mode === 'power' && action === 'display_settings' ? brightness : null,
+                contrast: mode === 'power' && action === 'display_settings' ? contrast : null,
                 display_name: mode === 'power' ? display_name : mode === 'layout' ? (overlay.querySelector('#sched-layout-display option:checked')?.dataset.connector || '') : null,
             };
 

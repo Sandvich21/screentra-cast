@@ -1553,27 +1553,27 @@ impl PostgresStore {
         Ok(())
     }
     fn schedule_from_row(row: &tokio_postgres::Row) -> ScheduleEntry {
-        ScheduleEntry { id: row.get(0), display: row.get(1), layout_id: row.get::<_, Option<String>>(2).unwrap_or_default(), day_of_week: row.get(3), start_time: row.get(4), end_time: row.get(5), created_at: row.get(6), layout_set_id: row.get(7), action: row.get(8), target_client: row.get(9), power_state: row.get(10), display_name: row.get(12), control_method: row.get(13), display_index: row.get::<_, Option<i32>>(14) }
+        ScheduleEntry { id: row.get(0), display: row.get(1), layout_id: row.get::<_, Option<String>>(2).unwrap_or_default(), day_of_week: row.get(3), start_time: row.get(4), end_time: row.get(5), created_at: row.get(6), layout_set_id: row.get(7), action: row.get(8), target_client: row.get(9), power_state: row.get(10), display_name: row.get(12), control_method: row.get(13), display_index: row.get::<_, Option<i32>>(14), brightness: row.get::<_, Option<i32>>(15), contrast: row.get::<_, Option<i32>>(16) }
     }
 
     pub async fn list_schedules(&self) -> Result<Vec<ScheduleEntry>, String> {
-        self.client.query("SELECT id,display,layout_id,day_of_week,start_time,end_time,created_at,layout_set_id,action,target_client,power_state,updated_at,display_name,control_method,display_index FROM schedules ORDER BY day_of_week,start_time", &[]).await.map(|rows| rows.iter().map(Self::schedule_from_row).collect()).map_err(|error| format!("list schedules: {error}"))
+        self.client.query("SELECT id,display,layout_id,day_of_week,start_time,end_time,created_at,layout_set_id,action,target_client,power_state,updated_at,display_name,control_method,display_index,brightness,contrast FROM schedules ORDER BY day_of_week,start_time", &[]).await.map(|rows| rows.iter().map(Self::schedule_from_row).collect()).map_err(|error| format!("list schedules: {error}"))
     }
 
     pub async fn get_schedule(&self, id: &str) -> Result<Option<ScheduleEntry>, String> {
-        self.client.query_opt("SELECT id,display,layout_id,day_of_week,start_time,end_time,created_at,layout_set_id,action,target_client,power_state,updated_at,display_name,control_method,display_index FROM schedules WHERE id=$1", &[&id]).await.map(|row| row.as_ref().map(Self::schedule_from_row)).map_err(|error| format!("get schedule: {error}"))
+        self.client.query_opt("SELECT id,display,layout_id,day_of_week,start_time,end_time,created_at,layout_set_id,action,target_client,power_state,updated_at,display_name,control_method,display_index,brightness,contrast FROM schedules WHERE id=$1", &[&id]).await.map(|row| row.as_ref().map(Self::schedule_from_row)).map_err(|error| format!("get schedule: {error}"))
     }
 
     pub async fn create_schedule(&self, entry: &ScheduleEntry) -> Result<(), String> {
         let index = entry.display_index.unwrap_or(0);
         let control_method = entry.control_method.as_deref().unwrap_or("auto");
-        self.client.execute("INSERT INTO schedules (id,display,layout_id,layout_set_id,day_of_week,start_time,end_time,created_at,action,target_client,power_state,display_name,control_method,display_index) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)", &[&entry.id, &entry.display, &entry.layout_id, &entry.layout_set_id, &entry.day_of_week, &entry.start_time, &entry.end_time, &entry.created_at, &entry.action, &entry.target_client, &entry.power_state, &entry.display_name, &control_method, &index]).await.map(|_| ()).map_err(|error| format!("create schedule: {error}"))
+        self.client.execute("INSERT INTO schedules (id,display,layout_id,layout_set_id,day_of_week,start_time,end_time,created_at,action,target_client,power_state,display_name,control_method,display_index,brightness,contrast) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)", &[&entry.id, &entry.display, &entry.layout_id, &entry.layout_set_id, &entry.day_of_week, &entry.start_time, &entry.end_time, &entry.created_at, &entry.action, &entry.target_client, &entry.power_state, &entry.display_name, &control_method, &index, &entry.brightness, &entry.contrast]).await.map(|_| ()).map_err(|error| format!("create schedule: {error}"))
     }
 
     pub async fn update_schedule(&self, entry: &ScheduleEntry) -> Result<(), String> {
         let index = entry.display_index.unwrap_or(0);
         let control_method = entry.control_method.as_deref().unwrap_or("auto");
-        if self.client.execute("UPDATE schedules SET display=$2,layout_id=$3,layout_set_id=$4,day_of_week=$5,start_time=$6,end_time=$7,action=$8,target_client=$9,power_state=$10,display_name=$11,control_method=$12,display_index=$13,updated_at=$14 WHERE id=$1", &[&entry.id, &entry.display, &entry.layout_id, &entry.layout_set_id, &entry.day_of_week, &entry.start_time, &entry.end_time, &entry.action, &entry.target_client, &entry.power_state, &entry.display_name, &control_method, &index, &entry.created_at]).await.map_err(|error| format!("update schedule: {error}"))? == 0 { return Err("Schedule not found".into()); }
+        if self.client.execute("UPDATE schedules SET display=$2,layout_id=$3,layout_set_id=$4,day_of_week=$5,start_time=$6,end_time=$7,action=$8,target_client=$9,power_state=$10,display_name=$11,control_method=$12,display_index=$13,brightness=$14,contrast=$15,updated_at=$16 WHERE id=$1", &[&entry.id, &entry.display, &entry.layout_id, &entry.layout_set_id, &entry.day_of_week, &entry.start_time, &entry.end_time, &entry.action, &entry.target_client, &entry.power_state, &entry.display_name, &control_method, &index, &entry.brightness, &entry.contrast, &entry.created_at]).await.map_err(|error| format!("update schedule: {error}"))? == 0 { return Err("Schedule not found".into()); }
         Ok(())
     }
 
@@ -1590,7 +1590,7 @@ impl PostgresStore {
         let previous_day_bit = 1i32 << ((day_of_week + 6) % 7);
         self.client
             .query(
-                "SELECT id,display,layout_id,day_of_week,start_time,end_time,created_at,layout_set_id,action,target_client,power_state,updated_at,display_name,control_method,display_index FROM schedules WHERE (start_time <= end_time AND (day_of_week=-1 OR (day_of_week & $1) <> 0) AND start_time <= $3 AND end_time >= $3) OR (start_time > end_time AND (((day_of_week=-1 OR (day_of_week & $1) <> 0) AND start_time <= $3) OR ((day_of_week=-1 OR (day_of_week & $2) <> 0) AND end_time >= $3))) ORDER BY start_time,id",
+                "SELECT id,display,layout_id,day_of_week,start_time,end_time,created_at,layout_set_id,action,target_client,power_state,updated_at,display_name,control_method,display_index,brightness,contrast FROM schedules WHERE (start_time <= end_time AND (day_of_week=-1 OR (day_of_week & $1) <> 0) AND start_time <= $3 AND end_time >= $3) OR (start_time > end_time AND (((day_of_week=-1 OR (day_of_week & $1) <> 0) AND start_time <= $3) OR ((day_of_week=-1 OR (day_of_week & $2) <> 0) AND end_time >= $3))) ORDER BY start_time,id",
                 &[&day_bit, &previous_day_bit, &current_time],
             )
             .await
@@ -1667,7 +1667,7 @@ impl PostgresStore {
         let id = format!("__postgres_schedule_probe_{}", Uuid::new_v4());
         let layout_id = format!("__postgres_schedule_layout_{}", Uuid::new_v4());
         self.client.execute("INSERT INTO layouts (id,name,created_at,updated_at) VALUES ($1,$2,$3,$4)", &[&layout_id, &"Schedule probe layout", &"2026-01-01T00:00:00Z", &"2026-01-01T00:00:00Z"]).await.map_err(|error| format!("create schedule probe layout: {error}"))?;
-        let entry = ScheduleEntry { id: id.clone(), display: "HDMI-A-1".into(), layout_id: layout_id.clone(), layout_set_id: None, day_of_week: -1, start_time: "08:00".into(), end_time: "17:00".into(), created_at: "2026-01-01T00:00:00Z".into(), action: "switch_layout".into(), target_client: None, power_state: None, display_name: Some("Probe schedule".into()), control_method: None, display_index: None };
+        let entry = ScheduleEntry { id: id.clone(), display: "HDMI-A-1".into(), layout_id: layout_id.clone(), layout_set_id: None, day_of_week: -1, start_time: "08:00".into(), end_time: "17:00".into(), created_at: "2026-01-01T00:00:00Z".into(), action: "switch_layout".into(), target_client: None, power_state: None, display_name: Some("Probe schedule".into()), control_method: None, display_index: None, brightness: None, contrast: None };
         self.create_schedule(&entry).await?;
         let stored = self.get_schedule(&id).await?.ok_or("schedule missing")?;
         if stored.display != entry.display || stored.day_of_week != -1 || stored.display_name != Some("Probe schedule".into()) || stored.control_method != Some("auto".into()) || stored.display_index != Some(0) { return Err("schedule round-trip mismatch".into()); }

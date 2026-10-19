@@ -63,9 +63,17 @@ pub struct ScheduleEntry {
     #[serde(default)]
     pub control_method: Option<String>,
 
-    /// Display index on the target client for layout or power schedules.
+    /// Display index on the target client for layout, power, or display-settings schedules.
     #[serde(default)]
     pub display_index: Option<i32>,
+
+    /// DDC/CI brightness (VCP 10) for `display_settings` schedules.
+    #[serde(default)]
+    pub brightness: Option<i32>,
+
+    /// DDC/CI contrast (VCP 12) for `display_settings` schedules.
+    #[serde(default)]
+    pub contrast: Option<i32>,
 }
 
 fn default_action() -> String {
@@ -193,6 +201,9 @@ async fn apply_repository_schedules_at(
                         .await;
                 }
             }
+            "display_settings" => {
+                apply_repository_display_settings_action(repository, &schedule, &now_rfc).await?;
+            }
             "power_on" | "display_sleep" | "power_off" => {
                 apply_repository_power_action(repository, &schedule, action, &now_rfc).await?;
             }
@@ -231,6 +242,31 @@ async fn resolve_repository_layout(
     Ok(pick_entry_from_set(&set, &schedule.start_time, now)
         .map(|entry| entry.layout_id.clone())
         .unwrap_or_default())
+}
+
+async fn apply_repository_display_settings_action(
+    repository: &crate::api::ClientRepository,
+    schedule: &ScheduleEntry,
+    now_rfc: &str,
+) -> Result<(), String> {
+    let target = schedule.target_client.as_deref().unwrap_or("");
+    let (command, payload) = display_settings_command(
+        schedule.display_index.unwrap_or(0),
+        schedule.brightness,
+        schedule.contrast,
+    );
+    let payload_json = payload.to_string();
+    let result = repository
+        .queue_client_command(target, &command, Some(&payload_json), now_rfc, Some("scheduler"))
+        .await;
+    let (success, message) = match result {
+        Ok(()) => (true, format!("queued {command} via ddc")),
+        Err(error) => (false, error),
+    };
+    let _ = repository
+        .log_schedule_run(&schedule.id, &command, target, success, Some(&message), now_rfc)
+        .await;
+    Ok(())
 }
 
 async fn apply_repository_power_action(
@@ -360,6 +396,22 @@ fn power_command(
     }
 }
 
+fn display_settings_command(
+    display_index: i32,
+    brightness: Option<i32>,
+    contrast: Option<i32>,
+) -> (String, serde_json::Value) {
+    let mut payload = serde_json::Map::new();
+    payload.insert("display_index".to_string(), serde_json::json!(display_index));
+    if let Some(value) = brightness {
+        payload.insert("brightness".to_string(), serde_json::json!(value));
+    }
+    if let Some(value) = contrast {
+        payload.insert("contrast".to_string(), serde_json::json!(value));
+    }
+    ("display_settings".to_string(), serde_json::Value::Object(payload))
+}
+
 /// Apply any schedules active at the given local time. Exposed for
 /// tests; production callers should use `run_scheduler`.
 pub async fn apply_active_schedules_at(
@@ -394,6 +446,9 @@ pub async fn apply_active_schedules_at(
         match action {
             "switch_layout" => {
                 apply_switch_layout(db, schedule, now, &current_time, day_of_week)?;
+            }
+            "display_settings" => {
+                apply_display_settings_action(db, schedule, &now_rfc)?;
             }
             "power_on" | "display_sleep" | "power_off" => {
                 apply_power_action(db, schedule, action, &now_rfc)?;
@@ -447,6 +502,40 @@ fn apply_switch_layout(
         let _ = db.log_schedule_run(
             &schedule.id, "switch_layout", display, true, None, &now_rfc,
         );
+    }
+    Ok(())
+}
+
+fn apply_display_settings_action(
+    db: &Arc<Database>,
+    schedule: &ScheduleEntry,
+    now_rfc: &str,
+) -> Result<(), String> {
+    let target = schedule.target_client.as_deref().unwrap_or("");
+    let (command, payload) = display_settings_command(
+        schedule.display_index.unwrap_or(0),
+        schedule.brightness,
+        schedule.contrast,
+    );
+    if target.is_empty() || schedule.control_method.as_deref() != Some("ddc") || (schedule.brightness.is_none() && schedule.contrast.is_none()) {
+        let message = "display_settings schedules require a target client, DDC/CI, and brightness or contrast";
+        let _ = db.log_schedule_run(&schedule.id, &command, target, false, Some(message), now_rfc);
+        return Ok(());
+    }
+    match crate::api::queue_command(db, target, &command, Some(&payload), Some("scheduler")) {
+        Ok(_) => {
+            let _ = db.log_schedule_run(
+                &schedule.id,
+                &command,
+                target,
+                true,
+                Some("queued display settings via ddc"),
+                now_rfc,
+            );
+        }
+        Err(error) => {
+            let _ = db.log_schedule_run(&schedule.id, &command, target, false, Some(&error), now_rfc);
+        }
     }
     Ok(())
 }
@@ -732,6 +821,23 @@ mod tests {
         assert_eq!(off["state"], "off");
         assert_eq!(off["display_index"], 0);
     }
+
+    #[test]
+    fn display_settings_command_contains_only_bounded_requested_values() {
+        let (action, payload) = display_settings_command(2, Some(35), Some(80));
+        assert_eq!(action, "display_settings");
+        assert_eq!(payload, serde_json::json!({
+            "display_index": 2,
+            "brightness": 35,
+            "contrast": 80,
+        }));
+
+        let (_, brightness_only) = display_settings_command(0, Some(0), None);
+        assert_eq!(brightness_only, serde_json::json!({
+            "display_index": 0,
+            "brightness": 0,
+        }));
+    }
     use crate::models::LayoutSetEntry;
     use rusqlite::Connection;
     use std::path::PathBuf;
@@ -802,6 +908,8 @@ mod tests {
             display_name: Some(display.to_string()),
             control_method: None,
             display_index: None,
+            brightness: None,
+            contrast: None,
         }
     }
 
@@ -827,6 +935,8 @@ mod tests {
             display_name: Some("Test Display".to_string()),
             control_method: None,
             display_index: None,
+            brightness: None,
+            contrast: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: ScheduleEntry = serde_json::from_str(&json).unwrap();
@@ -1170,6 +1280,8 @@ mod tests {
                 display_name: Some("Cycle Display".to_string()),
                 control_method: None,
                 display_index: None,
+            brightness: None,
+            contrast: None,
             };
             db.create_schedule(&sched).expect("create schedule");
 

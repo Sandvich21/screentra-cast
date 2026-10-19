@@ -74,7 +74,7 @@ ALLOWED_CLIENT_COMMAND_ACTIONS = (
     'set_display_count', 'set_touch_binding', 'bluetooth_scan',
     'bluetooth_connect', 'audio_list', 'audio_set_default',
     'audio_set_volume', 'restart_client', 'start_display_preview',
-    'stop_display_preview', 'ddc_set', 'display_power', 'cec_send',
+    'stop_display_preview', 'ddc_set', 'display_settings', 'display_power', 'cec_send',
     'ir_send', 'client_service_status', 'client_service_rollback_request',
     'client_service_transcribe_request',
 )
@@ -140,6 +140,21 @@ def validate_pending_command(spec, expected_client_id):
             raise ValueError(f'client command payload exceeds {MAX_COMMAND_PAYLOAD_BYTES} bytes')
         if 'client_id' in payload:
             raise ValueError('client identity is bound to the command envelope')
+    if action == 'display_settings':
+        if not isinstance(payload, dict):
+            raise ValueError('display_settings payload must be a JSON object')
+        allowed = {'display_index', 'brightness', 'contrast'}
+        if set(payload) - allowed:
+            raise ValueError('display_settings payload contains an unsupported field')
+        if not isinstance(payload.get('display_index'), int) or isinstance(payload.get('display_index'), bool) or not 0 <= payload['display_index'] <= 3:
+            raise ValueError('display_settings display_index must be between 0 and 3')
+        supplied = [field for field in ('brightness', 'contrast') if field in payload]
+        if not supplied:
+            raise ValueError('display_settings requires brightness or contrast')
+        for field in supplied:
+            value = payload[field]
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 100:
+                raise ValueError(f'display_settings {field} must be between 0 and 100')
     validate_client_service_payload(action, payload)
     return spec
 
@@ -1126,6 +1141,26 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
             return {'action': action, 'ok': False, 'message': 'a display index from 0 to 3 is required', 'started_at': started}
         ok, msg, details = stop_display_preview(ctx, display_index)
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'details': details, 'started_at': started}
+
+    # ── Scheduled DDC display settings ────────────────────────────────────────
+    if action == 'display_settings':
+        try:
+            validate_pending_command({'client_id': ctx.get('client_id', ''), 'action': action, 'payload': payload}, ctx.get('client_id', ''))
+        except ValueError as exc:
+            return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
+        results = []
+        for field, vcp in (('brightness', '10'), ('contrast', '12')):
+            if field not in payload:
+                continue
+            ok, msg = apply_ddc_control(vcp, payload[field])
+            results.append({'setting': field, 'vcp': vcp, 'value': payload[field], 'ok': ok, 'message': msg})
+        succeeded = sum(1 for result in results if result['ok'])
+        ok = succeeded == len(results)
+        return {
+            'action': action, 'display_index': display_index, 'ok': ok,
+            'partial': 0 < succeeded < len(results), 'message': 'DDC display settings applied' if ok else ('DDC display settings partially applied' if succeeded else 'DDC display settings failed'),
+            'details': {'settings': results, **{result['setting']: result for result in results}}, 'started_at': started,
+        }
 
     # ── Display control (DDC/CI + CEC) ────────────────────────────────────────
     if action == 'ddc_set':

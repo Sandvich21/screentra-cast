@@ -47,6 +47,32 @@ const fallback = build({
 assert.equal(fallback.display, 'client-a:Display 7');
 assert.equal(fallback.display_name, 'Display 7');
 
+const settings = build({
+  targetClient: 'client-a',
+  displayOption: selectedDisplay,
+  action: 'display_settings',
+  controlMethod: 'ddc',
+  brightness: 25,
+  contrast: 90,
+});
+assert.equal(settings.action, 'display_settings');
+assert.equal(settings.control_method, 'ddc');
+assert.equal(settings.brightness, 25);
+assert.equal(settings.contrast, 90);
+
+assert.equal(build({
+  targetClient: 'client-a', displayOption: selectedDisplay,
+  action: 'display_settings', controlMethod: 'ddc', brightness: null, contrast: null,
+}), null, 'display settings must include brightness or contrast');
+assert.equal(build({
+  targetClient: 'client-a', displayOption: selectedDisplay,
+  action: 'display_settings', controlMethod: 'cec', brightness: 20, contrast: null,
+}), null, 'display settings must use DDC control');
+assert.equal(build({
+  targetClient: 'client-a', displayOption: selectedDisplay,
+  action: 'display_settings', controlMethod: 'ddc', brightness: 101, contrast: null,
+}), null, 'brightness must be bounded');
+
 assert.equal(build({
   targetClient: '',
   displayOption: selectedDisplay,

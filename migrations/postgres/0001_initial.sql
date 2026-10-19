@@ -143,7 +143,9 @@ CREATE TABLE IF NOT EXISTS schedules (
     updated_at text,
     display_name text,
     control_method text NOT NULL DEFAULT 'auto',
-    display_index integer NOT NULL DEFAULT 0
+    display_index integer NOT NULL DEFAULT 0,
+    brightness integer,
+    contrast integer
 );
 CREATE INDEX IF NOT EXISTS idx_schedules_display ON schedules(display);
 CREATE INDEX IF NOT EXISTS idx_schedules_layout_set_id ON schedules(layout_set_id);
