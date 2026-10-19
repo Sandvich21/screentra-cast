@@ -56,6 +56,7 @@ _REQUEST_FIELDS: Final = frozenset({
     'rollback_policy_evidence',
     'runtime_installation_evidence',
     'audio_permission_evidence',
+    'resource_enforcement_evidence',
 })
 _REQUIRED_REQUEST_FIELDS: Final = _REQUEST_FIELDS
 _PREFLIGHT_FIELDS: Final = frozenset({
@@ -639,6 +640,67 @@ def _validated_audio_permission(value: Any, expected: dict[str, str]) -> Any:
     return value
 
 
+def _resource_enforcement_module() -> Any:
+    module_name = 'screentra_stt_resource_enforcement_evidence'
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    module_path = Path(__file__).with_name('screentra-stt-resource-enforcement-evidence.py')
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise _fail('runtime admission resource-enforcement evidence is invalid')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise _fail('runtime admission resource-enforcement evidence is invalid') from exc
+    return module
+
+
+def _validated_resource_enforcement(
+    value: Any, expected: dict[str, str], expected_policy_version: str
+) -> Any:
+    """Accept only the exact immutable, identity-bound enforcement observation."""
+    module = _resource_enforcement_module()
+    if type(value) is not module.STTResourceEnforcementEvidence:
+        raise _fail('runtime admission resource-enforcement evidence is invalid')
+    try:
+        raw = {
+            'service_id': value.service_id,
+            'activation_id': value.activation_id,
+            'policy_version': value.policy_version,
+            'cpu_enforced': value.cpu_enforced,
+            'memory_enforced': value.memory_enforced,
+            'pids_enforced': value.pids_enforced,
+            'writable_enforced': value.writable_enforced,
+            'observation_non_mutating': value.observation_non_mutating,
+        }
+        validated = module.validate_stt_resource_enforcement_evidence(
+            raw,
+            expected_service_id=expected['service_id'],
+            expected_activation_id=expected['activation_id'],
+            expected_policy_version=expected_policy_version,
+        )
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        raise _fail('runtime admission resource-enforcement evidence is invalid') from exc
+    if validated != value:
+        raise _fail('runtime admission resource-enforcement evidence is invalid')
+    if (
+        value.enforcement_valid is not True
+        or value.policy_valid is not True
+        or value.execution_enabled is not False
+        or value.runtime_activation_allowed is not False
+        or value.process_started is not False
+        or value.resource_enforced is not False
+        or value.cgroup_bound is not False
+        or value.effect != 'metadata_only'
+    ):
+        raise _fail('runtime admission resource-enforcement evidence is invalid')
+    return value
+
+
 def _capability_admission_module() -> Any:
     module_name = 'screentra_capability_admission'
     module = sys.modules.get(module_name)
@@ -774,6 +836,11 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     resource_policy = _validated_resource_policy(
         request['resource_policy_evidence'], expected
     )
+    resource_enforcement = _validated_resource_enforcement(
+        request['resource_enforcement_evidence'],
+        expected,
+        resource_policy.policy_version,
+    )
     rollback_policy = _validated_rollback_policy(
         request['rollback_policy_evidence'], expected
     )
@@ -796,6 +863,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     bounded_request['approval_record'] = approval.as_dict()
     bounded_request['capability_admission'] = capability.as_dict()
     bounded_request['resource_policy_evidence'] = resource_policy.as_dict()
+    bounded_request['resource_enforcement_evidence'] = resource_enforcement.as_dict()
     bounded_request['ipc_policy_evidence'] = ipc_policy.as_dict()
     bounded_request['rollback_policy_evidence'] = rollback_policy.as_dict()
     bounded_request['runtime_installation_evidence'] = runtime_installation.as_dict()
@@ -820,6 +888,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'model_loaded': False,
         'service_started': False,
         'resource_enforced': False,
+        'cgroup_bound': False,
         'ipc_enforced': False,
         'rollback_executed': False,
         'state_changed': False,
@@ -859,6 +928,12 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             audio_permission.audio_backend,
             audio_permission.permission_source,
         ),
+        'resource_enforcement_policy_version': resource_enforcement.policy_version,
+        'resource_enforcement_identity_tuple': (
+            resource_enforcement.service_id,
+            resource_enforcement.activation_id,
+            resource_enforcement.policy_version,
+        ),
         'socket_name': ipc_policy.socket_name,
         'protocol_version': ipc_policy.protocol_version,
         'allowed_operations': tuple(ipc_policy.allowed_operations),
@@ -889,6 +964,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             'approval_record': True,
             'capability_admission': True,
             'resource_policy': True,
+            'resource_enforcement': True,
             'ipc_policy': True,
             'rollback_policy': True,
             'runtime_installation': True,

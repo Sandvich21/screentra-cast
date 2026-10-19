@@ -14,6 +14,7 @@ ROLLBACK_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-rollba
 CAPABILITY_ADMISSION_MODULE_PATH = ROOT / 'player-client/scripts/screentra-capability-admission.py'
 RUNTIME_INSTALLATION_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-runtime-installation-evidence.py'
 AUDIO_PERMISSION_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-audio-permission-evidence.py'
+RESOURCE_ENFORCEMENT_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-resource-enforcement-evidence.py'
 
 
 def load_approval_module():
@@ -115,6 +116,22 @@ def load_audio_permission_evidence_module():
     return module
 
 
+def load_resource_enforcement_evidence_module():
+    module_name = 'screentra_stt_resource_enforcement_evidence'
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        RESOURCE_ENFORCEMENT_EVIDENCE_MODULE_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 admission = load_module()
 approval = load_approval_module()
 resource_policy = load_resource_policy_module()
@@ -123,6 +140,7 @@ rollback_policy = load_rollback_policy_module()
 capability_admission = load_capability_admission_module()
 runtime_installation_evidence = load_runtime_installation_evidence_module()
 audio_permission_evidence = load_audio_permission_evidence_module()
+resource_enforcement_evidence = load_resource_enforcement_evidence_module()
 
 
 SERVICE_ID = 'magic-mirror-stt'
@@ -383,6 +401,26 @@ def valid_audio_permission_evidence(**overrides):
     )
 
 
+def valid_resource_enforcement_evidence(**overrides):
+    value = {
+        'service_id': SERVICE_ID,
+        'activation_id': ACTIVATION_ID,
+        'policy_version': 'resource-policy-v1',
+        'cpu_enforced': True,
+        'memory_enforced': True,
+        'pids_enforced': True,
+        'writable_enforced': True,
+        'observation_non_mutating': True,
+    }
+    value.update(overrides)
+    return resource_enforcement_evidence.validate_stt_resource_enforcement_evidence(
+        value,
+        expected_service_id=SERVICE_ID,
+        expected_activation_id=ACTIVATION_ID,
+        expected_policy_version='resource-policy-v1',
+    )
+
+
 def valid_request(**overrides):
     value = {
         'approval_record': valid_approval_record(),
@@ -395,6 +433,7 @@ def valid_request(**overrides):
         'capability_admission': valid_capability_admission(),
         'runtime_installation_evidence': valid_runtime_installation_evidence(),
         'audio_permission_evidence': valid_audio_permission_evidence(),
+        'resource_enforcement_evidence': valid_resource_enforcement_evidence(),
     }
     value.update(overrides)
     return value
@@ -850,6 +889,102 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
                     module.decide_runtime_admission(
                         valid_request(resource_policy_evidence=policy)
                     )
+
+    def test_resource_enforcement_evidence_is_composed_as_exact_inert_identity_bound_type(self):
+        module = self.require_module()
+        result = module.decide_runtime_admission(valid_request())
+
+        self.assertEqual(result['admission'], 'approved_for_future_review')
+        self.assertTrue(result['evidence_composed']['resource_enforcement'])
+        self.assertEqual(
+            tuple(result['resource_enforcement_identity_tuple']),
+            (SERVICE_ID, ACTIVATION_ID, 'resource-policy-v1'),
+        )
+        self.assertEqual(result['resource_enforcement_policy_version'], 'resource-policy-v1')
+        for field in (
+            'execution_enabled', 'runtime_activation_allowed', 'process_started',
+            'model_loaded', 'service_started', 'resource_enforced', 'cgroup_bound',
+            'ipc_enforced', 'rollback_executed', 'lifecycle_state_changed',
+        ):
+            self.assertFalse(result[field], field)
+        self.assertNotIn('runtime_ready', result)
+        self.assertNotIn('readiness_claim', result)
+
+    def test_resource_enforcement_requires_exact_validated_type_and_no_runtime_claims(self):
+        module = self.require_module()
+        valid = valid_resource_enforcement_evidence()
+        for value in (valid.as_dict(), {'service_id': SERVICE_ID}, None):
+            with self.subTest(value=value):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(resource_enforcement_evidence=value)
+                    )
+
+        class DerivedResourceEnforcementEvidence(resource_enforcement_evidence.STTResourceEnforcementEvidence):
+            pass
+
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(
+                valid_request(
+                    resource_enforcement_evidence=DerivedResourceEnforcementEvidence(
+                        **dataclasses.asdict(valid)
+                    )
+                )
+            )
+
+        for tampered in (
+            dataclasses.replace(valid, service_id='other-service'),
+            dataclasses.replace(valid, activation_id='other-activation'),
+            dataclasses.replace(valid, policy_version='other-policy-v2'),
+            dataclasses.replace(valid, cpu_enforced=False),
+            dataclasses.replace(valid, policy_valid=False),
+            dataclasses.replace(valid, enforcement_valid=False),
+            dataclasses.replace(valid, resource_enforced=True),
+            dataclasses.replace(valid, cgroup_bound=True),
+            dataclasses.replace(valid, execution_enabled=True),
+        ):
+            with self.subTest(tampered=tampered):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(resource_enforcement_evidence=tampered)
+                    )
+
+    def test_resource_enforcement_policy_version_must_match_resource_policy(self):
+        module = self.require_module()
+        drifted_policy = dataclasses.replace(
+            valid_resource_policy(), policy_version='other-policy-v2'
+        )
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(
+                valid_request(resource_policy_evidence=drifted_policy)
+            )
+
+        drifted_enforcement = dataclasses.replace(
+            valid_resource_enforcement_evidence(), policy_version='other-policy-v2'
+        )
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(
+                valid_request(resource_enforcement_evidence=drifted_enforcement)
+            )
+
+    def test_resource_enforcement_raw_claims_are_not_request_fields(self):
+        module = self.require_module()
+        for extra in (
+            {'readiness_claim': True},
+            {'resource_enforced': True},
+            {'cgroup_bound': True},
+            {'process_started': True},
+            {'container_id': 'abc'},
+            {'model_bytes': 'AA=='},
+        ):
+            with self.subTest(extra=extra):
+                request = valid_request()
+                request['resource_enforcement_evidence'] = {
+                    **valid_resource_enforcement_evidence().as_dict(),
+                    **extra,
+                }
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(request)
 
     def test_rollback_policy_is_composed_as_validated_inert_identity_bound_evidence(self):
         module = self.require_module()
