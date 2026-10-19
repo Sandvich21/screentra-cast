@@ -57,6 +57,7 @@ _REQUEST_FIELDS: Final = frozenset({
     'rollback_policy_evidence',
     'runtime_installation_evidence',
     'model_load_evidence',
+    'process_health_evidence',
     'audio_permission_evidence',
     'resource_enforcement_evidence',
 })
@@ -713,6 +714,68 @@ def _validated_model_load(value: Any, expected: dict[str, str]) -> Any:
     return value
 
 
+def _process_health_module() -> Any:
+    module_name = 'screentra_stt_process_health_evidence'
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    module_path = Path(__file__).with_name('screentra-stt-process-health-evidence.py')
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise _fail('runtime admission process-health evidence is invalid')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise _fail('runtime admission process-health evidence is invalid') from exc
+    return module
+
+
+def _validated_process_health(value: Any, expected: dict[str, str]) -> Any:
+    """Accept only exact immutable, identity-bound health observations."""
+    module = _process_health_module()
+    if type(value) is not module.STTProcessHealthEvidence:
+        raise _fail('runtime admission process-health evidence is invalid')
+    try:
+        raw = {
+            'service_id': value.service_id,
+            'activation_id': value.activation_id,
+            'service_version': value.service_version,
+            'health_protocol': value.health_protocol,
+            'process_observed': value.process_observed,
+            'health_response_observed': value.health_response_observed,
+            'identity_observed': value.identity_observed,
+            'health_observation_non_mutating': value.health_observation_non_mutating,
+        }
+        validated = module.validate_stt_process_health_evidence(
+            raw,
+            expected_service_id=expected['service_id'],
+            expected_activation_id=expected['activation_id'],
+            expected_service_version=expected['service_version'],
+        )
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        raise _fail('runtime admission process-health evidence is invalid') from exc
+    if validated != value:
+        raise _fail('runtime admission process-health evidence is invalid')
+    if (
+        value.health_observation_valid is not True
+        or value.process_observed is not True
+        or value.health_response_observed is not True
+        or value.identity_observed is not True
+        or value.health_observation_non_mutating is not True
+        or value.execution_enabled is not False
+        or value.runtime_activation_allowed is not False
+        or value.process_started is not False
+        or value.service_healthy is not False
+        or value.health_observed is not False
+        or value.effect != 'metadata_only'
+    ):
+        raise _fail('runtime admission process-health evidence is invalid')
+    return value
+
+
 def _audio_permission_module() -> Any:
     module_name = 'screentra_stt_audio_permission_evidence'
     module = sys.modules.get(module_name)
@@ -983,6 +1046,9 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     model_load = _validated_model_load(
         request['model_load_evidence'], expected
     )
+    process_health = _validated_process_health(
+        request['process_health_evidence'], expected
+    )
     audio_permission = _validated_audio_permission(
         request['audio_permission_evidence'], expected
     )
@@ -1008,6 +1074,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     bounded_request['rollback_policy_evidence'] = rollback_policy.as_dict()
     bounded_request['runtime_installation_evidence'] = runtime_installation.as_dict()
     bounded_request['model_load_evidence'] = model_load.as_dict()
+    bounded_request['process_health_evidence'] = process_health.as_dict()
     bounded_request['audio_permission_evidence'] = audio_permission.as_dict()
     _bounded_json(bounded_request, MAX_REQUEST_BYTES, 'runtime admission request is not bounded')
 
@@ -1030,6 +1097,8 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'peer_authenticated': False,
         'model_loaded': False,
         'inference_started': False,
+        'service_healthy': False,
+        'health_observed': False,
         'service_started': False,
         'resource_enforced': False,
         'cgroup_bound': False,
@@ -1071,6 +1140,13 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             model_load.activation_id,
             model_load.model_id,
             model_load.model_sha256,
+        ),
+        'health_observation_valid': process_health.health_observation_valid,
+        'process_health_identity_tuple': (
+            process_health.service_id,
+            process_health.service_version,
+            process_health.activation_id,
+            process_health.health_protocol,
         ),
         'audio_permission_identity_tuple': (
             audio_permission.service_id,
@@ -1127,6 +1203,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             'rollback_policy': True,
             'runtime_installation': True,
             'model_load': True,
+            'process_health': True,
             'audio_permission': True,
         },
     }

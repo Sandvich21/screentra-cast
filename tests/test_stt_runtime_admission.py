@@ -15,6 +15,7 @@ ROLLBACK_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-rollba
 CAPABILITY_ADMISSION_MODULE_PATH = ROOT / 'player-client/scripts/screentra-capability-admission.py'
 RUNTIME_INSTALLATION_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-runtime-installation-evidence.py'
 MODEL_LOAD_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-model-load-evidence.py'
+PROCESS_HEALTH_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-process-health-evidence.py'
 AUDIO_PERMISSION_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-audio-permission-evidence.py'
 RESOURCE_ENFORCEMENT_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-resource-enforcement-evidence.py'
 
@@ -135,6 +136,24 @@ def load_model_load_evidence_module():
     return module
 
 
+def load_process_health_evidence_module():
+    if not PROCESS_HEALTH_EVIDENCE_MODULE_PATH.is_file():
+        return None
+    module_name = 'screentra_stt_process_health_evidence'
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        PROCESS_HEALTH_EVIDENCE_MODULE_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def load_audio_permission_evidence_module():
     module_name = 'screentra_stt_audio_permission_evidence'
     existing = sys.modules.get(module_name)
@@ -176,6 +195,7 @@ rollback_policy = load_rollback_policy_module()
 capability_admission = load_capability_admission_module()
 runtime_installation_evidence = load_runtime_installation_evidence_module()
 model_load_evidence = load_model_load_evidence_module()
+process_health_evidence = load_process_health_evidence_module()
 audio_permission_evidence = load_audio_permission_evidence_module()
 resource_enforcement_evidence = load_resource_enforcement_evidence_module()
 
@@ -461,6 +481,26 @@ def valid_model_load_evidence(**overrides):
     )
 
 
+def valid_process_health_evidence(**overrides):
+    value = {
+        'service_id': SERVICE_ID,
+        'activation_id': ACTIVATION_ID,
+        'service_version': SERVICE_VERSION,
+        'health_protocol': 'local_ai_health_v1',
+        'process_observed': True,
+        'health_response_observed': True,
+        'identity_observed': True,
+        'health_observation_non_mutating': True,
+    }
+    value.update(overrides)
+    return process_health_evidence.validate_stt_process_health_evidence(
+        value,
+        expected_service_id=SERVICE_ID,
+        expected_activation_id=ACTIVATION_ID,
+        expected_service_version=SERVICE_VERSION,
+    )
+
+
 def valid_audio_permission_evidence(**overrides):
     value = {
         'service_id': SERVICE_ID,
@@ -515,6 +555,7 @@ def valid_request(**overrides):
         'capability_admission': valid_capability_admission(),
         'runtime_installation_evidence': valid_runtime_installation_evidence(),
         'model_load_evidence': valid_model_load_evidence(),
+        'process_health_evidence': valid_process_health_evidence(),
         'audio_permission_evidence': valid_audio_permission_evidence(),
         'resource_enforcement_evidence': valid_resource_enforcement_evidence(),
     }
@@ -1354,6 +1395,106 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
                     module.decide_runtime_admission(
                         valid_request(model_staging_plan=plan)
                     )
+
+    def test_process_health_observation_is_composed_as_exact_inert_identity_bound_evidence(self):
+        module = self.require_module()
+        result = module.decide_runtime_admission(valid_request())
+
+        self.assertEqual(result['admission'], 'approved_for_future_review')
+        self.assertTrue(result['evidence_composed']['process_health'])
+        self.assertTrue(result['health_observation_valid'])
+        self.assertEqual(
+            tuple(result['process_health_identity_tuple']),
+            (SERVICE_ID, SERVICE_VERSION, ACTIVATION_ID, 'local_ai_health_v1'),
+        )
+        for field in (
+            'execution_enabled', 'runtime_activation_allowed', 'process_started',
+            'service_healthy', 'health_observed', 'socket_bound', 'model_loaded',
+            'lifecycle_state_changed',
+        ):
+            self.assertFalse(result[field], field)
+        for forbidden in ('runtime_ready', 'readiness_claim', 'lifecycle_state'):
+            self.assertNotIn(forbidden, result)
+
+    def test_process_health_requires_exact_validated_type_and_no_runtime_claims(self):
+        module = self.require_module()
+        valid = valid_process_health_evidence()
+        for value in (valid.as_dict(), {'service_id': SERVICE_ID}, None):
+            with self.subTest(value=value):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(process_health_evidence=value)
+                    )
+
+        class DerivedProcessHealthEvidence(process_health_evidence.STTProcessHealthEvidence):
+            pass
+
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(
+                valid_request(
+                    process_health_evidence=DerivedProcessHealthEvidence(
+                        **dataclasses.asdict(valid)
+                    )
+                )
+            )
+
+        for tampered in (
+            dataclasses.replace(valid, service_id='other-service'),
+            dataclasses.replace(valid, activation_id='other-activation'),
+            dataclasses.replace(valid, service_version='9.9.9'),
+            dataclasses.replace(valid, health_protocol='local_ai_health_v2'),
+            dataclasses.replace(valid, health_observation_valid=False),
+            dataclasses.replace(valid, execution_enabled=True),
+            dataclasses.replace(valid, runtime_activation_allowed=True),
+            dataclasses.replace(valid, process_started=True),
+            dataclasses.replace(valid, service_healthy=True),
+            dataclasses.replace(valid, health_observed=True),
+        ):
+            with self.subTest(tampered=tampered):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(process_health_evidence=tampered)
+                    )
+
+    def test_process_health_identity_must_match_supervisor_and_installation(self):
+        module = self.require_module()
+        for field, value in (
+            ('service_id', 'other-service'),
+            ('activation_id', 'other-activation'),
+            ('service_version', '9.9.9'),
+        ):
+            with self.subTest(field=field):
+                evidence = dataclasses.replace(
+                    valid_process_health_evidence(), **{field: value}
+                )
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(process_health_evidence=evidence)
+                    )
+
+    def test_process_health_raw_claims_are_not_request_fields(self):
+        module = self.require_module()
+        for extra in (
+            {'path': '/run/stt-health.sock'},
+            {'url': 'https://example.invalid/health'},
+            {'command': ['/bin/true']},
+            {'credentials': 'redacted'},
+            {'pid': 1234},
+            {'port': 9000},
+            {'container_id': 'container-1'},
+            {'service_healthy': True},
+            {'health_observed': True},
+            {'runtime_ready': True},
+            {'readiness_claim': True},
+        ):
+            with self.subTest(extra=extra):
+                request = valid_request()
+                request['process_health_evidence'] = {
+                    **valid_process_health_evidence().as_dict(),
+                    **extra,
+                }
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(request)
 
     def test_supervisor_must_be_identity_bound_and_metadata_only(self):
         module = self.require_module()
