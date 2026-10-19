@@ -263,6 +263,24 @@ All checks were run in `/home/tech/screentra-cast` with the source unchanged:
   0 failed, 6 ignored**. The focused regression command was **RED: 0 passed, 1
   failed** before the fix and **GREEN: 1 passed, 0 failed** after it.
 
+## Status-report persistence closeout (2026-10-19)
+
+The inert client-status boundary was extended without enabling any runtime path.
+`save_client_status` validates bounded report metadata before creating the status
+namespace, and `load_client_status` now deserializes a closed stored payload,
+binds the stored client identity to the requested client, validates RFC3339 report
+and receipt timestamps, reapplies report bounds and unsafe-detail checks, and
+fails closed on tampering. `serde(deny_unknown_fields)` covers the stored payload,
+report, capability, service, and add-on status shapes. Regression coverage rejects
+unsafe detail, unknown fields, invalid timestamps, and client-identity mismatch.
+
+The focused RED/GREEN timestamp regression ran one failing test before the helper
+and one passing test after it. The final serial locked Rust suite passed **428
+passed, 0 failed, 6 ignored**; `cargo check --locked` and `git diff --check` also
+passed. Commits `06c1b3e`, `1d28ce7`, and `90de221` contain this inert status
+persistence/readback hardening. No client/server deployment, service activation,
+listener, process, model, microphone, camera, or network probe was performed.
+
 ## Residual blockers and scope limits
 
 - `EXECUTION_ENABLED` must remain false until every required gate has independently
