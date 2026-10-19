@@ -42,7 +42,22 @@ def _load_transcription_request_admission():
     return module
 
 
+def _load_rollback_request_admission():
+    module_path = Path(__file__).with_name(
+        'screentra-client-service-rollback-request-admission.py'
+    )
+    spec = importlib.util.spec_from_file_location(
+        'screentra_client_service_rollback_request_admission', module_path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError('rollback request admission contract is unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 _TRANSCRIPTION_REQUEST_ADMISSION = _load_transcription_request_admission()
+_ROLLBACK_REQUEST_ADMISSION = _load_rollback_request_admission()
 
 MAX_PENDING_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
@@ -73,12 +88,13 @@ def _validate_client_service_identifier(value, field):
 
 
 def validate_client_service_payload(action, payload):
+    if action == 'client_service_rollback_request':
+        _ROLLBACK_REQUEST_ADMISSION.validate_rollback_request(payload)
+        return
     if action == 'client_service_transcribe_request':
         _TRANSCRIPTION_REQUEST_ADMISSION.validate_transcription_request(payload)
         return
     if payload is None:
-        if action == 'client_service_rollback_request':
-            raise ValueError('client service request payload is required')
         return
     if not isinstance(payload, dict):
         raise ValueError('client service payload must be a JSON object')
@@ -936,7 +952,8 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         }
     if action == 'client_service_rollback_request':
         try:
-            validate_client_service_payload(action, payload)
+            request = _ROLLBACK_REQUEST_ADMISSION.validate_rollback_request(payload)
+            evidence = _ROLLBACK_REQUEST_ADMISSION.build_rollback_request_evidence(request)
         except ValueError as exc:
             return {
                 'action': action, 'ok': False, 'code': 'invalid_payload',
@@ -945,12 +962,9 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         return {
             'action': action, 'ok': False, 'code': 'execution_disabled',
             'execution_enabled': False, 'state': 'disabled',
+            'status': evidence['status'],
             'message': 'client service rollback is disabled',
-            'details': {
-                'service_id': payload.get('service_id'),
-                'activation_id': payload.get('activation_id'),
-                'rollback_requested': False,
-            },
+            'details': dict(evidence),
             'started_at': started,
         }
     if action == 'client_service_transcribe_request':
