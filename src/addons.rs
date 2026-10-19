@@ -430,9 +430,29 @@ fn checked_client_status_dir(create: bool) -> Result<Option<PathBuf>, AddonError
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
             AddonError::Invalid("Invalid addon client status directory".to_string()),
         ),
-        Ok(_) => Ok(Some(dir)),
+        Ok(metadata) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o777 != 0o700 {
+                    return Err(AddonError::Invalid(
+                        "Invalid addon client status directory permissions".to_string(),
+                    ));
+                }
+            }
+            Ok(Some(dir))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
             fs::create_dir_all(&dir).map_err(io_error)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = fs::symlink_metadata(&dir)
+                    .map_err(io_error)?
+                    .permissions();
+                permissions.set_mode(0o700);
+                fs::set_permissions(&dir, permissions).map_err(io_error)?;
+            }
             let metadata = fs::symlink_metadata(&dir).map_err(io_error)?;
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 return Err(AddonError::Invalid(
@@ -4499,7 +4519,17 @@ mod tests {
         )
         .unwrap();
         let status_dir = data_root.join("addon-client-status");
-        let entries = fs::read_dir(status_dir)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::symlink_metadata(&status_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700);
+        }
+        let entries = fs::read_dir(&status_dir)
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -4511,6 +4541,17 @@ mod tests {
         assert_eq!(loaded["report"]["addons"][0]["state"], "verified_cached");
         assert_eq!(loaded["report"]["capabilities"][0]["id"], "render_only");
         assert_eq!(loaded["report"]["services"][0]["state"], "running");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::symlink_metadata(&status_dir).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&status_dir, permissions).unwrap();
+            assert!(load_client_status("client-1").is_err());
+            let mut permissions = fs::symlink_metadata(&status_dir).unwrap().permissions();
+            permissions.set_mode(0o700);
+            fs::set_permissions(&status_dir, permissions).unwrap();
+        }
         let invalid_report: ClientAddonStatusReport = serde_json::from_value(serde_json::json!({
             "at": "2026-10-19T12:01:00Z",
             "addons": [
