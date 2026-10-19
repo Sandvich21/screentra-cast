@@ -48,7 +48,7 @@ field. `local_inference` requires the model identity and digest. These fields
 are validated and signed as part of the manifest but are not pulled, started,
 or exposed by the current release.
 
-A client status report may also include bounded service observations. Service
+A server-side client status snapshot may include bounded service observations. Service
 states are report-only and currently include `staged`, `starting`, `running`,
 `degraded`, `stopped`, `failed`, and `rollback_ready`; they do not start or
 stop anything. The pure client-service lifecycle module and its focused tests
@@ -56,9 +56,14 @@ validate only bounded metadata and explicit state transitions; they are contract
 evidence, not runtime or process-execution evidence. Restart counts and diagnostic
 details are bounded, and duplicate service IDs are rejected.
 
-The heartbeat currently sends an explicit empty service list because no trusted
-client supervisor is enabled. A missing service report must not be interpreted
-as a running service.
+The player heartbeat has a stricter, separate report boundary in
+`screentra-client-status-report-admission.py`. While the trusted client supervisor
+is disabled, its report must contain `services: []`; running, healthy, queued, or
+process observations cannot be represented by the heartbeat cache. Capability
+observations are limited to the closed capability/state vocabulary, bounded
+control-free details, and a bounded JSON envelope. The heartbeat validates every
+status write through this boundary, and invalid reports are rejected without
+replacing the previous cache file.
 
 The command queue also carries three metadata-only client-service actions. The
 `client_service_status` action returns the bounded disabled status without

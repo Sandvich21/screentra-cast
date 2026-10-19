@@ -42,6 +42,7 @@ class ClientServiceContractTests(unittest.TestCase):
         self.assertIn("'client_service_transcribe_request'", generated)
         self.assertIn('screentra-client-service-rollback-request-admission.py', generated)
         self.assertIn('screentra-client-service-status-request-admission.py', generated)
+        self.assertIn('screentra-client-status-report-admission.py', generated)
         self.assertIn('MAX_ACTIVATION_ID_BYTES', generated)
         self.assertIn("'execution_disabled'", generated)
         self.assertIn('client_service_status', server_actions())

@@ -19,6 +19,7 @@ ACTOR="$INSTALL_DIR/screentra-client-actor.py"
 TRANSCRIPTION_ADMISSION="$INSTALL_DIR/screentra-stt-transcription-request-admission.py"
 ROLLBACK_ADMISSION="$INSTALL_DIR/screentra-client-service-rollback-request-admission.py"
 STATUS_ADMISSION="$INSTALL_DIR/screentra-client-service-status-request-admission.py"
+STATUS_REPORT_ADMISSION="$INSTALL_DIR/screentra-client-status-report-admission.py"
 ACTOR_SERVICE_FILE="$SYSTEMD_USER_DIR/screentra-client-actor.service"
 ACTOR_SERVICE_NAME="screentra-client-actor.service"
 SERVICE="$SYSTEMD_USER_DIR/screentra-client-heartbeat.service"
@@ -1318,6 +1319,12 @@ _mod = importlib.util.module_from_spec(_spec)
 _sys.modules['screentra_display_detect'] = _mod
 _spec.loader.exec_module(_mod)
 detect_displays = _mod.detect_displays
+_status_report_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'screentra-client-status-report-admission.py')
+_status_report_spec = importlib.util.spec_from_file_location('screentra_client_status_report_admission', _status_report_path)
+_status_report_mod = importlib.util.module_from_spec(_status_report_spec)
+_sys.modules['screentra_client_status_report_admission'] = _status_report_mod
+_status_report_spec.loader.exec_module(_status_report_mod)
+validate_status_report = _status_report_mod.validate_status_report
 
 from pathlib import Path
 
@@ -1346,6 +1353,12 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     temporary.write_text(text)
     os.chmod(temporary, mode)
     os.replace(temporary, path)
+
+
+def _write_status_report(path: Path, status):
+    """Persist only a report admitted by the metadata-only status boundary."""
+    validate_status_report(status)
+    _atomic_write_text(path, json.dumps(status, indent=2))
 
 
 def _display_governance_count(which):
@@ -2041,7 +2054,7 @@ def sync_client_addons(server, client_id, cache_dir):
             raise ValueError('server returned an invalid addon inventory')
     except Exception:
         status['error'] = GENERIC_INVENTORY_ERROR
-        _atomic_write_text(status_path, json.dumps(status, indent=2))
+        _write_status_report(status_path, status)
         return status
 
     validated = []
@@ -2064,7 +2077,7 @@ def sync_client_addons(server, client_id, cache_dir):
             item_status.update({'state': 'failed', 'error': GENERIC_ADDON_ERROR})
             status['addons'].append(item_status)
         status['error'] = GENERIC_INVENTORY_ERROR
-        _atomic_write_text(status_path, json.dumps(status, indent=2))
+        _write_status_report(status_path, status)
         return status
 
     addon_root = Path(os.environ.get('RIPLEY_CLIENT_ADDONS_DIR', str(Path(cache_dir).parent / 'addons')))
@@ -2078,7 +2091,7 @@ def sync_client_addons(server, client_id, cache_dir):
                 'state': 'failed', 'error': GENERIC_ADDON_ERROR,
             })
         status['error'] = GENERIC_ADDON_ERROR
-        _atomic_write_text(status_path, json.dumps(status, indent=2))
+        _write_status_report(status_path, status)
         return status
 
     for expected, version in validated:
@@ -2157,7 +2170,7 @@ def sync_client_addons(server, client_id, cache_dir):
                 shutil.rmtree(child)
             except Exception:
                 continue
-    _atomic_write_text(status_path, json.dumps(status, indent=2))
+    _write_status_report(status_path, status)
     return status
 
 
@@ -6251,6 +6264,93 @@ __all__ = [
 
 PY_STATUS_ADMISSION
 chmod +x "$STATUS_ADMISSION"
+
+cat > "$STATUS_REPORT_ADMISSION" <<'PY_STATUS_REPORT_ADMISSION'
+#!/usr/bin/env python3
+"""Pure admission for the client's metadata-only status snapshot."""
+import json
+import re
+from collections.abc import Mapping
+
+MAX_REPORT_BYTES = 256 * 1024
+MAX_CAPABILITIES = 8
+MAX_ADDONS = 64
+MAX_DETAIL_BYTES = 160
+MAX_ERROR_BYTES = 96
+
+_ALLOWED_FIELDS = frozenset({'at', 'addons', 'capabilities', 'services', 'error'})
+_ALLOWED_CAPABILITIES = frozenset({
+    'render_only',
+    'camera_capture',
+    'microphone_capture',
+    'local_inference',
+    'client_service',
+})
+_ALLOWED_STATES = frozenset({'available', 'unavailable', 'disabled'})
+_TIMESTAMP_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+_FORBIDDEN_DETAIL_MARKERS = ('password', 'credential', 'secret', 'token', '://', '/')
+
+
+class StatusReportError(ValueError):
+    """Raised when a status snapshot crosses the inert report boundary."""
+
+
+def _bounded_text(value, maximum, field):
+    if not isinstance(value, str) or not value or len(value.encode('utf-8')) > maximum:
+        raise StatusReportError(f'invalid status report {field}')
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        raise StatusReportError(f'invalid status report {field}')
+    return value
+
+
+def _validate_capabilities(value):
+    if not isinstance(value, list) or len(value) > MAX_CAPABILITIES:
+        raise StatusReportError('invalid status report capabilities')
+    seen = set()
+    for capability in value:
+        if not isinstance(capability, Mapping) or set(capability) != {'id', 'state', 'detail'}:
+            raise StatusReportError('invalid status report capability shape')
+        identifier = capability['id']
+        state = capability['state']
+        detail = capability['detail']
+        if identifier not in _ALLOWED_CAPABILITIES or identifier in seen:
+            raise StatusReportError('invalid or duplicate status report capability')
+        if state not in _ALLOWED_STATES:
+            raise StatusReportError('invalid status report capability state')
+        detail = _bounded_text(detail, MAX_DETAIL_BYTES, 'capability detail')
+        lowered = detail.lower()
+        if any(marker in lowered for marker in _FORBIDDEN_DETAIL_MARKERS):
+            raise StatusReportError('unsafe status report capability detail')
+        seen.add(identifier)
+
+
+def validate_status_report(report):
+    """Validate a report without probing devices or changing client state."""
+    if not isinstance(report, Mapping) or set(report) - _ALLOWED_FIELDS:
+        raise StatusReportError('invalid status report shape')
+    timestamp = report.get('at')
+    if not isinstance(timestamp, str) or not _TIMESTAMP_RE.fullmatch(timestamp):
+        raise StatusReportError('invalid status report timestamp')
+    addons = report.get('addons')
+    if not isinstance(addons, list) or len(addons) > MAX_ADDONS:
+        raise StatusReportError('invalid status report addons')
+    _validate_capabilities(report.get('capabilities'))
+    # Runtime execution is disabled. No service observation may be represented
+    # as running, healthy, queued, or otherwise active by this report path.
+    if report.get('services') != []:
+        raise StatusReportError('client service status reporting is disabled')
+    error = report.get('error')
+    if error is not None:
+        _bounded_text(error, MAX_ERROR_BYTES, 'error')
+    try:
+        encoded = json.dumps(report, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise StatusReportError('status report is not JSON serializable') from exc
+    if len(encoded) > MAX_REPORT_BYTES:
+        raise StatusReportError('status report exceeds its bound')
+
+PY_STATUS_REPORT_ADMISSION
+chmod +x "$STATUS_REPORT_ADMISSION"
 
 cat > "$ACTOR" <<'PY_ACTOR'
 #!/usr/bin/env python3

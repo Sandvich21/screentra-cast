@@ -34,7 +34,16 @@ server validate the same closed request before returning inert metadata; no
 service inspection, process control, listener access, or lifecycle mutation is
 performed.
 
-### Supervisor-plan evidence boundary
+### Client status-report admission boundary
+
+The pure `screentra-client-status-report-admission.py` module is the outgoing
+heartbeat boundary. While the trusted client supervisor is disabled, it requires
+`services: []`, validates the closed capability/state vocabulary, rejects
+credential/path/control-shaped details, and bounds the complete JSON envelope.
+The heartbeat routes every status-cache write through this validator; rejected
+reports do not replace the prior cache. This preserves report-only metadata and
+does not probe, start, inspect, or control a client service.
+
 
 The pure `screentra-client-service-supervisor-plan.py` contract composes the lifecycle and health identity validators for the Magic Mirror STT metadata. Its activation plans are metadata-only evidence: `execution_enabled` is false and `process_started`, `socket_bound`, and `model_loaded` are false. Health/status may bind a bounded observation; start/stop/update/rollback return structured `execution_disabled` results without changing lifecycle state. A plan is not evidence of a running service, bound socket, loaded model, installed package, or hardware readiness.
 

@@ -19,6 +19,7 @@ ACTOR="$INSTALL_DIR/screentra-client-actor.py"
 TRANSCRIPTION_ADMISSION="$INSTALL_DIR/screentra-stt-transcription-request-admission.py"
 ROLLBACK_ADMISSION="$INSTALL_DIR/screentra-client-service-rollback-request-admission.py"
 STATUS_ADMISSION="$INSTALL_DIR/screentra-client-service-status-request-admission.py"
+STATUS_REPORT_ADMISSION="$INSTALL_DIR/screentra-client-status-report-admission.py"
 ACTOR_SERVICE_FILE="$SYSTEMD_USER_DIR/screentra-client-actor.service"
 ACTOR_SERVICE_NAME="screentra-client-actor.service"
 SERVICE="$SYSTEMD_USER_DIR/screentra-client-heartbeat.service"
@@ -5140,6 +5141,10 @@ chmod +x "$ROLLBACK_ADMISSION"
 cat > "$STATUS_ADMISSION" <<'PY_STATUS_ADMISSION'
 PY_STATUS_ADMISSION
 chmod +x "$STATUS_ADMISSION"
+
+cat > "$STATUS_REPORT_ADMISSION" <<'PY_STATUS_REPORT_ADMISSION'
+PY_STATUS_REPORT_ADMISSION
+chmod +x "$STATUS_REPORT_ADMISSION"
 
 cat > "$ACTOR" <<'PY_ACTOR'
 #!/usr/bin/env python3

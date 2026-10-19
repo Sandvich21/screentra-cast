@@ -31,6 +31,12 @@ _mod = importlib.util.module_from_spec(_spec)
 _sys.modules['screentra_display_detect'] = _mod
 _spec.loader.exec_module(_mod)
 detect_displays = _mod.detect_displays
+_status_report_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'screentra-client-status-report-admission.py')
+_status_report_spec = importlib.util.spec_from_file_location('screentra_client_status_report_admission', _status_report_path)
+_status_report_mod = importlib.util.module_from_spec(_status_report_spec)
+_sys.modules['screentra_client_status_report_admission'] = _status_report_mod
+_status_report_spec.loader.exec_module(_status_report_mod)
+validate_status_report = _status_report_mod.validate_status_report
 
 from pathlib import Path
 
@@ -59,6 +65,12 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     temporary.write_text(text)
     os.chmod(temporary, mode)
     os.replace(temporary, path)
+
+
+def _write_status_report(path: Path, status):
+    """Persist only a report admitted by the metadata-only status boundary."""
+    validate_status_report(status)
+    _atomic_write_text(path, json.dumps(status, indent=2))
 
 
 def _display_governance_count(which):
@@ -754,7 +766,7 @@ def sync_client_addons(server, client_id, cache_dir):
             raise ValueError('server returned an invalid addon inventory')
     except Exception:
         status['error'] = GENERIC_INVENTORY_ERROR
-        _atomic_write_text(status_path, json.dumps(status, indent=2))
+        _write_status_report(status_path, status)
         return status
 
     validated = []
@@ -777,7 +789,7 @@ def sync_client_addons(server, client_id, cache_dir):
             item_status.update({'state': 'failed', 'error': GENERIC_ADDON_ERROR})
             status['addons'].append(item_status)
         status['error'] = GENERIC_INVENTORY_ERROR
-        _atomic_write_text(status_path, json.dumps(status, indent=2))
+        _write_status_report(status_path, status)
         return status
 
     addon_root = Path(os.environ.get('RIPLEY_CLIENT_ADDONS_DIR', str(Path(cache_dir).parent / 'addons')))
@@ -791,7 +803,7 @@ def sync_client_addons(server, client_id, cache_dir):
                 'state': 'failed', 'error': GENERIC_ADDON_ERROR,
             })
         status['error'] = GENERIC_ADDON_ERROR
-        _atomic_write_text(status_path, json.dumps(status, indent=2))
+        _write_status_report(status_path, status)
         return status
 
     for expected, version in validated:
@@ -870,7 +882,7 @@ def sync_client_addons(server, client_id, cache_dir):
                 shutil.rmtree(child)
             except Exception:
                 continue
-    _atomic_write_text(status_path, json.dumps(status, indent=2))
+    _write_status_report(status_path, status)
     return status
 
 
