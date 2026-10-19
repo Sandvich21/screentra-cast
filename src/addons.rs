@@ -493,7 +493,7 @@ fn validate_client_status_timestamp(
 ) -> Result<(), AddonError> {
     validate_client_status_text(value, field, 64, false)?;
     if let Some(value) = value {
-        chrono::DateTime::parse_from_rfc3339(value)
+        chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%SZ")
             .map_err(|_| AddonError::Invalid(format!("Invalid {field}")))?;
     }
     Ok(())
@@ -623,7 +623,9 @@ pub fn save_client_status(
     validate_client_status_report(&report)?;
     let payload = serde_json::json!({
         "client_id": client_id,
-        "received_at": chrono::Utc::now().to_rfc3339(),
+        "received_at": chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string(),
         "report": report,
     });
     let bytes = serde_json::to_vec_pretty(&payload).map_err(io_error)?;
@@ -4238,6 +4240,22 @@ mod tests {
             },
         );
         assert!(result.is_err());
+        for timestamp in [
+            "2026-10-19T12:00:00+00:00",
+            "2026-10-19T12:00:00.123Z",
+        ] {
+            let invalid_timestamp = save_client_status(
+                "client-1",
+                ClientAddonStatusReport {
+                    at: Some(timestamp.to_string()),
+                    addons: Vec::new(),
+                    capabilities: Vec::new(),
+                    services: Vec::new(),
+                    error: None,
+                },
+            );
+            assert!(invalid_timestamp.is_err(), "timestamp should be rejected: {timestamp}");
+        }
         let duplicate_addons = save_client_status(
             "client-1",
             ClientAddonStatusReport {

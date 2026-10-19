@@ -67,6 +67,8 @@ class ClientStatusReportAdmissionTests(unittest.TestCase):
             valid_report(capabilities=[{'id': 'render_only', 'state': 'running', 'detail': 'x'}]),
             valid_report(capabilities=[{'id': 'render_only', 'state': 'available'}]),
             valid_report(at='2026-99-99T12:00:00Z'),
+            valid_report(at='2026-10-19T12:00:00+00:00'),
+            valid_report(at='2026-10-19T12:00:00.123Z'),
             valid_report(addons=[{'id': '../secret', 'state': 'verified'}]),
             valid_report(addons=[{'id': 'weather', 'state': 'running'}]),
             valid_report(addons=[{'id': 'weather', 'state': 'verified', 'entrypoint': '../client.js'}]),

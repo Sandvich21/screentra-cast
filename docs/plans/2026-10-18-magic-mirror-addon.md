@@ -43,8 +43,8 @@ credential/path/control-shaped details, and bounds the complete JSON envelope.
 The heartbeat routes every status-cache write through this validator; rejected
 reports do not replace the prior cache. The server-side status persistence
 boundary applies the same control-character and credential/path/URL-shaped detail
-rejection before writing snapshots, validates RFC3339 timestamps, and revalidates
-stored client identity and closed report fields on readback while retaining its
+rejection before writing snapshots, validates exact second-precision UTC timestamps,
+and revalidates stored client identity and closed report fields on readback while retaining its
 separate report-only service-state vocabulary for future trusted observations.
 
 
