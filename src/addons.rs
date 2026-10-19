@@ -4528,6 +4528,17 @@ mod tests {
         )
         .unwrap();
         assert!(load_client_status("client-1").is_err());
+        let mut duplicate_addons = saved.clone();
+        duplicate_addons["report"]["addons"] = serde_json::json!([
+            {"id": "weather", "state": "verified"},
+            {"id": "weather", "state": "failed"}
+        ]);
+        fs::write(
+            entries[0].path(),
+            serde_json::to_vec(&duplicate_addons).unwrap(),
+        )
+        .unwrap();
+        assert!(load_client_status("client-1").is_err());
         let mut wrong_identity = saved;
         wrong_identity["client_id"] = serde_json::Value::String("client-2".to_string());
         fs::write(entries[0].path(), serde_json::to_vec(&wrong_identity).unwrap()).unwrap();
