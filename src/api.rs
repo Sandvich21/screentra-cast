@@ -4497,7 +4497,7 @@ fn validate_schedule_entry(entry: &ScheduleEntry) -> Result<(), (StatusCode, Str
                 return Err(bad("A schedule must select exactly one layout or layout set"));
             }
         }
-        "power_on" | "power_off" => {
+        "power_on" | "power_off" | "display_sleep" => {
             if entry
                 .target_client
                 .as_deref()
@@ -4506,7 +4506,12 @@ fn validate_schedule_entry(entry: &ScheduleEntry) -> Result<(), (StatusCode, Str
                 return Err(bad("Power schedules require a target client"));
             }
             if let Some(state) = entry.power_state.as_deref() {
-                if state != "on" && state != "off" {
+                let valid = match entry.action.as_str() {
+                    "display_sleep" => state == "sleep",
+                    "power_on" | "power_off" => state == "on" || state == "off",
+                    _ => false,
+                };
+                if !valid {
                     return Err(bad("Invalid power state"));
                 }
             }
@@ -11066,6 +11071,64 @@ mod audit_validation_tests {
         assert!(validate_schedule_entry(&entry).is_err());
         entry.start_time = "08:00".into();
         entry.layout_set_id = Some("set-1".into());
+        assert!(validate_schedule_entry(&entry).is_err());
+    }
+
+    #[test]
+    fn schedule_validation_accepts_client_targeted_display_sleep() {
+        let mut entry = layout_schedule();
+        entry.action = "display_sleep".into();
+        entry.layout_id.clear();
+        entry.target_client = Some("client-1".into());
+        entry.power_state = Some("sleep".into());
+        entry.control_method = Some("ddc".into());
+        entry.display_index = Some(1);
+
+        assert!(validate_schedule_entry(&entry).is_ok());
+    }
+
+    #[test]
+    fn schedule_validation_rejects_invalid_power_actions_and_states() {
+        let mut entry = layout_schedule();
+        entry.layout_id.clear();
+        entry.target_client = Some("client-1".into());
+
+        entry.action = "display_sleep".into();
+        entry.power_state = Some("on".into());
+        assert!(validate_schedule_entry(&entry).is_err());
+
+        entry.action = "power_on".into();
+        entry.power_state = Some("sleep".into());
+        assert!(validate_schedule_entry(&entry).is_err());
+
+        entry.action = "power_cycle".into();
+        entry.power_state = Some("on".into());
+        assert!(validate_schedule_entry(&entry).is_err());
+    }
+
+    #[test]
+    fn schedule_validation_rejects_display_sleep_without_target_client() {
+        let mut entry = layout_schedule();
+        entry.action = "display_sleep".into();
+        entry.layout_id.clear();
+        entry.power_state = Some("sleep".into());
+
+        assert!(validate_schedule_entry(&entry).is_err());
+    }
+
+    #[test]
+    fn schedule_validation_rejects_invalid_display_sleep_controls() {
+        let mut entry = layout_schedule();
+        entry.action = "display_sleep".into();
+        entry.layout_id.clear();
+        entry.target_client = Some("client-1".into());
+        entry.power_state = Some("sleep".into());
+
+        entry.control_method = Some("invalid".into());
+        assert!(validate_schedule_entry(&entry).is_err());
+
+        entry.control_method = Some("ddc".into());
+        entry.display_index = Some(64);
         assert!(validate_schedule_entry(&entry).is_err());
     }
 
