@@ -11,6 +11,7 @@ APPROVAL_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-approval-reco
 RESOURCE_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-resource-policy-evidence.py'
 IPC_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-ipc-policy-evidence.py'
 ROLLBACK_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-rollback-policy-evidence.py'
+CAPABILITY_ADMISSION_MODULE_PATH = ROOT / 'player-client/scripts/screentra-capability-admission.py'
 
 
 def load_approval_module():
@@ -69,11 +70,23 @@ def load_rollback_policy_module():
     return module
 
 
+def load_capability_admission_module():
+    spec = importlib.util.spec_from_file_location(
+        'screentra_capability_admission', CAPABILITY_ADMISSION_MODULE_PATH
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 admission = load_module()
 approval = load_approval_module()
 resource_policy = load_resource_policy_module()
 ipc_policy = load_ipc_policy_module()
 rollback_policy = load_rollback_policy_module()
+capability_admission = load_capability_admission_module()
 
 
 SERVICE_ID = 'magic-mirror-stt'
@@ -84,6 +97,11 @@ HOST_ID = 'client-56'
 MODEL_ID = 'whisper-tiny.en'
 MODEL_SHA256 = 'a' * 64
 ROLLBACK_POLICY_VERSION = 'rollback-policy-v1'
+STT_CAPABILITIES = (
+    'microphone_capture',
+    'local_inference',
+    'client_service',
+)
 
 
 def valid_approval_record(**overrides):
@@ -268,6 +286,23 @@ def valid_rollback_policy(**overrides):
     )
 
 
+def valid_capability_admission(**overrides):
+    manifest = {
+        'client_id': HOST_ID,
+        'addon_id': SERVICE_ID,
+        'capabilities': list(STT_CAPABILITIES),
+    }
+    policy = {
+        'client_id': HOST_ID,
+        'addon_id': SERVICE_ID,
+        'approved_capabilities': list(STT_CAPABILITIES),
+    }
+    result = capability_admission.admit_capabilities(manifest, policy)
+    if overrides:
+        result = dataclasses.replace(result, **overrides)
+    return result
+
+
 def valid_request(**overrides):
     value = {
         'approval_record': valid_approval_record(),
@@ -277,6 +312,7 @@ def valid_request(**overrides):
         'resource_policy_evidence': valid_resource_policy(),
         'ipc_policy_evidence': valid_ipc_policy(),
         'rollback_policy_evidence': valid_rollback_policy(),
+        'capability_admission': valid_capability_admission(),
     }
     value.update(overrides)
     return value
@@ -314,6 +350,105 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
         self.assertEqual(result['model_sha256'], MODEL_SHA256)
         self.assertTrue(result['evidence_composed']['resource_policy'])
         self.assertTrue(result['evidence_composed']['ipc_policy'])
+        self.assertTrue(result['evidence_composed']['capability_admission'])
+        self.assertEqual(result['client_id'], HOST_ID)
+        self.assertEqual(result['addon_id'], SERVICE_ID)
+        self.assertEqual(tuple(result['requested_capabilities']), STT_CAPABILITIES)
+        self.assertEqual(tuple(result['approved_capabilities']), STT_CAPABILITIES)
+        self.assertEqual(tuple(result['capabilities']), STT_CAPABILITIES)
+        self.assertEqual(
+            tuple(result['capability_identity_tuple']),
+            (HOST_ID, SERVICE_ID, STT_CAPABILITIES, STT_CAPABILITIES),
+        )
+
+    def test_capability_admission_requires_exact_validated_immutable_result_type(self):
+        module = self.require_module()
+        valid = valid_capability_admission()
+
+        for value in (
+            valid.as_dict(),
+            {'client_id': HOST_ID, 'addon_id': SERVICE_ID},
+            None,
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(capability_admission=value)
+                    )
+
+        class DerivedCapabilityAdmission(capability_admission.CapabilityAdmission):
+            pass
+
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(
+                valid_request(capability_admission=DerivedCapabilityAdmission(**dataclasses.asdict(valid)))
+            )
+
+    def test_capability_admission_rejects_missing_approval_and_dependency_drift(self):
+        module = self.require_module()
+        manifest = {
+            'client_id': HOST_ID,
+            'addon_id': SERVICE_ID,
+            'capabilities': list(STT_CAPABILITIES),
+        }
+        default_denied = capability_admission.admit_capabilities(manifest)
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(
+                valid_request(capability_admission=default_denied)
+            )
+
+        for tampered in (
+            dataclasses.replace(valid_capability_admission(), admitted=False),
+            dataclasses.replace(valid_capability_admission(), requested_capabilities=(
+                'local_inference', 'client_service',
+            )),
+            dataclasses.replace(valid_capability_admission(), approved_capabilities=(
+                'local_inference', 'client_service',
+            )),
+            dataclasses.replace(valid_capability_admission(), capabilities=(
+                'local_inference', 'client_service',
+            )),
+        ):
+            with self.subTest(tampered=tampered):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(capability_admission=tampered)
+                    )
+
+    def test_capability_admission_rejects_identity_drift_tampering_and_runtime_claims(self):
+        module = self.require_module()
+        for tampered in (
+            dataclasses.replace(valid_capability_admission(), client_id='other-client'),
+            dataclasses.replace(valid_capability_admission(), addon_id='other-addon'),
+            dataclasses.replace(valid_capability_admission(), execution_enabled=True),
+            dataclasses.replace(valid_capability_admission(), effect='runtime_active'),
+        ):
+            with self.subTest(tampered=tampered):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(capability_admission=tampered)
+                    )
+
+        readiness_claim = valid_capability_admission()
+        object.__setattr__(readiness_claim, 'readiness_claim', True)
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(
+                valid_request(capability_admission=readiness_claim)
+            )
+
+    def test_capability_admission_preserves_fail_closed_metadata_only_flags(self):
+        module = self.require_module()
+        result = module.decide_runtime_admission(valid_request())
+
+        self.assertEqual(result['admission'], 'approved_for_future_review')
+        for field in (
+            'execution_enabled', 'runtime_activation_allowed',
+            'hardware_permission_activated', 'microphone_access', 'camera_access',
+            'process_started', 'socket_bound', 'model_loaded', 'resource_enforced',
+            'ipc_enforced', 'rollback_executed', 'state_changed',
+            'lifecycle_state_changed',
+        ):
+            self.assertFalse(result[field], field)
 
     def test_raw_or_arbitrary_approval_mappings_are_rejected(self):
         module = self.require_module()

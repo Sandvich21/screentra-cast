@@ -40,9 +40,18 @@ _SECRET_RE: Final = re.compile(
     r'(?:password|passwd|secret|token|credential|bearer|api[_-]?key)',
     re.IGNORECASE,
 )
+_STT_CAPABILITIES: Final = frozenset({
+    'microphone_capture',
+    'local_inference',
+    'client_service',
+})
+_CAPABILITY_RESULT_FIELDS: Final = frozenset({
+    'client_id', 'addon_id', 'requested_capabilities', 'approved_capabilities',
+    'capabilities', 'admitted', 'reason', 'execution_enabled', 'effect',
+})
 
 _REQUEST_FIELDS: Final = frozenset({
-    'approval_record', 'preflight_evidence', 'model_staging_plan',
+    'approval_record', 'capability_admission', 'preflight_evidence', 'model_staging_plan',
     'supervisor_plan', 'resource_policy_evidence', 'ipc_policy_evidence',
     'rollback_policy_evidence',
 })
@@ -503,6 +512,64 @@ def _validated_rollback_policy(value: Any, expected: dict[str, str]) -> Any:
     return value
 
 
+def _capability_admission_module() -> Any:
+    module_name = 'screentra_capability_admission'
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    module_path = Path(__file__).with_name('screentra-capability-admission.py')
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise _fail('runtime capability admission is invalid')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise _fail('runtime capability admission is invalid') from exc
+    return module
+
+
+def _validated_capability_admission(value: Any, expected: dict[str, str]) -> Any:
+    """Accept only the exact immutable, default-deny admission result type."""
+    module = _capability_admission_module()
+    if type(value) is not module.CapabilityAdmission:
+        raise _fail('runtime capability admission is invalid')
+    if set(vars(value)) != _CAPABILITY_RESULT_FIELDS:
+        raise _fail('runtime capability admission is invalid')
+    try:
+        validated = module.admit_capabilities(
+            {
+                'client_id': value.client_id,
+                'addon_id': value.addon_id,
+                'capabilities': list(value.requested_capabilities),
+            },
+            {
+                'client_id': value.client_id,
+                'addon_id': value.addon_id,
+                'approved_capabilities': list(value.approved_capabilities),
+            },
+        )
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        raise _fail('runtime capability admission is invalid') from exc
+    if validated != value:
+        raise _fail('runtime capability admission is invalid')
+    if (
+        value.client_id != expected['host_id']
+        or value.addon_id != expected['service_id']
+        or set(value.requested_capabilities) != _STT_CAPABILITIES
+        or set(value.approved_capabilities) != _STT_CAPABILITIES
+        or value.admitted is not True
+        or value.execution_enabled is not False
+        or value.effect != 'metadata_only'
+        or value.reason is not None
+        or tuple(value.capabilities) != tuple(value.requested_capabilities)
+    ):
+        raise _fail('runtime capability admission is invalid')
+    return value
+
+
 def _approval_module() -> Any:
     module_name = 'screentra_stt_approval_record'
     module = sys.modules.get(module_name)
@@ -574,6 +641,9 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'model_id': approval.model_id,
         'model_sha256': approval.model_sha256,
     }
+    capability = _validated_capability_admission(
+        request['capability_admission'], expected
+    )
     resource_policy = _validated_resource_policy(
         request['resource_policy_evidence'], expected
     )
@@ -591,6 +661,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     )
     bounded_request = dict(request)
     bounded_request['approval_record'] = approval.as_dict()
+    bounded_request['capability_admission'] = capability.as_dict()
     bounded_request['resource_policy_evidence'] = resource_policy.as_dict()
     bounded_request['ipc_policy_evidence'] = ipc_policy.as_dict()
     bounded_request['rollback_policy_evidence'] = rollback_policy.as_dict()
@@ -603,6 +674,9 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'reason': 'approval_record_validated' if all_gates_passed else 'approval_gate_not_passed',
         'runtime_activation_allowed': False,
         'execution_enabled': False,
+        'hardware_permission_activated': False,
+        'microphone_access': False,
+        'camera_access': False,
         'process_started': False,
         'socket_bound': False,
         'model_loaded': False,
@@ -615,6 +689,11 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'service_version': expected['service_version'],
         'activation_id': expected['activation_id'],
         'host_id': expected['host_id'],
+        'client_id': capability.client_id,
+        'addon_id': capability.addon_id,
+        'requested_capabilities': tuple(capability.requested_capabilities),
+        'approved_capabilities': tuple(capability.approved_capabilities),
+        'capabilities': tuple(capability.capabilities),
         'model_id': expected['model_id'],
         'model_sha256': expected['model_sha256'],
         'socket_name': ipc_policy.socket_name,
@@ -630,6 +709,11 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             ipc_policy.socket_name, ipc_policy.protocol_version,
             tuple(ipc_policy.allowed_operations),
         ),
+        'capability_identity_tuple': (
+            capability.client_id, capability.addon_id,
+            tuple(capability.requested_capabilities),
+            tuple(capability.approved_capabilities),
+        ),
         'rollback_identity_tuple': (
             rollback_policy.service_id, rollback_policy.service_version,
             rollback_policy.activation_id,
@@ -640,6 +724,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             'model_verification': True,
             'supervisor': True,
             'approval_record': True,
+            'capability_admission': True,
             'resource_policy': True,
             'ipc_policy': True,
             'rollback_policy': True,
