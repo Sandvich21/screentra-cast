@@ -2435,7 +2435,7 @@ fn remove_signed_client_package_rollback(id: &str) -> Result<(), AddonError> {
     let Some(rollback_root) = checked_addon_rollback_root(&root, false)? else {
         return Ok(());
     };
-    let backup = rollback_root.join(id);
+    let backup = addon_dir(&rollback_root, id)?;
     reject_symlinked_path_ancestors(&backup, "Invalid addon rollback path")?;
     match fs::symlink_metadata(&backup) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
@@ -2548,7 +2548,7 @@ pub fn update_signed_client_package(archive: &Path) -> Result<AddonRecord, Addon
         let rollback_root = checked_addon_rollback_root(&root, true)?.ok_or_else(|| {
             AddonError::Io("Addon rollback storage is unavailable".to_string())
         })?;
-        let backup = rollback_root.join(&staged.manifest.id);
+        let backup = addon_dir(&rollback_root, &staged.manifest.id)?;
         replace_addon_directory_atomically(&staged.directory, &destination, &backup)?;
         Ok(AddonRecord {
             manifest: staged.manifest,
@@ -2570,8 +2570,8 @@ pub fn rollback_signed_client_package(id: &str) -> Result<AddonRecord, AddonErro
     })?;
     let root = checked_addon_storage_dir(false)?.ok_or(AddonError::NotFound)?;
     let rollback_root = checked_addon_rollback_root(&root, false)?.ok_or(AddonError::NotFound)?;
-    let destination = root.join(id);
-    let backup = rollback_root.join(id);
+    let destination = addon_dir(&root, id)?;
+    let backup = addon_dir(&rollback_root, id)?;
     let rollback_error = || AddonError::Invalid("Signed client package rollback failed".to_string());
 
     let current_metadata = fs::symlink_metadata(&destination).map_err(|_| rollback_error())?;
