@@ -66,7 +66,10 @@ validator; callers do not reconstruct it from the raw `SIGNAGE_DATA_DIR` value a
 validation. Ordinary add-on paths follow the same rule: the add-on identifier is validated
 before it is joined to the already-checked add-on storage root, and callers do not rebuild
 add-on paths from the raw data-root setting. Trusted-service staging paths use the same
-checked-root derivation and identifier validation. The containing status directory is created and
+checked-root derivation and identifier validation. Runtime approval records likewise derive
+per-addon directories from the checked trusted-service runtime root; enumeration, readback,
+write, and removal reject invalid addon namespaces before using those directories. The
+containing status directory is created and
 required to remain private with mode `0700`. Capability/service detail text is limited to 160 UTF-8 bytes,
 add-on/report error text to 96 UTF-8 bytes, and the client and server enforce the
 same limits.

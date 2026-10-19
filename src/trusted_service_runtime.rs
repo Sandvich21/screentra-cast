@@ -635,18 +635,16 @@ pub fn list() -> Result<Vec<TrustedServiceRuntimeRecord>, RuntimeError> {
         if name.starts_with('.') {
             continue;
         }
-        let metadata = fs::symlink_metadata(entry.path())
+        let directory = runtime_addon_dir(&root, &name)?;
+        let metadata = fs::symlink_metadata(&directory)
             .map_err(|error| RuntimeError::Io(error.to_string()))?;
-        validate_private_runtime_directory(
-            &metadata,
-            "Invalid trusted service runtime directory",
-        )?;
+        validate_private_runtime_directory(&metadata, "Invalid trusted service runtime directory")?;
         if records.len() >= MAX_RUNTIME_RECORDS {
             return Err(RuntimeError::Invalid(
                 "Too many trusted service runtime records".to_string(),
             ));
         }
-        let record = read_record(&entry.path().join(RUNTIME_FILE))?;
+        let record = read_record(&directory.join(RUNTIME_FILE))?;
         if record.addon_id != name {
             return Err(RuntimeError::Invalid(
                 "Trusted service runtime identity mismatch".to_string(),
@@ -1836,6 +1834,38 @@ mod tests {
         let root = PathBuf::from("/tmp/screentra-runtime-root");
         let path = runtime_addon_dir(&root, "trusted-addon").expect("valid addon id");
         assert_eq!(path, root.join("trusted-addon"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_rejects_invalid_runtime_directory_namespace() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = crate::PROCESS_ENV_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let root = std::env::temp_dir().join(format!("screentra-runtime-list-invalid-{}", Uuid::new_v4()));
+        let runtime_root = root.join(RUNTIME_DIR);
+        let invalid_directory = runtime_root.join("invalid namespace");
+        fs::create_dir_all(&invalid_directory).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&runtime_root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&invalid_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+
+        let result = list();
+
+        if let Some(value) = old_data_dir {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+        assert!(matches!(result, Err(RuntimeError::Invalid(_))));
     }
 
     #[test]
