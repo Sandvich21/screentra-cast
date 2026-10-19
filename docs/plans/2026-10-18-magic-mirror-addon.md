@@ -44,10 +44,10 @@ The heartbeat routes every status-cache write through this validator; rejected
 reports do not replace the prior cache. The server-side status persistence
 boundary applies the same control-character and credential/path/URL-shaped detail
 rejection before writing snapshots, validates exact second-precision UTC timestamps,
-requires a private `0700` status directory and `0600` snapshot files, and
-revalidates stored client identity and closed report fields on readback while
-retaining its separate report-only service-state vocabulary for future trusted
-observations.
+requires a private `0700` status directory and `0600` snapshot files, rejects
+symlinked or multiply-linked snapshots, and revalidates stored client identity and
+closed report fields on readback while retaining its separate report-only
+service-state vocabulary for future trusted observations.
 
 
 The pure `screentra-client-service-supervisor-plan.py` contract composes the lifecycle and health identity validators for the Magic Mirror STT metadata. Its activation plans are metadata-only evidence: `execution_enabled` is false and `process_started`, `socket_bound`, and `model_loaded` are false. Health/status may bind a bounded observation; start/stop/update/rollback return structured `execution_disabled` results without changing lifecycle state. A plan is not evidence of a running service, bound socket, loaded model, installed package, or hardware readiness.

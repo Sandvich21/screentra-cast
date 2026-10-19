@@ -659,8 +659,8 @@ pub fn load_client_status(client_id: &str) -> Result<Option<serde_json::Value>, 
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o777 != 0o600 {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.nlink() != 1 || metadata.permissions().mode() & 0o777 != 0o600 {
             return Err(AddonError::Invalid(
                 "Invalid stored addon status permissions".to_string(),
             ));
@@ -4799,6 +4799,20 @@ mod tests {
         wrong_identity["client_id"] = serde_json::Value::String("client-2".to_string());
         fs::write(entries[0].path(), serde_json::to_vec(&wrong_identity).unwrap()).unwrap();
         assert!(load_client_status("client-1").is_err());
+        #[cfg(unix)]
+        {
+            let outside = root.join("outside-status.json");
+            fs::write(&outside, raw_saved.as_bytes()).unwrap();
+            fs::remove_file(entries[0].path()).unwrap();
+            fs::hard_link(&outside, entries[0].path()).unwrap();
+            let mut file_permissions = fs::symlink_metadata(entries[0].path())
+                .unwrap()
+                .permissions();
+            use std::os::unix::fs::PermissionsExt;
+            file_permissions.set_mode(0o600);
+            fs::set_permissions(entries[0].path(), file_permissions).unwrap();
+            assert!(load_client_status("client-1").is_err());
+        }
         if let Some(value) = old_data_root {
             unsafe {
                 std::env::set_var("SIGNAGE_DATA_DIR", value);
