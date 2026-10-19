@@ -138,6 +138,25 @@ class ClientStatusReportAdmissionTests(unittest.TestCase):
                 heartbeat._write_status_report(path, valid_report(services=[{'id': 'speech-to-text'}]))
             self.assertEqual(json.loads(path.read_text(encoding='utf-8')), valid_report())
 
+    def test_heartbeat_atomic_status_write_does_not_follow_preexisting_temp_symlink(self):
+        heartbeat = load_module(
+            ROOT / 'player-client/scripts/screentra-player-heartbeat.py',
+            'screentra_player_heartbeat_symlink_temp_test',
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / 'cache' / 'addon-status.json'
+            path.parent.mkdir()
+            outside = root / 'outside.json'
+            outside.write_text('sentinel', encoding='utf-8')
+            temporary_path = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+            temporary_path.symlink_to(outside)
+
+            heartbeat._write_status_report(path, valid_report())
+
+            self.assertEqual(outside.read_text(encoding='utf-8'), 'sentinel')
+            self.assertEqual(json.loads(path.read_text(encoding='utf-8')), valid_report())
+
         source = MODULE_PATH.read_text(encoding='utf-8')
         for forbidden in ('socket', 'subprocess', 'Popen', 'run(', 'open(', 'systemctl', 'Path(', 'urlopen'):
             self.assertNotIn(forbidden, source)

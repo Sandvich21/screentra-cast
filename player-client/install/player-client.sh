@@ -1166,10 +1166,22 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     """Replace a cache JSON file atomically and keep it owner-readable."""
     _ensure_real_directory(path.parent, create=True)
     os.chmod(path.parent, 0o700)
-    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
-    temporary.write_text(text)
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f'.{path.name}.', suffix='.tmp', dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _display_governance_count(which):
