@@ -402,6 +402,26 @@ fn validate_private_addon_storage_directory(
     Ok(())
 }
 
+fn validate_addon_storage_root_identity(
+    root: &Path,
+    expected: &fs::Metadata,
+) -> Result<(), AddonError> {
+    let current = fs::symlink_metadata(root).map_err(io_error)?;
+    validate_private_addon_storage_directory(&current)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (current.dev(), current.ino()) != (expected.dev(), expected.ino()) {
+            return Err(AddonError::Invalid(
+                "Addon storage root changed".to_string(),
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = expected;
+    Ok(())
+}
+
 fn checked_addon_storage_dir(create: bool) -> Result<Option<PathBuf>, AddonError> {
     let Some(data_root) = checked_data_dir(create)? else {
         return Ok(None);
@@ -2519,20 +2539,30 @@ struct StagedSignedClientPackage {
     manifest: AddonManifest,
 }
 
+fn cleanup_staged_addon_directory(root: &Path, expected_root: &fs::Metadata, stage: &Path) {
+    if validate_addon_storage_root_identity(root, expected_root).is_ok() {
+        let _ = fs::remove_dir_all(stage);
+    }
+}
+
 fn stage_signed_client_package(
     archive: &Path,
     root: &Path,
+    expected_root: &fs::Metadata,
     stage_prefix: &str,
 ) -> Result<StagedSignedClientPackage, AddonError> {
-    reject_symlinked_path_ancestors(root, "Invalid addon storage directory")?;
+    validate_addon_storage_root_identity(root, expected_root)?;
     let stage = root.join(format!(".{stage_prefix}-{}", Uuid::new_v4()));
     if let Err(error) = crate::safe_archive::extract_tar_gz(archive, &stage, 0) {
-        let _ = fs::remove_dir_all(&stage);
+        cleanup_staged_addon_directory(root, expected_root, &stage);
         return Err(AddonError::Invalid(error));
+    }
+    if let Err(error) = validate_addon_storage_root_identity(root, expected_root) {
+        return Err(error);
     }
     let stage_metadata = fs::symlink_metadata(&stage).map_err(io_error)?;
     if stage_metadata.file_type().is_symlink() || !stage_metadata.is_dir() {
-        let _ = fs::remove_dir_all(&stage);
+        cleanup_staged_addon_directory(root, expected_root, &stage);
         return Err(AddonError::Invalid("Invalid addon staging directory".to_string()));
     }
     #[cfg(unix)]
@@ -2586,7 +2616,10 @@ fn stage_signed_client_package(
 pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, AddonError> {
     let root = checked_addon_storage_dir(true)?
         .ok_or_else(|| AddonError::Io("Addon storage directory is unavailable".to_string()))?;
-    let staged = stage_signed_client_package(archive, &root, "package-install")?;
+    let root_metadata = fs::symlink_metadata(&root).map_err(io_error)?;
+    validate_addon_storage_root_identity(&root, &root_metadata)?;
+    let staged =
+        stage_signed_client_package(archive, &root, &root_metadata, "package-install")?;
     let result = (|| {
         let destination = addon_dir(&root, &staged.manifest.id)?;
         match fs::symlink_metadata(&destination) {
@@ -2605,6 +2638,7 @@ pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, Addo
             state_text.as_bytes(),
             "signed-package-state",
         )?;
+        validate_addon_storage_root_identity(&root, &root_metadata)?;
         fs::rename(&staged.directory, &destination).map_err(io_error)?;
         Ok(AddonRecord {
             manifest: staged.manifest,
@@ -2613,7 +2647,7 @@ pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, Addo
         })
     })();
     if result.is_err() {
-        let _ = fs::remove_dir_all(&staged.directory);
+        cleanup_staged_addon_directory(&root, &root_metadata, &staged.directory);
     }
     result
 }
@@ -2741,7 +2775,9 @@ fn client_package_version_is_newer(candidate: &str, installed: &str) -> bool {
 /// it never executes client JavaScript or enables a runtime.
 pub fn update_signed_client_package(archive: &Path) -> Result<AddonRecord, AddonError> {
     let root = checked_addon_storage_dir(false)?.ok_or(AddonError::NotFound)?;
-    let staged = stage_signed_client_package(archive, &root, "package-update")?;
+    let root_metadata = fs::symlink_metadata(&root).map_err(io_error)?;
+    validate_addon_storage_root_identity(&root, &root_metadata)?;
+    let staged = stage_signed_client_package(archive, &root, &root_metadata, "package-update")?;
     let result = (|| {
         let destination = addon_dir(&root, &staged.manifest.id)?;
         let existing = match fs::symlink_metadata(&destination) {
@@ -2789,6 +2825,7 @@ pub fn update_signed_client_package(archive: &Path) -> Result<AddonRecord, Addon
             AddonError::Io("Addon rollback storage is unavailable".to_string())
         })?;
         let backup = addon_dir(&rollback_root, &staged.manifest.id)?;
+        validate_addon_storage_root_identity(&root, &root_metadata)?;
         replace_addon_directory_atomically(&staged.directory, &destination, &backup)?;
         Ok(AddonRecord {
             manifest: staged.manifest,
@@ -2797,7 +2834,7 @@ pub fn update_signed_client_package(archive: &Path) -> Result<AddonRecord, Addon
         })
     })();
     if result.is_err() {
-        let _ = fs::remove_dir_all(&staged.directory);
+        cleanup_staged_addon_directory(&root, &root_metadata, &staged.directory);
     }
     result
 }
@@ -4592,6 +4629,30 @@ mod tests {
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(validate_private_trusted_service_directory(&root).is_err());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn addon_storage_root_identity_rejects_replacement_before_staging() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "screentra-addon-stage-root-check-{}",
+            Uuid::new_v4()
+        ));
+        let displaced = root.with_extension("displaced");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let expected = fs::symlink_metadata(&root).unwrap();
+        fs::rename(&root, &displaced).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let result = validate_addon_storage_root_identity(&root, &expected);
+
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(displaced);
     }
 
     #[cfg(unix)]
