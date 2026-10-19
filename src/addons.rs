@@ -1538,9 +1538,8 @@ pub fn list() -> Result<Vec<AddonRecord>, AddonError> {
             return Err(AddonError::Invalid("Invalid addon directory".to_string()));
         }
         if entry.file_name() == ROLLBACK_DIR {
-            if !file_type.is_dir() {
-                return Err(AddonError::Invalid("Invalid addon rollback directory".to_string()));
-            }
+            let metadata = fs::symlink_metadata(entry.path()).map_err(io_error)?;
+            validate_private_addon_rollback_directory(&metadata)?;
             continue;
         }
         if file_type.is_dir() {
@@ -2404,6 +2403,26 @@ pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, Addo
     result
 }
 
+fn validate_private_addon_rollback_directory(
+    metadata: &fs::Metadata,
+) -> Result<(), AddonError> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AddonError::Invalid(
+            "Invalid addon rollback directory".to_string(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o777 != 0o700 {
+            return Err(AddonError::Invalid(
+                "Addon rollback directory permissions are insecure".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn checked_addon_rollback_root(
     root: &Path,
     create: bool,
@@ -2411,18 +2430,20 @@ fn checked_addon_rollback_root(
     reject_symlinked_path_ancestors(root, "Invalid addon storage directory")?;
     let rollback_root = root.join(ROLLBACK_DIR);
     match fs::symlink_metadata(&rollback_root) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
-            AddonError::Invalid("Invalid addon rollback directory".to_string()),
-        ),
-        Ok(_) => Ok(Some(rollback_root)),
+        Ok(metadata) => {
+            validate_private_addon_rollback_directory(&metadata)?;
+            Ok(Some(rollback_root))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
-            fs::create_dir(&rollback_root).map_err(io_error)?;
-            let metadata = fs::symlink_metadata(&rollback_root).map_err(io_error)?;
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(AddonError::Invalid(
-                    "Invalid addon rollback directory".to_string(),
-                ));
+            let mut directory_builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                directory_builder.mode(0o700);
             }
+            directory_builder.create(&rollback_root).map_err(io_error)?;
+            let metadata = fs::symlink_metadata(&rollback_root).map_err(io_error)?;
+            validate_private_addon_rollback_directory(&metadata)?;
             Ok(Some(rollback_root))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -2677,6 +2698,55 @@ mod tests {
             path,
             status_dir.join(format!("{:x}.json", Sha256::digest(b"client-1")))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_addon_rollback_root_rejects_insecure_permissions() {
+        let root = std::env::temp_dir().join(format!("screentra-rollback-root-{}", Uuid::new_v4()));
+        let rollback_root = root.join(ROLLBACK_DIR);
+        fs::create_dir_all(&rollback_root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&rollback_root, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let result = checked_addon_rollback_root(&root, false);
+
+        let _ = fs::remove_dir_all(&root);
+        assert!(matches!(result, Err(AddonError::Invalid(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn addon_list_rejects_insecure_rollback_permissions() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("screentra-addon-list-root-{}", Uuid::new_v4()));
+        let addon_root = root.join("addons");
+        let rollback_root = addon_root.join(ROLLBACK_DIR);
+        fs::create_dir_all(&rollback_root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&addon_root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&rollback_root, fs::Permissions::from_mode(0o755)).unwrap();
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+
+        let result = list();
+
+        if let Some(value) = old_data_root {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+        assert!(matches!(result, Err(AddonError::Invalid(_))));
     }
 
     #[test]

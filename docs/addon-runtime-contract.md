@@ -192,7 +192,10 @@ next renderer start.
 
 The current server-side signed-package lifecycle has a separate
 `rollback_signed_client_package(id)` path. It retains one previous, validated
-package under the checked addon root at `.rollback/<id>`. Rollback re-verifies
+package under the checked addon root at `.rollback/<id>`. The rollback root is a
+regular private directory with exact `0700` permissions; it is created with that
+mode and enumerated/loaded only after the same type, symlink, and permission
+checks. Rollback re-verifies
 the retained manifest signature, regular-file entrypoint, entrypoint digest,
 package identity, and persisted enabled/install state before atomically swapping
 the current and retained package directories. Missing, malformed, tampered, or
