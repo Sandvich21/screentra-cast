@@ -1657,10 +1657,46 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<AddonRecord, AddonError> {
     Ok(record)
 }
 
+fn remove_checked_addon_directory(
+    storage_root: &Path,
+    expected_root: &fs::Metadata,
+    dir: &Path,
+    expected_dir: &fs::Metadata,
+) -> Result<(), AddonError> {
+    let current_root = fs::symlink_metadata(storage_root).map_err(io_error)?;
+    validate_private_addon_storage_directory(&current_root)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (current_root.dev(), current_root.ino()) != (expected_root.dev(), expected_root.ino()) {
+            return Err(AddonError::Invalid(
+                "Addon storage root changed before removal".to_string(),
+            ));
+        }
+    }
+
+    let current_dir = fs::symlink_metadata(dir).map_err(io_error)?;
+    if current_dir.file_type().is_symlink() || !current_dir.is_dir() {
+        return Err(AddonError::Invalid("Invalid addon directory".to_string()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (current_dir.dev(), current_dir.ino()) != (expected_dir.dev(), expected_dir.ino()) {
+            return Err(AddonError::Invalid(
+                "Addon directory changed before removal".to_string(),
+            ));
+        }
+    }
+    fs::remove_dir_all(dir).map_err(io_error)
+}
+
 pub fn remove(id: &str) -> Result<(), AddonError> {
-    let Some(dir) = checked_addon_dir(false, id)? else {
+    let Some(root) = checked_addon_storage_dir(false)? else {
         return Err(AddonError::NotFound);
     };
+    let dir = addon_dir(&root, id)?;
+    let root_metadata = fs::symlink_metadata(&root).map_err(io_error)?;
     let metadata = match fs::symlink_metadata(&dir) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1675,7 +1711,7 @@ pub fn remove(id: &str) -> Result<(), AddonError> {
     // treat the installed directory as opaque and do not read untrusted files.
     // Rollback storage is validated separately before it is removed.
     remove_signed_client_package_rollback(id)?;
-    fs::remove_dir_all(dir).map_err(io_error)
+    remove_checked_addon_directory(&root, &root_metadata, &dir, &metadata)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5197,6 +5233,32 @@ mod tests {
             unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_checked_addon_directory_rejects_replaced_directory() {
+        let root = std::env::temp_dir().join(format!("screentra-addon-remove-identity-{}", Uuid::new_v4()));
+        let storage_root = root.join("addons");
+        let addon_path = storage_root.join("example.weather");
+        let original_path = root.join("original-addon");
+        fs::create_dir_all(&addon_path).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&storage_root, fs::Permissions::from_mode(0o700)).unwrap();
+        let root_metadata = fs::symlink_metadata(&storage_root).unwrap();
+        let addon_metadata = fs::symlink_metadata(&addon_path).unwrap();
+        fs::rename(&addon_path, &original_path).unwrap();
+        fs::create_dir(&addon_path).unwrap();
+
+        let result = remove_checked_addon_directory(
+            &storage_root,
+            &root_metadata,
+            &addon_path,
+            &addon_metadata,
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        assert!(matches!(result, Err(AddonError::Invalid(_))));
     }
 
     #[test]
