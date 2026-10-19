@@ -66,9 +66,13 @@ The player heartbeat has a stricter, separate report boundary in
 is disabled, its report must contain `services: []`; running, healthy, queued, or
 process observations cannot be represented by the heartbeat cache. Capability
 observations are limited to the closed capability/state vocabulary, bounded
-control-free details, and a bounded JSON envelope. The heartbeat validates every
-status write through this boundary, and invalid reports are rejected without
-replacing the previous cache file.
+control-free details, and a bounded JSON envelope. Add-on entries likewise use a
+closed `id`/version/state/entrypoint/error shape with verified-state vocabulary,
+relative `client/` entrypoints, duplicate-ID rejection, bounded versions, and
+credential/path/URL-safe errors. Report and add-on timestamps must be real RFC3339
+UTC values rather than shape-only strings. The heartbeat validates every status
+write through this boundary, and invalid reports are rejected without replacing
+the previous cache file.
 
 The command queue also carries three metadata-only client-service actions. The
 `client_service_status` action returns the bounded disabled status without

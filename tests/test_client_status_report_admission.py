@@ -44,6 +44,12 @@ def valid_report(**overrides):
 class ClientStatusReportAdmissionTests(unittest.TestCase):
     def test_accepts_bounded_inert_report(self):
         self.assertIsNone(admission.validate_status_report(valid_report()))
+        self.assertIsNone(admission.validate_status_report(valid_report(addons=[{
+            'id': 'weather',
+            'version': '1.0.0',
+            'state': 'verified_cached',
+            'entrypoint': 'client/widget.js',
+        }])))
 
     def test_services_must_remain_empty_while_runtime_is_disabled(self):
         with self.assertRaises(admission.StatusReportError):
@@ -60,6 +66,11 @@ class ClientStatusReportAdmissionTests(unittest.TestCase):
             valid_report(capabilities=[{'id': 'render_only', 'state': 'running', 'detail': 'x'}]),
             valid_report(capabilities=[{'id': 'render_only', 'state': 'available'}]),
             valid_report(at='2026-99-99T12:00:00Z'),
+            valid_report(addons=[{'id': '../secret', 'state': 'verified'}]),
+            valid_report(addons=[{'id': 'weather', 'state': 'running'}]),
+            valid_report(addons=[{'id': 'weather', 'state': 'verified', 'entrypoint': '../client.js'}]),
+            valid_report(addons=[{'id': 'weather', 'state': 'failed', 'error': 'password=secret'}]),
+            valid_report(error='https://example.invalid'),
             valid_report(capabilities=[{'id': 'render_only', 'state': 'available', 'detail': '/dev/video0'}]),
         )
         for candidate in invalid:

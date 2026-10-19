@@ -20,6 +20,10 @@ _ALLOWED_CAPABILITIES = frozenset({
     'client_service',
 })
 _ALLOWED_STATES = frozenset({'available', 'unavailable', 'disabled'})
+_ADDON_STATES = frozenset({'verified', 'verified_cached', 'failed'})
+_ADDON_FIELDS = frozenset({'id', 'version', 'state', 'entrypoint', 'error'})
+_ADDON_ID_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}$')
+_ADDON_VERSION_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}$')
 _TIMESTAMP_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
 _FORBIDDEN_DETAIL_MARKERS = ('password', 'credential', 'secret', 'token', '://', '/')
 
@@ -57,6 +61,45 @@ def _validate_capabilities(value):
         seen.add(identifier)
 
 
+def _validate_addons(value):
+    if not isinstance(value, list) or len(value) > MAX_ADDONS:
+        raise StatusReportError('invalid status report addons')
+    seen = set()
+    for addon in value:
+        if not isinstance(addon, Mapping) or set(addon) - _ADDON_FIELDS:
+            raise StatusReportError('invalid status report addon shape')
+        identifier = addon.get('id')
+        state = addon.get('state')
+        if not isinstance(identifier, str) or not _ADDON_ID_RE.fullmatch(identifier):
+            raise StatusReportError('invalid status report addon id')
+        if identifier in seen:
+            raise StatusReportError('duplicate status report addon')
+        if state not in _ADDON_STATES:
+            raise StatusReportError('invalid status report addon state')
+        version = addon.get('version')
+        if version is not None and (
+                not isinstance(version, str) or not _ADDON_VERSION_RE.fullmatch(version)):
+            raise StatusReportError('invalid status report addon version')
+        entrypoint = addon.get('entrypoint')
+        if entrypoint is not None:
+            if (not isinstance(entrypoint, str) or not entrypoint.startswith('client/') or
+                    '\\' in entrypoint or '..' in entrypoint.split('/') or
+                    any(ord(character) < 0x20 or ord(character) == 0x7F for character in entrypoint) or
+                    len(entrypoint.encode('utf-8')) > MAX_DETAIL_BYTES):
+                raise StatusReportError('invalid status report addon entrypoint')
+        error = addon.get('error')
+        if error is not None:
+            _validate_safe_text(error, MAX_ERROR_BYTES, 'addon error')
+        seen.add(identifier)
+
+
+def _validate_safe_text(value, maximum, field):
+    _bounded_text(value, maximum, field)
+    lowered = value.lower()
+    if any(marker in lowered for marker in _FORBIDDEN_DETAIL_MARKERS):
+        raise StatusReportError(f'unsafe status report {field}')
+
+
 def validate_status_report(report):
     """Validate a report without probing devices or changing client state."""
     if not isinstance(report, Mapping) or set(report) - _ALLOWED_FIELDS:
@@ -68,9 +111,7 @@ def validate_status_report(report):
         datetime.strptime(timestamp, '%Y-%m-%dT%H:%M:%SZ')
     except ValueError as exc:
         raise StatusReportError('invalid status report timestamp') from exc
-    addons = report.get('addons')
-    if not isinstance(addons, list) or len(addons) > MAX_ADDONS:
-        raise StatusReportError('invalid status report addons')
+    _validate_addons(report.get('addons'))
     _validate_capabilities(report.get('capabilities'))
     # Runtime execution is disabled. No service observation may be represented
     # as running, healthy, queued, or otherwise active by this report path.
@@ -78,7 +119,7 @@ def validate_status_report(report):
         raise StatusReportError('client service status reporting is disabled')
     error = report.get('error')
     if error is not None:
-        _bounded_text(error, MAX_ERROR_BYTES, 'error')
+        _validate_safe_text(error, MAX_ERROR_BYTES, 'error')
     try:
         encoded = json.dumps(report, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
     except (TypeError, ValueError, UnicodeError) as exc:
