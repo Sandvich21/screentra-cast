@@ -467,13 +467,20 @@ fn validate_client_status_text(
     Ok(())
 }
 
+fn validate_client_status_timestamp(
+    value: Option<&str>,
+    field: &str,
+) -> Result<(), AddonError> {
+    validate_client_status_text(value, field, 64, false)?;
+    if let Some(value) = value {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .map_err(|_| AddonError::Invalid(format!("Invalid {field}")))?;
+    }
+    Ok(())
+}
+
 fn validate_client_status_report(report: &ClientAddonStatusReport) -> Result<(), AddonError> {
-    validate_client_status_text(
-        report.at.as_deref(),
-        "addon status timestamp",
-        64,
-        false,
-    )?;
+    validate_client_status_timestamp(report.at.as_deref(), "addon status timestamp")?;
     if report.addons.len() > 64 {
         return Err(AddonError::Invalid(
             "Addon status contains too many entries".to_string(),
@@ -625,7 +632,10 @@ pub fn load_client_status(client_id: &str) -> Result<Option<serde_json::Value>, 
             "Stored addon status client identity mismatch".to_string(),
         ));
     }
-    validate_client_status_text(Some(&payload.received_at), "stored addon status timestamp", 64, false)?;
+    validate_client_status_timestamp(
+        Some(&payload.received_at),
+        "stored addon status timestamp",
+    )?;
     validate_client_status_report(&payload.report)?;
     serde_json::to_value(payload)
         .map(Some)
@@ -4220,6 +4230,17 @@ mod tests {
             );
             assert!(result.is_err(), "unsafe detail should be rejected: {detail:?}");
         }
+        let invalid_timestamp = save_client_status(
+            "client-1",
+            ClientAddonStatusReport {
+                at: Some("not-a-rfc3339-timestamp".to_string()),
+                addons: Vec::new(),
+                capabilities: Vec::new(),
+                services: Vec::new(),
+                error: None,
+            },
+        );
+        assert!(invalid_timestamp.is_err(), "invalid timestamp should be rejected");
         assert!(!data_root.join("addon-client-status").exists());
         if let Some(value) = old_data_root {
             unsafe {
@@ -4465,6 +4486,15 @@ mod tests {
         let mut unknown_field = saved.clone();
         unknown_field["report"]["unexpected"] = serde_json::Value::Bool(true);
         fs::write(entries[0].path(), serde_json::to_vec(&unknown_field).unwrap()).unwrap();
+        assert!(load_client_status("client-1").is_err());
+        let mut invalid_timestamp = saved.clone();
+        invalid_timestamp["received_at"] =
+            serde_json::Value::String("not-a-rfc3339-timestamp".to_string());
+        fs::write(
+            entries[0].path(),
+            serde_json::to_vec(&invalid_timestamp).unwrap(),
+        )
+        .unwrap();
         assert!(load_client_status("client-1").is_err());
         let mut wrong_identity = saved;
         wrong_identity["client_id"] = serde_json::Value::String("client-2".to_string());
