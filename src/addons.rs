@@ -4457,10 +4457,18 @@ mod tests {
         assert_eq!(loaded["report"]["addons"][0]["state"], "verified_cached");
         assert_eq!(loaded["report"]["capabilities"][0]["id"], "render_only");
         assert_eq!(loaded["report"]["services"][0]["state"], "running");
-        let mut tampered = saved;
+        let mut tampered = saved.clone();
         tampered["report"]["capabilities"][0]["detail"] =
             serde_json::Value::String("password=redacted".to_string());
         fs::write(entries[0].path(), serde_json::to_vec(&tampered).unwrap()).unwrap();
+        assert!(load_client_status("client-1").is_err());
+        let mut unknown_field = saved.clone();
+        unknown_field["report"]["unexpected"] = serde_json::Value::Bool(true);
+        fs::write(entries[0].path(), serde_json::to_vec(&unknown_field).unwrap()).unwrap();
+        assert!(load_client_status("client-1").is_err());
+        let mut wrong_identity = saved;
+        wrong_identity["client_id"] = serde_json::Value::String("client-2".to_string());
+        fs::write(entries[0].path(), serde_json::to_vec(&wrong_identity).unwrap()).unwrap();
         assert!(load_client_status("client-1").is_err());
         if let Some(value) = old_data_root {
             unsafe {
