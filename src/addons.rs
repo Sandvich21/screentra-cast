@@ -1925,6 +1925,26 @@ fn validate_private_trusted_service_directory(path: &Path) -> Result<(), AddonEr
     Ok(())
 }
 
+fn validate_trusted_service_storage_root_identity(
+    root: &Path,
+    expected: &fs::Metadata,
+) -> Result<(), AddonError> {
+    validate_private_trusted_service_directory(root)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let current = fs::symlink_metadata(root).map_err(io_error)?;
+        if (current.dev(), current.ino()) != (expected.dev(), expected.ino()) {
+            return Err(AddonError::Invalid(
+                "Trusted service storage root changed".to_string(),
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = expected;
+    Ok(())
+}
+
 fn validate_private_trusted_service_file(
     path: &Path,
     maximum_bytes: u64,
@@ -2195,6 +2215,8 @@ pub fn stage_trusted_service_manifest(
 
     let root = checked_trusted_service_storage_dir(true)?
         .ok_or_else(|| AddonError::Io("Trusted service storage directory is unavailable".to_string()))?;
+    let root_metadata = fs::symlink_metadata(&root).map_err(io_error)?;
+    validate_trusted_service_storage_root_identity(&root, &root_metadata)?;
     let dir = trusted_service_dir(&root, &manifest.id)?;
     match fs::symlink_metadata(&dir) {
         Ok(_) => return Err(AddonError::AlreadyInstalled),
@@ -2205,6 +2227,7 @@ pub fn stage_trusted_service_manifest(
     #[cfg(unix)]
     let mut stage_identity = None;
     let result = (|| {
+        validate_trusted_service_storage_root_identity(&root, &root_metadata)?;
         create_private_trusted_service_stage_dir(&stage)?;
         #[cfg(unix)]
         {
@@ -2225,6 +2248,7 @@ pub fn stage_trusted_service_manifest(
             .map_err(io_error)?,
         )?;
         let validated_stage = read_trusted_service_stage(&stage)?;
+        validate_trusted_service_storage_root_identity(&root, &root_metadata)?;
         rename_trusted_service_stage_noreplace(&stage, &dir)?;
         Ok(validated_stage)
     })();
@@ -4568,6 +4592,30 @@ mod tests {
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(validate_private_trusted_service_directory(&root).is_err());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_service_storage_root_identity_rejects_replacement_before_staging() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "screentra-trusted-service-root-check-{}",
+            Uuid::new_v4()
+        ));
+        let displaced = root.with_extension("displaced");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let expected = fs::symlink_metadata(&root).unwrap();
+        fs::rename(&root, &displaced).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let result = validate_trusted_service_storage_root_identity(&root, &expected);
+
+        assert!(result.is_err());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(displaced);
     }
 
     #[test]

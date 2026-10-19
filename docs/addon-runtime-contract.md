@@ -208,7 +208,9 @@ manifest, signature, image-signature, and state files are regular single-link
 files with exact `0600` permissions. Listing and readback reject permission drift,
 symlinks, non-files, and hard-linked metadata before signature verification or
 runtime-gate evaluation. This is metadata validation only; it does not enable
-execution or deploy a trusted service.
+execution or deploy a trusted service. Trusted-service staging rechecks the checked
+storage-root identity before creating the private stage and again before publishing
+it, rejecting a replaced root rather than writing or renaming below it.
 
 Trusted-service runtime roots and per-addon runtime directories are also real,
 private `0700` directories. Runtime records are regular, single-link files with
