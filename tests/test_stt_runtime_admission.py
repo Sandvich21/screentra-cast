@@ -10,6 +10,7 @@ MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-runtime-admission.py'
 APPROVAL_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-approval-record.py'
 RESOURCE_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-resource-policy-evidence.py'
 IPC_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-ipc-policy-evidence.py'
+IPC_READINESS_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-ipc-readiness-evidence.py'
 ROLLBACK_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-rollback-policy-evidence.py'
 CAPABILITY_ADMISSION_MODULE_PATH = ROOT / 'player-client/scripts/screentra-capability-admission.py'
 RUNTIME_INSTALLATION_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-runtime-installation-evidence.py'
@@ -54,6 +55,21 @@ def load_resource_policy_module():
 def load_ipc_policy_module():
     spec = importlib.util.spec_from_file_location(
         'screentra_stt_ipc_policy_evidence', IPC_POLICY_MODULE_PATH
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_ipc_readiness_evidence_module():
+    module_name = 'screentra_stt_ipc_readiness_evidence'
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        module_name, IPC_READINESS_EVIDENCE_MODULE_PATH
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -136,6 +152,7 @@ admission = load_module()
 approval = load_approval_module()
 resource_policy = load_resource_policy_module()
 ipc_policy = load_ipc_policy_module()
+ipc_readiness_evidence = load_ipc_readiness_evidence_module()
 rollback_policy = load_rollback_policy_module()
 capability_admission = load_capability_admission_module()
 runtime_installation_evidence = load_runtime_installation_evidence_module()
@@ -321,6 +338,30 @@ def valid_ipc_policy(**overrides):
     )
 
 
+def valid_ipc_readiness_evidence(**overrides):
+    value = {
+        'service_id': SERVICE_ID,
+        'activation_id': ACTIVATION_ID,
+        'socket_name': SOCKET_NAME,
+        'protocol_version': 1,
+        'allowed_operations': ['health', 'transcribe'],
+        'listener_observed': True,
+        'peer_identity_observed': True,
+        'hello_observed': True,
+        'transport_non_mutating': True,
+        'local_only': True,
+    }
+    value.update(overrides)
+    return ipc_readiness_evidence.validate_stt_ipc_readiness_evidence(
+        value,
+        expected_service_id=SERVICE_ID,
+        expected_activation_id=ACTIVATION_ID,
+        expected_socket_name=SOCKET_NAME,
+        expected_protocol_version=1,
+        expected_allowed_operations=('health', 'transcribe'),
+    )
+
+
 def valid_rollback_policy(**overrides):
     value = {
         'service_id': SERVICE_ID,
@@ -429,6 +470,7 @@ def valid_request(**overrides):
         'supervisor_plan': valid_supervisor(),
         'resource_policy_evidence': valid_resource_policy(),
         'ipc_policy_evidence': valid_ipc_policy(),
+        'ipc_readiness_evidence': valid_ipc_readiness_evidence(),
         'rollback_policy_evidence': valid_rollback_policy(),
         'capability_admission': valid_capability_admission(),
         'runtime_installation_evidence': valid_runtime_installation_evidence(),
@@ -1089,6 +1131,65 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
             module.decide_runtime_admission(
                 valid_request(supervisor_plan=supervisor)
             )
+
+    def test_ipc_readiness_is_composed_as_exact_inert_evidence_bound_to_policy(self):
+        module = self.require_module()
+        result = module.decide_runtime_admission(valid_request())
+
+        self.assertEqual(result['admission'], 'approved_for_future_review')
+        self.assertTrue(result['evidence_composed']['ipc_readiness'])
+        self.assertTrue(result['ipc_readiness_valid'])
+        self.assertEqual(
+            tuple(result['ipc_readiness_identity_tuple']),
+            (SERVICE_ID, ACTIVATION_ID, SOCKET_NAME, 1, ('health', 'transcribe')),
+        )
+        for field in (
+            'execution_enabled', 'runtime_activation_allowed', 'socket_bound',
+            'ipc_enforced', 'listener_started', 'peer_authenticated',
+        ):
+            self.assertFalse(result[field], field)
+        for forbidden in ('transport_ready', 'listener_ready', 'runtime_ready'):
+            self.assertNotIn(forbidden, result)
+
+    def test_ipc_readiness_rejects_raw_tampered_and_mismatched_evidence(self):
+        module = self.require_module()
+        valid = valid_ipc_readiness_evidence()
+        for value in (valid.as_dict(), {'service_id': SERVICE_ID}, None):
+            with self.subTest(value=value):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(ipc_readiness_evidence=value)
+                    )
+
+        class DerivedReadinessEvidence(ipc_readiness_evidence.STTIPCReadinessEvidence):
+            pass
+
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(
+                valid_request(
+                    ipc_readiness_evidence=DerivedReadinessEvidence(
+                        **dataclasses.asdict(valid)
+                    )
+                )
+            )
+
+        for tampered in (
+            dataclasses.replace(valid, service_id='other-service'),
+            dataclasses.replace(valid, activation_id='other-activation'),
+            dataclasses.replace(valid, socket_name='other-socket'),
+            dataclasses.replace(valid, protocol_version=2),
+            dataclasses.replace(valid, allowed_operations=('health',)),
+            dataclasses.replace(valid, readiness_valid=False),
+            dataclasses.replace(valid, execution_enabled=True),
+            dataclasses.replace(valid, socket_bound=True),
+            dataclasses.replace(valid, listener_started=True),
+            dataclasses.replace(valid, peer_authenticated=True),
+        ):
+            with self.subTest(tampered=tampered):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(ipc_readiness_evidence=tampered)
+                    )
 
     def test_preflight_camera_evidence_is_optional_for_stt_admission(self):
         module = self.require_module()

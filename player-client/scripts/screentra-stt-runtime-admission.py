@@ -2,8 +2,8 @@
 """Pure, fail-closed composition boundary for future STT runtime admission.
 
 This module consumes already-produced preflight, model-verification, supervisor,
-resource-policy, local-IPC-policy, and immutable approval-record
-metadata. It performs no preflight, model
+resource-policy, local-IPC-policy, local-IPC-transport-observation, and immutable
+approval-record metadata. It performs no preflight, model
 verification, process work, hardware access, audio access, filesystem mutation,
 network work, or runtime activation. Even an approved future review result never
 enables execution.
@@ -53,6 +53,7 @@ _CAPABILITY_RESULT_FIELDS: Final = frozenset({
 _REQUEST_FIELDS: Final = frozenset({
     'approval_record', 'capability_admission', 'preflight_evidence', 'model_staging_plan',
     'supervisor_plan', 'resource_policy_evidence', 'ipc_policy_evidence',
+    'ipc_readiness_evidence',
     'rollback_policy_evidence',
     'runtime_installation_evidence',
     'audio_permission_evidence',
@@ -452,6 +453,76 @@ def _validated_ipc_policy(
         or value.effect != 'metadata_only'
     ):
         raise _fail('runtime admission IPC policy is invalid')
+    return value
+
+
+def _ipc_readiness_module() -> Any:
+    module_name = 'screentra_stt_ipc_readiness_evidence'
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    module_path = Path(__file__).with_name('screentra-stt-ipc-readiness-evidence.py')
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise _fail('runtime admission IPC readiness evidence is invalid')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise _fail('runtime admission IPC readiness evidence is invalid') from exc
+    return module
+
+
+def _validated_ipc_readiness(
+    value: Any, expected: dict[str, str], policy: Any
+) -> Any:
+    """Accept only exact immutable readiness evidence bound to IPC policy."""
+    module = _ipc_readiness_module()
+    if type(value) is not module.STTIPCReadinessEvidence:
+        raise _fail('runtime admission IPC readiness evidence is invalid')
+    try:
+        raw = {
+            'service_id': value.service_id,
+            'activation_id': value.activation_id,
+            'socket_name': value.socket_name,
+            'protocol_version': value.protocol_version,
+            'allowed_operations': list(value.allowed_operations),
+            'listener_observed': value.listener_observed,
+            'peer_identity_observed': value.peer_identity_observed,
+            'hello_observed': value.hello_observed,
+            'transport_non_mutating': value.transport_non_mutating,
+            'local_only': value.local_only,
+        }
+        validated = module.validate_stt_ipc_readiness_evidence(
+            raw,
+            expected_service_id=expected['service_id'],
+            expected_activation_id=expected['activation_id'],
+            expected_socket_name=policy.socket_name,
+            expected_protocol_version=policy.protocol_version,
+            expected_allowed_operations=tuple(policy.allowed_operations),
+        )
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        raise _fail('runtime admission IPC readiness evidence is invalid') from exc
+    if validated != value:
+        raise _fail('runtime admission IPC readiness evidence is invalid')
+    if (
+        value.readiness_valid is not True
+        or value.listener_observed is not True
+        or value.peer_identity_observed is not True
+        or value.hello_observed is not True
+        or value.transport_non_mutating is not True
+        or value.local_only is not True
+        or value.execution_enabled is not False
+        or value.runtime_activation_allowed is not False
+        or value.socket_bound is not False
+        or value.ipc_enforced is not False
+        or value.listener_started is not False
+        or value.peer_authenticated is not False
+        or value.effect != 'metadata_only'
+    ):
+        raise _fail('runtime admission IPC readiness evidence is invalid')
     return value
 
 
@@ -859,12 +930,16 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     ipc_policy = _validated_ipc_policy(
         request['ipc_policy_evidence'], expected, socket_name
     )
+    ipc_readiness = _validated_ipc_readiness(
+        request['ipc_readiness_evidence'], expected, ipc_policy
+    )
     bounded_request = dict(request)
     bounded_request['approval_record'] = approval.as_dict()
     bounded_request['capability_admission'] = capability.as_dict()
     bounded_request['resource_policy_evidence'] = resource_policy.as_dict()
     bounded_request['resource_enforcement_evidence'] = resource_enforcement.as_dict()
     bounded_request['ipc_policy_evidence'] = ipc_policy.as_dict()
+    bounded_request['ipc_readiness_evidence'] = ipc_readiness.as_dict()
     bounded_request['rollback_policy_evidence'] = rollback_policy.as_dict()
     bounded_request['runtime_installation_evidence'] = runtime_installation.as_dict()
     bounded_request['audio_permission_evidence'] = audio_permission.as_dict()
@@ -885,6 +960,8 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'process_started': False,
         'socket_bound': False,
         'listener_bound': False,
+        'listener_started': False,
+        'peer_authenticated': False,
         'model_loaded': False,
         'service_started': False,
         'resource_enforced': False,
@@ -947,6 +1024,12 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             ipc_policy.socket_name, ipc_policy.protocol_version,
             tuple(ipc_policy.allowed_operations),
         ),
+        'ipc_readiness_valid': ipc_readiness.readiness_valid,
+        'ipc_readiness_identity_tuple': (
+            ipc_readiness.service_id, ipc_readiness.activation_id,
+            ipc_readiness.socket_name, ipc_readiness.protocol_version,
+            tuple(ipc_readiness.allowed_operations),
+        ),
         'capability_identity_tuple': (
             capability.client_id, capability.addon_id,
             tuple(capability.requested_capabilities),
@@ -966,6 +1049,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             'resource_policy': True,
             'resource_enforcement': True,
             'ipc_policy': True,
+            'ipc_readiness': True,
             'rollback_policy': True,
             'runtime_installation': True,
             'audio_permission': True,

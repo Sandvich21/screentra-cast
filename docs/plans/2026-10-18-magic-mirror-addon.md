@@ -92,6 +92,12 @@ The pure `screentra-stt-resource-policy-evidence.py` validator accepts only the 
 
 The pure `screentra-stt-ipc-policy-evidence.py` validator binds a closed local socket label, protocol version, codec-compatible frame/request/response limits, and only the `health`/`transcribe` operations to the service and activation identities. Its frozen result requires `local_only: true`, reports `policy_valid: true`, and forces `execution_enabled`, `runtime_activation_allowed`, `socket_bound`, and `ipc_enforced` false. IPC policy evidence is metadata-only: it is not a bound listener, transport enforcement, or transport readiness, and it performs no process, audio, credential, or network work.
 
+### STT bounded IPC transport-readiness observation boundary
+
+The pure `screentra-stt-ipc-readiness-evidence.py` validator is a separate observation contract, not an IPC policy declaration or listener activation. It accepts only the closed service/activation/socket/protocol/operation identity plus five real booleans: `listener_observed`, `peer_identity_observed`, `hello_observed`, `transport_non_mutating`, and `local_only`. `readiness_valid` can be true only when all five observations are true, but the immutable result always forces `execution_enabled`, `runtime_activation_allowed`, `socket_bound`, `ipc_enforced`, `listener_started`, and `peer_authenticated` false and carries no transport-ready or runtime-ready claim. It rejects arbitrary or duplicate fields, paths, URLs, commands, credentials, raw audio, ports/listener controls, peer-credential claims, socket paths, and oversized records. Runtime admission consumes only this exact immutable type and binds its complete identity to the validated IPC policy's exact service, activation, socket, protocol, and operation tuple.
+
+This observation is metadata evidence about a bounded transport review only; it does not prove that a listener was started, a socket is currently bound, peer credentials were authenticated by the runtime, IPC is enforced, or a service is ready. Actual listener activation remains a separate explicitly authorized runtime boundary and is not part of this slice.
+
 ### STT rollback-policy evidence boundary
 
 The pure `screentra-stt-rollback-policy-evidence.py` validator accepts one closed,
