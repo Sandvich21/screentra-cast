@@ -72,7 +72,8 @@ relative `client/` entrypoints, duplicate-ID rejection, bounded versions, and
 credential/path/URL-safe errors. Report and add-on timestamps must be real RFC3339
 UTC values rather than shape-only strings. The heartbeat validates every status
 write through this boundary, and invalid reports are rejected without replacing
-the previous cache file.
+the previous cache file. The server route also applies a 256 KiB body limit before
+JSON extraction, matching the report persistence bound.
 
 The command queue also carries three metadata-only client-service actions. The
 `client_service_status` action returns the bounded disabled status without
