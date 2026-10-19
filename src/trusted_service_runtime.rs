@@ -167,6 +167,25 @@ fn record_path(addon_id: &str) -> Result<PathBuf, RuntimeError> {
     Ok(directory.join(RUNTIME_FILE))
 }
 
+fn validate_runtime_root_identity(
+    root: &Path,
+    expected: &fs::Metadata,
+) -> Result<(), RuntimeError> {
+    let current =
+        fs::symlink_metadata(root).map_err(|error| RuntimeError::Io(error.to_string()))?;
+    validate_private_runtime_directory(&current, "Invalid trusted service runtime root")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (current.dev(), current.ino()) != (expected.dev(), expected.ino()) {
+            return Err(RuntimeError::Conflict(
+                "Trusted service runtime root changed".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn ensure_runtime_directory(addon_id: &str) -> Result<PathBuf, RuntimeError> {
     addons::validate_addon_storage_namespace(addon_id).map_err(RuntimeError::Invalid)?;
     let root = checked_runtime_root(true)?.ok_or(RuntimeError::NotFound)?;
@@ -191,24 +210,8 @@ fn ensure_runtime_directory(addon_id: &str) -> Result<PathBuf, RuntimeError> {
     let root_metadata =
         fs::symlink_metadata(&root).map_err(|error| RuntimeError::Io(error.to_string()))?;
     validate_private_runtime_directory(&root_metadata, "Invalid trusted service runtime root")?;
-    #[cfg(unix)]
-    let root_identity = {
-        use std::os::unix::fs::MetadataExt;
-        (root_metadata.dev(), root_metadata.ino())
-    };
     let directory = record_dir(addon_id)?;
-    let current_root = fs::symlink_metadata(&root)
-        .map_err(|error| RuntimeError::Io(error.to_string()))?;
-    validate_private_runtime_directory(&current_root, "Invalid trusted service runtime root")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if (current_root.dev(), current_root.ino()) != root_identity {
-            return Err(RuntimeError::Conflict(
-                "Trusted service runtime root changed".to_string(),
-            ));
-        }
-    }
+    validate_runtime_root_identity(&root, &root_metadata)?;
     match fs::symlink_metadata(&directory) {
         Ok(metadata) => {
             validate_private_runtime_directory(
@@ -2233,6 +2236,29 @@ mod tests {
 
         assert!(matches!(result, Err(RuntimeError::Conflict(_))));
         assert!(directory.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_root_identity_rejects_replacement_before_child_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("screentra-runtime-root-check-{}", Uuid::new_v4()));
+        let runtime_root = root.join(RUNTIME_DIR);
+        let displaced_root = root.join("displaced-runtime");
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&runtime_root, fs::Permissions::from_mode(0o700)).unwrap();
+        let expected_root = fs::symlink_metadata(&runtime_root).unwrap();
+        fs::rename(&runtime_root, &displaced_root).unwrap();
+        fs::create_dir_all(&runtime_root).unwrap();
+        fs::set_permissions(&runtime_root, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let result = validate_runtime_root_identity(&runtime_root, &expected_root);
+
+        assert!(matches!(result, Err(RuntimeError::Conflict(_))));
         let _ = fs::remove_dir_all(root);
     }
 
