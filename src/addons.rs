@@ -4738,6 +4738,14 @@ mod tests {
         assert_ne!(duplicated_client_id, raw_saved);
         fs::write(entries[0].path(), duplicated_client_id).unwrap();
         assert!(load_client_status("client-1").is_err());
+        let duplicated_received_at = raw_saved.replacen(
+            "  \"received_at\": ",
+            "  \"received_at\": \"2026-10-19T12:00:00Z\",\n  \"received_at\": ",
+            1,
+        );
+        assert_ne!(duplicated_received_at, raw_saved);
+        fs::write(entries[0].path(), duplicated_received_at).unwrap();
+        assert!(load_client_status("client-1").is_err());
         let mut tampered = saved.clone();
         tampered["report"]["capabilities"][0]["detail"] =
             serde_json::Value::String("password=redacted".to_string());
