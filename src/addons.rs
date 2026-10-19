@@ -406,17 +406,17 @@ fn checked_addon_storage_dir(create: bool) -> Result<Option<PathBuf>, AddonError
     }
 }
 
-fn client_status_path(client_id: &str) -> Result<PathBuf, AddonError> {
-    if client_id.is_empty() || client_id.len() > 200 || client_id.chars().any(|ch| ch.is_control())
-    {
+fn validate_client_status_client_id(client_id: &str) -> Result<(), AddonError> {
+    if client_id.is_empty() || client_id.len() > 200 || client_id.chars().any(|ch| ch.is_control()) {
         return Err(AddonError::Invalid("Invalid client id".to_string()));
     }
+    Ok(())
+}
+
+fn client_status_path(status_dir: &Path, client_id: &str) -> Result<PathBuf, AddonError> {
+    validate_client_status_client_id(client_id)?;
     let digest = Sha256::digest(client_id.as_bytes());
-    Ok(storage_dir()
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("addon-client-status")
-        .join(format!("{:x}.json", digest)))
+    Ok(status_dir.join(format!("{:x}.json", digest)))
 }
 
 fn checked_client_status_dir(create: bool) -> Result<Option<PathBuf>, AddonError> {
@@ -619,8 +619,11 @@ pub fn save_client_status(
     client_id: &str,
     report: ClientAddonStatusReport,
 ) -> Result<(), AddonError> {
-    let path = client_status_path(client_id)?;
+    validate_client_status_client_id(client_id)?;
     validate_client_status_report(&report)?;
+    let status_dir = checked_client_status_dir(true)?
+        .ok_or_else(|| AddonError::Io("Addon status directory is unavailable".to_string()))?;
+    let path = client_status_path(&status_dir, client_id)?;
     let payload = serde_json::json!({
         "client_id": client_id,
         "received_at": chrono::Utc::now()
@@ -634,19 +637,15 @@ pub fn save_client_status(
             "Addon status payload is too large".to_string(),
         ));
     }
-    let _ = checked_client_status_dir(true)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| AddonError::Io("Invalid addon status path".to_string()))?;
-    fs::create_dir_all(parent).map_err(io_error)?;
     write_addon_file_atomic(&path, &bytes, "status")
 }
 
 pub fn load_client_status(client_id: &str) -> Result<Option<serde_json::Value>, AddonError> {
-    let Some(_status_dir) = checked_client_status_dir(false)? else {
+    validate_client_status_client_id(client_id)?;
+    let Some(status_dir) = checked_client_status_dir(false)? else {
         return Ok(None);
     };
-    let path = client_status_path(client_id)?;
+    let path = client_status_path(&status_dir, client_id)?;
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -2629,6 +2628,17 @@ mod tests {
             client_sha256: None,
             client_api_version: None,
         }
+    }
+
+    #[test]
+    fn client_status_path_is_derived_from_checked_root() {
+        let root = PathBuf::from("/tmp/screentra-status-root");
+        let status_dir = root.join("addon-client-status");
+        let path = client_status_path(&status_dir, "client-1").expect("valid client id");
+        assert_eq!(
+            path,
+            status_dir.join(format!("{:x}.json", Sha256::digest(b"client-1")))
+        );
     }
 
     #[test]

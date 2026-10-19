@@ -61,7 +61,9 @@ on readback, including the client identity, closed JSON field set, bounds, exact
 second-precision UTC timestamps, regular single-link file type, and private `0600`
 file permissions;
 tampered or legacy-shaped files fail closed instead of being returned to callers.
-The containing status directory is created and required to remain private with
+The status path is derived from the checked status directory returned by the data-root
+validator; callers do not reconstruct it from the raw `SIGNAGE_DATA_DIR` value after
+validation. The containing status directory is created and required to remain private with
 mode `0700`. Capability/service detail text is limited to 160 UTF-8 bytes,
 add-on/report error text to 96 UTF-8 bytes, and the client and server enforce the
 same limits.
