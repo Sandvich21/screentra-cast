@@ -150,6 +150,28 @@
 // Global HTML escape helper. Prefer this over inline regex substitutions.
 window.esc = window.esc || function (v) { return String(v == null ? "" : v).replace(/[&<>"'`]/g, function (c) { return ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;", "`":"&#96;" })[c]; }); };
 
+function buildPowerSchedulePayload({ targetClient, displayOption, action, controlMethod }) {
+    const client = String(targetClient || '').trim();
+    const rawIndex = displayOption && displayOption.value != null
+        ? String(displayOption.value).trim() : '';
+    const displayIndex = Number.parseInt(rawIndex, 10);
+    if (!client || !rawIndex || !Number.isInteger(displayIndex) || displayIndex < 0) return null;
+
+    const connector = String(
+        displayOption.dataset?.connector || displayOption.dataset?.label || displayOption.textContent || ''
+    ).trim();
+    const displayName = (connector || `Display ${displayIndex}`).slice(0, 256);
+    const display = `${client}:${displayName}`.slice(0, 256);
+    return {
+        display,
+        display_name: displayName,
+        display_index: displayIndex,
+        action,
+        power_state: action === 'power_on' ? 'on' : action === 'display_sleep' ? 'sleep' : 'off',
+        control_method: controlMethod,
+    };
+}
+
 
 /**
  * Copy text to clipboard. Prefers the async Clipboard API; falls back to the
@@ -2670,9 +2692,10 @@ ${targetSection}
                     const displays = await API.getClientDisplays(clientId);
                     const idx = selectedIdx !== undefined ? String(selectedIdx) : '0';
                     displaySel.innerHTML = '<option value="">— Select a display —</option>' +
-                        displays.map((d, i) =>
-                            `<option value="${i}" ${String(i) === idx ? 'selected' : ''}>${esc(d.connector || d.label || ('Display ' + i))}</option>`
-                        ).join('');
+                        displays.map((d, i) => {
+                            const label = d.connector || d.label || ('Display ' + i);
+                            return `<option value="${i}" data-connector="${esc(label)}" ${String(i) === idx ? 'selected' : ''}>${esc(label)}</option>`;
+                        }).join('');
                     displaySel.disabled = false;
                     hint.textContent = displays.length ? `${displays.length} display(s) found` : 'No displays detected on this client';
                 } catch(e) {
@@ -2727,15 +2750,24 @@ ${targetSection}
             // task_id. The backend doesn't have a "task" concept yet; we still create a
             // schedule row with a placeholder display/layout so the schedule can be tracked.
             // Future work: add a `tasks` table and proper task_id foreign key.
-            let display, layout_id, action, target_client, power_state, control_method, display_index;
+            let display, layout_id, action, target_client, power_state, control_method, display_index, display_name;
             if (mode === 'power') {
-                target_client = overlay.querySelector('#sched-power-client').value;
-                const displayIdx = overlay.querySelector('#sched-power-display').value;
+                const clientSel = overlay.querySelector('#sched-power-client');
+                const displaySel = overlay.querySelector('#sched-power-display');
+                target_client = clientSel.value;
                 action = overlay.querySelector('#sched-power-action').value;
                 control_method = overlay.querySelector('#sched-power-method').value;
-                display_index = displayIdx !== '' ? parseInt(displayIdx) : 0;
-                power_state = action === 'power_on' ? 'on' : action === 'display_sleep' ? 'sleep' : 'off';
-                display = '';  // power schedules use target_client instead
+                const powerPayload = buildPowerSchedulePayload({
+                    targetClient: target_client,
+                    displayOption: displaySel.options[displaySel.selectedIndex],
+                    action,
+                    controlMethod: control_method,
+                });
+                if (!powerPayload) {
+                    alert('Please select a client and display.');
+                    return;
+                }
+                ({ display, display_name, display_index, power_state, control_method } = powerPayload);
                 layout_id = '';
                 if (!target_client) {
                     alert('Please select a client.');
@@ -2784,7 +2816,7 @@ ${targetSection}
                 power_state,
                 control_method,
                 display_index,
-                display_name: mode === 'layout' ? (overlay.querySelector('#sched-layout-display option:checked')?.dataset.connector || '') : null,
+                display_name: mode === 'power' ? display_name : mode === 'layout' ? (overlay.querySelector('#sched-layout-display option:checked')?.dataset.connector || '') : null,
             };
 
             try {
