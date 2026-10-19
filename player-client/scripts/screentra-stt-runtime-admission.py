@@ -54,6 +54,7 @@ _REQUEST_FIELDS: Final = frozenset({
     'approval_record', 'capability_admission', 'preflight_evidence', 'model_staging_plan',
     'supervisor_plan', 'resource_policy_evidence', 'ipc_policy_evidence',
     'rollback_policy_evidence',
+    'runtime_installation_evidence',
 })
 _REQUIRED_REQUEST_FIELDS: Final = _REQUEST_FIELDS
 _PREFLIGHT_FIELDS: Final = frozenset({
@@ -512,6 +513,71 @@ def _validated_rollback_policy(value: Any, expected: dict[str, str]) -> Any:
     return value
 
 
+def _runtime_installation_module() -> Any:
+    module_name = 'screentra_stt_runtime_installation_evidence'
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    module_path = Path(__file__).with_name('screentra-stt-runtime-installation-evidence.py')
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise _fail('runtime installation evidence is invalid')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise _fail('runtime installation evidence is invalid') from exc
+    return module
+
+
+def _validated_runtime_installation(value: Any, expected: dict[str, str]) -> Any:
+    """Accept only the exact immutable, identity-bound install evidence type."""
+    module = _runtime_installation_module()
+    if type(value) is not module.STTRuntimeInstallationEvidence:
+        raise _fail('runtime installation evidence is invalid')
+    try:
+        raw = {
+            'service_id': value.service_id,
+            'activation_id': value.activation_id,
+            'service_version': value.service_version,
+            'runtime_family': value.runtime_family,
+            'runtime_version': value.runtime_version,
+            'source_commit': value.source_commit,
+            'runtime_sha256': value.runtime_sha256,
+            'model_id': value.model_id,
+            'model_sha256': value.model_sha256,
+            'runtime_verified': value.runtime_verified,
+            'model_verified': value.model_verified,
+            'non_starting_check': value.non_starting_check,
+        }
+        validated = module.validate_stt_runtime_installation_evidence(
+            raw,
+            expected_service_id=expected['service_id'],
+            expected_activation_id=expected['activation_id'],
+            expected_service_version=expected['service_version'],
+            expected_model_id=expected['model_id'],
+            expected_model_sha256=expected['model_sha256'],
+        )
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        raise _fail('runtime installation evidence is invalid') from exc
+    if validated != value:
+        raise _fail('runtime installation evidence is invalid')
+    if (
+        value.policy_valid is not True
+        or value.artifacts_verified is not True
+        or value.execution_enabled is not False
+        or value.runtime_activation_allowed is not False
+        or value.process_started is not False
+        or value.model_loaded is not False
+        or value.service_started is not False
+        or value.effect != 'metadata_only'
+    ):
+        raise _fail('runtime installation evidence is invalid')
+    return value
+
+
 def _capability_admission_module() -> Any:
     module_name = 'screentra_capability_admission'
     module = sys.modules.get(module_name)
@@ -650,6 +716,9 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     rollback_policy = _validated_rollback_policy(
         request['rollback_policy_evidence'], expected
     )
+    runtime_installation = _validated_runtime_installation(
+        request['runtime_installation_evidence'], expected
+    )
     try:
         _validate_preflight(request['preflight_evidence'], expected)
         _validate_model_plan(request['model_staging_plan'], expected)
@@ -665,6 +734,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     bounded_request['resource_policy_evidence'] = resource_policy.as_dict()
     bounded_request['ipc_policy_evidence'] = ipc_policy.as_dict()
     bounded_request['rollback_policy_evidence'] = rollback_policy.as_dict()
+    bounded_request['runtime_installation_evidence'] = runtime_installation.as_dict()
     _bounded_json(bounded_request, MAX_REQUEST_BYTES, 'runtime admission request is not bounded')
 
     all_gates_passed = all(gate.passed for gate in approval.gates)
@@ -680,6 +750,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'process_started': False,
         'socket_bound': False,
         'model_loaded': False,
+        'service_started': False,
         'resource_enforced': False,
         'ipc_enforced': False,
         'rollback_executed': False,
@@ -696,6 +767,21 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'capabilities': tuple(capability.capabilities),
         'model_id': expected['model_id'],
         'model_sha256': expected['model_sha256'],
+        'runtime_family': runtime_installation.runtime_family,
+        'runtime_version': runtime_installation.runtime_version,
+        'source_commit': runtime_installation.source_commit,
+        'runtime_sha256': runtime_installation.runtime_sha256,
+        'runtime_installation_identity_tuple': (
+            runtime_installation.service_id,
+            runtime_installation.service_version,
+            runtime_installation.activation_id,
+            runtime_installation.runtime_family,
+            runtime_installation.runtime_version,
+            runtime_installation.source_commit,
+            runtime_installation.runtime_sha256,
+            runtime_installation.model_id,
+            runtime_installation.model_sha256,
+        ),
         'socket_name': ipc_policy.socket_name,
         'protocol_version': ipc_policy.protocol_version,
         'allowed_operations': tuple(ipc_policy.allowed_operations),
@@ -728,6 +814,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             'resource_policy': True,
             'ipc_policy': True,
             'rollback_policy': True,
+            'runtime_installation': True,
         },
     }
 

@@ -12,6 +12,7 @@ RESOURCE_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-resour
 IPC_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-ipc-policy-evidence.py'
 ROLLBACK_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-rollback-policy-evidence.py'
 CAPABILITY_ADMISSION_MODULE_PATH = ROOT / 'player-client/scripts/screentra-capability-admission.py'
+RUNTIME_INSTALLATION_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-runtime-installation-evidence.py'
 
 
 def load_approval_module():
@@ -81,12 +82,29 @@ def load_capability_admission_module():
     return module
 
 
+def load_runtime_installation_evidence_module():
+    module_name = 'screentra_stt_runtime_installation_evidence'
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        RUNTIME_INSTALLATION_EVIDENCE_MODULE_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 admission = load_module()
 approval = load_approval_module()
 resource_policy = load_resource_policy_module()
 ipc_policy = load_ipc_policy_module()
 rollback_policy = load_rollback_policy_module()
 capability_admission = load_capability_admission_module()
+runtime_installation_evidence = load_runtime_installation_evidence_module()
 
 
 SERVICE_ID = 'magic-mirror-stt'
@@ -95,7 +113,11 @@ ACTIVATION_ID = 'activation-20261018-01'
 SOCKET_NAME = 'magic-mirror-stt'
 HOST_ID = 'client-56'
 MODEL_ID = 'whisper-tiny.en'
-MODEL_SHA256 = 'a' * 64
+RUNTIME_FAMILY = 'whisper.cpp'
+RUNTIME_VERSION = '1.9.5'
+SOURCE_COMMIT = 'd1be6fde11ac6e0407606b4e42fe72d34add8037'
+RUNTIME_SHA256 = 'd8b3d4f22d96f2a5c26cc34966927c69ab88406b52cdc7cee7c94e75bee16d97'
+MODEL_SHA256 = '921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f'
 ROLLBACK_POLICY_VERSION = 'rollback-policy-v1'
 STT_CAPABILITIES = (
     'microphone_capture',
@@ -303,6 +325,25 @@ def valid_capability_admission(**overrides):
     return result
 
 
+def valid_runtime_installation_evidence(**overrides):
+    value = {
+        'service_id': SERVICE_ID,
+        'activation_id': ACTIVATION_ID,
+        'service_version': SERVICE_VERSION,
+        'runtime_family': RUNTIME_FAMILY,
+        'runtime_version': RUNTIME_VERSION,
+        'source_commit': SOURCE_COMMIT,
+        'runtime_sha256': RUNTIME_SHA256,
+        'model_id': MODEL_ID,
+        'model_sha256': MODEL_SHA256,
+        'runtime_verified': True,
+        'model_verified': True,
+        'non_starting_check': True,
+    }
+    value.update(overrides)
+    return runtime_installation_evidence.validate_stt_runtime_installation_evidence(value)
+
+
 def valid_request(**overrides):
     value = {
         'approval_record': valid_approval_record(),
@@ -313,6 +354,7 @@ def valid_request(**overrides):
         'ipc_policy_evidence': valid_ipc_policy(),
         'rollback_policy_evidence': valid_rollback_policy(),
         'capability_admission': valid_capability_admission(),
+        'runtime_installation_evidence': valid_runtime_installation_evidence(),
     }
     value.update(overrides)
     return value
@@ -360,6 +402,97 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
             tuple(result['capability_identity_tuple']),
             (HOST_ID, SERVICE_ID, STT_CAPABILITIES, STT_CAPABILITIES),
         )
+
+    def test_runtime_installation_evidence_is_composed_as_exact_inert_identity_bound_evidence(self):
+        module = self.require_module()
+
+        result = module.decide_runtime_admission(valid_request())
+
+        self.assertEqual(result['admission'], 'approved_for_future_review')
+        self.assertTrue(result['evidence_composed']['runtime_installation'])
+        self.assertEqual(result['runtime_family'], RUNTIME_FAMILY)
+        self.assertEqual(result['runtime_version'], RUNTIME_VERSION)
+        self.assertEqual(result['source_commit'], SOURCE_COMMIT)
+        self.assertEqual(result['runtime_sha256'], RUNTIME_SHA256)
+        self.assertEqual(result['model_id'], MODEL_ID)
+        self.assertEqual(result['model_sha256'], MODEL_SHA256)
+        for field in (
+            'execution_enabled', 'runtime_activation_allowed', 'process_started',
+            'model_loaded', 'service_started',
+        ):
+            self.assertFalse(result[field], field)
+
+    def test_runtime_installation_evidence_requires_exact_validated_type_and_full_identity(self):
+        module = self.require_module()
+        valid = valid_runtime_installation_evidence()
+
+        for value in (
+            valid.as_dict(),
+            {'service_id': SERVICE_ID},
+            None,
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(runtime_installation_evidence=value)
+                    )
+
+        class DerivedRuntimeInstallationEvidence(runtime_installation_evidence.STTRuntimeInstallationEvidence):
+            pass
+
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(
+                valid_request(
+                    runtime_installation_evidence=DerivedRuntimeInstallationEvidence(
+                        **dataclasses.asdict(valid)
+                    )
+                )
+            )
+
+        for tampered in (
+            dataclasses.replace(valid, service_id='other-service'),
+            dataclasses.replace(valid, activation_id='other-activation'),
+            dataclasses.replace(valid, service_version='9.9.9'),
+            dataclasses.replace(valid, model_id='other-model'),
+            dataclasses.replace(valid, model_sha256=RUNTIME_SHA256),
+            dataclasses.replace(valid, policy_valid=False),
+            dataclasses.replace(valid, artifacts_verified=False),
+            dataclasses.replace(valid, execution_enabled=True),
+            dataclasses.replace(valid, service_started=True),
+        ):
+            with self.subTest(tampered=tampered):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(runtime_installation_evidence=tampered)
+                    )
+
+    def test_runtime_installation_evidence_rejects_failed_artifact_or_non_starting_checks(self):
+        module = self.require_module()
+        for field in ('runtime_verified', 'model_verified', 'non_starting_check'):
+            with self.subTest(field=field):
+                evidence = runtime_installation_evidence.validate_stt_runtime_installation_evidence(
+                    {
+                        **{
+                            'service_id': SERVICE_ID,
+                            'activation_id': ACTIVATION_ID,
+                            'service_version': SERVICE_VERSION,
+                            'runtime_family': RUNTIME_FAMILY,
+                            'runtime_version': RUNTIME_VERSION,
+                            'source_commit': SOURCE_COMMIT,
+                            'runtime_sha256': RUNTIME_SHA256,
+                            'model_id': MODEL_ID,
+                            'model_sha256': MODEL_SHA256,
+                            'runtime_verified': True,
+                            'model_verified': True,
+                            'non_starting_check': True,
+                        },
+                        field: False,
+                    }
+                )
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(runtime_installation_evidence=evidence)
+                    )
 
     def test_capability_admission_requires_exact_validated_immutable_result_type(self):
         module = self.require_module()
