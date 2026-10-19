@@ -1565,11 +1565,29 @@ pub fn list() -> Result<Vec<AddonRecord>, AddonError> {
             continue;
         }
         if file_type.is_dir() {
+            let metadata = fs::symlink_metadata(entry.path()).map_err(io_error)?;
+            validate_private_addon_directory(&metadata)?;
             records.push(read_record(&entry.path())?);
         }
     }
     records.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
     Ok(records)
+}
+
+fn validate_private_addon_directory(metadata: &fs::Metadata) -> Result<(), AddonError> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AddonError::Invalid("Invalid addon directory".to_string()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o777 != 0o700 {
+            return Err(AddonError::Invalid(
+                "Addon directory permissions are insecure".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn create_private_addon_directory(dir: &Path) -> Result<(), AddonError> {
@@ -1587,18 +1605,7 @@ fn create_private_addon_directory(dir: &Path) -> Result<(), AddonError> {
     }
     directory_builder.create(dir).map_err(io_error)?;
     let metadata = fs::symlink_metadata(dir).map_err(io_error)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(AddonError::Invalid("Invalid addon directory".to_string()));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o777 != 0o700 {
-            return Err(AddonError::Invalid(
-                "Addon directory permissions are insecure".to_string(),
-            ));
-        }
-    }
+    validate_private_addon_directory(&metadata)?;
     Ok(())
 }
 
@@ -2425,6 +2432,20 @@ fn stage_signed_client_package(
         let _ = fs::remove_dir_all(&stage);
         return Err(AddonError::Invalid(error));
     }
+    let stage_metadata = fs::symlink_metadata(&stage).map_err(io_error)?;
+    if stage_metadata.file_type().is_symlink() || !stage_metadata.is_dir() {
+        let _ = fs::remove_dir_all(&stage);
+        return Err(AddonError::Invalid("Invalid addon staging directory".to_string()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = stage_metadata.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&stage, permissions).map_err(io_error)?;
+    }
+    let stage_metadata = fs::symlink_metadata(&stage).map_err(io_error)?;
+    validate_private_addon_directory(&stage_metadata)?;
     let result = (|| {
         let manifest_path = stage.join(MANIFEST_FILE);
         let signature_path = stage.join("manifest.sig");
@@ -5291,6 +5312,54 @@ mod tests {
             &addon_metadata,
         );
 
+        let _ = fs::remove_dir_all(&root);
+        assert!(matches!(result, Err(AddonError::Invalid(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_rejects_insecure_addon_directory_permissions() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("screentra-addon-list-private-{}", Uuid::new_v4()));
+        let addon_root = root.join("addons");
+        let addon_dir = addon_root.join("example.weather");
+        fs::create_dir_all(&addon_dir).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&addon_root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&addon_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            addon_dir.join(MANIFEST_FILE),
+            serde_json::to_vec(&manifest()).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            addon_dir.join(STATE_FILE),
+            serde_json::to_vec(&AddonState {
+                enabled: true,
+                installed_at: "now".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+
+        let result = list();
+
+        if let Some(value) = old_data_root {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
         let _ = fs::remove_dir_all(&root);
         assert!(matches!(result, Err(AddonError::Invalid(_))));
     }
