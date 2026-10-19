@@ -1471,6 +1471,47 @@ fn checked_addon_file(path: &Path, description: &str) -> Result<(), AddonError> 
     Ok(())
 }
 
+fn validate_private_addon_metadata_file(
+    path: &Path,
+    description: &str,
+) -> Result<(), AddonError> {
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AddonError::Invalid(format!("Invalid {description}")));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.permissions().mode() & 0o777 != 0o600 || metadata.nlink() != 1 {
+            return Err(AddonError::Invalid(format!(
+                "Invalid {description} permissions"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_private_addon_metadata_file(
+    path: &Path,
+    description: &str,
+) -> Result<(), AddonError> {
+    checked_addon_file(path, description)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+        if metadata.nlink() != 1 {
+            return Err(AddonError::Invalid(format!(
+                "Invalid {description} permissions"
+            )));
+        }
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(path, permissions).map_err(io_error)?;
+    }
+    validate_private_addon_metadata_file(path, description)
+}
+
 fn write_addon_file_atomic(
     path: &Path,
     bytes: &[u8],
@@ -1513,14 +1554,14 @@ fn write_addon_file_atomic(
 fn read_record(dir: &Path) -> Result<AddonRecord, AddonError> {
     let manifest_path = dir.join(MANIFEST_FILE);
     let state_path = dir.join(STATE_FILE);
-    checked_addon_file(&manifest_path, "addon manifest")?;
-    checked_addon_file(&state_path, "addon state")?;
+    validate_private_addon_metadata_file(&manifest_path, "addon manifest")?;
+    validate_private_addon_metadata_file(&state_path, "addon state")?;
     let manifest_text = fs::read_to_string(&manifest_path).map_err(io_error)?;
     let manifest: AddonManifest = serde_json::from_str(&manifest_text).map_err(io_error)?;
     if manifest.kind == "client_extension" {
         validate_client_extension_manifest(&manifest)?;
         let signature_path = dir.join("manifest.sig");
-        checked_addon_file(&signature_path, "addon signature")?;
+        validate_private_addon_metadata_file(&signature_path, "addon signature")?;
         let entrypoint = manifest.client_entrypoint.as_deref().ok_or_else(|| {
             AddonError::Invalid("Client package entrypoint is missing".to_string())
         })?;
@@ -2479,8 +2520,8 @@ fn stage_signed_client_package(
     let result = (|| {
         let manifest_path = stage.join(MANIFEST_FILE);
         let signature_path = stage.join("manifest.sig");
-        checked_addon_file(&manifest_path, "addon package manifest")?;
-        checked_addon_file(&signature_path, "addon package signature")?;
+        normalize_private_addon_metadata_file(&manifest_path, "addon package manifest")?;
+        normalize_private_addon_metadata_file(&signature_path, "addon package signature")?;
         verify_manifest_signature(&manifest_path, &signature_path)?;
         let manifest_bytes = fs::read(&manifest_path).map_err(io_error)?;
         let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
@@ -2532,7 +2573,11 @@ pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, Addo
             installed_at: installed_at.clone(),
         };
         let state_text = serde_json::to_string_pretty(&state).map_err(io_error)?;
-        fs::write(staged.directory.join(STATE_FILE), state_text).map_err(io_error)?;
+        write_addon_file_atomic(
+            &staged.directory.join(STATE_FILE),
+            state_text.as_bytes(),
+            "signed-package-state",
+        )?;
         fs::rename(&staged.directory, &destination).map_err(io_error)?;
         Ok(AddonRecord {
             manifest: staged.manifest,
@@ -2708,7 +2753,11 @@ pub fn update_signed_client_package(archive: &Path) -> Result<AddonRecord, Addon
             installed_at: existing.installed_at.clone(),
         };
         let state_text = serde_json::to_string_pretty(&state).map_err(io_error)?;
-        fs::write(staged.directory.join(STATE_FILE), state_text).map_err(io_error)?;
+        write_addon_file_atomic(
+            &staged.directory.join(STATE_FILE),
+            state_text.as_bytes(),
+            "signed-package-state",
+        )?;
         let rollback_root = checked_addon_rollback_root(&root, true)?.ok_or_else(|| {
             AddonError::Io("Addon rollback storage is unavailable".to_string())
         })?;
@@ -5433,6 +5482,52 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&root);
         assert!(matches!(result, Err(AddonError::Invalid(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_rejects_insecure_addon_metadata_permissions() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-addon-list-metadata-private-{}",
+            Uuid::new_v4()
+        ));
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        let installed = install(manifest()).unwrap();
+        let manifest_path = root
+            .join("addons")
+            .join(&installed.manifest.id)
+            .join(MANIFEST_FILE);
+        fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let permission_result = list();
+        fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let hard_link_path = root.join("hard-linked-addon-manifest.json");
+        fs::hard_link(&manifest_path, &hard_link_path).unwrap();
+        let hard_link_result = list();
+        if let Some(value) = old_data_root {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+        assert!(matches!(
+            permission_result,
+            Err(AddonError::Invalid(_))
+        ));
+        assert!(matches!(
+            hard_link_result,
+            Err(AddonError::Invalid(_))
+        ));
     }
 
     #[cfg(unix)]
