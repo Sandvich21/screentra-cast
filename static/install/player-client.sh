@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SERVER_URL="${SCREENTRA_SERVER_URL:-${RIPLEY_SERVER_URL:-}}"
+DISCOVERED_CA_B64=""
+DISCOVERED_SERVER_NAME=""
 INSTALL_DIR="${SCREENTRA_CLIENT_DIR:-/home/${SCREENTRA_BOARD_USER:-board}/.local/share/screentra-client}"
 BIN_DIR="$HOME/.local/bin"
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
@@ -14,6 +16,8 @@ PREFLIGHT="$INSTALL_DIR/screentra-client-preflight.py"
 DISPLAY_GOVERNANCE="$INSTALL_DIR/screentra-display-governance.py"
 STATUS="$BIN_DIR/screentra-client-status"
 ACTOR="$INSTALL_DIR/screentra-client-actor.py"
+TRANSCRIPTION_ADMISSION="$INSTALL_DIR/screentra-stt-transcription-request-admission.py"
+ROLLBACK_ADMISSION="$INSTALL_DIR/screentra-client-service-rollback-request-admission.py"
 ACTOR_SERVICE_FILE="$SYSTEMD_USER_DIR/screentra-client-actor.service"
 ACTOR_SERVICE_NAME="screentra-client-actor.service"
 SERVICE="$SYSTEMD_USER_DIR/screentra-client-heartbeat.service"
@@ -21,6 +25,174 @@ RENDER_SERVICE="$SYSTEMD_USER_DIR/screentra-client-renderer@.service"
 ADMIN_SERVICE="$SYSTEMD_USER_DIR/screentra-client-admin.service"
 KIOSK_SERVICE="$SYSTEMD_USER_DIR/screentra-kiosk-browser@.service"
 SYSTEMD_KIOSK_UNIT="/etc/systemd/system/screentra-cast-kiosk@.service"
+INSTALLER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+discover_server() {
+    local result
+    if ! result="$(python3 - <<'PY_DISCOVERY'
+#!/usr/bin/env python3
+"""Discover Screentra Cast servers on the local IPv4 broadcast domain."""
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import socket
+import sys
+import time
+import urllib.parse
+
+DISCOVERY_PROTOCOL = "screentra-cast-discovery-v1"
+DISCOVERY_REQUEST = b"SCREENTRA_CAST_DISCOVER_V1"
+MAX_RESPONSE_BYTES = 64 * 1024
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def validate_record(raw: object) -> dict[str, str] | None:
+    if not isinstance(raw, dict) or raw.get("protocol") != DISCOVERY_PROTOCOL:
+        return None
+    name = raw.get("server_name")
+    url = raw.get("url")
+    ca_b64 = raw.get("ca_pem_b64")
+    ca_hash = raw.get("ca_sha256")
+    if not isinstance(name, str) or not name.strip() or len(name) > 128:
+        return None
+    if any(ord(char) < 32 for char in name):
+        return None
+    if not isinstance(url, str) or len(url) > 512:
+        return None
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        return None
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        return None
+    try:
+        port = parsed.port or 443
+    except ValueError:
+        return None
+    if not 1 <= port <= 65535:
+        return None
+    if not isinstance(ca_b64, str) or len(ca_b64) > 128 * 1024:
+        return None
+    try:
+        ca = base64.b64decode(ca_b64, validate=True)
+    except Exception:
+        return None
+    if b"-----BEGIN CERTIFICATE-----" not in ca or len(ca) > 64 * 1024:
+        return None
+    if not isinstance(ca_hash, str) or ca_hash != sha256_bytes(ca):
+        return None
+    return {
+        "server_name": name.strip(),
+        "url": url.rstrip("/"),
+        "ca_pem_b64": ca_b64,
+        "ca_sha256": ca_hash,
+    }
+
+
+def discover(port: int, timeout: float) -> list[dict[str, str]]:
+    request = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    request.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    request.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    request.bind(("", 0))
+    request.settimeout(0.25)
+    try:
+        request.sendto(DISCOVERY_REQUEST, ("255.255.255.255", port))
+        deadline = time.monotonic() + timeout
+        records: dict[tuple[str, str], dict[str, str]] = {}
+        while time.monotonic() < deadline:
+            try:
+                data, _peer = request.recvfrom(MAX_RESPONSE_BYTES)
+            except socket.timeout:
+                continue
+            try:
+                raw = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            record = validate_record(raw)
+            if record:
+                records[(record["url"], record["ca_sha256"])] = record
+        return sorted(records.values(), key=lambda value: (value["server_name"].lower(), value["url"]))
+    finally:
+        request.close()
+
+
+def choose(records: list[dict[str, str]]) -> dict[str, str] | None:
+    if not records:
+        return None
+    tty = None
+    try:
+        tty = open("/dev/tty", "r+", encoding="utf-8")
+    except OSError:
+        pass
+    try:
+        if len(records) == 1:
+            record = records[0]
+            print(
+                f"Found Screentra Cast server '{record['server_name']}' at {record['url']}.",
+                file=sys.stderr,
+            )
+            if os.environ.get("SCREENTRA_DISCOVERY_AUTO_ACCEPT") == "1":
+                return record
+            if tty is None:
+                return None
+            print("Use this server? [Y/n] ", end="", file=tty, flush=True)
+            answer = tty.readline().strip().lower()
+            return None if answer not in ("", "y", "yes") else record
+
+        if tty is None:
+            return None
+        print("Discovered Screentra Cast servers:", file=tty)
+        for index, record in enumerate(records, 1):
+            print(f"  {index}) {record['server_name']} ({record['url']})", file=tty)
+        print("Select a server number, or press Enter to cancel: ", end="", file=tty, flush=True)
+        answer = tty.readline().strip()
+        if not answer.isdigit() or not 1 <= int(answer) <= len(records):
+            return None
+        return records[int(answer) - 1]
+    finally:
+        if tty is not None:
+            tty.close()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=3911)
+    parser.add_argument("--timeout", type=float, default=2.5)
+    args = parser.parse_args()
+    if not 1 <= args.port <= 65535 or not 0.2 <= args.timeout <= 10:
+        return 2
+    selected = choose(discover(args.port, args.timeout))
+    if selected is None:
+        return 1
+    print(selected["url"])
+    print(selected["ca_pem_b64"])
+    print(selected["server_name"])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+PY_DISCOVERY
+)"; then
+        return 1
+    fi
+    local values=()
+    mapfile -t values <<<"$result"
+    if [ -z "${values[0]:-}" ] || [ -z "${values[1]:-}" ]; then
+        return 1
+    fi
+    SERVER_URL="${values[0]}"
+    DISCOVERED_CA_B64="${values[1]}"
+    DISCOVERED_SERVER_NAME="${values[2]:-Screentra Cast}"
+    return 0
+}
 
 is_ssh_session() {
     if [ -n "${SSH_CONNECTION:-}" ]; then return 0; fi
@@ -60,6 +232,11 @@ fi
 printf "%s\n" "$VERSION" > "$INSTALL_DIR/VERSION"
 if [ -z "$SERVER_URL" ] && [ -f "$INSTALL_DIR/server" ]; then
     SERVER_URL="$(cat "$INSTALL_DIR/server" 2>/dev/null || true)"
+fi
+if [ -z "$SERVER_URL" ]; then
+    if discover_server; then
+        echo "Using discovered Screentra Cast server: $DISCOVERED_SERVER_NAME ($SERVER_URL)"
+    fi
 fi
 if [ -z "$SERVER_URL" ]; then
     if [ -t 0 ] && [ -t 1 ]; then
@@ -129,6 +306,25 @@ run_privileged() {
         if [ -t 0 ]; then sudo "$@"; else sudo -n "$@"; fi
     else
         return 1
+    fi
+}
+
+install_client_update_public_key() {
+    local source="${SCREENTRA_CLIENT_UPDATE_PUBLIC_KEY_SOURCE:-$INSTALLER_DIR/screentra-cast-client-update.pub}"
+    local target="/etc/screentra-cast/client-update-signing.pub"
+    if [ -s "$source" ] && grep -q 'BEGIN PUBLIC KEY' "$source"; then
+        if [ -s "$target" ] && ! cmp -s "$source" "$target"; then
+            echo "ERROR: bundled client-update public key does not match the existing pinned key at $target." >&2
+            return 1
+        fi
+        if [ ! -s "$target" ]; then
+            run_privileged install -D -o root -g root -m 0644 "$source" "$target"
+            echo "Installed pinned client-update public key at $target."
+        else
+            echo "Verified existing pinned client-update public key at $target."
+        fi
+    elif [ ! -s "$target" ]; then
+        echo "WARNING: client-update public key is missing; client self-updates will remain disabled." >&2
     fi
 }
 
@@ -795,6 +991,15 @@ ensure_user_groups
 ensure_seat_daemon
 create_board_user
 
+if [ -n "$DISCOVERED_CA_B64" ]; then
+    discovered_ca_tmp="$(mktemp "$INSTALL_DIR/.discovered-ca.XXXXXX")"
+    if printf '%s' "$DISCOVERED_CA_B64" | base64 --decode > "$discovered_ca_tmp" 2>/dev/null \
+        && grep -q 'BEGIN CERTIFICATE' "$discovered_ca_tmp"; then
+        install -m 0644 "$discovered_ca_tmp" "$INSTALL_DIR/screentra-cast-signage-ca.crt"
+        echo "Saved discovered Screentra Cast CA trust anchor."
+    fi
+    rm -f "$discovered_ca_tmp"
+fi
 install_screentra_ca_trust
 write_os_marker
 export RIPLEY_CLIENT_DIR="$INSTALL_DIR"
@@ -1075,6 +1280,7 @@ print(secrets.token_urlsafe(48))
 PY_TOKEN
 fi
 chmod 0600 "$CLIENT_AUTH_TOKEN_FILE"
+install_client_update_public_key
 install_root_verified_updater
 
 cat > "$HEARTBEAT" <<'PY'
@@ -1085,15 +1291,24 @@ Posts system metrics to the Screentra Cast signage server so the Connected Clien
 can show enrolled player uptime and usage.
 """
 import argparse
+import ctypes
+import hashlib
+import io
 import json
-import ssl
 import os
+import posixpath
+import re
+import shutil
+import ssl
 import socket
+import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 import importlib.util
 import sys as _sys
 _display_detect_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'screentra-display-detect.py')
@@ -1106,6 +1321,12 @@ detect_displays = _mod.detect_displays
 from pathlib import Path
 
 MAX_JSON_FILE_BYTES = 1 << 20
+
+
+def client_pairing_code(client_id):
+    """Return the short physical-confirmation code for a client ID."""
+    digest = hashlib.sha256(b'screentra-cast-pairing-v1\0' + str(client_id).encode('utf-8')).digest()
+    return f'{int.from_bytes(digest[:4], "big") % 1_000_000:06d}'
 
 
 def _read_json_file(path: Path, default):
@@ -1288,6 +1509,7 @@ def payload(args):
         'client_installed': True,
         'identity_source': 'persistent_client_id',
         'client_id': client_id,
+        'pairing_code': client_pairing_code(client_id),
         'hostname': args.name or hostname,
         'address': local_ip(),
         'role': args.role,
@@ -1363,8 +1585,600 @@ def client_auth_headers(token=None):
     token = client_auth_token() if token is None else str(token).strip()
     return {'X-SCREENTRA-CLIENT-TOKEN': token} if token else {}
 
+
+ADDON_API_VERSION = '1'
+MAX_ADDON_PACKAGE_BYTES = 8 * 1024 * 1024
+MAX_ADDON_MEMBER_BYTES = 4 * 1024 * 1024
+MAX_ADDON_MANIFEST_BYTES = 256 * 1024
+MAX_ADDON_SIGNATURE_BYTES = 16 * 1024
+ADDON_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
+ADDON_VERSION_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}$')
+CLIENT_CAPABILITIES = frozenset({
+    'render_only',
+    'camera_capture',
+    'microphone_capture',
+    'local_inference',
+    'client_service',
+})
+CLIENT_SERVICE_FIELDS = frozenset({
+    'id',
+    'image',
+    'image_digest',
+    'socket_name',
+    'cpu_millis',
+    'memory_bytes',
+    'pids',
+    'writable_bytes',
+    'model_id',
+    'model_sha256',
+})
+GENERIC_ADDON_ERROR = 'signed addon cache update failed'
+GENERIC_INVENTORY_ERROR = 'addon inventory unavailable'
+
+
+def _absolute_path(path):
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _ensure_real_directory(path, create=False):
+    """Validate or create a directory without following symlinked ancestors."""
+    current = Path(_absolute_path(path).anchor)
+    parts = _absolute_path(path).parts[1:]
+    for part in parts:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            if not create:
+                return False
+            current.mkdir()
+            metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError('addon cache directory is not a real directory')
+    return True
+
+
+def _path_exists(path):
+    try:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _reject_symlinked_ancestors(path):
+    current = Path(_absolute_path(path).anchor)
+    for part in _absolute_path(path).parts[1:]:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError('addon cache path contains a symlink')
+
+
+def _require_real_file(path):
+    """Reject symlinks and non-regular files before cache reads."""
+    _reject_symlinked_ancestors(path)
+    metadata = os.lstat(path)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ValueError('addon cache file is not a regular file')
+    return metadata
+
+
+def _read_real_file(path, max_bytes=MAX_JSON_FILE_BYTES):
+    _require_real_file(path)
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+    descriptor = os.open(os.fspath(path), flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > max_bytes:
+            raise ValueError('addon cache file exceeds its bound')
+        return os.read(descriptor, max_bytes + 1)
+    finally:
+        os.close(descriptor)
+
+
+def _read_cache_json(path, default):
+    if not _path_exists(path):
+        return default
+    try:
+        return json.loads(_read_real_file(path).decode('utf-8'))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        raise ValueError('addon cache metadata is invalid')
+
+
+def _validate_addon_version(version):
+    if not isinstance(version, str) or not ADDON_VERSION_RE.fullmatch(version):
+        raise ValueError('addon inventory contains an unsafe version')
+    return version
+
+
+def _validate_client_service_token(value, field):
+    if not isinstance(value, str) or not 0 < len(value) <= 64 or not re.fullmatch(r'[a-z0-9._-]+', value):
+        raise ValueError(f'invalid client service {field}')
+
+
+def _validate_client_service_image(value):
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 255
+        or '..' in value
+        or '://' in value
+        or ':' in value
+        or '@' in value
+        or '//' in value
+        or value.startswith('/')
+        or value.endswith('/')
+        or any(not (character.isascii() and (character.isalnum() or character in '._-/')) for character in value)
+        or any(
+            not component
+            or component in ('.', '..')
+            or not component[0].isascii()
+            or not component[0].isalnum()
+            or not component[-1].isascii()
+            or not component[-1].isalnum()
+            for component in value.split('/')
+        )
+    ):
+        raise ValueError('invalid client service image reference')
+
+
+def _validate_client_service_model_identity(service):
+    model_id = service.get('model_id')
+    model_sha256 = service.get('model_sha256')
+    if (model_id is None) != (model_sha256 is None):
+        raise ValueError('client service model_id and model_sha256 must be declared together')
+    if model_id is not None:
+        _validate_client_service_token(model_id, 'model id')
+        if not isinstance(model_sha256, str) or not re.fullmatch(r'[0-9a-f]{64}', model_sha256):
+            raise ValueError('client service model_sha256 must be a lowercase hexadecimal digest')
+
+
+def _validate_client_extension_capabilities(manifest):
+    capabilities = manifest.get('client_capabilities', [])
+    if not isinstance(capabilities, list):
+        raise ValueError('client_capabilities must be a list')
+    seen = set()
+    for capability in capabilities:
+        if not isinstance(capability, str) or capability not in CLIENT_CAPABILITIES:
+            raise ValueError('unsupported client capability')
+        if capability in seen:
+            raise ValueError('duplicate client capability')
+        seen.add(capability)
+    if 'local_inference' in seen and 'microphone_capture' not in seen:
+        raise ValueError('local_inference requires microphone_capture')
+    if 'local_inference' in seen and 'client_service' not in seen:
+        raise ValueError('local_inference requires client_service')
+    requests_service = 'client_service' in seen
+    service = manifest.get('client_service')
+    if requests_service != (service is not None):
+        raise ValueError('client_service capability and metadata must be declared together')
+    if service is None:
+        return
+    if not isinstance(service, dict) or set(service) - CLIENT_SERVICE_FIELDS:
+        raise ValueError('client service metadata contains unsupported fields')
+    required = {
+        'id', 'image', 'image_digest', 'socket_name',
+        'cpu_millis', 'memory_bytes', 'pids', 'writable_bytes',
+    }
+    if not required.issubset(service):
+        raise ValueError('client service metadata is incomplete')
+    _validate_client_service_token(service['id'], 'id')
+    _validate_client_service_token(service['socket_name'], 'socket name')
+    _validate_client_service_image(service['image'])
+    if not isinstance(service['image_digest'], str) or not re.fullmatch(
+            r'sha256:[0-9a-f]{64}', service['image_digest']):
+        raise ValueError('invalid client service image digest')
+    for field, minimum, maximum in (
+        ('cpu_millis', 1, 4000),
+        ('memory_bytes', 64 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+        ('pids', 1, 256),
+    ):
+        value = service[field]
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            raise ValueError(f'client service {field} is outside the bounded range')
+    writable_bytes = service['writable_bytes']
+    if isinstance(writable_bytes, bool) or not isinstance(writable_bytes, int) or not 0 <= writable_bytes <= 512 * 1024 * 1024:
+        raise ValueError('client service writable_bytes is outside the bounded range')
+    if 'local_inference' in seen and service.get('model_id') is None:
+        raise ValueError('local_inference requires an explicit model identity and digest')
+    _validate_client_service_model_identity(service)
+
+
+def _validate_addon_manifest_metadata(manifest, expected):
+    """Validate signed addon metadata against the server inventory contract."""
+    if not isinstance(manifest, dict) or manifest.get('schema_version') != 1:
+        raise ValueError('unsupported addon manifest schema')
+    if manifest.get('kind') != 'client_extension' or manifest.get('client_api_version') != ADDON_API_VERSION:
+        raise ValueError('unsupported client addon API version or kind')
+    addon_id = manifest.get('id')
+    if not isinstance(addon_id, str) or not ADDON_ID_RE.fullmatch(addon_id):
+        raise ValueError('invalid addon id')
+    if addon_id != expected.get('id') or manifest.get('version') != expected.get('version'):
+        raise ValueError('addon package does not match the server inventory')
+    if manifest.get('server_entrypoint') is not None:
+        raise ValueError('client addon contains a server entrypoint')
+    entrypoint = manifest.get('client_entrypoint')
+    digest = manifest.get('client_sha256')
+    if not isinstance(entrypoint, str) or not entrypoint.startswith('client/'):
+        raise ValueError('invalid addon entrypoint')
+    if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', digest):
+        raise ValueError('invalid addon entrypoint digest')
+    if digest.lower() != str(expected.get('client_sha256', '')).lower():
+        raise ValueError('addon package digest does not match inventory')
+    _validate_client_extension_capabilities(manifest)
+    return entrypoint, digest
+
+
+def _verify_addon_manifest_signature(manifest_path, signature_path):
+    """Verify detached manifest bytes with the configured addon public key."""
+    _read_real_file(signature_path, MAX_ADDON_SIGNATURE_BYTES)
+    public_key = addon_public_key_path()
+    if not public_key.is_file():
+        raise ValueError('addon signing public key is unavailable')
+    result = subprocess.run(
+        ['openssl', 'pkeyutl', '-verify', '-rawin', '-pubin', '-inkey', str(public_key),
+         '-sigfile', str(signature_path), '-in', str(manifest_path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise ValueError('addon manifest signature verification failed')
+
+
+def _verify_cached_addon(target, active, expected):
+    """Revalidate persisted addon files before accepting verified_cached."""
+    if set(active) != {'id', 'version', 'client_sha256', 'entrypoint'}:
+        raise ValueError('addon cache metadata is invalid')
+    manifest_path = target / 'manifest.json'
+    signature_path = target / 'manifest.sig'
+    manifest_bytes = _read_real_file(manifest_path, MAX_ADDON_MANIFEST_BYTES)
+    try:
+        manifest = json.loads(manifest_bytes.decode('utf-8'))
+    except (UnicodeError, ValueError, json.JSONDecodeError):
+        raise ValueError('addon cache manifest is invalid')
+    entrypoint, digest = _validate_addon_manifest_metadata(manifest, expected)
+    if (active['id'] != expected['id'] or active['version'] != expected['version'] or
+            str(active['client_sha256']).lower() != expected['client_sha256'].lower() or
+            active['entrypoint'] != entrypoint):
+        raise ValueError('addon cache metadata does not match the signed manifest')
+    client_path = target / entrypoint
+    client_bytes = _read_real_file(client_path, MAX_ADDON_MEMBER_BYTES)
+    if hashlib.sha256(client_bytes).hexdigest().lower() != digest.lower():
+        raise ValueError('addon entrypoint SHA-256 verification failed')
+    _verify_addon_manifest_signature(manifest_path, signature_path)
+    return entrypoint
+
+
+def _atomic_exchange(left, right):
+    """Atomically exchange two same-filesystem paths on Linux."""
+    if sys.platform != 'linux':
+        raise OSError('atomic directory exchange is unavailable')
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, 'renameat2', None)
+    if renameat2 is None:
+        raise OSError('atomic directory exchange is unavailable')
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(-100, os.fsencode(left), -100, os.fsencode(right), 0x2)
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def addon_public_key_path():
+    return Path(os.environ.get(
+        'SCREENTRA_CAST_ADDON_SIGNING_PUBLIC_KEY',
+        '/etc/screentra-cast/addon-signing.pub',
+    ))
+
+
+def _safe_addon_member(name):
+    normalized = posixpath.normpath(name)
+    if normalized in ('.', '') or normalized.startswith('/') or normalized.startswith('../') or '/../' in normalized:
+        raise ValueError('addon package contains an unsafe path')
+    if normalized not in ('manifest.json', 'manifest.sig') and not normalized.startswith('client/'):
+        raise ValueError('addon package contains an unexpected member')
+    return normalized
+
+
+def _extract_verified_addon_package(package_bytes, expected, staging_parent=None):
+    if len(package_bytes) > MAX_ADDON_PACKAGE_BYTES:
+        raise ValueError('addon package exceeds the client limit')
+    staging = Path(tempfile.mkdtemp(
+        prefix='.addon-verify-',
+        dir=os.fspath(staging_parent) if staging_parent is not None else None,
+    ))
+    try:
+        seen = set()
+        with tarfile.open(fileobj=io.BytesIO(package_bytes), mode='r:gz') as archive:
+            members = archive.getmembers()
+            if len(members) > 64:
+                raise ValueError('addon package contains too many members')
+            for member in members:
+                name = _safe_addon_member(member.name)
+                if name in seen:
+                    raise ValueError('addon package contains duplicate members')
+                seen.add(name)
+                if member.isdir():
+                    continue
+                if not member.isfile() or member.size > MAX_ADDON_MEMBER_BYTES:
+                    raise ValueError('addon package contains an unsupported or oversized file')
+                source = archive.extractfile(member)
+                if source is None:
+                    raise ValueError('addon package member cannot be read')
+                target = staging / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read(member.size + 1))
+                if target.stat().st_size != member.size:
+                    raise ValueError('addon package member size changed while reading')
+        manifest_path = staging / 'manifest.json'
+        signature_path = staging / 'manifest.sig'
+        if not manifest_path.is_file() or not signature_path.is_file():
+            raise ValueError('addon package is missing its manifest or signature')
+        manifest_bytes = manifest_path.read_bytes()
+        if len(manifest_bytes) > MAX_ADDON_MANIFEST_BYTES:
+            raise ValueError('addon manifest is too large')
+        manifest = json.loads(manifest_bytes.decode('utf-8'))
+        entrypoint, digest = _validate_addon_manifest_metadata(manifest, expected)
+        client_path = staging / entrypoint
+        if not client_path.is_file() or hashlib.sha256(client_path.read_bytes()).hexdigest().lower() != digest.lower():
+            raise ValueError('addon entrypoint SHA-256 verification failed')
+        _verify_addon_manifest_signature(manifest_path, signature_path)
+        return staging, manifest, entrypoint
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def _publish_verified_addon(target, staging, active_path, active_text):
+    """Publish a verified directory with rollback-safe active metadata."""
+    _ensure_real_directory(target.parent)
+    _ensure_real_directory(staging)
+    target_exists = _path_exists(target)
+    if target_exists:
+        _ensure_real_directory(target)
+    old_active = _read_real_file(active_path) if _path_exists(active_path) else None
+    try:
+        if target_exists:
+            _atomic_exchange(staging, target)
+        else:
+            os.replace(staging, target)
+        _atomic_write_text(active_path, active_text)
+    except Exception:
+        try:
+            if target_exists:
+                _atomic_exchange(staging, target)
+            elif _path_exists(target):
+                _ensure_real_directory(target)
+                shutil.rmtree(target)
+            if old_active is None:
+                if _path_exists(active_path):
+                    _require_real_file(active_path)
+                    Path(active_path).unlink()
+            else:
+                _atomic_write_text(active_path, old_active.decode('utf-8'))
+        finally:
+            if _path_exists(staging):
+                _ensure_real_directory(staging)
+                shutil.rmtree(staging)
+        raise
+    if _path_exists(staging):
+        _ensure_real_directory(staging)
+        shutil.rmtree(staging)
+
+
+def fetch_addon_bytes(server, client_id, addon_id):
+    url = (server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') +
+           '/addons/' + quote(addon_id, safe='') + '/package')
+    req = urllib.request.Request(url, headers=client_auth_headers())
+    with urlopen_ripley(req, timeout=20) as response:
+        package = response.read(MAX_ADDON_PACKAGE_BYTES + 1)
+    if len(package) > MAX_ADDON_PACKAGE_BYTES:
+        raise ValueError('addon package exceeds the client limit')
+    return package
+
+
+def client_capability_status():
+    """Report local capability observations without enabling any service."""
+    camera_nodes = sorted(Path('/dev').glob('video*'))
+    microphone_nodes = sorted(Path('/dev/snd').glob('pcm*C*D*c')) if Path('/dev/snd').is_dir() else []
+    return [
+        {
+            'id': 'render_only',
+            'state': 'available',
+            'detail': 'Built-in declarative renderer is available',
+        },
+        {
+            'id': 'camera_capture',
+            'state': 'available' if camera_nodes else 'unavailable',
+            'detail': ('Detected local video device' if camera_nodes
+                       else 'No local video capture device detected'),
+        },
+        {
+            'id': 'microphone_capture',
+            'state': 'available' if microphone_nodes else 'unavailable',
+            'detail': ('Detected local ALSA capture device' if microphone_nodes
+                       else 'No local ALSA capture device detected'),
+        },
+        {
+            'id': 'local_inference',
+            'state': 'disabled',
+            'detail': 'Signed client inference service is not enabled',
+        },
+        {
+            'id': 'client_service',
+            'state': 'disabled',
+            'detail': 'Trusted client service runtime is not enabled',
+        },
+    ]
+
+
+def sync_client_addons(server, client_id, cache_dir):
+    """Fetch and verify enabled addon packages without executing their code."""
+    status_path = Path(cache_dir) / 'addon-status.json'
+    status = {
+        'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        'addons': [],
+        'capabilities': client_capability_status(),
+        # No trusted client supervisor is enabled yet. Keep this explicit so a
+        # missing service report cannot be mistaken for a running service.
+        'services': [],
+    }
+    try:
+        url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/addons'
+        req = urllib.request.Request(url, headers=client_auth_headers())
+        with urlopen_ripley(req, timeout=10) as response:
+            inventory = json.loads(response.read().decode('utf-8'))
+        addons = inventory.get('addons') if isinstance(inventory, dict) else None
+        if not isinstance(addons, list):
+            raise ValueError('server returned an invalid addon inventory')
+    except Exception:
+        status['error'] = GENERIC_INVENTORY_ERROR
+        _atomic_write_text(status_path, json.dumps(status, indent=2))
+        return status
+
+    validated = []
+    try:
+        for expected in addons:
+            if not isinstance(expected, dict) or not ADDON_ID_RE.fullmatch(str(expected.get('id', ''))):
+                raise ValueError('invalid addon inventory entry')
+            version = _validate_addon_version(expected.get('version'))
+            if expected.get('client_api_version') != ADDON_API_VERSION:
+                raise ValueError('unsupported addon API version')
+            if not isinstance(expected.get('client_sha256'), str) or not re.fullmatch(
+                    r'[0-9a-fA-F]{64}', expected['client_sha256']):
+                raise ValueError('invalid addon inventory digest')
+            validated.append((expected, version))
+    except Exception:
+        for expected in addons:
+            item_status = {}
+            if isinstance(expected, dict) and ADDON_ID_RE.fullmatch(str(expected.get('id', ''))):
+                item_status['id'] = expected['id']
+            item_status.update({'state': 'failed', 'error': GENERIC_ADDON_ERROR})
+            status['addons'].append(item_status)
+        status['error'] = GENERIC_INVENTORY_ERROR
+        _atomic_write_text(status_path, json.dumps(status, indent=2))
+        return status
+
+    addon_root = Path(os.environ.get('RIPLEY_CLIENT_ADDONS_DIR', str(Path(cache_dir).parent / 'addons')))
+    desired_ids = {expected['id'] for expected, _ in validated}
+    try:
+        _ensure_real_directory(addon_root, create=True)
+    except Exception:
+        for expected, version in validated:
+            status['addons'].append({
+                'id': expected['id'], 'version': version,
+                'state': 'failed', 'error': GENERIC_ADDON_ERROR,
+            })
+        status['error'] = GENERIC_ADDON_ERROR
+        _atomic_write_text(status_path, json.dumps(status, indent=2))
+        return status
+
+    for expected, version in validated:
+        item_status = {'id': expected['id'], 'version': version}
+        try:
+            id_dir = addon_root / expected['id']
+            if _path_exists(id_dir):
+                _ensure_real_directory(id_dir)
+            target = id_dir / version
+            if _path_exists(target):
+                _ensure_real_directory(target)
+            active_path = id_dir / 'active.json'
+            active = _read_cache_json(active_path, {}) if _path_exists(id_dir) else {}
+            target_exists = _path_exists(target)
+            if target_exists:
+                if (not isinstance(active, dict) or active.get('id') != expected['id'] or
+                        active.get('version') != version or
+                        str(active.get('client_sha256', '')).lower() != expected['client_sha256'].lower()):
+                    item_status.update({'state': 'failed', 'error': GENERIC_ADDON_ERROR})
+                    status['addons'].append(item_status)
+                    continue
+            cached_entrypoint = active.get('entrypoint')
+            if cached_entrypoint is not None:
+                if not isinstance(cached_entrypoint, str) or not cached_entrypoint.startswith('client/'):
+                    raise ValueError('addon cache entrypoint is unsafe')
+                if _safe_addon_member(cached_entrypoint) != cached_entrypoint:
+                    raise ValueError('addon cache entrypoint is unsafe')
+            cached_file = target / cached_entrypoint if cached_entrypoint and _path_exists(target) else None
+            if (active.get('id') == expected['id'] and active.get('version') == version and
+                    str(active.get('client_sha256', '')).lower() == expected['client_sha256'].lower() and
+                    cached_file is not None):
+                try:
+                    _verify_cached_addon(target, active, expected)
+                except Exception:
+                    item_status.update({'state': 'failed', 'error': GENERIC_ADDON_ERROR})
+                    status['addons'].append(item_status)
+                    continue
+                item_status.update({'state': 'verified_cached', 'entrypoint': cached_entrypoint})
+                status['addons'].append(item_status)
+                continue
+
+            package = fetch_addon_bytes(server, client_id, expected['id'])
+            staging, manifest, entrypoint = _extract_verified_addon_package(
+                package, expected, staging_parent=addon_root)
+            if manifest['version'] != version:
+                raise ValueError('addon package version changed during verification')
+            _validate_client_extension_capabilities(manifest)
+            _ensure_real_directory(id_dir, create=True)
+            if _path_exists(target):
+                _ensure_real_directory(target)
+            _publish_verified_addon(
+                target,
+                staging,
+                active_path,
+                json.dumps({
+                    'id': manifest['id'], 'version': manifest['version'],
+                    'client_sha256': manifest['client_sha256'],
+                    'entrypoint': entrypoint,
+                }, indent=2),
+            )
+            item_status.update({'state': 'verified', 'entrypoint': entrypoint})
+        except Exception:
+            item_status.update({'state': 'failed', 'error': GENERIC_ADDON_ERROR})
+        status['addons'].append(item_status)
+
+    if len(desired_ids) == len(validated):
+        for child in addon_root.iterdir():
+            if child.is_symlink() or not child.is_dir() or not ADDON_ID_RE.fullmatch(child.name) or child.name in desired_ids:
+                continue
+            active_path = child / 'active.json'
+            if not _path_exists(active_path):
+                continue
+            try:
+                _ensure_real_directory(child)
+                _require_real_file(active_path)
+                shutil.rmtree(child)
+            except Exception:
+                continue
+    _atomic_write_text(status_path, json.dumps(status, indent=2))
+    return status
+
+
+def post_addon_status(server, client_id, status):
+    url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/addons/status'
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(status).encode('utf-8'),
+        headers={'Content-Type': 'application/json', **client_auth_headers()},
+        method='POST',
+    )
+    try:
+        with urlopen_ripley(request, timeout=10) as response:
+            return response.status == 200
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 404, 429):
+            return False
+        raise
+
+
 def poll_command(server, client_id, client_token):
-    url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command'
+    url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/command'
     try:
         req = urllib.request.Request(url, headers=client_auth_headers(client_token))
         with urlopen_ripley(req, timeout=5) as r:
@@ -1379,7 +2193,7 @@ def poll_command(server, client_id, client_token):
 
 
 def ack_command(server, client_id):
-    url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/command/ack'
+    url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/command/ack'
     try:
         req = urllib.request.Request(url, headers=client_auth_headers(), method='POST')
         with urlopen_ripley(req, timeout=5) as r:
@@ -1397,7 +2211,7 @@ def write_pending_command(command, cache_dir):
     try:
         import subprocess, shutil
         if shutil.which('systemctl'):
-            subprocess.run(['systemctl', '--user', 'start', 'ripley-player-actor.service'], timeout=10)
+            subprocess.run(['systemctl', '--user', 'start', 'screentra-client-actor.service'], timeout=10)
     except Exception as e:
         print(f'actor start skipped/failed: {e}', flush=True)
 
@@ -1418,7 +2232,7 @@ def read_command_result(cache_dir):
 
 
 def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='assigned-layout-display-{index}.json'):
-    url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/displays/' + str(display_index) + '/config'
+    url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/displays/' + str(display_index) + '/config'
     try:
         req = urllib.request.Request(url, headers=client_auth_headers())
         with urlopen_ripley(req, timeout=10) as r:
@@ -1466,7 +2280,7 @@ def fetch_admin_users(server, client_id, cache_dir):
     Server users are cached for authenticated local administration; without
     that cache the local admin login remains unprovisioned.
     """
-    url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/admin-users'
+    url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/admin-users'
     try:
         req = urllib.request.Request(url, headers=client_auth_headers())
         with urlopen_ripley(req, timeout=10) as r:
@@ -1613,6 +2427,13 @@ def main():
                 print(f'orientation restart failed: {e}', flush=True)
         fetch_all_displays(args.server, data['client_id'], args.cache_dir, len(data.get('displays') or []), args.display_config_pattern)
         fetch_admin_users(args.server, data['client_id'], args.cache_dir)
+        addon_status = sync_client_addons(args.server, data['client_id'], args.cache_dir)
+        try:
+            post_addon_status(args.server, data['client_id'], addon_status)
+        except Exception as error:
+            print(f'addon status report failed: {error}', flush=True)
+        if addon_status.get('addons') or addon_status.get('error'):
+            print(f'addon sync: {json.dumps(addon_status, separators=(",", ":"))}', flush=True)
         assigned = current_layout_id
         cmd = poll_command(args.server, data['client_id'], client_auth_token())
         if cmd:
@@ -1640,6 +2461,7 @@ def main():
                 'at': _dt.now(_tz.utc).isoformat(),
                 'connection': 'online' if status == 200 else 'offline',
                 'assigned_layout_id': assigned,
+                'pairing_code': client_pairing_code(data['client_id']),
             }
             Path(args.cache_dir).mkdir(parents=True, exist_ok=True)
             (Path(args.cache_dir) / 'last-heartbeat.json').write_text(__import__('json').dumps(status_payload))
@@ -2019,6 +2841,13 @@ cat > "$INSTALL_DIR/no-layout.html" <<'PY_NOLAYOUT'
           </div>
           <div class="k" id="assignedLayout">No layout assigned</div>
         </div>
+        <div class="row" style="grid-column: span 2">
+          <div>
+            <div class="k">Pairing code</div>
+            <div class="v" id="pairingCode" style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 24px; letter-spacing: .18em;">—</div>
+          </div>
+          <div class="k">Confirm this code on the server before adoption</div>
+        </div>
       </div>
 
       <div class="touchline" id="touchline">
@@ -2077,6 +2906,7 @@ cat > "$INSTALL_DIR/no-layout.html" <<'PY_NOLAYOUT'
         $('serverUrl').textContent = s.server_url || '—';
         $('hostname').textContent  = s.hostname || '—';
         $('clientId').textContent  = s.client_id || '—';
+        $('pairingCode').textContent = s.pairing_code || '—';
         const adminUrl = s.admin_url || (s.lan_ip ? ('http://' + s.lan_ip + ':3910/') : 'http://11.1.1.54:3910/');
         const adminUrlEl = $('adminUrl');
         if (adminUrlEl) adminUrlEl.textContent = adminUrl;
@@ -4958,6 +5788,322 @@ ln -sf "$DISPLAY_GOVERNANCE" "$BIN_DIR/ripley-display-governance"
 
 ln -sf "$RENDERER" "$BIN_DIR/screentra-client-renderer"
 
+cat > "$TRANSCRIPTION_ADMISSION" <<'PY_TRANSCRIPTION_ADMISSION'
+#!/usr/bin/env python3
+"""Pure, bounded admission for one inert transcription request.
+
+The request mapping is closed and immutable.  Admission returns metadata-only
+state and never performs work outside this module.
+"""
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Any, Final
+
+
+MAX_SERVICE_ID_BYTES: Final = 64
+MAX_REQUEST_ID_BYTES: Final = 128
+MAX_REQUEST_BYTES: Final = 512
+MAX_EVIDENCE_BYTES: Final = 2048
+
+TRANSCRIPTION_REQUEST_FIELDS: Final = (
+    'service_id',
+    'request_id',
+    'push_to_talk',
+)
+STT_TRANSCRIPTION_REQUEST_FIELDS: Final = frozenset(TRANSCRIPTION_REQUEST_FIELDS)
+_TRANSCRIPTION_REQUEST_FIELD_SET: Final = STT_TRANSCRIPTION_REQUEST_FIELDS
+_TRANSCRIPTION_EVIDENCE_FIELDS: Final = frozenset({
+    'service_id',
+    'request_id',
+    'push_to_talk',
+    'request_valid',
+    'execution_enabled',
+    'request_queued',
+    'audio_accessed',
+    'transcription_started',
+    'status',
+})
+_SERVICE_ID_RE: Final = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}$')
+_REQUEST_ID_RE: Final = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
+_UNSAFE_IDENTIFIER_RE: Final = re.compile(
+    r'(?:password|passwd|secret|token|credential|bearer|api[_-]?key|apikey)',
+    re.IGNORECASE,
+)
+
+
+class STTTranscriptionRequestError(ValueError):
+    """Raised when a transcription request is not the closed contract."""
+
+
+def _fail(message: str = 'transcription request is invalid') -> STTTranscriptionRequestError:
+    return STTTranscriptionRequestError(message)
+
+
+def _bounded_json(value: Mapping[str, Any], limit: int, message: str) -> None:
+    try:
+        encoded = json.dumps(
+            dict(value),
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(',', ':'),
+        ).encode('utf-8')
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise _fail(message) from exc
+    if len(encoded) > limit:
+        raise _fail(message)
+
+
+def _identifier(value: Any, field: str, pattern: re.Pattern[str], maximum: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or not value.isascii()
+        or len(value.encode('utf-8')) > maximum
+        or pattern.fullmatch(value) is None
+        or _UNSAFE_IDENTIFIER_RE.search(value) is not None
+    ):
+        raise _fail(f'{field} is invalid or exceeds its bound')
+    return value
+
+
+def _request_values(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise _fail('transcription request must be a mapping')
+    try:
+        keys = list(value.keys())
+        if len(keys) != len(set(keys)):
+            raise _fail('transcription request contains duplicate keys')
+        values = dict(value)
+    except STTTranscriptionRequestError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise _fail('transcription request is not a bounded mapping') from exc
+    if set(values) != _TRANSCRIPTION_REQUEST_FIELD_SET:
+        raise _fail('transcription request fields are not allowlisted')
+    _bounded_json(values, MAX_REQUEST_BYTES, 'transcription request is oversized')
+    _identifier(values['service_id'], 'service_id', _SERVICE_ID_RE, MAX_SERVICE_ID_BYTES)
+    _identifier(values['request_id'], 'request_id', _REQUEST_ID_RE, MAX_REQUEST_ID_BYTES)
+    if values['push_to_talk'] is not True:
+        raise _fail('push_to_talk must be the real boolean true')
+    return values
+
+
+def validate_transcription_request(payload: Mapping[str, Any]) -> MappingProxyType:
+    """Return the exact immutable request mapping after pure validation."""
+    values = _request_values(payload)
+    return MappingProxyType({field: values[field] for field in TRANSCRIPTION_REQUEST_FIELDS})
+
+
+def build_transcription_request_evidence(request: Mapping[str, Any]) -> MappingProxyType:
+    """Return only bounded metadata for the exact immutable validated request."""
+    if type(request) is not MappingProxyType:
+        raise _fail('transcription request must be the immutable validated result')
+    values = _request_values(request)
+    evidence = {
+        'service_id': values['service_id'],
+        'request_id': values['request_id'],
+        'push_to_talk': values['push_to_talk'],
+        'request_valid': True,
+        'execution_enabled': False,
+        'request_queued': False,
+        'audio_accessed': False,
+        'transcription_started': False,
+        'status': 'disabled',
+    }
+    if set(evidence) != _TRANSCRIPTION_EVIDENCE_FIELDS:
+        raise _fail('transcription evidence fields are not allowlisted')
+    _bounded_json(evidence, MAX_EVIDENCE_BYTES, 'transcription evidence is oversized')
+    return MappingProxyType(evidence)
+
+
+admit_transcription_request = validate_transcription_request
+transcription_request_evidence = build_transcription_request_evidence
+validate_stt_transcription_request = validate_transcription_request
+build_stt_transcription_request_evidence = build_transcription_request_evidence
+
+
+__all__ = [
+    'MAX_EVIDENCE_BYTES',
+    'MAX_REQUEST_BYTES',
+    'MAX_REQUEST_ID_BYTES',
+    'MAX_SERVICE_ID_BYTES',
+    'STTTranscriptionRequestError',
+    'STT_TRANSCRIPTION_REQUEST_FIELDS',
+    'TRANSCRIPTION_REQUEST_FIELDS',
+    'admit_transcription_request',
+    'build_stt_transcription_request_evidence',
+    'build_transcription_request_evidence',
+    'transcription_request_evidence',
+    'validate_stt_transcription_request',
+    'validate_transcription_request',
+]
+
+PY_TRANSCRIPTION_ADMISSION
+chmod +x "$TRANSCRIPTION_ADMISSION"
+
+cat > "$ROLLBACK_ADMISSION" <<'PY_ROLLBACK_ADMISSION'
+#!/usr/bin/env python3
+"""Pure, bounded admission for one inert client-service rollback request.
+
+Admission returns immutable metadata only.  It never performs rollback or any
+other local, process, network, filesystem, or hardware operation.
+"""
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Any, Final
+
+
+MAX_SERVICE_ID_BYTES: Final = 64
+MAX_ACTIVATION_ID_BYTES: Final = 128
+MAX_REQUEST_BYTES: Final = 192
+MAX_EVIDENCE_BYTES: Final = 2048
+
+ROLLBACK_REQUEST_FIELDS: Final = ('service_id', 'activation_id')
+CLIENT_SERVICE_ROLLBACK_REQUEST_FIELDS: Final = frozenset(ROLLBACK_REQUEST_FIELDS)
+_ROLLBACK_EVIDENCE_FIELDS: Final = frozenset({
+    'service_id',
+    'activation_id',
+    'request_valid',
+    'execution_enabled',
+    'request_queued',
+    'rollback_executed',
+    'state_changed',
+    'status',
+})
+_SERVICE_ID_RE: Final = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}$')
+_ACTIVATION_ID_RE: Final = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
+_UNSAFE_IDENTIFIER_RE: Final = re.compile(
+    r'(?:password|passwd|secret|token|credential|bearer|api[_-]?key|apikey)',
+    re.IGNORECASE,
+)
+
+
+class RollbackRequestError(ValueError):
+    """Raised when a rollback request is not the closed contract."""
+
+
+ClientServiceRollbackRequestError = RollbackRequestError
+
+
+def _fail(message: str = 'rollback request is invalid') -> RollbackRequestError:
+    return RollbackRequestError(message)
+
+
+def _bounded_json(value: Mapping[str, Any], limit: int, message: str) -> None:
+    try:
+        encoded = json.dumps(
+            dict(value),
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(',', ':'),
+        ).encode('utf-8')
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise _fail(message) from exc
+    if len(encoded) > limit:
+        raise _fail(message)
+
+
+def _identifier(value: Any, field: str, pattern: re.Pattern[str], maximum: int) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or not value.isascii()
+        or len(value.encode('utf-8')) > maximum
+        or pattern.fullmatch(value) is None
+        or _UNSAFE_IDENTIFIER_RE.search(value) is not None
+    ):
+        raise _fail(f'{field} is invalid or exceeds its bound')
+    return value
+
+
+def _request_values(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise _fail('rollback request must be a mapping')
+    try:
+        keys = list(value.keys())
+        if len(keys) != len(set(keys)):
+            raise _fail('rollback request contains duplicate keys')
+        values = dict(value)
+    except RollbackRequestError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise _fail('rollback request is not a bounded mapping') from exc
+    if set(values) != CLIENT_SERVICE_ROLLBACK_REQUEST_FIELDS:
+        raise _fail('rollback request fields are not allowlisted')
+    _bounded_json(values, MAX_REQUEST_BYTES, 'rollback request is oversized')
+    return {
+        'service_id': _identifier(
+            values['service_id'], 'service_id', _SERVICE_ID_RE, MAX_SERVICE_ID_BYTES
+        ),
+        'activation_id': _identifier(
+            values['activation_id'], 'activation_id', _ACTIVATION_ID_RE,
+            MAX_ACTIVATION_ID_BYTES,
+        ),
+    }
+
+
+def validate_rollback_request(payload: Mapping[str, Any]) -> MappingProxyType:
+    """Return the exact immutable request mapping after pure validation."""
+    values = _request_values(payload)
+    return MappingProxyType({field: values[field] for field in ROLLBACK_REQUEST_FIELDS})
+
+
+def build_rollback_request_evidence(request: Mapping[str, Any]) -> MappingProxyType:
+    """Return bounded metadata for the exact immutable validated request."""
+    if type(request) is not MappingProxyType:
+        raise _fail('rollback request must be the immutable validated result')
+    values = _request_values(request)
+    evidence = {
+        'service_id': values['service_id'],
+        'activation_id': values['activation_id'],
+        'request_valid': True,
+        'execution_enabled': False,
+        'request_queued': False,
+        'rollback_executed': False,
+        'state_changed': False,
+        'status': 'disabled',
+    }
+    if set(evidence) != _ROLLBACK_EVIDENCE_FIELDS:
+        raise _fail('rollback evidence fields are not allowlisted')
+    _bounded_json(evidence, MAX_EVIDENCE_BYTES, 'rollback evidence is oversized')
+    return MappingProxyType(evidence)
+
+
+admit_rollback_request = validate_rollback_request
+admit_client_service_rollback_request = validate_rollback_request
+rollback_request_evidence = build_rollback_request_evidence
+validate_client_service_rollback_request = validate_rollback_request
+build_client_service_rollback_request_evidence = build_rollback_request_evidence
+
+
+__all__ = [
+    'CLIENT_SERVICE_ROLLBACK_REQUEST_FIELDS',
+    'ClientServiceRollbackRequestError',
+    'MAX_ACTIVATION_ID_BYTES',
+    'MAX_EVIDENCE_BYTES',
+    'MAX_REQUEST_BYTES',
+    'MAX_SERVICE_ID_BYTES',
+    'ROLLBACK_REQUEST_FIELDS',
+    'RollbackRequestError',
+    'admit_rollback_request',
+    'build_client_service_rollback_request_evidence',
+    'build_rollback_request_evidence',
+    'rollback_request_evidence',
+    'validate_client_service_rollback_request',
+    'validate_rollback_request',
+]
+
+PY_ROLLBACK_ADMISSION
+chmod +x "$ROLLBACK_ADMISSION"
+
 cat > "$ACTOR" <<'PY_ACTOR'
 #!/usr/bin/env python3
 """Screentra Cast client command actor.
@@ -4972,6 +6118,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import datetime as _d
+import importlib.util
 import json
 import os
 import re
@@ -4987,8 +6134,136 @@ import urllib.request
 from urllib.parse import urlparse
 from pathlib import Path
 
+
+def _load_transcription_request_admission():
+    module_path = Path(__file__).with_name(
+        'screentra-stt-transcription-request-admission.py'
+    )
+    spec = importlib.util.spec_from_file_location(
+        'screentra_stt_transcription_request_admission', module_path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError('transcription request admission contract is unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_rollback_request_admission():
+    module_path = Path(__file__).with_name(
+        'screentra-client-service-rollback-request-admission.py'
+    )
+    spec = importlib.util.spec_from_file_location(
+        'screentra_client_service_rollback_request_admission', module_path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError('rollback request admission contract is unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_TRANSCRIPTION_REQUEST_ADMISSION = _load_transcription_request_admission()
+_ROLLBACK_REQUEST_ADMISSION = _load_rollback_request_admission()
+
 MAX_PENDING_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
+MAX_COMMAND_PAYLOAD_BYTES = 64 * 1024
+MAX_CLIENT_ID_BYTES = 200
+CLIENT_SERVICE_IDENTIFIER_MAX_BYTES = 128
+CLIENT_SERVICE_REQUEST_ID_MAX_BYTES = 128
+CLIENT_SERVICE_TRANSCRIBE_ENVELOPE_MAX_BYTES = 512
+CLIENT_SERVICE_REASON_MAX_BYTES = 256
+
+ALLOWED_CLIENT_COMMAND_ACTIONS = (
+    'restart_renderer', 'restart_kiosk', 'restart_kiosk_display',
+    'reload_layout', 'refresh_cache', 'update_client',
+    'set_display_count', 'set_touch_binding', 'bluetooth_scan',
+    'bluetooth_connect', 'audio_list', 'audio_set_default',
+    'audio_set_volume', 'restart_client', 'start_display_preview',
+    'stop_display_preview', 'ddc_set', 'display_settings', 'display_power', 'cec_send',
+    'ir_send', 'client_service_status', 'client_service_rollback_request',
+    'client_service_transcribe_request',
+)
+
+
+def _validate_client_service_identifier(value, field):
+    if (not isinstance(value, str) or not value or
+            len(value.encode('utf-8')) > CLIENT_SERVICE_IDENTIFIER_MAX_BYTES or
+            any(not (char.isascii() and (char.isalnum() or char in '._-')) for char in value)):
+        raise ValueError(f'{field} is invalid or exceeds its bound')
+
+
+def validate_client_service_payload(action, payload):
+    if action == 'client_service_rollback_request':
+        _ROLLBACK_REQUEST_ADMISSION.validate_rollback_request(payload)
+        return
+    if action == 'client_service_transcribe_request':
+        _TRANSCRIPTION_REQUEST_ADMISSION.validate_transcription_request(payload)
+        return
+    if payload is None:
+        return
+    if not isinstance(payload, dict):
+        raise ValueError('client service payload must be a JSON object')
+    allowed = ({'service_id'} if action == 'client_service_status' else
+               {'service_id', 'activation_id', 'target_version', 'reason'}
+               if action == 'client_service_rollback_request' else None)
+    if allowed is None:
+        return
+    if set(payload) - allowed:
+        raise ValueError('client service payload contains an unsupported field')
+    required = {'service_id', 'activation_id'} if action == 'client_service_rollback_request' else set()
+    missing = required - set(payload)
+    if missing:
+        raise ValueError(f'client service payload is missing {sorted(missing)[0]}')
+    for field in ('service_id', 'activation_id', 'target_version'):
+        if field in payload:
+            _validate_client_service_identifier(payload[field], field)
+    if 'reason' in payload:
+        reason = payload['reason']
+        if (not isinstance(reason, str) or not reason or
+                len(reason.encode('utf-8')) > CLIENT_SERVICE_REASON_MAX_BYTES or
+                any(ord(char) < 32 or ord(char) == 127 for char in reason)):
+            raise ValueError('client service reason is invalid or exceeds its bound')
+
+
+def validate_pending_command(spec, expected_client_id):
+    if not isinstance(spec, dict):
+        raise ValueError('pending command must be a JSON object')
+    if (not isinstance(expected_client_id, str) or not expected_client_id or
+            len(expected_client_id.encode('utf-8')) > MAX_CLIENT_ID_BYTES):
+        raise ValueError('client identity is invalid')
+    if spec.get('client_id') != expected_client_id:
+        raise ValueError('pending command client identity mismatch')
+    action = spec.get('action')
+    if action not in ALLOWED_CLIENT_COMMAND_ACTIONS:
+        raise ValueError(f'unsupported client command action: {action}')
+    payload = spec.get('payload')
+    if payload is not None and not isinstance(payload, dict):
+        raise ValueError('client command payload must be a JSON object')
+    if payload is not None:
+        encoded = json.dumps(payload, separators=(',', ':')).encode('utf-8')
+        if len(encoded) > MAX_COMMAND_PAYLOAD_BYTES:
+            raise ValueError(f'client command payload exceeds {MAX_COMMAND_PAYLOAD_BYTES} bytes')
+        if 'client_id' in payload:
+            raise ValueError('client identity is bound to the command envelope')
+    if action == 'display_settings':
+        if not isinstance(payload, dict):
+            raise ValueError('display_settings payload must be a JSON object')
+        allowed = {'display_index', 'brightness', 'contrast'}
+        if set(payload) - allowed:
+            raise ValueError('display_settings payload contains an unsupported field')
+        if not isinstance(payload.get('display_index'), int) or isinstance(payload.get('display_index'), bool) or not 0 <= payload['display_index'] <= 3:
+            raise ValueError('display_settings display_index must be between 0 and 3')
+        supplied = [field for field in ('brightness', 'contrast') if field in payload]
+        if not supplied:
+            raise ValueError('display_settings requires brightness or contrast')
+        for field in supplied:
+            value = payload[field]
+            if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 100:
+                raise ValueError(f'display_settings {field} must be between 0 and 100')
+    validate_client_service_payload(action, payload)
+    return spec
 
 
 def _read_json_file(path: Path, default):
@@ -5037,20 +6312,13 @@ def ddcutil_detect(bus: str | None = None) -> tuple[bool, str]:
     return False, err.strip() or out.strip()
 
 
-def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, display_index: int | None = None, has_layout: bool = False) -> tuple[bool, str]:
+def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_layout: bool = False) -> tuple[bool, str]:
     """Set a DDC/CI VCP value via ddcutil. Returns (ok, message).
     If has_layout=True and the display is not initially detected (ddcutil_no_bus),
     runs ddcutil detect once and retries before returning failure."""
-    # DDC/CI behavior is monitor-dependent: some displays acknowledge a power
-    # or input command without visibly waking. A successful setvcp is therefore
-    # command acceptance, not proof that the panel selected the active input.
     args = ['sudo', '-n', 'ddcutil', 'setvcp']
     if bus:
         args.extend(['--bus', bus])
-    elif display_index is not None and display_index >= 0:
-        # ddcutil display numbers are 1-based; the client API indexes
-        # displays from zero. Keep DDC scoped to the selected display.
-        args.extend(['--display', str(display_index + 1)])
     args.extend([vcp_code, str(value)])
 
     def _do_set():
@@ -5058,14 +6326,9 @@ def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, display
         if rc == 0:
             return True, f'DDC: {vcp_code}={value}' + (f' ({out.strip()})' if out.strip() else '')
         err_msg = err.strip() or out.strip()
-        # Distinguish a missing ddcutil executable from a monitor that is
-        # currently unavailable over DDC (for example after DPMS/full off).
-        if 'command not found' in err_msg.lower() or 'no such file or directory' in err_msg.lower():
+        if 'not found' in err_msg.lower() or 'no such file' in err_msg.lower():
             return False, f'ddcutil_not_installed: {err_msg}'
-        if ('display not found' in err_msg.lower() or 'no displays found' in err_msg.lower()
-                or 'no monitor detected' in err_msg.lower()
-                or 'unable to open' in err_msg.lower() or 'i2c' in err_msg.lower()
-                or 'no bus' in err_msg.lower()):
+        if 'unable to open' in err_msg.lower() or 'i2c' in err_msg.lower() or 'no bus' in err_msg.lower():
             return False, 'ddcutil_no_bus', err_msg
         if 'communication' in err_msg.lower() or 'timeout' in err_msg.lower():
             return False, f'ddcutil_no_support: {err_msg}'
@@ -5360,40 +6623,6 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
 
     ok = has_systemctl_user()
     return ok, f'active display count set to {active}', details
-
-
-def apply_display_power(cache_dir: Path, display_index: int | None, state: str) -> tuple[bool, str, dict]:
-    """Use compositor DPMS, not DDC power mode, for monitor standby."""
-    if display_index is None or display_index < 0 or display_index > 3:
-        return False, 'a display index from 0 to 3 is required', {}
-    if state not in {'on', 'off'}:
-        return False, 'display power state must be on or off', {}
-    if shutil.which('wlr-randr') is None:
-        return False, 'wlr-randr is not installed on this client', {}
-    config = _read_json_file(cache_dir.parent / 'config.json', {})
-    connectors = _display_connectors_for_indexes(config, [display_index])
-    if not connectors:
-        return False, f'no compositor output is mapped to display {display_index}', {'display_index': display_index}
-    connector = connectors[0]
-    args = ['wlr-randr', '--output', connector, '--on' if state == 'on' else '--off']
-    wayland_env = os.environ.copy()
-    runtime_dir = wayland_env.get('XDG_RUNTIME_DIR') or f"/run/{wayland_env.get('USER', 'board')}"
-    wayland_env['XDG_RUNTIME_DIR'] = runtime_dir
-    if not wayland_env.get('WAYLAND_DISPLAY'):
-        for candidate in ('wayland-1', 'wayland-0'):
-            if (Path(runtime_dir) / candidate).exists():
-                wayland_env['WAYLAND_DISPLAY'] = candidate
-                break
-    try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=10, env=wayland_env)
-        rc, out, err = proc.returncode, proc.stdout, proc.stderr
-    except Exception as exc:
-        return False, f'compositor display power failed: {exc}', {'display_index': display_index, 'connector': connector, 'state': state, 'command': args}
-    details = {'display_index': display_index, 'connector': connector, 'state': state, 'command': args}
-    if rc != 0:
-        details['stderr'] = err or out
-        return False, f'compositor display power failed (rc={rc}): {err or out}', details
-    return True, f'display {display_index} ({connector}) power set to {state}', details
 
 
 def _resolve_touch_name(device_path: str | None, device_name: str | None = None) -> str | None:
@@ -5827,8 +7056,65 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
 def execute(action: str, payload: dict | None, ctx: dict) -> dict:
     """Run a single command and return a result dict."""
     started = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z'
-    has_user = has_systemctl_user()
+    if action == 'client_service_status':
+        service_payload = payload if payload is not None else {}
+        try:
+            validate_client_service_payload(action, service_payload)
+        except ValueError as exc:
+            return {
+                'action': action, 'ok': False, 'code': 'invalid_payload',
+                'execution_enabled': False, 'message': str(exc), 'started_at': started,
+            }
+        return {
+            'action': action, 'ok': True, 'code': 'execution_disabled',
+            'execution_enabled': False, 'state': 'disabled',
+            'message': 'client service runtime execution is disabled',
+            'details': {'services': [], 'service_id': service_payload.get('service_id')},
+            'started_at': started,
+        }
+    if action == 'client_service_rollback_request':
+        try:
+            request = _ROLLBACK_REQUEST_ADMISSION.validate_rollback_request(payload)
+            evidence = _ROLLBACK_REQUEST_ADMISSION.build_rollback_request_evidence(request)
+        except ValueError as exc:
+            return {
+                'action': action, 'ok': False, 'code': 'invalid_payload',
+                'execution_enabled': False, 'message': str(exc), 'started_at': started,
+            }
+        return {
+            'action': action, 'ok': False, 'code': 'execution_disabled',
+            'execution_enabled': False, 'state': 'disabled',
+            'status': evidence['status'],
+            'message': 'client service rollback is disabled',
+            'details': dict(evidence),
+            'started_at': started,
+        }
+    if action == 'client_service_transcribe_request':
+        try:
+            request = _TRANSCRIPTION_REQUEST_ADMISSION.validate_transcription_request(payload)
+            evidence = _TRANSCRIPTION_REQUEST_ADMISSION.build_transcription_request_evidence(request)
+        except ValueError as exc:
+            return {
+                'action': action, 'ok': False, 'code': 'invalid_payload',
+                'execution_enabled': False, 'message': str(exc), 'started_at': started,
+            }
+        details = dict(evidence)
+        details.update({'audio_bytes': 0, 'transcript': None})
+        return {
+            'action': action, 'ok': False, 'code': 'execution_disabled',
+            'execution_enabled': False, 'state': 'disabled', 'status': evidence['status'],
+            'message': 'client service transcription is disabled',
+            'details': details,
+            'started_at': started,
+        }
     payload = payload or {}
+    if action not in ALLOWED_CLIENT_COMMAND_ACTIONS:
+        return {
+            'action': action, 'ok': False, 'code': 'unsupported_action',
+            'execution_enabled': False, 'message': f'unknown action: {action}',
+            'started_at': started,
+        }
+    has_user = has_systemctl_user()
     display_index = payload.get('display_index')
     try:
         display_index = int(display_index) if display_index is not None else None
@@ -5963,6 +7249,26 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         ok, msg, details = stop_display_preview(ctx, display_index)
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'details': details, 'started_at': started}
 
+    # ── Scheduled DDC display settings ────────────────────────────────────────
+    if action == 'display_settings':
+        try:
+            validate_pending_command({'client_id': ctx.get('client_id', ''), 'action': action, 'payload': payload}, ctx.get('client_id', ''))
+        except ValueError as exc:
+            return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
+        results = []
+        for field, vcp in (('brightness', '10'), ('contrast', '12')):
+            if field not in payload:
+                continue
+            ok, msg = apply_ddc_control(vcp, payload[field])
+            results.append({'setting': field, 'vcp': vcp, 'value': payload[field], 'ok': ok, 'message': msg})
+        succeeded = sum(1 for result in results if result['ok'])
+        ok = succeeded == len(results)
+        return {
+            'action': action, 'display_index': display_index, 'ok': ok,
+            'partial': 0 < succeeded < len(results), 'message': 'DDC display settings applied' if ok else ('DDC display settings partially applied' if succeeded else 'DDC display settings failed'),
+            'details': {'settings': results, **{result['setting']: result for result in results}}, 'started_at': started,
+        }
+
     # ── Display control (DDC/CI + CEC) ────────────────────────────────────────
     if action == 'ddc_set':
         # payload: { "vcp": "10", "value": 50 }  brightness
@@ -5973,13 +7279,8 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         value = payload.get('value', 0)
         bus = payload.get('bus')
         has_layout = payload.get('has_layout', False)
-        ok, msg = apply_ddc_control(str(vcp), int(value), bus=bus, display_index=display_index, has_layout=has_layout)
+        ok, msg = apply_ddc_control(str(vcp), int(value), bus=bus, has_layout=has_layout)
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
-
-    if action == 'display_power':
-        state = str(payload.get('state') or '')
-        ok, msg, details = apply_display_power(Path(ctx['cache_dir']), display_index, state)
-        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'details': details, 'started_at': started}
 
     if action == 'cec_send':
         # payload: { "cmd": "pow 0" }   power on OSD addr 0
@@ -5994,7 +7295,9 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
                 'message': 'IR control not yet implemented. Set method to DDC or CEC.',
                 'started_at': started}
 
-    return {'action': action, 'display_index': display_index, 'ok': False, 'message': f'unknown action: {action}', 'started_at': started}
+    return {'action': action, 'display_index': display_index, 'ok': False,
+            'code': 'unsupported_action', 'execution_enabled': False,
+            'message': f'unknown action: {action}', 'started_at': started}
 
 
 def main() -> int:
@@ -6047,6 +7350,21 @@ def main() -> int:
             spec = json.loads(pending_path.read_text(encoding='utf-8'))
         except Exception as e:
             result = {'action': 'unknown', 'ok': False, 'message': f'bad pending file: {e}', 'started_at': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z'}
+            _atomic_write_text(result_path, json.dumps(result, indent=2))
+            try: pending_path.unlink()
+            except Exception: pass
+            return True
+        try:
+            validate_pending_command(spec, ctx['client_id'])
+        except Exception as e:
+            action = spec.get('action', 'unknown') if isinstance(spec, dict) else 'unknown'
+            result = {
+                'action': action, 'ok': False, 'code': 'invalid_command',
+                'execution_enabled': False, 'message': str(e),
+                'started_at': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z',
+                'client_id': ctx['client_id'] or None,
+                'requested_at': spec.get('requested_at') if isinstance(spec, dict) else None,
+            }
             _atomic_write_text(result_path, json.dumps(result, indent=2))
             try: pending_path.unlink()
             except Exception: pass
