@@ -82,8 +82,9 @@ def _validate_addons(value):
             raise StatusReportError('invalid status report addon version')
         entrypoint = addon.get('entrypoint')
         if entrypoint is not None:
-            if (not isinstance(entrypoint, str) or not entrypoint.startswith('client/') or
-                    '\\' in entrypoint or '..' in entrypoint.split('/') or
+            if (not isinstance(entrypoint, str) or entrypoint == 'client/' or
+                    not entrypoint.startswith('client/') or '\\' in entrypoint or
+                    '..' in entrypoint.split('/') or
                     any(ord(character) < 0x20 or ord(character) == 0x7F for character in entrypoint) or
                     len(entrypoint.encode('utf-8')) > MAX_DETAIL_BYTES):
                 raise StatusReportError('invalid status report addon entrypoint')

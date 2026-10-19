@@ -71,8 +71,9 @@ queued, or process observations cannot be represented by the heartbeat cache. Ca
 observations are limited to the closed capability/state vocabulary, bounded
 control-free details, and a bounded JSON envelope. Add-on entries likewise use a
 closed `id`/version/state/entrypoint/error shape with verified-state vocabulary,
-relative `client/` entrypoints, duplicate-ID rejection, bounded versions, and
-credential/path/URL-safe errors. Report and add-on timestamps must be real RFC3339
+relative non-empty `client/` entrypoints (without traversal, backslashes, or control
+characters, bounded to 160 UTF-8 bytes), duplicate-ID rejection, bounded versions, and
+credential/path/URL-safe errors. Report timestamps must be real RFC3339
 UTC values rather than shape-only strings. The heartbeat validates every status
 write through this boundary, and invalid reports are rejected without replacing
 the previous cache file. The server route also applies a 256 KiB body limit before

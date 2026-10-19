@@ -475,7 +475,8 @@ fn validate_client_status_text(
     };
     let lowered = value.to_ascii_lowercase();
     let sensitive = ["password", "credential", "secret", "token", "://", "/"];
-    if value.len() > maximum_bytes
+    if value.is_empty()
+        || value.len() > maximum_bytes
         || value
             .chars()
             .any(|character| character.is_control())
@@ -597,7 +598,7 @@ fn validate_client_status_report(report: &ClientAddonStatusReport) -> Result<(),
             ));
         }
         if let Some(entrypoint) = addon.entrypoint.as_deref() {
-            validate_relative_client_path(entrypoint)?;
+            validate_client_status_entrypoint(entrypoint)?;
         }
         validate_client_status_text(
             addon.error.as_deref(),
@@ -1373,6 +1374,29 @@ pub fn validate_client_extension_manifest(manifest: &AddonManifest) -> Result<()
                 widget.id
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_client_status_entrypoint(value: &str) -> Result<(), AddonError> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || value == "client/"
+        || value.len() > MAX_CLIENT_STATUS_DETAIL_BYTES
+        || value.contains('\\')
+        || value.chars().any(|character| character.is_control())
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+        || !value.starts_with("client/")
+    {
+        return Err(AddonError::Invalid(
+            "Invalid addon status entrypoint".to_string(),
+        ));
     }
     Ok(())
 }
@@ -4317,6 +4341,56 @@ mod tests {
             },
         );
         assert!(oversized_error.is_err());
+        for entrypoint in [
+            "client/".to_string(),
+            "client/widget\\\\js".to_string(),
+            format!("client/{}", "x".repeat(154)),
+            "client/\u{1}".to_string(),
+        ] {
+            let invalid_entrypoint = save_client_status(
+                "client-1",
+                ClientAddonStatusReport {
+                    at: Some("2026-10-19T12:00:00Z".to_string()),
+                    addons: vec![ClientAddonStatus {
+                        id: "weather".to_string(),
+                        version: Some("1.0.0".to_string()),
+                        state: "verified".to_string(),
+                        entrypoint: Some(entrypoint.clone()),
+                        error: None,
+                    }],
+                    capabilities: Vec::new(),
+                    services: Vec::new(),
+                    error: None,
+                },
+            );
+            assert!(invalid_entrypoint.is_err(), "entrypoint should be rejected: {entrypoint:?}");
+        }
+        let empty_detail = save_client_status(
+            "client-1",
+            ClientAddonStatusReport {
+                at: Some("2026-10-19T12:00:00Z".to_string()),
+                addons: Vec::new(),
+                capabilities: vec![ClientCapabilityStatus {
+                    id: "render_only".to_string(),
+                    state: "available".to_string(),
+                    detail: Some(String::new()),
+                }],
+                services: Vec::new(),
+                error: None,
+            },
+        );
+        assert!(empty_detail.is_err());
+        let empty_error = save_client_status(
+            "client-1",
+            ClientAddonStatusReport {
+                at: Some("2026-10-19T12:00:00Z".to_string()),
+                addons: Vec::new(),
+                capabilities: Vec::new(),
+                services: Vec::new(),
+                error: Some(String::new()),
+            },
+        );
+        assert!(empty_error.is_err());
         let error_state = save_client_status(
             "client-1",
             ClientAddonStatusReport {

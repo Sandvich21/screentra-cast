@@ -70,11 +70,16 @@ class ClientStatusReportAdmissionTests(unittest.TestCase):
             valid_report(addons=[{'id': '../secret', 'state': 'verified'}]),
             valid_report(addons=[{'id': 'weather', 'state': 'running'}]),
             valid_report(addons=[{'id': 'weather', 'state': 'verified', 'entrypoint': '../client.js'}]),
+            valid_report(addons=[{'id': 'weather', 'state': 'verified', 'entrypoint': 'client/'}]),
+            valid_report(addons=[{'id': 'weather', 'state': 'verified', 'entrypoint': 'client/widget\\\\js'}]),
+            valid_report(addons=[{'id': 'weather', 'state': 'verified', 'entrypoint': 'client/' + 'x' * 154}]),
             valid_report(addons=[
                 {'id': 'weather', 'state': 'verified'},
                 {'id': 'weather', 'state': 'failed'},
             ]),
             valid_report(addons=[{'id': 'weather', 'state': 'failed', 'error': 'password=secret'}]),
+            valid_report(addons=[{'id': 'weather', 'state': 'failed', 'error': ''}]),
+            valid_report(error=''),
             valid_report(error='https://example.invalid'),
             valid_report(capabilities=[{'id': 'render_only', 'state': 'available', 'detail': '/dev/video0'}]),
         )
