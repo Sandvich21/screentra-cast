@@ -57,11 +57,13 @@ evidence, not runtime or process-execution evidence. Restart counts and diagnost
 details are bounded, and duplicate service IDs are rejected. Server admission also
 rejects control characters and credential-, path-, or URL-shaped detail/error
 strings before persisting snapshots. The server also revalidates stored snapshots
-on readback, including the client identity, closed JSON field set, bounds, RFC3339
-timestamps, and detail safety rules; tampered or legacy-shaped files fail closed
-instead of being returned to callers. Capability/service detail text is limited to
-160 UTF-8 bytes, add-on/report error text to 96 UTF-8 bytes, and the client and
-server enforce the same limits.
+on readback, including the client identity, closed JSON field set, bounds, exact
+second-precision UTC timestamps, file type, and private `0600` file permissions;
+tampered or legacy-shaped files fail closed instead of being returned to callers.
+The containing status directory is created and required to remain private with
+mode `0700`. Capability/service detail text is limited to 160 UTF-8 bytes,
+add-on/report error text to 96 UTF-8 bytes, and the client and server enforce the
+same limits.
 
 The player heartbeat has a stricter, separate report boundary in
 `screentra-client-status-report-admission.py`. Its closed top-level report shape

@@ -657,6 +657,15 @@ pub fn load_client_status(client_id: &str) -> Result<Option<serde_json::Value>, 
             "Invalid stored addon status".to_string(),
         ));
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            return Err(AddonError::Invalid(
+                "Invalid stored addon status permissions".to_string(),
+            ));
+        }
+    }
     let bytes = fs::read(path).map_err(io_error)?;
     if bytes.len() > MAX_CLIENT_STATUS_BYTES {
         return Err(AddonError::Invalid(
@@ -4715,6 +4724,17 @@ mod tests {
             let mut permissions = fs::symlink_metadata(&status_dir).unwrap().permissions();
             permissions.set_mode(0o700);
             fs::set_permissions(&status_dir, permissions).unwrap();
+            let mut file_permissions = fs::symlink_metadata(entries[0].path())
+                .unwrap()
+                .permissions();
+            file_permissions.set_mode(0o644);
+            fs::set_permissions(entries[0].path(), file_permissions).unwrap();
+            assert!(load_client_status("client-1").is_err());
+            let mut file_permissions = fs::symlink_metadata(entries[0].path())
+                .unwrap()
+                .permissions();
+            file_permissions.set_mode(0o600);
+            fs::set_permissions(entries[0].path(), file_permissions).unwrap();
         }
         let invalid_report: ClientAddonStatusReport = serde_json::from_value(serde_json::json!({
             "at": "2026-10-19T12:01:00Z",
