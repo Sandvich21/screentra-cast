@@ -7614,6 +7614,8 @@ const ALLOWED_CLIENT_COMMAND_ACTIONS: &[&str] = &[
 ];
 
 const CLIENT_SERVICE_IDENTIFIER_MAX_BYTES: usize = 128;
+const CLIENT_SERVICE_STATUS_IDENTIFIER_MAX_BYTES: usize = 64;
+const CLIENT_SERVICE_STATUS_REQUEST_MAX_BYTES: usize = 80;
 const CLIENT_SERVICE_TRANSCRIBE_IDENTIFIER_MAX_BYTES: usize = 64;
 const CLIENT_SERVICE_TRANSCRIBE_UNSAFE_MARKERS: &[&str] = &[
     "password",
@@ -7662,12 +7664,32 @@ fn validate_client_service_transcription_identifier(
     Ok(())
 }
 
+fn validate_client_service_status_identifier(value: &str, field: &str) -> Result<(), String> {
+    validate_client_service_identifier(value, field)?;
+    let valid_shape = value.bytes().enumerate().all(|(index, byte)| {
+        byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+    });
+    if value.len() > CLIENT_SERVICE_STATUS_IDENTIFIER_MAX_BYTES
+        || transcription_identifier_contains_unsafe_marker(value)
+        || !value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        || !valid_shape
+    {
+        return Err(format!("{field} is invalid or exceeds its bound"));
+    }
+    Ok(())
+}
+
 fn validate_client_service_payload(
     action: &str,
     payload: Option<&serde_json::Value>,
 ) -> Result<(), String> {
     let Some(value) = payload else {
-        if matches!(action, "client_service_rollback_request" | "client_service_transcribe_request") {
+        if matches!(action, "client_service_status" | "client_service_rollback_request" | "client_service_transcribe_request") {
             return Err("client service request payload is required".to_string());
         }
         return Ok(());
@@ -7688,7 +7710,20 @@ fn validate_client_service_payload(
     if object.keys().any(|key| !allowed.contains(&key.as_str())) {
         return Err("client service payload contains an unsupported field".to_string());
     }
-    let required = if action == "client_service_rollback_request" {
+    if action == "client_service_status"
+        && serde_json::to_vec(value)
+            .map_err(|_| "client service status request could not be serialized".to_string())?
+            .len()
+            > CLIENT_SERVICE_STATUS_REQUEST_MAX_BYTES
+    {
+        return Err(format!(
+            "client service status request exceeds {} bytes",
+            CLIENT_SERVICE_STATUS_REQUEST_MAX_BYTES
+        ));
+    }
+    let required = if action == "client_service_status" {
+        &["service_id"][..]
+    } else if action == "client_service_rollback_request" {
         &["service_id", "activation_id"][..]
     } else if action == "client_service_transcribe_request" {
         &["service_id", "request_id", "push_to_talk"][..]
@@ -7715,6 +7750,8 @@ fn validate_client_service_payload(
                 {
                     return Err(format!("{field} is invalid or exceeds its bound"));
                 }
+            } else if action == "client_service_status" && field == "service_id" {
+                validate_client_service_status_identifier(value, field)?;
             } else if action == "client_service_transcribe_request" && field == "service_id" {
                 validate_client_service_transcription_identifier(value, field)?;
             } else {
@@ -9818,6 +9855,25 @@ mod tests {
             Some(&serde_json::json!({"client_id": "client-b"})),
         )
         .is_err());
+        assert!(validate_client_command_for_client(
+            "client-a",
+            "client_service_status",
+            None,
+        )
+        .is_err());
+        for status_payload in [
+            serde_json::json!({"service_id": "speech/to-text"}),
+            serde_json::json!({"service_id": "Password-service"}),
+            serde_json::json!({"service_id": "speech-to-text", "health": true}),
+            serde_json::json!({"service_id": "x".repeat(65)}),
+        ] {
+            assert!(validate_client_command_for_client(
+                "client-a",
+                "client_service_status",
+                Some(&status_payload),
+            )
+            .is_err());
+        }
         assert!(validate_client_command_for_client(
             "client-a",
             "client_service_rollback_request",

@@ -41,6 +41,7 @@ class ClientServiceContractTests(unittest.TestCase):
         self.assertIn("'client_service_rollback_request'", generated)
         self.assertIn("'client_service_transcribe_request'", generated)
         self.assertIn('screentra-client-service-rollback-request-admission.py', generated)
+        self.assertIn('screentra-client-service-status-request-admission.py', generated)
         self.assertIn('MAX_ACTIVATION_ID_BYTES', generated)
         self.assertIn("'execution_disabled'", generated)
         self.assertIn('client_service_status', server_actions())
@@ -146,6 +147,23 @@ class ClientServiceContractTests(unittest.TestCase):
         self.assertTrue(status['ok'])
         self.assertFalse(status['execution_enabled'])
         self.assertEqual(status['state'], 'disabled')
+        self.assertEqual(status['details'], {
+            'service_id': 'speech-to-text',
+            'request_valid': True,
+            'execution_enabled': False,
+            'request_queued': False,
+            'health_requested': False,
+            'process_started': False,
+            'service_healthy': False,
+        })
+
+        invalid_status = actor.execute(
+            'client_service_status',
+            {},
+            {'client_id': 'client-a', 'cache_dir': '/tmp/screentra-contract-test'},
+        )
+        self.assertFalse(invalid_status['ok'])
+        self.assertEqual(invalid_status['code'], 'invalid_payload')
 
         rollback = actor.execute(
             'client_service_rollback_request',

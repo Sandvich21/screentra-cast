@@ -17,6 +17,7 @@ SECTIONS = {
     "PY_ACTOR":               PLAYER_ROOT / "scripts/screentra-player-actor.py",
     "PY_TRANSCRIPTION_ADMISSION": PLAYER_ROOT / "scripts/screentra-stt-transcription-request-admission.py",
     "PY_ROLLBACK_ADMISSION": PLAYER_ROOT / "scripts/screentra-client-service-rollback-request-admission.py",
+    "PY_STATUS_ADMISSION": PLAYER_ROOT / "scripts/screentra-client-service-status-request-admission.py",
     "SH_STATUS":              PLAYER_ROOT / "scripts/screentra-player-status.sh",
     "SH_KIOSK":               PLAYER_ROOT / "install/screentra-kiosk.sh",
     "PY_NOLAYOUT":            PLAYER_ROOT / "static/no-layout.html",

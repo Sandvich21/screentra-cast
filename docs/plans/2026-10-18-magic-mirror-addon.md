@@ -22,6 +22,18 @@ camera or microphone permission, local inference, a running client service, or
 any other hardware or process activation; those require a separate reviewed
 runtime/permission gate.
 
+### Client-service status-request admission boundary
+
+The pure `screentra-client-service-status-request-admission.py` contract accepts
+exactly one bounded `service_id` field. It rejects paths, URLs, commands,
+credential-shaped identifiers, process/health/socket controls, arbitrary fields,
+duplicate fields, and oversized envelopes. Its immutable evidence reports
+`request_valid: true` while forcing `execution_enabled`, `request_queued`,
+`health_requested`, `process_started`, and `service_healthy` false. The actor and
+server validate the same closed request before returning inert metadata; no
+service inspection, process control, listener access, or lifecycle mutation is
+performed.
+
 ### Supervisor-plan evidence boundary
 
 The pure `screentra-client-service-supervisor-plan.py` contract composes the lifecycle and health identity validators for the Magic Mirror STT metadata. Its activation plans are metadata-only evidence: `execution_enabled` is false and `process_started`, `socket_bound`, and `model_loaded` are false. Health/status may bind a bounded observation; start/stop/update/rollback return structured `execution_disabled` results without changing lifecycle state. A plan is not evidence of a running service, bound socket, loaded model, installed package, or hardware readiness.

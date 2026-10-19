@@ -56,8 +56,23 @@ def _load_rollback_request_admission():
     return module
 
 
+def _load_status_request_admission():
+    module_path = Path(__file__).with_name(
+        'screentra-client-service-status-request-admission.py'
+    )
+    spec = importlib.util.spec_from_file_location(
+        'screentra_client_service_status_request_admission', module_path
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError('status request admission contract is unavailable')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 _TRANSCRIPTION_REQUEST_ADMISSION = _load_transcription_request_admission()
 _ROLLBACK_REQUEST_ADMISSION = _load_rollback_request_admission()
+_STATUS_REQUEST_ADMISSION = _load_status_request_admission()
 
 MAX_PENDING_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
@@ -88,6 +103,9 @@ def _validate_client_service_identifier(value, field):
 
 
 def validate_client_service_payload(action, payload):
+    if action == 'client_service_status':
+        _STATUS_REQUEST_ADMISSION.validate_status_request(payload)
+        return
     if action == 'client_service_rollback_request':
         _ROLLBACK_REQUEST_ADMISSION.validate_rollback_request(payload)
         return
@@ -98,8 +116,7 @@ def validate_client_service_payload(action, payload):
         return
     if not isinstance(payload, dict):
         raise ValueError('client service payload must be a JSON object')
-    allowed = ({'service_id'} if action == 'client_service_status' else
-               {'service_id', 'activation_id', 'target_version', 'reason'}
+    allowed = ({'service_id', 'activation_id', 'target_version', 'reason'}
                if action == 'client_service_rollback_request' else None)
     if allowed is None:
         return
@@ -950,9 +967,9 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
     """Run a single command and return a result dict."""
     started = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z'
     if action == 'client_service_status':
-        service_payload = payload if payload is not None else {}
         try:
-            validate_client_service_payload(action, service_payload)
+            request = _STATUS_REQUEST_ADMISSION.validate_status_request(payload)
+            evidence = _STATUS_REQUEST_ADMISSION.build_status_request_evidence(request)
         except ValueError as exc:
             return {
                 'action': action, 'ok': False, 'code': 'invalid_payload',
@@ -962,7 +979,7 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
             'action': action, 'ok': True, 'code': 'execution_disabled',
             'execution_enabled': False, 'state': 'disabled',
             'message': 'client service runtime execution is disabled',
-            'details': {'services': [], 'service_id': service_payload.get('service_id')},
+            'details': dict(evidence),
             'started_at': started,
         }
     if action == 'client_service_rollback_request':
