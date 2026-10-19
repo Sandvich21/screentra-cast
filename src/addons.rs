@@ -377,8 +377,9 @@ pub(crate) fn checked_addon_data_root(
     checked_data_dir(create)
 }
 
-fn storage_dir() -> PathBuf {
-    data_dir().join("addons")
+fn addon_dir(storage_root: &Path, id: &str) -> Result<PathBuf, AddonError> {
+    validate_id(id)?;
+    Ok(storage_root.join(id))
 }
 
 fn checked_addon_storage_dir(create: bool) -> Result<Option<PathBuf>, AddonError> {
@@ -404,6 +405,13 @@ fn checked_addon_storage_dir(create: bool) -> Result<Option<PathBuf>, AddonError
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(io_error(error)),
     }
+}
+
+fn checked_addon_dir(create: bool, id: &str) -> Result<Option<PathBuf>, AddonError> {
+    let Some(root) = checked_addon_storage_dir(create)? else {
+        return Ok(None);
+    };
+    Ok(Some(addon_dir(&root, id)?))
 }
 
 fn validate_client_status_client_id(client_id: &str) -> Result<(), AddonError> {
@@ -686,11 +694,6 @@ pub fn load_client_status(client_id: &str) -> Result<Option<serde_json::Value>, 
     serde_json::to_value(payload)
         .map(Some)
         .map_err(|error| AddonError::Io(format!("Invalid stored addon status: {error}")))
-}
-
-fn addon_dir(id: &str) -> Result<PathBuf, AddonError> {
-    validate_id(id)?;
-    Ok(storage_dir().join(id))
 }
 
 fn validate_id(id: &str) -> Result<(), AddonError> {
@@ -1090,8 +1093,9 @@ pub struct AddonWidgetRegistration {
 }
 
 pub fn client_package(id: &str) -> Result<Vec<u8>, AddonError> {
-    let _ = checked_addon_storage_dir(false)?;
-    let dir = addon_dir(id)?;
+    let Some(dir) = checked_addon_dir(false, id)? else {
+        return Err(AddonError::NotFound);
+    };
     let metadata = fs::symlink_metadata(&dir).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             AddonError::NotFound
@@ -1185,9 +1189,12 @@ fn migrate_legacy_standard_renderer_fields() -> Result<Vec<AddonRecord>, AddonEr
         "traffic-standard-us-ca",
         "magic-mirror-camera",
     ];
+    let Some(root) = checked_addon_storage_dir(false)? else {
+        return Ok(Vec::new());
+    };
 
     for id in STANDARD_IDS {
-        let dir = addon_dir(id)?;
+        let dir = addon_dir(&root, id)?;
         let metadata = match fs::symlink_metadata(&dir) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -1546,8 +1553,10 @@ pub fn list() -> Result<Vec<AddonRecord>, AddonError> {
 
 pub fn install(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
     validate_manifest(&manifest)?;
-    let _ = checked_addon_storage_dir(true)?;
-    let dir = addon_dir(&manifest.id)?;
+    let root = checked_addon_storage_dir(true)?.ok_or_else(|| {
+        AddonError::Io("Addon storage directory is unavailable".to_string())
+    })?;
+    let dir = addon_dir(&root, &manifest.id)?;
     match fs::symlink_metadata(&dir) {
         Ok(_) => return Err(AddonError::AlreadyInstalled),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1576,8 +1585,8 @@ pub fn install(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
 
 pub fn update(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
     validate_manifest(&manifest)?;
-    let _ = checked_addon_storage_dir(false)?;
-    let dir = addon_dir(&manifest.id)?;
+    let root = checked_addon_storage_dir(false)?.ok_or(AddonError::NotFound)?;
+    let dir = addon_dir(&root, &manifest.id)?;
     let metadata = match fs::symlink_metadata(&dir) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1603,8 +1612,9 @@ pub fn update(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
 }
 
 pub fn set_enabled(id: &str, enabled: bool) -> Result<AddonRecord, AddonError> {
-    let _ = checked_addon_storage_dir(false)?;
-    let dir = addon_dir(id)?;
+    let Some(dir) = checked_addon_dir(false, id)? else {
+        return Err(AddonError::NotFound);
+    };
     let metadata = match fs::symlink_metadata(&dir) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1627,8 +1637,9 @@ pub fn set_enabled(id: &str, enabled: bool) -> Result<AddonRecord, AddonError> {
 }
 
 pub fn remove(id: &str) -> Result<(), AddonError> {
-    let _ = checked_addon_storage_dir(false)?;
-    let dir = addon_dir(id)?;
+    let Some(dir) = checked_addon_dir(false, id)? else {
+        return Err(AddonError::NotFound);
+    };
     let metadata = match fs::symlink_metadata(&dir) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2354,7 +2365,7 @@ pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, Addo
         .ok_or_else(|| AddonError::Io("Addon storage directory is unavailable".to_string()))?;
     let staged = stage_signed_client_package(archive, &root, "package-install")?;
     let result = (|| {
-        let destination = addon_dir(&staged.manifest.id)?;
+        let destination = addon_dir(&root, &staged.manifest.id)?;
         match fs::symlink_metadata(&destination) {
             Ok(_) => return Err(AddonError::AlreadyInstalled),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2483,7 +2494,7 @@ pub fn update_signed_client_package(archive: &Path) -> Result<AddonRecord, Addon
     let root = checked_addon_storage_dir(false)?.ok_or(AddonError::NotFound)?;
     let staged = stage_signed_client_package(archive, &root, "package-update")?;
     let result = (|| {
-        let destination = addon_dir(&staged.manifest.id)?;
+        let destination = addon_dir(&root, &staged.manifest.id)?;
         let existing = match fs::symlink_metadata(&destination) {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -2628,6 +2639,13 @@ mod tests {
             client_sha256: None,
             client_api_version: None,
         }
+    }
+
+    #[test]
+    fn addon_dir_is_derived_from_checked_storage_root() {
+        let root = PathBuf::from("/tmp/screentra-addon-root");
+        let path = addon_dir(&root, "client-addon").expect("valid addon id");
+        assert_eq!(path, root.join("client-addon"));
     }
 
     #[test]
