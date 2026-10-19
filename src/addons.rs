@@ -4510,6 +4510,15 @@ mod tests {
         assert_eq!(loaded["report"]["addons"][0]["state"], "verified_cached");
         assert_eq!(loaded["report"]["capabilities"][0]["id"], "render_only");
         assert_eq!(loaded["report"]["services"][0]["state"], "running");
+        let raw_saved = fs::read_to_string(entries[0].path()).unwrap();
+        let duplicated_client_id = raw_saved.replacen(
+            "  \"client_id\": \"client-1\",\n",
+            "  \"client_id\": \"client-1\",\n  \"client_id\": \"client-1\",\n",
+            1,
+        );
+        assert_ne!(duplicated_client_id, raw_saved);
+        fs::write(entries[0].path(), duplicated_client_id).unwrap();
+        assert!(load_client_status("client-1").is_err());
         let mut tampered = saved.clone();
         tampered["report"]["capabilities"][0]["detail"] =
             serde_json::Value::String("password=redacted".to_string());
