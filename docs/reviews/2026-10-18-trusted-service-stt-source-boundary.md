@@ -1,7 +1,7 @@
 # Trusted-service and client-STT source-boundary review
 
 **Review date:** 2026-10-18
-**Reviewed commit:** `0c28e6061a575b642734a60780a637f10c412ec7`
+**Reviewed commit:** `8e9f9752e25acb8a6372d419373ad8a84c291e7e`
 **Scope:** source/tests only; no client, server, listener, process, model, hardware, image, or deployment activation was attempted.
 
 ## Verdict
@@ -10,8 +10,9 @@
 trusted-service execution and the client STT supervisor plan inert. This is **not** a
 runtime-readiness, deployment, or physical-verification claim.
 
-No production code was changed. This review artifact is the only file added by this
-review slice.
+The preceding contract slices added inert source/test artifacts. This closeout added one
+focused server-side request-admission fix and regression test described in the dated
+closeout section below; it did not activate any runtime, deployment, or hardware path.
 
 ## Route registration and activation surface
 
@@ -177,6 +178,90 @@ All checks were run in `/home/tech/screentra-cast` with the source unchanged:
    `--bin screentra-cast`.
 6. `git diff --check` and final `git status --short`/diff inspection were run after
    writing this artifact.
+
+## Post-install / contract closeout (2026-10-18)
+
+### Installed artifact evidence is not runtime readiness
+
+- The authorized `.56` installation identity is recorded as `whisper.cpp` 1.9.5,
+  source commit `d1be6fde11ac6e0407606b4e42fe72d34add8037`, runtime SHA-256
+  `d8b3d4f22d96f2a5c26cc34966927c69ab88406b52cdc7cee7c94e75bee16d97`, and
+  `whisper-tiny.en` model SHA-256
+  `921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f`
+  (`tests/test_stt_runtime_installation_evidence.py:29-37`). The evidence contract
+  requires artifact checks plus a non-starting check and keeps execution, process,
+  model-load, and service-start flags false (`player-client/scripts/
+  screentra-stt-runtime-installation-evidence.py:137-186,245-260`).
+- A read-only SSH probe of `.56` returned `host=third-floor`, no matching
+  `whisper`/`stt`/`magic-mirror` process, no matching Unix listener, and no matching
+  system or user unit. It observed only unrelated loopback listeners on `127.0.0.1:3900`
+  and `:3910`. No file, service, process, listener, model, microphone, or camera
+  operation was performed on `.56`; the probe is inactive-state evidence, not a fresh
+  artifact hash or runtime-readiness result.
+- The remaining blockers are runtime activation, process health, IPC binding and peer
+  authorization, resource enforcement, microphone permission/capture, model loading and
+  inference, lifecycle/rollback, and physical verification. Installation evidence and
+  the plan's explicit non-readiness distinction remain separate
+  (`docs/plans/2026-10-18-magic-mirror-addon.md:54-62`).
+
+### Contract closeout and focused fix
+
+- The latest client transcription contract requires `push_to_talk is True`, 64-byte
+  service identifiers, and 128-byte request identifiers that reject credential-shaped
+  identifiers (`player-client/scripts/screentra-stt-transcription-request-admission.py:69-101`).
+  The server previously accepted any boolean, the broader 128-byte generic service
+  identifier, and credential-shaped request IDs. Test-first regressions cover false
+  push-to-talk, a 65-byte service ID, `password-token`, and `token-1`
+  (`src/api.rs:9816-9834`): the tests failed before each fix and passed after it. The
+  server now applies the matching checks at `src/api.rs:7619-7639,7687-7701`.
+- The actor validates the same request through the pure admission module and returns
+  `execution_disabled` with zero audio and no transcript (`player-client/scripts/
+  screentra-player-actor.py:75-127,956-973`). The runtime-admission result likewise
+  forces activation, microphone/camera access, process, listener, model-load,
+  inference, health, resource, rollback, and lifecycle flags false
+  (`player-client/scripts/screentra-stt-runtime-admission.py:1147-1183`).
+
+### Boundary and packaging checks
+
+- The 14 new `screentra-stt-*.py` modules have zero AST calls to subprocess/process,
+  socket bind/listen, model-load, capture, network, or mutating filesystem APIs. Their
+  inert flag counts were nonzero: `execution_enabled_false=15`,
+  `runtime_activation_allowed_false=13`, `process_started_false=8`,
+  `socket_bound_false=3`, `model_loaded_false=3`.
+- The current route inventory still has exactly six trusted-service registrations at
+  `src/api.rs:1286-1308`; `activate(` occurs zero times in `src/api.rs`. The latest
+  contract-slice diff added zero source route, activation, spawn, or listener-bind
+  lines. The focused server fix also added zero route, activation, spawn, or bind
+  lines. `EXECUTION_ENABLED` remains the literal false at
+  `src/trusted_service_runtime.rs:25-27`, and `database_boundary` remains false in
+  the gate inventory at `:276-281` and default record at `:539-543`.
+- The generated installer is source-derived: the generator maps the actor and
+  transcription module at `player-client/scripts/build-installer.py:7-24`, and its
+  in-memory output matched `player-client/static/install/player-client.sh` byte-for-byte
+  across all 14 sections. The generator's optional `--deploy-server` path at
+  `:42-67` was not invoked; no deploy, SSH copy, service enable/start/restart, or
+  `.56` mutation was introduced.
+- Deferred trusted-service boundaries remain fail-closed: OCI capability probing reports
+  `can_start: false` (`src/trusted_service_oci.rs:157-164`), process start returns before
+  spawn (`src/trusted_service_runtime.rs:966-974`), the gateway returns before
+  `UnixListener::bind` (`src/trusted_service_gateway.rs:820-844`), the credential broker
+  blocks issue/revoke (`src/trusted_service_credentials.rs:248-264`), and the database
+  contract rejects raw SQL/core-table/migration/file-mount grants
+  (`src/trusted_service_database.rs:115-173`).
+
+### Closeout commands and results
+
+- `python3 -m unittest discover -s tests -p 'test_stt_*.py' -v` — **134 tests,
+  0 failures**; `python3 -m unittest discover -s tests -p 'test_client_service*.py' -v`
+  — **19 tests, 0 failures**; `python3 -m unittest discover -s tests -p
+  'test_local_model_staging_plan.py' -v` — **8 tests, 0 failures**.
+- `PYTHONPYCACHEPREFIX=<temporary> python3 -m py_compile player-client/scripts/
+  screentra-stt-*.py player-client/scripts/screentra-player-actor.py
+  player-client/scripts/build-installer.py` — **exit 0**; temporary bytecode was
+  removed. `git diff --check` — **exit 0**.
+- `RUSTFLAGS=-Awarnings cargo test --bin screentra-cast --quiet` — **419 passed,
+  0 failed, 6 ignored**. The focused regression command was **RED: 0 passed, 1
+  failed** before the fix and **GREEN: 1 passed, 0 failed** after it.
 
 ## Residual blockers and scope limits
 

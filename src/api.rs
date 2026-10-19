@@ -7588,6 +7588,18 @@ const ALLOWED_CLIENT_COMMAND_ACTIONS: &[&str] = &[
 ];
 
 const CLIENT_SERVICE_IDENTIFIER_MAX_BYTES: usize = 128;
+const CLIENT_SERVICE_TRANSCRIBE_IDENTIFIER_MAX_BYTES: usize = 64;
+const CLIENT_SERVICE_TRANSCRIBE_UNSAFE_MARKERS: &[&str] = &[
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "credential",
+    "bearer",
+    "api-key",
+    "api_key",
+    "apikey",
+];
 const CLIENT_SERVICE_REQUEST_ID_MAX_BYTES: usize = 128;
 const CLIENT_SERVICE_TRANSCRIBE_ENVELOPE_MAX_BYTES: usize = 512;
 const CLIENT_SERVICE_REASON_MAX_BYTES: usize = 256;
@@ -7598,6 +7610,26 @@ fn validate_client_service_identifier(value: &str, field: &str) -> Result<(), St
         || !value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
         })
+    {
+        return Err(format!("{field} is invalid or exceeds its bound"));
+    }
+    Ok(())
+}
+
+fn transcription_identifier_contains_unsafe_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    CLIENT_SERVICE_TRANSCRIBE_UNSAFE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+fn validate_client_service_transcription_identifier(
+    value: &str,
+    field: &str,
+) -> Result<(), String> {
+    validate_client_service_identifier(value, field)?;
+    if value.len() > CLIENT_SERVICE_TRANSCRIBE_IDENTIFIER_MAX_BYTES
+        || transcription_identifier_contains_unsafe_marker(value)
     {
         return Err(format!("{field} is invalid or exceeds its bound"));
     }
@@ -7653,9 +7685,12 @@ fn validate_client_service_payload(
                     || !value.bytes().all(|byte| {
                         byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
                     })
+                    || transcription_identifier_contains_unsafe_marker(value)
                 {
                     return Err(format!("{field} is invalid or exceeds its bound"));
                 }
+            } else if action == "client_service_transcribe_request" && field == "service_id" {
+                validate_client_service_transcription_identifier(value, field)?;
             } else {
                 validate_client_service_identifier(value, field)?;
             }
@@ -7664,9 +7699,9 @@ fn validate_client_service_payload(
     if action == "client_service_transcribe_request"
         && !object
             .get("push_to_talk")
-            .is_some_and(serde_json::Value::is_boolean)
+            .is_some_and(|value| value == &serde_json::Value::Bool(true))
     {
-        return Err("client service push_to_talk must be a boolean".to_string());
+        return Err("client service push_to_talk must be true".to_string());
     }
     if action == "client_service_transcribe_request"
         && serde_json::to_vec(value)
@@ -9786,6 +9821,10 @@ mod tests {
         for payload in [
             serde_json::json!({"service_id": "speech-to-text", "request_id": "request-001"}),
             serde_json::json!({"service_id": "speech-to-text", "request_id": "request-001", "push_to_talk": "true"}),
+            serde_json::json!({"service_id": "speech-to-text", "request_id": "request-001", "push_to_talk": false}),
+            serde_json::json!({"service_id": "x".repeat(65), "request_id": "request-001", "push_to_talk": true}),
+            serde_json::json!({"service_id": "password-token", "request_id": "request-001", "push_to_talk": true}),
+            serde_json::json!({"service_id": "speech-to-text", "request_id": "token-1", "push_to_talk": true}),
             serde_json::json!({"service_id": "speech/to-text", "request_id": "request-001", "push_to_talk": true}),
             serde_json::json!({"service_id": "speech-to-text", "request_id": "request 001", "push_to_talk": true}),
             serde_json::json!({"service_id": "speech-to-text", "request_id": "request-001", "push_to_talk": true, "audio": "raw"}),
