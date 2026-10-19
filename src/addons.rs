@@ -553,8 +553,14 @@ fn validate_client_status_report(report: &ClientAddonStatusReport) -> Result<(),
             service.model_sha256.as_deref(),
         )?;
     }
+    let mut seen_addons = BTreeSet::new();
     for addon in &report.addons {
         validate_id(&addon.id)?;
+        if !seen_addons.insert(&addon.id) {
+            return Err(AddonError::Invalid(
+                "Duplicate addon client status".to_string(),
+            ));
+        }
         if let Some(version) = addon.version.as_deref() {
             validate_token(version, "Addon status version")?;
         }
@@ -4179,6 +4185,32 @@ mod tests {
             },
         );
         assert!(result.is_err());
+        let duplicate_addons = save_client_status(
+            "client-1",
+            ClientAddonStatusReport {
+                at: Some("2026-10-19T12:00:00Z".to_string()),
+                addons: vec![
+                    ClientAddonStatus {
+                        id: "weather".to_string(),
+                        version: Some("1.0.0".to_string()),
+                        state: "verified".to_string(),
+                        entrypoint: None,
+                        error: None,
+                    },
+                    ClientAddonStatus {
+                        id: "weather".to_string(),
+                        version: Some("1.0.0".to_string()),
+                        state: "verified_cached".to_string(),
+                        entrypoint: None,
+                        error: None,
+                    },
+                ],
+                capabilities: Vec::new(),
+                services: Vec::new(),
+                error: None,
+            },
+        );
+        assert!(duplicate_addons.is_err());
         assert!(!data_root.join("addon-client-status").exists());
         if let Some(value) = old_data_root {
             unsafe {
