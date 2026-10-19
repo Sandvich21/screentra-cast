@@ -17,6 +17,7 @@ const DATABASE_URL_ENV: &str = "SIGNAGE_DATABASE_URL";
 const INITIAL_SCHEMA: &str = include_str!("../migrations/postgres/0001_initial.sql");
 const RUNTIME_COLUMNS_MIGRATION: &str = include_str!("../migrations/postgres/0002_runtime_columns.sql");
 const ADDON_STORAGE_MIGRATION: &str = include_str!("../migrations/postgres/0003_addon_storage.sql");
+const DISPLAY_SETTINGS_MIGRATION: &str = include_str!("../migrations/postgres/0004_schedule_display_settings.sql");
 
 pub fn configured_database_url() -> Result<String, String> {
     database_url_from(std::env::var(DATABASE_URL_ENV).ok())
@@ -2985,6 +2986,7 @@ pub async fn apply_initial_schema() -> Result<(), String> {
         ("0001_initial", INITIAL_SCHEMA),
         ("0002_runtime_columns", RUNTIME_COLUMNS_MIGRATION),
         ("0003_addon_storage", ADDON_STORAGE_MIGRATION),
+        ("0004_schedule_display_settings", DISPLAY_SETTINGS_MIGRATION),
     ] {
         let applied = transaction
             .query_opt("SELECT 1 FROM schema_migrations WHERE version=$1", &[&version])
