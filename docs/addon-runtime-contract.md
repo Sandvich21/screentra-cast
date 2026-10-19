@@ -65,7 +65,8 @@ The status path is derived from the checked status directory returned by the dat
 validator; callers do not reconstruct it from the raw `SIGNAGE_DATA_DIR` value after
 validation. Ordinary add-on paths follow the same rule: the add-on identifier is validated
 before it is joined to the already-checked add-on storage root, and callers do not rebuild
-add-on paths from the raw data-root setting. The containing status directory is created and
+add-on paths from the raw data-root setting. Trusted-service staging paths use the same
+checked-root derivation and identifier validation. The containing status directory is created and
 required to remain private with mode `0700`. Capability/service detail text is limited to 160 UTF-8 bytes,
 add-on/report error text to 96 UTF-8 bytes, and the client and server enforce the
 same limits.
