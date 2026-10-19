@@ -40,6 +40,7 @@ const HOST_RENDERERS: &[&str] = &[
 
 pub const MAX_ADDON_STORAGE_KEY_BYTES: usize = 128;
 pub const MAX_ADDON_STORAGE_VALUE_BYTES: usize = 64 * 1024;
+pub const MAX_CLIENT_STATUS_BYTES: usize = 256 * 1024;
 
 /// Validate the addon namespace before it reaches either database backend.
 /// This is deliberately the same conservative identifier shape used by addon
@@ -597,7 +598,7 @@ pub fn save_client_status(
         "report": report,
     });
     let bytes = serde_json::to_vec_pretty(&payload).map_err(io_error)?;
-    if bytes.len() > 256 * 1024 {
+    if bytes.len() > MAX_CLIENT_STATUS_BYTES {
         return Err(AddonError::Invalid(
             "Addon status payload is too large".to_string(),
         ));
@@ -626,7 +627,7 @@ pub fn load_client_status(client_id: &str) -> Result<Option<serde_json::Value>, 
         ));
     }
     let bytes = fs::read(path).map_err(io_error)?;
-    if bytes.len() > 256 * 1024 {
+    if bytes.len() > MAX_CLIENT_STATUS_BYTES {
         return Err(AddonError::Invalid(
             "Stored addon status is too large".to_string(),
         ));

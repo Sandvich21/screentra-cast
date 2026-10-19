@@ -1337,7 +1337,8 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route("/api/clients/{id}/addons", get(get_client_addons))
         .route(
             "/api/clients/{id}/addons/status",
-            post(post_client_addon_status).layer(DefaultBodyLimit::max(256 * 1024)),
+            post(post_client_addon_status)
+                .layer(DefaultBodyLimit::max(crate::addons::MAX_CLIENT_STATUS_BYTES)),
         )
         .route("/api/clients/{id}/addons/{addon_id}/package", get(get_client_addon_package))
         .route("/api/clients/{id}/update-check", get(get_client_update_check))
