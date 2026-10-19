@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -126,8 +127,12 @@ class ClientStatusReportAdmissionTests(unittest.TestCase):
             'screentra_player_heartbeat_for_status_report_test',
         )
         with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / 'addon-status.json'
+            path = Path(temporary) / 'cache' / 'addon-status.json'
+            path.parent.mkdir()
+            os.chmod(path.parent, 0o755)
             heartbeat._write_status_report(path, valid_report())
+            self.assertEqual(os.stat(path.parent).st_mode & 0o777, 0o700)
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
             self.assertEqual(json.loads(path.read_text(encoding='utf-8')), valid_report())
             with self.assertRaises(heartbeat._status_report_mod.StatusReportError):
                 heartbeat._write_status_report(path, valid_report(services=[{'id': 'speech-to-text'}]))

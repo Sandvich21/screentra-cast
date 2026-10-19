@@ -1164,7 +1164,8 @@ def _read_json_file(path: Path, default):
 
 def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     """Replace a cache JSON file atomically and keep it owner-readable."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(path.parent, create=True)
+    os.chmod(path.parent, 0o700)
     temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
     temporary.write_text(text)
     os.chmod(temporary, mode)
