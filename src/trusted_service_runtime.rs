@@ -168,6 +168,7 @@ fn record_path(addon_id: &str) -> Result<PathBuf, RuntimeError> {
 }
 
 fn ensure_runtime_directory(addon_id: &str) -> Result<PathBuf, RuntimeError> {
+    addons::validate_addon_storage_namespace(addon_id).map_err(RuntimeError::Invalid)?;
     let root = checked_runtime_root(true)?.ok_or(RuntimeError::NotFound)?;
     match fs::symlink_metadata(&root) {
         Ok(metadata) => validate_private_runtime_directory(
@@ -1806,6 +1807,29 @@ impl Drop for DisposableRuntimeHarness {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn invalid_runtime_addon_id_is_rejected_before_runtime_root_creation() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let root = std::env::temp_dir().join(format!("screentra-runtime-invalid-id-{}", Uuid::new_v4()));
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        let result = ensure_runtime_directory("../invalid");
+        assert!(matches!(result, Err(RuntimeError::Invalid(_))));
+        assert!(!root.join(RUNTIME_DIR).exists());
+        if let Some(value) = old_data_dir {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn runtime_addon_dir_is_derived_from_checked_storage_root() {
