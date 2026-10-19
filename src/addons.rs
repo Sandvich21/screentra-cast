@@ -41,6 +41,8 @@ const HOST_RENDERERS: &[&str] = &[
 pub const MAX_ADDON_STORAGE_KEY_BYTES: usize = 128;
 pub const MAX_ADDON_STORAGE_VALUE_BYTES: usize = 64 * 1024;
 pub const MAX_CLIENT_STATUS_BYTES: usize = 256 * 1024;
+const MAX_CLIENT_STATUS_DETAIL_BYTES: usize = 160;
+const MAX_CLIENT_STATUS_ERROR_BYTES: usize = 96;
 
 /// Validate the addon namespace before it reaches either database backend.
 /// This is deliberately the same conservative identifier shape used by addon
@@ -276,17 +278,13 @@ pub struct ClientCapabilityStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientAddonStatusReport {
-    #[serde(default)]
     pub at: Option<String>,
-    #[serde(default)]
     pub addons: Vec<ClientAddonStatus>,
     /// Hardware/runtime observations are report-only until a capability broker
     /// and signed client service lifecycle are enabled.
-    #[serde(default)]
     pub capabilities: Vec<ClientCapabilityStatus>,
     /// Signed client-service observations are report-only until the trusted
     /// client supervisor and capability broker are enabled.
-    #[serde(default)]
     pub services: Vec<ClientServiceStatus>,
     #[serde(default)]
     pub error: Option<String>,
@@ -501,6 +499,11 @@ fn validate_client_status_timestamp(
 }
 
 fn validate_client_status_report(report: &ClientAddonStatusReport) -> Result<(), AddonError> {
+    if report.at.is_none() {
+        return Err(AddonError::Invalid(
+            "Addon status timestamp is required".to_string(),
+        ));
+    }
     validate_client_status_timestamp(report.at.as_deref(), "addon status timestamp")?;
     if report.addons.len() > 64 {
         return Err(AddonError::Invalid(
@@ -526,7 +529,7 @@ fn validate_client_status_report(report: &ClientAddonStatusReport) -> Result<(),
         }
         if !matches!(
             capability.state.as_str(),
-            "available" | "unavailable" | "disabled" | "error"
+            "available" | "unavailable" | "disabled"
         ) {
             return Err(AddonError::Invalid(
                 "Unsupported client capability state".to_string(),
@@ -535,7 +538,7 @@ fn validate_client_status_report(report: &ClientAddonStatusReport) -> Result<(),
         validate_client_status_text(
             capability.detail.as_deref(),
             "client capability detail",
-            256,
+            MAX_CLIENT_STATUS_DETAIL_BYTES,
             true,
         )?;
     }
@@ -566,7 +569,7 @@ fn validate_client_status_report(report: &ClientAddonStatusReport) -> Result<(),
         validate_client_status_text(
             service.detail.as_deref(),
             "client service detail",
-            256,
+            MAX_CLIENT_STATUS_DETAIL_BYTES,
             true,
         )?;
         validate_client_service_model_identity(
@@ -599,11 +602,16 @@ fn validate_client_status_report(report: &ClientAddonStatusReport) -> Result<(),
         validate_client_status_text(
             addon.error.as_deref(),
             "addon status error",
-            256,
+            MAX_CLIENT_STATUS_ERROR_BYTES,
             true,
         )?;
     }
-    validate_client_status_text(report.error.as_deref(), "addon status error", 256, true)
+    validate_client_status_text(
+        report.error.as_deref(),
+        "addon status error",
+        MAX_CLIENT_STATUS_ERROR_BYTES,
+        true,
+    )
 }
 
 pub fn save_client_status(
@@ -4283,6 +4291,58 @@ mod tests {
             );
             assert!(result.is_err(), "unsafe detail should be rejected: {detail:?}");
         }
+        let oversized_detail = save_client_status(
+            "client-1",
+            ClientAddonStatusReport {
+                at: Some("2026-10-19T12:00:00Z".to_string()),
+                addons: Vec::new(),
+                capabilities: vec![ClientCapabilityStatus {
+                    id: "render_only".to_string(),
+                    state: "available".to_string(),
+                    detail: Some("d".repeat(161)),
+                }],
+                services: Vec::new(),
+                error: None,
+            },
+        );
+        assert!(oversized_detail.is_err());
+        let oversized_error = save_client_status(
+            "client-1",
+            ClientAddonStatusReport {
+                at: Some("2026-10-19T12:00:00Z".to_string()),
+                addons: Vec::new(),
+                capabilities: Vec::new(),
+                services: Vec::new(),
+                error: Some("e".repeat(97)),
+            },
+        );
+        assert!(oversized_error.is_err());
+        let error_state = save_client_status(
+            "client-1",
+            ClientAddonStatusReport {
+                at: Some("2026-10-19T12:00:00Z".to_string()),
+                addons: Vec::new(),
+                capabilities: vec![ClientCapabilityStatus {
+                    id: "render_only".to_string(),
+                    state: "error".to_string(),
+                    detail: None,
+                }],
+                services: Vec::new(),
+                error: None,
+            },
+        );
+        assert!(error_state.is_err());
+        let missing_timestamp = save_client_status(
+            "client-1",
+            ClientAddonStatusReport {
+                at: None,
+                addons: Vec::new(),
+                capabilities: Vec::new(),
+                services: Vec::new(),
+                error: None,
+            },
+        );
+        assert!(missing_timestamp.is_err());
         let invalid_timestamp = save_client_status(
             "client-1",
             ClientAddonStatusReport {
@@ -4342,6 +4402,9 @@ mod tests {
     #[test]
     fn client_service_model_identity_round_trip_preserves_optional_metadata() {
         let report: ClientAddonStatusReport = serde_json::from_value(serde_json::json!({
+            "at": "2026-10-19T12:00:00Z",
+            "addons": [],
+            "capabilities": [],
             "services": [{
                 "id": "speech-to-text",
                 "version": "1.0.0",
@@ -4356,6 +4419,9 @@ mod tests {
         assert_eq!(encoded["services"][0]["model_sha256"], "a".repeat(64));
 
         let legacy: ClientAddonStatusReport = serde_json::from_value(serde_json::json!({
+            "at": "2026-10-19T12:00:00Z",
+            "addons": [],
+            "capabilities": [],
             "services": [{
                 "id": "speech-to-text",
                 "version": "1.0.0",
@@ -4419,6 +4485,9 @@ mod tests {
                 service[key] = value.clone();
             }
             let report: ClientAddonStatusReport = serde_json::from_value(serde_json::json!({
+                "at": "2026-10-19T12:00:00Z",
+                "addons": [],
+                "capabilities": [],
                 "services": [service]
             }))
             .expect("model identity test status should deserialize");
@@ -4449,6 +4518,9 @@ mod tests {
         let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
         unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &data_root); }
         let report: ClientAddonStatusReport = serde_json::from_value(serde_json::json!({
+            "at": "2026-10-19T12:00:00Z",
+            "addons": [],
+            "capabilities": [],
             "services": [{
                 "id": "speech-to-text",
                 "version": "1.0.0",
@@ -4557,7 +4629,9 @@ mod tests {
             "addons": [
                 {"id": "weather", "state": "verified"},
                 {"id": "weather", "state": "failed"}
-            ]
+            ],
+            "capabilities": [],
+            "services": []
         }))
         .unwrap();
         assert!(save_client_status("client-1", invalid_report).is_err());

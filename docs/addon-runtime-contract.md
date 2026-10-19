@@ -59,12 +59,15 @@ rejects control characters and credential-, path-, or URL-shaped detail/error
 strings before persisting snapshots. The server also revalidates stored snapshots
 on readback, including the client identity, closed JSON field set, bounds, RFC3339
 timestamps, and detail safety rules; tampered or legacy-shaped files fail closed
-instead of being returned to callers.
+instead of being returned to callers. Capability/service detail text is limited to
+160 UTF-8 bytes, add-on/report error text to 96 UTF-8 bytes, and the client and
+server enforce the same limits.
 
 The player heartbeat has a stricter, separate report boundary in
-`screentra-client-status-report-admission.py`. While the trusted client supervisor
-is disabled, its report must contain `services: []`; running, healthy, queued, or
-process observations cannot be represented by the heartbeat cache. Capability
+`screentra-client-status-report-admission.py`. Its closed top-level report shape
+requires `at`, `addons`, `capabilities`, and `services` (with `error` optional); while
+the trusted client supervisor is disabled, `services` must be `[]`. Running, healthy,
+queued, or process observations cannot be represented by the heartbeat cache. Capability
 observations are limited to the closed capability/state vocabulary, bounded
 control-free details, and a bounded JSON envelope. Add-on entries likewise use a
 closed `id`/version/state/entrypoint/error shape with verified-state vocabulary,
@@ -91,7 +94,7 @@ the client envelope, and reject arbitrary lifecycle fields. Service start, stop,
 update, and rollback actions are not allowlisted and fail closed.
 
 The heartbeat may report `available`, `unavailable`,
-`disabled`, or `error` plus a bounded diagnostic detail. These observations are
+or `disabled` plus a bounded diagnostic detail. These observations are
 health metadata only: `available` means the local prerequisite was detected, not
 that an add-on has permission to use it. The current heartbeat reports camera
 and ALSA microphone device presence, while `client_service` and
