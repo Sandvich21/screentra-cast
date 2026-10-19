@@ -188,6 +188,13 @@ renderer's perspective. A failed replacement must leave the last known-good
 active package intact. A disabled or removed addon must not be loaded on the
 next renderer start.
 
+The ordinary addon storage root is a checked private directory with exact `0700`
+permissions. It is created with that mode and every listing, install, update,
+enable/disable, package-read, removal, and rollback path rejects a symlink,
+non-directory, or permission drift before using child paths. Child paths are
+derived from the checked root rather than reconstructed from raw
+`SIGNAGE_DATA_DIR`.
+
 ## Rollback and reporting
 
 The current server-side signed-package lifecycle has a separate
