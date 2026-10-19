@@ -13,6 +13,7 @@ IPC_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-ipc-policy-
 ROLLBACK_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-rollback-policy-evidence.py'
 CAPABILITY_ADMISSION_MODULE_PATH = ROOT / 'player-client/scripts/screentra-capability-admission.py'
 RUNTIME_INSTALLATION_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-runtime-installation-evidence.py'
+AUDIO_PERMISSION_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-audio-permission-evidence.py'
 
 
 def load_approval_module():
@@ -98,6 +99,22 @@ def load_runtime_installation_evidence_module():
     return module
 
 
+def load_audio_permission_evidence_module():
+    module_name = 'screentra_stt_audio_permission_evidence'
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        AUDIO_PERMISSION_EVIDENCE_MODULE_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 admission = load_module()
 approval = load_approval_module()
 resource_policy = load_resource_policy_module()
@@ -105,6 +122,7 @@ ipc_policy = load_ipc_policy_module()
 rollback_policy = load_rollback_policy_module()
 capability_admission = load_capability_admission_module()
 runtime_installation_evidence = load_runtime_installation_evidence_module()
+audio_permission_evidence = load_audio_permission_evidence_module()
 
 
 SERVICE_ID = 'magic-mirror-stt'
@@ -344,6 +362,27 @@ def valid_runtime_installation_evidence(**overrides):
     return runtime_installation_evidence.validate_stt_runtime_installation_evidence(value)
 
 
+def valid_audio_permission_evidence(**overrides):
+    value = {
+        'service_id': SERVICE_ID,
+        'activation_id': ACTIVATION_ID,
+        'host_id': HOST_ID,
+        'audio_backend': 'pipewire',
+        'permission_source': 'group_membership',
+        'permission_observed': True,
+        'capture_device_observed': True,
+        'user_service_observed': True,
+        'non_capture_check': True,
+    }
+    value.update(overrides)
+    return audio_permission_evidence.validate_stt_audio_permission_evidence(
+        value,
+        expected_service_id=SERVICE_ID,
+        expected_activation_id=ACTIVATION_ID,
+        expected_host_id=HOST_ID,
+    )
+
+
 def valid_request(**overrides):
     value = {
         'approval_record': valid_approval_record(),
@@ -355,6 +394,7 @@ def valid_request(**overrides):
         'rollback_policy_evidence': valid_rollback_policy(),
         'capability_admission': valid_capability_admission(),
         'runtime_installation_evidence': valid_runtime_installation_evidence(),
+        'audio_permission_evidence': valid_audio_permission_evidence(),
     }
     value.update(overrides)
     return value
@@ -493,6 +533,107 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
                     module.decide_runtime_admission(
                         valid_request(runtime_installation_evidence=evidence)
                     )
+
+    def test_audio_permission_evidence_is_composed_as_exact_inert_identity_bound_type(self):
+        module = self.require_module()
+        result = module.decide_runtime_admission(valid_request())
+
+        self.assertEqual(result['admission'], 'approved_for_future_review')
+        self.assertTrue(result['evidence_composed']['audio_permission'])
+        self.assertEqual(result['audio_backend'], 'pipewire')
+        self.assertEqual(result['permission_source'], 'group_membership')
+        self.assertEqual(
+            tuple(result['audio_permission_identity_tuple']),
+            (SERVICE_ID, ACTIVATION_ID, HOST_ID, 'pipewire', 'group_membership'),
+        )
+        for field in (
+            'execution_enabled', 'runtime_activation_allowed',
+            'hardware_permission_activated', 'microphone_accessed',
+            'audio_captured', 'listener_bound', 'process_started',
+            'socket_bound', 'model_loaded', 'resource_enforced',
+            'ipc_enforced', 'rollback_executed', 'lifecycle_state_changed',
+        ):
+            self.assertFalse(result[field], field)
+        self.assertNotIn('runtime_ready', result)
+
+    def test_audio_permission_evidence_requires_exact_validated_type_and_no_claims(self):
+        module = self.require_module()
+        valid = valid_audio_permission_evidence()
+        for value in (valid.as_dict(), {'service_id': SERVICE_ID}, None):
+            with self.subTest(value=value):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(audio_permission_evidence=value)
+                    )
+
+        class DerivedAudioPermissionEvidence(audio_permission_evidence.STTAudioPermissionEvidence):
+            pass
+
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(
+                valid_request(
+                    audio_permission_evidence=DerivedAudioPermissionEvidence(
+                        **dataclasses.asdict(valid)
+                    )
+                )
+            )
+
+        for tampered in (
+            dataclasses.replace(valid, service_id='other-service'),
+            dataclasses.replace(valid, activation_id='other-activation'),
+            dataclasses.replace(valid, host_id='other-host'),
+            dataclasses.replace(valid, policy_valid=False),
+            dataclasses.replace(valid, execution_enabled=True),
+            dataclasses.replace(valid, runtime_activation_allowed=True),
+            dataclasses.replace(valid, hardware_permission_activated=True),
+            dataclasses.replace(valid, microphone_accessed=True),
+            dataclasses.replace(valid, audio_captured=True),
+            dataclasses.replace(valid, listener_bound=True),
+        ):
+            with self.subTest(tampered=tampered):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(audio_permission_evidence=tampered)
+                    )
+
+    def test_audio_permission_evidence_rejects_failed_policy(self):
+        module = self.require_module()
+        failed = audio_permission_evidence.validate_stt_audio_permission_evidence(
+            {
+                'service_id': SERVICE_ID,
+                'activation_id': ACTIVATION_ID,
+                'host_id': HOST_ID,
+                'audio_backend': 'pipewire',
+                'permission_source': 'user_service',
+                'permission_observed': False,
+                'capture_device_observed': True,
+                'user_service_observed': True,
+                'non_capture_check': True,
+            },
+            expected_service_id=SERVICE_ID,
+            expected_activation_id=ACTIVATION_ID,
+            expected_host_id=HOST_ID,
+        )
+        self.assertFalse(failed.policy_valid)
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(
+                valid_request(audio_permission_evidence=failed)
+            )
+
+    def test_audio_permission_raw_claims_are_not_request_fields(self):
+        module = self.require_module()
+        for extra in (
+            {'permission_activated': True},
+            {'capture_started': True},
+            {'audio_bytes': 'AA=='},
+            {'device_path': '/dev/snd'},
+            {'readiness_claim': True},
+        ):
+            with self.subTest(extra=extra):
+                request = valid_request()
+                request.update(extra)
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(request)
 
     def test_capability_admission_requires_exact_validated_immutable_result_type(self):
         module = self.require_module()

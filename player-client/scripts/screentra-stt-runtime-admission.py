@@ -55,6 +55,7 @@ _REQUEST_FIELDS: Final = frozenset({
     'supervisor_plan', 'resource_policy_evidence', 'ipc_policy_evidence',
     'rollback_policy_evidence',
     'runtime_installation_evidence',
+    'audio_permission_evidence',
 })
 _REQUIRED_REQUEST_FIELDS: Final = _REQUEST_FIELDS
 _PREFLIGHT_FIELDS: Final = frozenset({
@@ -578,6 +579,66 @@ def _validated_runtime_installation(value: Any, expected: dict[str, str]) -> Any
     return value
 
 
+def _audio_permission_module() -> Any:
+    module_name = 'screentra_stt_audio_permission_evidence'
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    module_path = Path(__file__).with_name('screentra-stt-audio-permission-evidence.py')
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise _fail('runtime admission audio-permission evidence is invalid')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise _fail('runtime admission audio-permission evidence is invalid') from exc
+    return module
+
+
+def _validated_audio_permission(value: Any, expected: dict[str, str]) -> Any:
+    """Accept only the exact immutable, identity-bound permission result type."""
+    module = _audio_permission_module()
+    if type(value) is not module.STTAudioPermissionEvidence:
+        raise _fail('runtime admission audio-permission evidence is invalid')
+    try:
+        raw = {
+            'service_id': value.service_id,
+            'activation_id': value.activation_id,
+            'host_id': value.host_id,
+            'audio_backend': value.audio_backend,
+            'permission_source': value.permission_source,
+            'permission_observed': value.permission_observed,
+            'capture_device_observed': value.capture_device_observed,
+            'user_service_observed': value.user_service_observed,
+            'non_capture_check': value.non_capture_check,
+        }
+        validated = module.validate_stt_audio_permission_evidence(
+            raw,
+            expected_service_id=expected['service_id'],
+            expected_activation_id=expected['activation_id'],
+            expected_host_id=expected['host_id'],
+        )
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        raise _fail('runtime admission audio-permission evidence is invalid') from exc
+    if validated != value:
+        raise _fail('runtime admission audio-permission evidence is invalid')
+    if (
+        value.policy_valid is not True
+        or value.execution_enabled is not False
+        or value.runtime_activation_allowed is not False
+        or value.hardware_permission_activated is not False
+        or value.microphone_accessed is not False
+        or value.audio_captured is not False
+        or value.listener_bound is not False
+        or value.effect != 'metadata_only'
+    ):
+        raise _fail('runtime admission audio-permission evidence is invalid')
+    return value
+
+
 def _capability_admission_module() -> Any:
     module_name = 'screentra_capability_admission'
     module = sys.modules.get(module_name)
@@ -719,6 +780,9 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     runtime_installation = _validated_runtime_installation(
         request['runtime_installation_evidence'], expected
     )
+    audio_permission = _validated_audio_permission(
+        request['audio_permission_evidence'], expected
+    )
     try:
         _validate_preflight(request['preflight_evidence'], expected)
         _validate_model_plan(request['model_staging_plan'], expected)
@@ -735,6 +799,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     bounded_request['ipc_policy_evidence'] = ipc_policy.as_dict()
     bounded_request['rollback_policy_evidence'] = rollback_policy.as_dict()
     bounded_request['runtime_installation_evidence'] = runtime_installation.as_dict()
+    bounded_request['audio_permission_evidence'] = audio_permission.as_dict()
     _bounded_json(bounded_request, MAX_REQUEST_BYTES, 'runtime admission request is not bounded')
 
     all_gates_passed = all(gate.passed for gate in approval.gates)
@@ -746,9 +811,12 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'execution_enabled': False,
         'hardware_permission_activated': False,
         'microphone_access': False,
+        'microphone_accessed': False,
+        'audio_captured': False,
         'camera_access': False,
         'process_started': False,
         'socket_bound': False,
+        'listener_bound': False,
         'model_loaded': False,
         'service_started': False,
         'resource_enforced': False,
@@ -760,6 +828,8 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'service_version': expected['service_version'],
         'activation_id': expected['activation_id'],
         'host_id': expected['host_id'],
+        'audio_backend': audio_permission.audio_backend,
+        'permission_source': audio_permission.permission_source,
         'client_id': capability.client_id,
         'addon_id': capability.addon_id,
         'requested_capabilities': tuple(capability.requested_capabilities),
@@ -781,6 +851,13 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             runtime_installation.runtime_sha256,
             runtime_installation.model_id,
             runtime_installation.model_sha256,
+        ),
+        'audio_permission_identity_tuple': (
+            audio_permission.service_id,
+            audio_permission.activation_id,
+            audio_permission.host_id,
+            audio_permission.audio_backend,
+            audio_permission.permission_source,
         ),
         'socket_name': ipc_policy.socket_name,
         'protocol_version': ipc_policy.protocol_version,
@@ -815,6 +892,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             'ipc_policy': True,
             'rollback_policy': True,
             'runtime_installation': True,
+            'audio_permission': True,
         },
     }
 

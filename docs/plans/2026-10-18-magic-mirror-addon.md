@@ -43,11 +43,33 @@ The pure `screentra-stt-client-preflight-evidence.py` evaluator accepts only a b
 
 ### STT runtime-admission evidence boundary
 
-The pure `screentra-stt-runtime-admission.py` module composes the preflight, model, supervisor, resource-policy, and local-IPC metadata outputs with only immutable validated result types for approval, resource, and IPC evidence. It binds the full service/version/activation/host/model identity tuple and exact seven-gate inventory, and binds IPC service/activation/socket/protocol/operation metadata across the supervisor and IPC-policy results while rejecting raw, arbitrary, tampered, or identity-drifting evidence. A complete all-passed record may return `admission: approved_for_future_review`, but `runtime_activation_allowed`, `execution_enabled`, `process_started`, `socket_bound`, `model_loaded`, `resource_enforced`, `ipc_enforced`, and lifecycle-state changes remain false. This is a fail-closed metadata boundary, not runtime readiness or activation; it is not wired to listeners, startup, routes, installers, hardware, audio, model/image loading, or remote hosts.
+The pure `screentra-stt-runtime-admission.py` module composes the preflight, model, supervisor, resource-policy, local-IPC, and bounded audio-permission metadata outputs with only immutable validated result types for approval, resource, IPC, installation, and audio-permission evidence. It binds the full service/version/activation/host/model identity tuple and exact seven-gate inventory, and binds IPC service/activation/socket/protocol/operation metadata across the supervisor and IPC-policy results while binding audio-permission service/activation/host/backend/source metadata and rejecting raw, arbitrary, tampered, or identity-drifting evidence. A complete all-passed record may return `admission: approved_for_future_review`, but `runtime_activation_allowed`, `execution_enabled`, `hardware_permission_activated`, `microphone_accessed`, `audio_captured`, `listener_bound`, `process_started`, `socket_bound`, `model_loaded`, `resource_enforced`, `ipc_enforced`, and lifecycle-state changes remain false. This is a fail-closed metadata boundary, not runtime readiness or activation; it is not wired to listeners, startup, routes, installers, hardware, audio, model/image loading, or remote hosts.
 
 ### STT bounded runtime/model installation evidence
 
 The pure `screentra-stt-runtime-installation-evidence.py` contract is a separate installation-evidence slice. It binds `magic-mirror-stt`, activation `activation-20261018-01`, service version `0.1.0`, the allowlisted `whisper.cpp` runtime at version `1.9.5` and source commit `d1be6fde11ac6e0407606b4e42fe72d34add8037`, plus the installed runtime digest `d8b3d4f22d96f2a5c26cc34966927c69ab88406b52cdc7cee7c94e75bee16d97` and `whisper-tiny.en` model digest `921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f`. `policy_valid` and `artifacts_verified` require both artifact checks and the explicit non-starting check, while every execution, activation, process, model-load, and service-start flag remains false. Installation evidence proves only bounded artifact identity and a non-starting verification record; it is not runtime readiness and does not prove a listener, capture path, inference, model loading, service health, resource enforcement, or lifecycle activation. Runtime admission consumes only this exact immutable result type and rejects raw, arbitrary, tampered, or mismatched evidence.
+
+### STT bounded audio-permission evidence boundary
+
+The pure `screentra-stt-audio-permission-evidence.py` contract accepts only a
+closed, bounded record bound to the service, activation, and host identities,
+with `audio_backend: pipewire`, a `group_membership` or `user_service`
+permission source, and four real boolean observations. `policy_valid` can be
+true only when `permission_observed`, `capture_device_observed`,
+`user_service_observed`, and `non_capture_check` are all true. The frozen result
+always forces execution, runtime activation, hardware-permission activation,
+microphone access, audio capture, and listener binding false and carries no
+readiness claim. It rejects paths, URLs, commands, credentials, raw audio or
+audio bytes, device-control fields, hardware-capture claims, and oversized or
+identity-drifting records.
+
+Audio-permission evidence is not permission activation: observing a permission
+source or a capture device does not grant or activate microphone permission.
+Permission activation remains a separate deferred gate and must have its own
+explicit authorization and runtime evidence. Capture is a third, independent
+boundary: no microphone or camera is accessed, no audio is captured, and no
+listener or service is started by this evidence contract or by its runtime-
+admission integration.
 
 ### STT future-activation approval-record boundary
 
