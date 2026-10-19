@@ -59,6 +59,7 @@ class ClientStatusReportAdmissionTests(unittest.TestCase):
             valid_report(capabilities=[{'id': 'unknown', 'state': 'available', 'detail': 'x'}]),
             valid_report(capabilities=[{'id': 'render_only', 'state': 'running', 'detail': 'x'}]),
             valid_report(capabilities=[{'id': 'render_only', 'state': 'available'}]),
+            valid_report(at='2026-99-99T12:00:00Z'),
             valid_report(capabilities=[{'id': 'render_only', 'state': 'available', 'detail': '/dev/video0'}]),
         )
         for candidate in invalid:

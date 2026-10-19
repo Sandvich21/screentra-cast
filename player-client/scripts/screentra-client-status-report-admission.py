@@ -3,6 +3,7 @@
 import json
 import re
 from collections.abc import Mapping
+from datetime import datetime
 
 MAX_REPORT_BYTES = 256 * 1024
 MAX_CAPABILITIES = 8
@@ -63,6 +64,10 @@ def validate_status_report(report):
     timestamp = report.get('at')
     if not isinstance(timestamp, str) or not _TIMESTAMP_RE.fullmatch(timestamp):
         raise StatusReportError('invalid status report timestamp')
+    try:
+        datetime.strptime(timestamp, '%Y-%m-%dT%H:%M:%SZ')
+    except ValueError as exc:
+        raise StatusReportError('invalid status report timestamp') from exc
     addons = report.get('addons')
     if not isinstance(addons, list) or len(addons) > MAX_ADDONS:
         raise StatusReportError('invalid status report addons')
