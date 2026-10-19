@@ -433,16 +433,39 @@ fn checked_client_status_dir(create: bool) -> Result<Option<PathBuf>, AddonError
     }
 }
 
+fn validate_client_status_text(
+    value: Option<&str>,
+    field: &str,
+    maximum_bytes: usize,
+    reject_sensitive_markers: bool,
+) -> Result<(), AddonError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let lowered = value.to_ascii_lowercase();
+    let sensitive = ["password", "credential", "secret", "token", "://", "/"];
+    if value.len() > maximum_bytes
+        || value
+            .chars()
+            .any(|character| character.is_control())
+        || (reject_sensitive_markers && sensitive.iter().any(|marker| lowered.contains(marker)))
+    {
+        return Err(AddonError::Invalid(format!("Invalid {field}")));
+    }
+    Ok(())
+}
+
 pub fn save_client_status(
     client_id: &str,
     report: ClientAddonStatusReport,
 ) -> Result<(), AddonError> {
     let path = client_status_path(client_id)?;
-    if report.at.as_deref().map_or(false, |value| value.len() > 64) {
-        return Err(AddonError::Invalid(
-            "Addon status timestamp is too long".to_string(),
-        ));
-    }
+    validate_client_status_text(
+        report.at.as_deref(),
+        "addon status timestamp",
+        64,
+        false,
+    )?;
     if report.addons.len() > 64 {
         return Err(AddonError::Invalid(
             "Addon status contains too many entries".to_string(),
@@ -473,15 +496,12 @@ pub fn save_client_status(
                 "Unsupported client capability state".to_string(),
             ));
         }
-        if capability
-            .detail
-            .as_deref()
-            .map_or(false, |value| value.len() > 256)
-        {
-            return Err(AddonError::Invalid(
-                "Client capability detail is too long".to_string(),
-            ));
-        }
+        validate_client_status_text(
+            capability.detail.as_deref(),
+            "client capability detail",
+            256,
+            true,
+        )?;
     }
     if report.services.len() > 16 {
         return Err(AddonError::Invalid(
@@ -507,15 +527,12 @@ pub fn save_client_status(
                 "Client service restart count exceeds the bounded limit".to_string(),
             ));
         }
-        if service
-            .detail
-            .as_deref()
-            .map_or(false, |value| value.len() > 256)
-        {
-            return Err(AddonError::Invalid(
-                "Client service detail is too long".to_string(),
-            ));
-        }
+        validate_client_status_text(
+            service.detail.as_deref(),
+            "client service detail",
+            256,
+            true,
+        )?;
         validate_client_service_model_identity(
             service.model_id.as_deref(),
             service.model_sha256.as_deref(),
@@ -537,25 +554,14 @@ pub fn save_client_status(
         if let Some(entrypoint) = addon.entrypoint.as_deref() {
             validate_relative_client_path(entrypoint)?;
         }
-        if addon
-            .error
-            .as_deref()
-            .map_or(false, |value| value.len() > 256)
-        {
-            return Err(AddonError::Invalid(
-                "Addon status error is too long".to_string(),
-            ));
-        }
+        validate_client_status_text(
+            addon.error.as_deref(),
+            "addon status error",
+            256,
+            true,
+        )?;
     }
-    if report
-        .error
-        .as_deref()
-        .map_or(false, |value| value.len() > 256)
-    {
-        return Err(AddonError::Invalid(
-            "Addon status error is too long".to_string(),
-        ));
-    }
+    validate_client_status_text(report.error.as_deref(), "addon status error", 256, true)?;
     let payload = serde_json::json!({
         "client_id": client_id,
         "received_at": chrono::Utc::now().to_rfc3339(),
@@ -4150,6 +4156,58 @@ mod tests {
         }
         let _ = fs::remove_dir_all(root);
     }
+    #[test]
+    fn rejects_unsafe_client_status_details_without_writing() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-cast-addon-unsafe-status-detail-test-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let data_root = root.join("data");
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_root);
+        }
+        for detail in [
+            "password=redacted",
+            "credential-token",
+            "https://example.invalid",
+            "/dev/video0",
+            "line\nstatus",
+        ] {
+            let result = save_client_status(
+                "client-1",
+                ClientAddonStatusReport {
+                    at: Some("2026-10-19T12:00:00Z".to_string()),
+                    addons: Vec::new(),
+                    capabilities: vec![ClientCapabilityStatus {
+                        id: "render_only".to_string(),
+                        state: "available".to_string(),
+                        detail: Some(detail.to_string()),
+                    }],
+                    services: Vec::new(),
+                    error: None,
+                },
+            );
+            assert!(result.is_err(), "unsafe detail should be rejected: {detail:?}");
+        }
+        assert!(!data_root.join("addon-client-status").exists());
+        if let Some(value) = old_data_root {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn client_capability_status_round_trip_is_bounded() {
         let report = ClientAddonStatusReport {

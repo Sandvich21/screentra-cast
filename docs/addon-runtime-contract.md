@@ -54,7 +54,9 @@ states are report-only and currently include `staged`, `starting`, `running`,
 stop anything. The pure client-service lifecycle module and its focused tests
 validate only bounded metadata and explicit state transitions; they are contract
 evidence, not runtime or process-execution evidence. Restart counts and diagnostic
-details are bounded, and duplicate service IDs are rejected.
+details are bounded, and duplicate service IDs are rejected. Server admission also
+rejects control characters and credential-, path-, or URL-shaped detail/error
+strings before persisting the snapshot.
 
 The player heartbeat has a stricter, separate report boundary in
 `screentra-client-status-report-admission.py`. While the trusted client supervisor
