@@ -189,7 +189,9 @@ active package intact. A disabled or removed addon must not be loaded on the
 next renderer start.
 
 The ordinary addon storage root is a checked private directory with exact `0700`
-permissions. It is created with that mode and every listing, install, update,
+permissions. Newly installed addon directories use exact `0700` permissions,
+and their manifest/state files are published atomically with exact `0600`
+permissions. The root is created with that mode and every listing, install, update,
 enable/disable, package-read, removal, and rollback path rejects a symlink,
 non-directory, or permission drift before using child paths. Recursive removal
 also rechecks the storage-root and addon-directory device/inode identities

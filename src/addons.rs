@@ -1572,6 +1572,36 @@ pub fn list() -> Result<Vec<AddonRecord>, AddonError> {
     Ok(records)
 }
 
+fn create_private_addon_directory(dir: &Path) -> Result<(), AddonError> {
+    let parent = dir
+        .parent()
+        .ok_or_else(|| AddonError::Invalid("Invalid addon directory parent".to_string()))?;
+    reject_symlinked_path_ancestors(parent, "Invalid addon directory parent")?;
+    let parent_metadata = fs::symlink_metadata(parent).map_err(io_error)?;
+    validate_private_addon_storage_directory(&parent_metadata)?;
+    let mut directory_builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directory_builder.mode(0o700);
+    }
+    directory_builder.create(dir).map_err(io_error)?;
+    let metadata = fs::symlink_metadata(dir).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AddonError::Invalid("Invalid addon directory".to_string()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o777 != 0o700 {
+            return Err(AddonError::Invalid(
+                "Addon directory permissions are insecure".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn install(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
     validate_manifest(&manifest)?;
     let root = checked_addon_storage_dir(true)?.ok_or_else(|| {
@@ -1583,7 +1613,7 @@ pub fn install(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(io_error(error)),
     }
-    fs::create_dir_all(&dir).map_err(io_error)?;
+    create_private_addon_directory(&dir)?;
     let installed_at = chrono::Utc::now().to_rfc3339();
     let state = AddonState {
         enabled: true,
@@ -1591,11 +1621,15 @@ pub fn install(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
     };
     let manifest_text = serde_json::to_string_pretty(&manifest).map_err(io_error)?;
     let state_text = serde_json::to_string_pretty(&state).map_err(io_error)?;
-    if let Err(error) = fs::write(dir.join(MANIFEST_FILE), manifest_text)
-        .and_then(|_| fs::write(dir.join(STATE_FILE), state_text))
+    if let Err(error) = write_addon_file_atomic(
+        &dir.join(MANIFEST_FILE),
+        manifest_text.as_bytes(),
+        "manifest",
+    )
+    .and_then(|_| write_addon_file_atomic(&dir.join(STATE_FILE), state_text.as_bytes(), "state"))
     {
         let _ = fs::remove_dir_all(&dir);
-        return Err(io_error(error));
+        return Err(error);
     }
     Ok(AddonRecord {
         manifest,
@@ -5259,6 +5293,39 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         assert!(matches!(result, Err(AddonError::Invalid(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_creates_private_addon_directory_and_metadata() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("screentra-addon-install-private-{}", Uuid::new_v4()));
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+
+        let installed = install(manifest()).unwrap();
+        let addon_root = root.join("addons").join(&installed.manifest.id);
+        let modes = [addon_root.clone(), addon_root.join(MANIFEST_FILE), addon_root.join(STATE_FILE)]
+            .into_iter()
+            .map(|path| fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777)
+            .collect::<Vec<_>>();
+
+        if let Some(value) = old_data_root {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(modes, vec![0o700, 0o600, 0o600]);
     }
 
     #[test]
