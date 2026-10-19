@@ -217,6 +217,7 @@ struct AddonState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientAddonStatus {
     pub id: String,
     #[serde(default)]
@@ -229,6 +230,7 @@ pub struct ClientAddonStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientServiceStatus {
     pub id: String,
     pub version: String,
@@ -262,6 +264,7 @@ const CLIENT_CAPABILITIES: &[&str] = &[
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientCapabilityStatus {
     pub id: String,
     pub state: String,
@@ -270,6 +273,7 @@ pub struct ClientCapabilityStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientAddonStatusReport {
     #[serde(default)]
     pub at: Option<String>,
@@ -285,6 +289,14 @@ pub struct ClientAddonStatusReport {
     pub services: Vec<ClientServiceStatus>,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredClientStatusPayload {
+    client_id: String,
+    received_at: String,
+    report: ClientAddonStatusReport,
 }
 
 #[derive(Debug)]
@@ -455,11 +467,7 @@ fn validate_client_status_text(
     Ok(())
 }
 
-pub fn save_client_status(
-    client_id: &str,
-    report: ClientAddonStatusReport,
-) -> Result<(), AddonError> {
-    let path = client_status_path(client_id)?;
+fn validate_client_status_report(report: &ClientAddonStatusReport) -> Result<(), AddonError> {
     validate_client_status_text(
         report.at.as_deref(),
         "addon status timestamp",
@@ -561,7 +569,15 @@ pub fn save_client_status(
             true,
         )?;
     }
-    validate_client_status_text(report.error.as_deref(), "addon status error", 256, true)?;
+    validate_client_status_text(report.error.as_deref(), "addon status error", 256, true)
+}
+
+pub fn save_client_status(
+    client_id: &str,
+    report: ClientAddonStatusReport,
+) -> Result<(), AddonError> {
+    let path = client_status_path(client_id)?;
+    validate_client_status_report(&report)?;
     let payload = serde_json::json!({
         "client_id": client_id,
         "received_at": chrono::Utc::now().to_rfc3339(),
@@ -602,7 +618,16 @@ pub fn load_client_status(client_id: &str) -> Result<Option<serde_json::Value>, 
             "Stored addon status is too large".to_string(),
         ));
     }
-    serde_json::from_slice(&bytes)
+    let payload: StoredClientStatusPayload = serde_json::from_slice(&bytes)
+        .map_err(|error| AddonError::Io(format!("Invalid stored addon status: {error}")))?;
+    if payload.client_id != client_id {
+        return Err(AddonError::Invalid(
+            "Stored addon status client identity mismatch".to_string(),
+        ));
+    }
+    validate_client_status_text(Some(&payload.received_at), "stored addon status timestamp", 64, false)?;
+    validate_client_status_report(&payload.report)?;
+    serde_json::to_value(payload)
         .map(Some)
         .map_err(|error| AddonError::Io(format!("Invalid stored addon status: {error}")))
 }
@@ -4432,6 +4457,11 @@ mod tests {
         assert_eq!(loaded["report"]["addons"][0]["state"], "verified_cached");
         assert_eq!(loaded["report"]["capabilities"][0]["id"], "render_only");
         assert_eq!(loaded["report"]["services"][0]["state"], "running");
+        let mut tampered = saved;
+        tampered["report"]["capabilities"][0]["detail"] =
+            serde_json::Value::String("password=redacted".to_string());
+        fs::write(entries[0].path(), serde_json::to_vec(&tampered).unwrap()).unwrap();
+        assert!(load_client_status("client-1").is_err());
         if let Some(value) = old_data_root {
             unsafe {
                 std::env::set_var("SIGNAGE_DATA_DIR", value);
