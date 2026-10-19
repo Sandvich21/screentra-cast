@@ -117,6 +117,11 @@ fn checked_runtime_root(create: bool) -> Result<Option<PathBuf>, RuntimeError> {
         .map_err(|error| RuntimeError::Invalid(error.to_string()))
 }
 
+fn runtime_addon_dir(runtime_root: &Path, addon_id: &str) -> Result<PathBuf, RuntimeError> {
+    addons::validate_addon_storage_namespace(addon_id).map_err(RuntimeError::Invalid)?;
+    Ok(runtime_root.join(addon_id))
+}
+
 fn validate_private_runtime_directory(
     metadata: &fs::Metadata,
     description: &str,
@@ -137,7 +142,6 @@ fn validate_private_runtime_directory(
 }
 
 fn record_dir(addon_id: &str) -> Result<PathBuf, RuntimeError> {
-    addons::validate_addon_storage_namespace(addon_id).map_err(RuntimeError::Invalid)?;
     let root = checked_runtime_root(false)?.ok_or(RuntimeError::NotFound)?;
     let metadata = fs::symlink_metadata(&root).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -147,7 +151,7 @@ fn record_dir(addon_id: &str) -> Result<PathBuf, RuntimeError> {
         }
     })?;
     validate_private_runtime_directory(&metadata, "Invalid trusted service runtime root")?;
-    Ok(root.join(addon_id))
+    runtime_addon_dir(&root, addon_id)
 }
 
 fn record_path(addon_id: &str) -> Result<PathBuf, RuntimeError> {
@@ -1802,6 +1806,13 @@ impl Drop for DisposableRuntimeHarness {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn runtime_addon_dir_is_derived_from_checked_storage_root() {
+        let root = PathBuf::from("/tmp/screentra-runtime-root");
+        let path = runtime_addon_dir(&root, "trusted-addon").expect("valid addon id");
+        assert_eq!(path, root.join("trusted-addon"));
+    }
 
     #[test]
     fn activation_gates_are_fail_closed() {
