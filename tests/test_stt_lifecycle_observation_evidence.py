@@ -44,6 +44,19 @@ def valid_observation(**overrides):
     return value
 
 
+def runtime_test_module():
+    module = sys.modules.get('test_stt_runtime_admission') or sys.modules.get(
+        'tests.test_stt_runtime_admission'
+    )
+    if module is not None:
+        return module
+    try:
+        import tests.test_stt_runtime_admission as module
+    except ModuleNotFoundError:
+        import test_stt_runtime_admission as module
+    return module
+
+
 class DuplicateKeyMapping(Mapping):
     def __init__(self, pairs):
         self._pairs = pairs
@@ -178,11 +191,14 @@ class STTLifecycleObservationEvidenceTests(unittest.TestCase):
     def test_admission_composes_only_exact_lifecycle_type_and_preserves_inert_flags(self):
         self.assertIsNotNone(admission, 'runtime admission module is not available')
         self.require_lifecycle()
-        from test_stt_runtime_admission import valid_request
+        runtime_tests = runtime_test_module()
+        runtime_admission = runtime_tests.admission
+        runtime_lifecycle = runtime_tests.lifecycle_observation_evidence
+        valid_request = runtime_tests.valid_request
 
-        evidence = lifecycle.validate_stt_lifecycle_observation_evidence(valid_observation())
+        evidence = runtime_lifecycle.validate_stt_lifecycle_observation_evidence(valid_observation())
         request = valid_request(lifecycle_observation_evidence=evidence)
-        result = admission.decide_runtime_admission(request)
+        result = runtime_admission.decide_runtime_admission(request)
 
         self.assertEqual(result['admission'], 'approved_for_future_review')
         self.assertTrue(result['evidence_composed']['lifecycle_observation'])
@@ -205,21 +221,24 @@ class STTLifecycleObservationEvidenceTests(unittest.TestCase):
     def test_admission_rejects_raw_derived_tampered_and_mismatched_lifecycle_evidence(self):
         self.assertIsNotNone(admission, 'runtime admission module is not available')
         self.require_lifecycle()
-        from test_stt_runtime_admission import valid_request
+        runtime_tests = runtime_test_module()
+        runtime_admission = runtime_tests.admission
+        runtime_lifecycle = runtime_tests.lifecycle_observation_evidence
+        valid_request = runtime_tests.valid_request
 
-        valid = lifecycle.validate_stt_lifecycle_observation_evidence(valid_observation())
+        valid = runtime_lifecycle.validate_stt_lifecycle_observation_evidence(valid_observation())
         for value in (valid.as_dict(), {'service_id': SERVICE_ID}, None):
             with self.subTest(value=value):
-                with self.assertRaises(admission.RuntimeAdmissionError):
-                    admission.decide_runtime_admission(
+                with self.assertRaises(runtime_admission.RuntimeAdmissionError):
+                    runtime_admission.decide_runtime_admission(
                         valid_request(lifecycle_observation_evidence=value)
                     )
 
-        class DerivedLifecycleEvidence(lifecycle.STTLifecycleObservationEvidence):
+        class DerivedLifecycleEvidence(runtime_lifecycle.STTLifecycleObservationEvidence):
             pass
 
-        with self.assertRaises(admission.RuntimeAdmissionError):
-            admission.decide_runtime_admission(
+        with self.assertRaises(runtime_admission.RuntimeAdmissionError):
+            runtime_admission.decide_runtime_admission(
                 valid_request(
                     lifecycle_observation_evidence=DerivedLifecycleEvidence(
                         **dataclasses.asdict(valid)
@@ -239,17 +258,20 @@ class STTLifecycleObservationEvidenceTests(unittest.TestCase):
             dataclasses.replace(valid, service_started=True),
         ):
             with self.subTest(tampered=tampered):
-                with self.assertRaises(admission.RuntimeAdmissionError):
-                    admission.decide_runtime_admission(
+                with self.assertRaises(runtime_admission.RuntimeAdmissionError):
+                    runtime_admission.decide_runtime_admission(
                         valid_request(lifecycle_observation_evidence=tampered)
                     )
 
     def test_admission_binds_lifecycle_identity_to_supervisor_installation_and_health(self):
         self.assertIsNotNone(admission, 'runtime admission module is not available')
         self.require_lifecycle()
-        from test_stt_runtime_admission import valid_request
+        runtime_tests = runtime_test_module()
+        runtime_admission = runtime_tests.admission
+        runtime_lifecycle = runtime_tests.lifecycle_observation_evidence
+        valid_request = runtime_tests.valid_request
 
-        valid = lifecycle.validate_stt_lifecycle_observation_evidence(valid_observation())
+        valid = runtime_lifecycle.validate_stt_lifecycle_observation_evidence(valid_observation())
         for component, change in (
             ('supervisor_plan', {'service_id': 'other-service'}),
             ('runtime_installation_evidence', {'activation_id': 'other-activation'}),
@@ -263,8 +285,8 @@ class STTLifecycleObservationEvidenceTests(unittest.TestCase):
                 else:
                     request[component] = copy.deepcopy(original)
                     request[component].update(change)
-                with self.assertRaises(admission.RuntimeAdmissionError):
-                    admission.decide_runtime_admission(request)
+                with self.assertRaises(runtime_admission.RuntimeAdmissionError):
+                    runtime_admission.decide_runtime_admission(request)
 
 
 if __name__ == '__main__':
