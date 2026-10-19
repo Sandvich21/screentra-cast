@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / 'player-client/scripts/screentra-client-status-report-admission.py'
@@ -98,6 +99,19 @@ class ClientStatusReportAdmissionTests(unittest.TestCase):
             admission.validate_status_report(oversized)
         encoded = json.dumps(valid_report(), separators=(',', ':')).encode('utf-8')
         self.assertLessEqual(len(encoded), admission.MAX_REPORT_BYTES)
+
+    def test_upload_revalidates_before_network(self):
+        heartbeat = load_module(
+            ROOT / 'player-client/scripts/screentra-player-heartbeat.py',
+            'screentra_player_heartbeat_for_upload_validation_test',
+        )
+        with patch.object(heartbeat, 'urlopen_ripley', side_effect=AssertionError('network called')):
+            with self.assertRaises(heartbeat._status_report_mod.StatusReportError):
+                heartbeat.post_addon_status(
+                    'https://example.invalid',
+                    'client-1',
+                    valid_report(services=[{'id': 'speech-to-text'}]),
+                )
 
     def test_heartbeat_writes_only_admitted_reports(self):
         heartbeat = load_module(
