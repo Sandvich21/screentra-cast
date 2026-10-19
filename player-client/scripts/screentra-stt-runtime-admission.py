@@ -60,6 +60,7 @@ _REQUEST_FIELDS: Final = frozenset({
     'process_health_evidence',
     'audio_permission_evidence',
     'resource_enforcement_evidence',
+    'lifecycle_observation_evidence',
 })
 _REQUIRED_REQUEST_FIELDS: Final = _REQUEST_FIELDS
 _PREFLIGHT_FIELDS: Final = frozenset({
@@ -776,6 +777,65 @@ def _validated_process_health(value: Any, expected: dict[str, str]) -> Any:
     return value
 
 
+def _lifecycle_observation_module() -> Any:
+    module_name = 'screentra_stt_lifecycle_observation_evidence'
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    module_path = Path(__file__).with_name('screentra-stt-lifecycle-observation-evidence.py')
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise _fail('runtime admission lifecycle observation evidence is invalid')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise _fail('runtime admission lifecycle observation evidence is invalid') from exc
+    return module
+
+
+def _validated_lifecycle_observation(value: Any, expected: dict[str, str], expected_state: str) -> Any:
+    """Accept only exact immutable, identity-bound non-running lifecycle evidence."""
+    module = _lifecycle_observation_module()
+    if type(value) is not module.STTLifecycleObservationEvidence:
+        raise _fail('runtime admission lifecycle observation evidence is invalid')
+    try:
+        raw = {
+            'service_id': value.service_id,
+            'activation_id': value.activation_id,
+            'service_version': value.service_version,
+            'observed_state': value.observed_state,
+            'identity_observed': value.identity_observed,
+            'observation_non_mutating': value.observation_non_mutating,
+        }
+        validated = module.validate_stt_lifecycle_observation_evidence(
+            raw,
+            expected_service_id=expected['service_id'],
+            expected_activation_id=expected['activation_id'],
+            expected_service_version=expected['service_version'],
+        )
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        raise _fail('runtime admission lifecycle observation evidence is invalid') from exc
+    if validated != value:
+        raise _fail('runtime admission lifecycle observation evidence is invalid')
+    if (
+        value.observation_valid is not True
+        or value.identity_observed is not True
+        or value.observation_non_mutating is not True
+        or value.observed_state != expected_state
+        or value.execution_enabled is not False
+        or value.runtime_activation_allowed is not False
+        or value.lifecycle_changed is not False
+        or value.process_started is not False
+        or value.service_started is not False
+        or value.effect != 'metadata_only'
+    ):
+        raise _fail('runtime admission lifecycle observation evidence is invalid')
+    return value
+
+
 def _audio_permission_module() -> Any:
     module_name = 'screentra_stt_audio_permission_evidence'
     module = sys.modules.get(module_name)
@@ -1058,6 +1118,11 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         socket_name = _validate_supervisor(request['supervisor_plan'], expected)
     except RuntimeAdmissionError as exc:
         raise _fail('runtime admission evidence is invalid') from exc
+    lifecycle_observation = _validated_lifecycle_observation(
+        request['lifecycle_observation_evidence'],
+        expected,
+        request['supervisor_plan'].get('lifecycle_state'),
+    )
     ipc_policy = _validated_ipc_policy(
         request['ipc_policy_evidence'], expected, socket_name
     )
@@ -1075,6 +1140,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     bounded_request['runtime_installation_evidence'] = runtime_installation.as_dict()
     bounded_request['model_load_evidence'] = model_load.as_dict()
     bounded_request['process_health_evidence'] = process_health.as_dict()
+    bounded_request['lifecycle_observation_evidence'] = lifecycle_observation.as_dict()
     bounded_request['audio_permission_evidence'] = audio_permission.as_dict()
     _bounded_json(bounded_request, MAX_REQUEST_BYTES, 'runtime admission request is not bounded')
 
@@ -1106,6 +1172,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'rollback_executed': False,
         'state_changed': False,
         'lifecycle_state_changed': False,
+        'lifecycle_changed': False,
         'service_id': expected['service_id'],
         'service_version': expected['service_version'],
         'activation_id': expected['activation_id'],
@@ -1147,6 +1214,13 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             process_health.service_version,
             process_health.activation_id,
             process_health.health_protocol,
+        ),
+        'lifecycle_observation_valid': lifecycle_observation.observation_valid,
+        'lifecycle_observation_identity_tuple': (
+            lifecycle_observation.service_id,
+            lifecycle_observation.service_version,
+            lifecycle_observation.activation_id,
+            lifecycle_observation.observed_state,
         ),
         'audio_permission_identity_tuple': (
             audio_permission.service_id,
@@ -1204,6 +1278,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             'runtime_installation': True,
             'model_load': True,
             'process_health': True,
+            'lifecycle_observation': True,
             'audio_permission': True,
         },
     }

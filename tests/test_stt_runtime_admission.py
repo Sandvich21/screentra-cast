@@ -18,6 +18,7 @@ MODEL_LOAD_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-mo
 PROCESS_HEALTH_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-process-health-evidence.py'
 AUDIO_PERMISSION_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-audio-permission-evidence.py'
 RESOURCE_ENFORCEMENT_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-resource-enforcement-evidence.py'
+LIFECYCLE_OBSERVATION_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-lifecycle-observation-evidence.py'
 
 
 def load_approval_module():
@@ -170,6 +171,22 @@ def load_audio_permission_evidence_module():
     return module
 
 
+def load_lifecycle_observation_evidence_module():
+    module_name = 'screentra_stt_lifecycle_observation_evidence'
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        LIFECYCLE_OBSERVATION_EVIDENCE_MODULE_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def load_resource_enforcement_evidence_module():
     module_name = 'screentra_stt_resource_enforcement_evidence'
     existing = sys.modules.get(module_name)
@@ -198,6 +215,7 @@ model_load_evidence = load_model_load_evidence_module()
 process_health_evidence = load_process_health_evidence_module()
 audio_permission_evidence = load_audio_permission_evidence_module()
 resource_enforcement_evidence = load_resource_enforcement_evidence_module()
+lifecycle_observation_evidence = load_lifecycle_observation_evidence_module()
 
 
 SERVICE_ID = 'magic-mirror-stt'
@@ -542,6 +560,24 @@ def valid_resource_enforcement_evidence(**overrides):
     )
 
 
+def valid_lifecycle_observation_evidence(**overrides):
+    value = {
+        'service_id': SERVICE_ID,
+        'activation_id': ACTIVATION_ID,
+        'service_version': SERVICE_VERSION,
+        'observed_state': 'staged',
+        'identity_observed': True,
+        'observation_non_mutating': True,
+    }
+    value.update(overrides)
+    return lifecycle_observation_evidence.validate_stt_lifecycle_observation_evidence(
+        value,
+        expected_service_id=SERVICE_ID,
+        expected_activation_id=ACTIVATION_ID,
+        expected_service_version=SERVICE_VERSION,
+    )
+
+
 def valid_request(**overrides):
     value = {
         'approval_record': valid_approval_record(),
@@ -558,6 +594,7 @@ def valid_request(**overrides):
         'process_health_evidence': valid_process_health_evidence(),
         'audio_permission_evidence': valid_audio_permission_evidence(),
         'resource_enforcement_evidence': valid_resource_enforcement_evidence(),
+        'lifecycle_observation_evidence': valid_lifecycle_observation_evidence(),
     }
     value.update(overrides)
     return value
