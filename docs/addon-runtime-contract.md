@@ -209,6 +209,13 @@ symlinks, non-files, and hard-linked metadata before signature verification or
 runtime-gate evaluation. This is metadata validation only; it does not enable
 execution or deploy a trusted service.
 
+Trusted-service runtime roots and per-addon runtime directories are also real,
+private `0700` directories. Runtime records are regular, single-link files with
+exact `0600` permissions and bounded contents. Runtime listing, readback, and
+removal validate the checked root and addon namespace; recursive runtime-record
+removal rechecks the root and addon-directory device/inode identities immediately
+before deletion so a replaced private root cannot redirect cleanup.
+
 ## Rollback and reporting
 
 The current server-side signed-package lifecycle has a separate

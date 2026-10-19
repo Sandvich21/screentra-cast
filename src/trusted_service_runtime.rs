@@ -656,41 +656,59 @@ pub fn list() -> Result<Vec<TrustedServiceRuntimeRecord>, RuntimeError> {
     Ok(records)
 }
 
+fn remove_checked_runtime_directory(
+    root: &Path,
+    expected_root: &fs::Metadata,
+    directory: &Path,
+    expected_directory: &fs::Metadata,
+) -> Result<(), RuntimeError> {
+    let current_root = fs::symlink_metadata(root)
+        .map_err(|error| RuntimeError::Io(error.to_string()))?;
+    validate_private_runtime_directory(&current_root, "Invalid trusted service runtime root")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (current_root.dev(), current_root.ino()) != (expected_root.dev(), expected_root.ino()) {
+            return Err(RuntimeError::Conflict(
+                "Trusted service runtime root changed".to_string(),
+            ));
+        }
+    }
+    let current_directory = fs::symlink_metadata(directory)
+        .map_err(|error| RuntimeError::Io(error.to_string()))?;
+    validate_private_runtime_directory(
+        &current_directory,
+        "Invalid trusted service runtime directory",
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (current_directory.dev(), current_directory.ino())
+            != (expected_directory.dev(), expected_directory.ino())
+        {
+            return Err(RuntimeError::Conflict(
+                "Trusted service runtime directory changed".to_string(),
+            ));
+        }
+    }
+    fs::remove_dir_all(directory).map_err(|error| RuntimeError::Io(error.to_string()))
+}
+
 /// Remove only the inert runtime record associated with staged metadata.
 pub fn remove(addon_id: &str) -> Result<(), RuntimeError> {
-    let directory = match record_dir(addon_id) {
-        Ok(directory) => directory,
-        Err(RuntimeError::NotFound) => return Ok(()),
-        Err(error) => return Err(error),
+    let root = match checked_runtime_root(false)? {
+        Some(root) => root,
+        None => return Ok(()),
     };
+    let root_metadata = match fs::symlink_metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(RuntimeError::Io(error.to_string())),
+    };
+    validate_private_runtime_directory(&root_metadata, "Invalid trusted service runtime root")?;
+    let directory = runtime_addon_dir(&root, addon_id)?;
     match fs::symlink_metadata(&directory) {
-        Ok(metadata) => {
-            validate_private_runtime_directory(
-                &metadata,
-                "Invalid trusted service runtime directory",
-            )?;
-            #[cfg(unix)]
-            let directory_identity = {
-                use std::os::unix::fs::MetadataExt;
-                (metadata.dev(), metadata.ino())
-            };
-            let current_metadata = fs::symlink_metadata(&directory)
-                .map_err(|error| RuntimeError::Io(error.to_string()))?;
-            validate_private_runtime_directory(
-                &current_metadata,
-                "Invalid trusted service runtime directory",
-            )?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if (current_metadata.dev(), current_metadata.ino()) != directory_identity {
-                    return Err(RuntimeError::Conflict(
-                        "Trusted service runtime directory changed".to_string(),
-                    ));
-                }
-            }
-            fs::remove_dir_all(directory).map_err(|error| RuntimeError::Io(error.to_string()))
-        }
+        Ok(metadata) => remove_checked_runtime_directory(&root, &root_metadata, &directory, &metadata),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(RuntimeError::Io(error.to_string())),
     }
@@ -2180,6 +2198,41 @@ mod tests {
                 std::env::remove_var("SIGNAGE_DATA_DIR");
             }
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_rejects_replaced_runtime_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root =
+            std::env::temp_dir().join(format!("screentra-runtime-root-replace-{}", Uuid::new_v4()));
+        let runtime_root = root.join(RUNTIME_DIR);
+        let displaced_root = root.join("displaced-runtime");
+        let directory = runtime_root.join("example.service");
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let expected_root = fs::symlink_metadata(&runtime_root).unwrap();
+        let expected_directory = fs::symlink_metadata(&directory).unwrap();
+        fs::rename(&runtime_root, &displaced_root).unwrap();
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&runtime_root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let result = remove_checked_runtime_directory(
+            &runtime_root,
+            &expected_root,
+            &directory,
+            &expected_directory,
+        );
+
+        assert!(matches!(result, Err(RuntimeError::Conflict(_))));
+        assert!(directory.exists());
         let _ = fs::remove_dir_all(root);
     }
 
