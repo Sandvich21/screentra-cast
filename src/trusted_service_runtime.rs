@@ -474,8 +474,8 @@ fn read_record(path: &Path) -> Result<TrustedServiceRuntimeRecord, RuntimeError>
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o777 != 0o600 {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.permissions().mode() & 0o777 != 0o600 || metadata.nlink() != 1 {
             return Err(RuntimeError::Invalid(
                 "Trusted service runtime record permissions are insecure".to_string(),
             ));
@@ -2033,6 +2033,28 @@ mod tests {
         symlink(&real_parent, &linked_parent).unwrap();
         assert!(matches!(
             read_record(&linked_parent.join(RUNTIME_FILE)),
+            Err(RuntimeError::Invalid(_))
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_record_read_rejects_hard_linked_file() {
+        use std::fs::hard_link;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("screentra-runtime-read-hardlink-{}", Uuid::new_v4()));
+        let parent = root.join("example.service");
+        let path = parent.join(RUNTIME_FILE);
+        let linked_path = parent.join("linked-runtime.json");
+        fs::create_dir_all(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        write_atomic(&path, &test_record()).unwrap();
+        hard_link(&path, &linked_path).unwrap();
+        assert!(matches!(
+            read_record(&path),
             Err(RuntimeError::Invalid(_))
         ));
         let _ = fs::remove_dir_all(root);
