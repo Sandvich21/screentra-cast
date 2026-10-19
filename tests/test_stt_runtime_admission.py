@@ -14,6 +14,7 @@ IPC_READINESS_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt
 ROLLBACK_POLICY_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-rollback-policy-evidence.py'
 CAPABILITY_ADMISSION_MODULE_PATH = ROOT / 'player-client/scripts/screentra-capability-admission.py'
 RUNTIME_INSTALLATION_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-runtime-installation-evidence.py'
+MODEL_LOAD_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-model-load-evidence.py'
 AUDIO_PERMISSION_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-audio-permission-evidence.py'
 RESOURCE_ENFORCEMENT_EVIDENCE_MODULE_PATH = ROOT / 'player-client/scripts/screentra-stt-resource-enforcement-evidence.py'
 
@@ -116,6 +117,24 @@ def load_runtime_installation_evidence_module():
     return module
 
 
+def load_model_load_evidence_module():
+    if not MODEL_LOAD_EVIDENCE_MODULE_PATH.is_file():
+        return None
+    module_name = 'screentra_stt_model_load_evidence'
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        MODEL_LOAD_EVIDENCE_MODULE_PATH,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def load_audio_permission_evidence_module():
     module_name = 'screentra_stt_audio_permission_evidence'
     existing = sys.modules.get(module_name)
@@ -156,6 +175,7 @@ ipc_readiness_evidence = load_ipc_readiness_evidence_module()
 rollback_policy = load_rollback_policy_module()
 capability_admission = load_capability_admission_module()
 runtime_installation_evidence = load_runtime_installation_evidence_module()
+model_load_evidence = load_model_load_evidence_module()
 audio_permission_evidence = load_audio_permission_evidence_module()
 resource_enforcement_evidence = load_resource_enforcement_evidence_module()
 
@@ -421,6 +441,26 @@ def valid_runtime_installation_evidence(**overrides):
     return runtime_installation_evidence.validate_stt_runtime_installation_evidence(value)
 
 
+def valid_model_load_evidence(**overrides):
+    value = {
+        'service_id': SERVICE_ID,
+        'activation_id': ACTIVATION_ID,
+        'model_id': MODEL_ID,
+        'model_sha256': MODEL_SHA256,
+        'model_file_observed': True,
+        'load_observation_non_mutating': True,
+        'load_identity_observed': True,
+    }
+    value.update(overrides)
+    return model_load_evidence.validate_stt_model_load_evidence(
+        value,
+        expected_service_id=SERVICE_ID,
+        expected_activation_id=ACTIVATION_ID,
+        expected_model_id=MODEL_ID,
+        expected_model_sha256=MODEL_SHA256,
+    )
+
+
 def valid_audio_permission_evidence(**overrides):
     value = {
         'service_id': SERVICE_ID,
@@ -474,6 +514,7 @@ def valid_request(**overrides):
         'rollback_policy_evidence': valid_rollback_policy(),
         'capability_admission': valid_capability_admission(),
         'runtime_installation_evidence': valid_runtime_installation_evidence(),
+        'model_load_evidence': valid_model_load_evidence(),
         'audio_permission_evidence': valid_audio_permission_evidence(),
         'resource_enforcement_evidence': valid_resource_enforcement_evidence(),
     }
@@ -613,6 +654,79 @@ class STTRuntimeAdmissionTests(unittest.TestCase):
                 with self.assertRaises(module.RuntimeAdmissionError):
                     module.decide_runtime_admission(
                         valid_request(runtime_installation_evidence=evidence)
+                    )
+
+    def test_model_load_observation_is_composed_as_exact_inert_identity_bound_evidence(self):
+        module = self.require_module()
+        result = module.decide_runtime_admission(valid_request())
+
+        self.assertEqual(result['admission'], 'approved_for_future_review')
+        self.assertTrue(result['evidence_composed']['model_load'])
+        self.assertTrue(result['model_load_observation_valid'])
+        self.assertEqual(
+            tuple(result['model_load_identity_tuple']),
+            (SERVICE_ID, ACTIVATION_ID, MODEL_ID, MODEL_SHA256),
+        )
+        for field in (
+            'execution_enabled', 'runtime_activation_allowed', 'model_loaded',
+            'inference_started', 'process_started',
+        ):
+            self.assertFalse(result[field], field)
+        for forbidden in ('runtime_ready', 'readiness_claim', 'load_ready'):
+            self.assertNotIn(forbidden, result)
+
+    def test_model_load_observation_requires_exact_type_identity_and_no_runtime_claims(self):
+        module = self.require_module()
+        valid = valid_model_load_evidence()
+        for value in (valid.as_dict(), {'service_id': SERVICE_ID}, None):
+            with self.subTest(value=value):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(model_load_evidence=value)
+                    )
+
+        class DerivedModelLoadEvidence(model_load_evidence.STTModelLoadEvidence):
+            pass
+
+        with self.assertRaises(module.RuntimeAdmissionError):
+            module.decide_runtime_admission(
+                valid_request(
+                    model_load_evidence=DerivedModelLoadEvidence(
+                        **dataclasses.asdict(valid)
+                    )
+                )
+            )
+
+        for tampered in (
+            dataclasses.replace(valid, service_id='other-service'),
+            dataclasses.replace(valid, activation_id='other-activation'),
+            dataclasses.replace(valid, model_id='other-model'),
+            dataclasses.replace(valid, model_sha256=RUNTIME_SHA256),
+            dataclasses.replace(valid, load_observation_valid=False),
+            dataclasses.replace(valid, execution_enabled=True),
+            dataclasses.replace(valid, model_loaded=True),
+            dataclasses.replace(valid, inference_started=True),
+            dataclasses.replace(valid, process_started=True),
+        ):
+            with self.subTest(tampered=tampered):
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(model_load_evidence=tampered)
+                    )
+
+    def test_model_load_identity_must_match_model_plan_and_installation_identity(self):
+        module = self.require_module()
+        for field, value in (
+            ('service_id', 'other-service'),
+            ('activation_id', 'other-activation'),
+            ('model_id', 'other-model'),
+            ('model_sha256', RUNTIME_SHA256),
+        ):
+            with self.subTest(field=field):
+                evidence = dataclasses.replace(valid_model_load_evidence(), **{field: value})
+                with self.assertRaises(module.RuntimeAdmissionError):
+                    module.decide_runtime_admission(
+                        valid_request(model_load_evidence=evidence)
                     )
 
     def test_audio_permission_evidence_is_composed_as_exact_inert_identity_bound_type(self):

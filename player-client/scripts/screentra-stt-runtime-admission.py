@@ -56,6 +56,7 @@ _REQUEST_FIELDS: Final = frozenset({
     'ipc_readiness_evidence',
     'rollback_policy_evidence',
     'runtime_installation_evidence',
+    'model_load_evidence',
     'audio_permission_evidence',
     'resource_enforcement_evidence',
 })
@@ -651,6 +652,67 @@ def _validated_runtime_installation(value: Any, expected: dict[str, str]) -> Any
     return value
 
 
+def _model_load_module() -> Any:
+    module_name = 'screentra_stt_model_load_evidence'
+    module = sys.modules.get(module_name)
+    if module is not None:
+        return module
+    module_path = Path(__file__).with_name('screentra-stt-model-load-evidence.py')
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise _fail('runtime admission model-load evidence is invalid')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise _fail('runtime admission model-load evidence is invalid') from exc
+    return module
+
+
+def _validated_model_load(value: Any, expected: dict[str, str]) -> Any:
+    """Accept only exact immutable, identity-bound model-load observations."""
+    module = _model_load_module()
+    if type(value) is not module.STTModelLoadEvidence:
+        raise _fail('runtime admission model-load evidence is invalid')
+    try:
+        raw = {
+            'service_id': value.service_id,
+            'activation_id': value.activation_id,
+            'model_id': value.model_id,
+            'model_sha256': value.model_sha256,
+            'model_file_observed': value.model_file_observed,
+            'load_observation_non_mutating': value.load_observation_non_mutating,
+            'load_identity_observed': value.load_identity_observed,
+        }
+        validated = module.validate_stt_model_load_evidence(
+            raw,
+            expected_service_id=expected['service_id'],
+            expected_activation_id=expected['activation_id'],
+            expected_model_id=expected['model_id'],
+            expected_model_sha256=expected['model_sha256'],
+        )
+    except (AttributeError, TypeError, ValueError, KeyError) as exc:
+        raise _fail('runtime admission model-load evidence is invalid') from exc
+    if validated != value:
+        raise _fail('runtime admission model-load evidence is invalid')
+    if (
+        value.load_observation_valid is not True
+        or value.model_file_observed is not True
+        or value.load_observation_non_mutating is not True
+        or value.load_identity_observed is not True
+        or value.execution_enabled is not False
+        or value.runtime_activation_allowed is not False
+        or value.model_loaded is not False
+        or value.inference_started is not False
+        or value.process_started is not False
+        or value.effect != 'metadata_only'
+    ):
+        raise _fail('runtime admission model-load evidence is invalid')
+    return value
+
+
 def _audio_permission_module() -> Any:
     module_name = 'screentra_stt_audio_permission_evidence'
     module = sys.modules.get(module_name)
@@ -918,6 +980,9 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     runtime_installation = _validated_runtime_installation(
         request['runtime_installation_evidence'], expected
     )
+    model_load = _validated_model_load(
+        request['model_load_evidence'], expected
+    )
     audio_permission = _validated_audio_permission(
         request['audio_permission_evidence'], expected
     )
@@ -942,6 +1007,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
     bounded_request['ipc_readiness_evidence'] = ipc_readiness.as_dict()
     bounded_request['rollback_policy_evidence'] = rollback_policy.as_dict()
     bounded_request['runtime_installation_evidence'] = runtime_installation.as_dict()
+    bounded_request['model_load_evidence'] = model_load.as_dict()
     bounded_request['audio_permission_evidence'] = audio_permission.as_dict()
     _bounded_json(bounded_request, MAX_REQUEST_BYTES, 'runtime admission request is not bounded')
 
@@ -963,6 +1029,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
         'listener_started': False,
         'peer_authenticated': False,
         'model_loaded': False,
+        'inference_started': False,
         'service_started': False,
         'resource_enforced': False,
         'cgroup_bound': False,
@@ -997,6 +1064,13 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             runtime_installation.runtime_sha256,
             runtime_installation.model_id,
             runtime_installation.model_sha256,
+        ),
+        'model_load_observation_valid': model_load.load_observation_valid,
+        'model_load_identity_tuple': (
+            model_load.service_id,
+            model_load.activation_id,
+            model_load.model_id,
+            model_load.model_sha256,
         ),
         'audio_permission_identity_tuple': (
             audio_permission.service_id,
@@ -1052,6 +1126,7 @@ def decide_runtime_admission(request: Mapping[str, Any]) -> dict[str, Any]:
             'ipc_readiness': True,
             'rollback_policy': True,
             'runtime_installation': True,
+            'model_load': True,
             'audio_permission': True,
         },
     }
