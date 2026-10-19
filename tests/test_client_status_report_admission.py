@@ -115,6 +115,14 @@ class ClientStatusReportAdmissionTests(unittest.TestCase):
         source = MODULE_PATH.read_text(encoding='utf-8')
         for forbidden in ('socket', 'subprocess', 'Popen', 'run(', 'open(', 'systemctl', 'Path(', 'urlopen'):
             self.assertNotIn(forbidden, source)
+        heartbeat_source = (
+            ROOT / 'player-client/scripts/screentra-player-heartbeat.py'
+        ).read_text(encoding='utf-8')
+        self.assertIn(
+            'def post_addon_status(server, client_id, status):\n'
+            '    validate_status_report(status)\n',
+            heartbeat_source,
+        )
 
 
 if __name__ == '__main__':

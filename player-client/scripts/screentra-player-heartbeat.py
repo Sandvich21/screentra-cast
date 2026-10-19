@@ -887,6 +887,7 @@ def sync_client_addons(server, client_id, cache_dir):
 
 
 def post_addon_status(server, client_id, status):
+    validate_status_report(status)
     url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/addons/status'
     request = urllib.request.Request(
         url,
