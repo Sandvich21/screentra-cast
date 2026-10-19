@@ -199,6 +199,14 @@ immediately before deleting the addon directory. Child paths are
 derived from the checked root rather than reconstructed from raw
 `SIGNAGE_DATA_DIR`.
 
+Trusted-service stage roots and per-service stage directories follow the same
+private-storage rule: real directories with exact `0700` permissions. Persisted
+manifest, signature, image-signature, and state files are regular single-link
+files with exact `0600` permissions. Listing and readback reject permission drift,
+symlinks, non-files, and hard-linked metadata before signature verification or
+runtime-gate evaluation. This is metadata validation only; it does not enable
+execution or deploy a trusted service.
+
 ## Rollback and reporting
 
 The current server-side signed-package lifecycle has a separate

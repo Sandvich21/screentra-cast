@@ -1861,6 +1861,45 @@ fn validate_trusted_service_file(
     Ok(())
 }
 
+fn validate_private_trusted_service_directory(path: &Path) -> Result<(), AddonError> {
+    reject_symlinked_path_ancestors(path, "Trusted service stage has a symlinked path ancestor")?;
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AddonError::Invalid(
+            "Invalid staged trusted service directory".to_string(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o777 != 0o700 {
+            return Err(AddonError::Invalid(
+                "Trusted service stage directory permissions are insecure".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_private_trusted_service_file(
+    path: &Path,
+    maximum_bytes: u64,
+    description: &str,
+) -> Result<(), AddonError> {
+    validate_trusted_service_file(path, maximum_bytes, description)?;
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.permissions().mode() & 0o777 != 0o600 || metadata.nlink() != 1 {
+            return Err(AddonError::Invalid(format!(
+                "Trusted service {description} permissions are insecure"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn trusted_service_signature_verifier_executable() -> &'static str {
     "/usr/bin/openssl"
 }
@@ -2169,24 +2208,15 @@ pub fn stage_trusted_service_manifest(
 }
 
 fn read_trusted_service_stage(dir: &Path) -> Result<TrustedServiceStage, AddonError> {
-    reject_symlinked_path_ancestors(
-        dir,
-        "Invalid staged trusted service directory path",
-    )?;
-    let dir_metadata = fs::symlink_metadata(dir).map_err(io_error)?;
-    if dir_metadata.file_type().is_symlink() || !dir_metadata.is_dir() {
-        return Err(AddonError::Invalid(
-            "Invalid staged trusted service directory".to_string(),
-        ));
-    }
+    validate_private_trusted_service_directory(dir)?;
     let manifest_path = dir.join(MANIFEST_FILE);
     let signature_path = dir.join("manifest.sig");
     let image_signature_path = dir.join("image.sig");
     let state_path = dir.join(STATE_FILE);
-    validate_trusted_service_file(&manifest_path, 1024 * 1024, "manifest")?;
-    validate_trusted_service_file(&signature_path, 64 * 1024, "manifest signature")?;
-    validate_trusted_service_file(&image_signature_path, 64 * 1024, "image signature")?;
-    validate_trusted_service_file(&state_path, 64 * 1024, "state")?;
+    validate_private_trusted_service_file(&manifest_path, 1024 * 1024, "manifest")?;
+    validate_private_trusted_service_file(&signature_path, 64 * 1024, "manifest signature")?;
+    validate_private_trusted_service_file(&image_signature_path, 64 * 1024, "image signature")?;
+    validate_private_trusted_service_file(&state_path, 64 * 1024, "state")?;
     verify_trusted_service_manifest_signature(&manifest_path, &signature_path)?;
     let manifest_bytes = fs::read(&manifest_path).map_err(io_error)?;
     let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
@@ -4407,6 +4437,47 @@ mod tests {
             std::os::unix::fs::symlink(&target, &path).unwrap();
             assert!(validate_trusted_service_file(&path, 64, "artifact").is_err());
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_service_private_metadata_rejects_permission_drift_and_hardlinks() {
+        use std::fs::hard_link;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "screentra-trusted-service-private-file-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("artifact");
+        let linked_path = root.join("linked-artifact");
+        fs::write(&path, b"small").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        validate_private_trusted_service_file(&path, 64, "artifact").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(validate_private_trusted_service_file(&path, 64, "artifact").is_err());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        hard_link(&path, &linked_path).unwrap();
+        assert!(validate_private_trusted_service_file(&path, 64, "artifact").is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_service_stage_directory_rejects_permission_drift() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "screentra-trusted-service-private-dir-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        validate_private_trusted_service_directory(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(validate_private_trusted_service_directory(&root).is_err());
         let _ = fs::remove_dir_all(root);
     }
 
