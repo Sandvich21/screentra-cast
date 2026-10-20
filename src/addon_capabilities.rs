@@ -664,6 +664,81 @@ impl ServerExecutionPlan {
     }
 }
 
+/// Pure client-side admission output. Building this plan performs no IO,
+/// image pull, process start, device access, or client rollout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientExecutionPlan {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub addon_version: String,
+    pub artifact_digest: String,
+    pub image: String,
+    pub image_digest: String,
+    pub memory_bytes: u64,
+    pub cpu_millis: u32,
+    pub pids: u32,
+    pub writable_bytes: u64,
+    pub capabilities: Vec<AddonCapabilityRequest>,
+    pub host_api_scopes: Vec<String>,
+    pub network_allow_rules: Vec<NetworkAllowRule>,
+}
+
+impl ClientExecutionPlan {
+    pub fn from_approved(
+        record: &AddonApprovalRecord,
+        activation_instance: &str,
+    ) -> Result<Self, ApprovalError> {
+        record.validate()?;
+        addons::validate_addon_storage_namespace(activation_instance)
+            .map_err(|_| ApprovalError::InvalidActivationInstance)?;
+        if !record.request.targets.contains(&ExecutionTarget::Client) {
+            return Err(ApprovalError::TargetNotApproved);
+        }
+        record.can_start_for_target(ExecutionTarget::Client)?;
+        let container = record
+            .request
+            .client
+            .as_ref()
+            .ok_or(ApprovalError::InvalidRequest(
+                CapabilityContractError::MissingContainerSpec(ExecutionTarget::Client),
+            ))?;
+        let capabilities = record
+            .request
+            .capabilities
+            .iter()
+            .filter(|capability| capability.target == ExecutionTarget::Client)
+            .cloned()
+            .collect::<Vec<_>>();
+        let host_api_scopes = capabilities
+            .iter()
+            .filter_map(|capability| {
+                (capability.kind == CapabilityKind::HostApiRead)
+                    .then(|| capability.scope.clone())
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        let network_allow_rules = capabilities
+            .iter()
+            .filter_map(|capability| capability.network.clone())
+            .collect::<Vec<_>>();
+        Ok(Self {
+            addon_id: record.addon_id.clone(),
+            activation_instance: activation_instance.to_string(),
+            addon_version: record.addon_version.clone(),
+            artifact_digest: record.artifact_digest.clone(),
+            image: container.image.clone(),
+            image_digest: container.image_digest.clone(),
+            memory_bytes: container.memory_bytes,
+            cpu_millis: container.cpu_millis,
+            pids: container.pids,
+            writable_bytes: container.writable_bytes,
+            capabilities,
+            host_api_scopes,
+            network_allow_rules,
+        })
+    }
+}
+
 /// Contract-only OCI policy for a server add-on. It is never a launch handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerOciLaunchSpec {
@@ -691,6 +766,51 @@ impl ServerOciLaunchSpec {
                 CapabilityKind::HostApiRead | CapabilityKind::NetworkEgress
             )
         }) {
+            return Err(ApprovalError::OciCapabilityBoundaryUnavailable(
+                capability.kind,
+            ));
+        }
+        Ok(Self {
+            addon_id: plan.addon_id.clone(),
+            activation_instance: plan.activation_instance.clone(),
+            image_ref: format!("{}@{}", plan.image, plan.image_digest),
+            memory_bytes: plan.memory_bytes,
+            cpu_millis: plan.cpu_millis,
+            pids: plan.pids,
+            writable_bytes: plan.writable_bytes,
+            rootless: true,
+            non_root: true,
+            network_disabled: true,
+            read_only_rootfs: true,
+            no_new_privileges: true,
+            drop_all_capabilities: true,
+            seccomp_default: true,
+        })
+    }
+}
+
+/// Contract-only OCI policy for a client add-on. It is never a launch handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientOciLaunchSpec {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub image_ref: String,
+    pub memory_bytes: u64,
+    pub cpu_millis: u32,
+    pub pids: u32,
+    pub writable_bytes: u64,
+    pub rootless: bool,
+    pub non_root: bool,
+    pub network_disabled: bool,
+    pub read_only_rootfs: bool,
+    pub no_new_privileges: bool,
+    pub drop_all_capabilities: bool,
+    pub seccomp_default: bool,
+}
+
+impl ClientOciLaunchSpec {
+    pub fn from_client_plan(plan: &ClientExecutionPlan) -> Result<Self, ApprovalError> {
+        if let Some(capability) = plan.capabilities.first() {
             return Err(ApprovalError::OciCapabilityBoundaryUnavailable(
                 capability.kind,
             ));
@@ -1483,6 +1603,97 @@ mod tests {
         approval.set_capability_approved(1, true).unwrap();
         approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
         assert_eq!(approval.can_start(), Ok(()));
+    }
+
+    #[test]
+    fn client_plan_contains_only_client_scoped_capabilities() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server, ExecutionTarget::Client],
+            server: Some(container("registry.example/server", 'a')),
+            client: Some(container("registry.example/client", 'b')),
+            capabilities: vec![
+                AddonCapabilityRequest::storage(ExecutionTarget::Server),
+                AddonCapabilityRequest::camera(ExecutionTarget::Client),
+            ],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.client-plan",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.set_capability_approved(1, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ClientExecutionPlan::from_approved(&approval, "client-plan-1").unwrap();
+
+        assert_eq!(plan.addon_id, "example.client-plan");
+        assert_eq!(plan.activation_instance, "client-plan-1");
+        assert_eq!(plan.image, "registry.example/client");
+        assert_eq!(plan.image_digest, format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(plan.capabilities.len(), 1);
+        assert_eq!(plan.capabilities[0].target, ExecutionTarget::Client);
+        assert_eq!(plan.capabilities[0].kind, CapabilityKind::CameraCapture);
+    }
+
+    #[test]
+    fn client_oci_spec_is_hardened_and_inert_without_broker_capabilities() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Client],
+            server: None,
+            client: Some(container("registry.example/client", 'b')),
+            capabilities: Vec::new(),
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.client-oci",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ClientExecutionPlan::from_approved(&approval, "client-oci-1").unwrap();
+        let spec = ClientOciLaunchSpec::from_client_plan(&plan).unwrap();
+
+        assert_eq!(
+            spec.image_ref,
+            format!("registry.example/client@sha256:{}", "b".repeat(64))
+        );
+        assert!(spec.rootless);
+        assert!(spec.non_root);
+        assert!(spec.network_disabled);
+        assert!(spec.read_only_rootfs);
+        assert!(spec.no_new_privileges);
+        assert!(spec.drop_all_capabilities);
+        assert!(spec.seccomp_default);
+    }
+
+    #[test]
+    fn client_oci_spec_rejects_hardware_capabilities_until_broker_exists() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Client],
+            server: None,
+            client: Some(container("registry.example/client", 'b')),
+            capabilities: vec![AddonCapabilityRequest::camera(ExecutionTarget::Client)],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.client-camera",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ClientExecutionPlan::from_approved(&approval, "client-camera-1").unwrap();
+
+        assert_eq!(
+            ClientOciLaunchSpec::from_client_plan(&plan),
+            Err(ApprovalError::OciCapabilityBoundaryUnavailable(
+                CapabilityKind::CameraCapture
+            ))
+        );
     }
 
     #[test]
