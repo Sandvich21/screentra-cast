@@ -14,6 +14,30 @@ SPEC.loader.exec_module(actor)
 
 
 class DisplaySettingsActorTests(unittest.TestCase):
+    def test_display_power_uses_wayland_dpms_for_selected_connector(self):
+        calls = []
+        original_connector = actor._preview_connector
+        original_run_list = actor._run_list
+        original_env = actor._preview_wayland_env
+        actor._preview_connector = lambda cache_dir, display_index: 'DP-2'
+        actor._preview_wayland_env = lambda: {'XDG_RUNTIME_DIR': '/run/board', 'WAYLAND_DISPLAY': 'wayland-1'}
+        actor._run_list = lambda argv, **kwargs: (calls.append((argv, kwargs)) or (0, '', ''))
+        try:
+            result = actor.execute(
+                'display_power',
+                {'state': 'off', 'display_index': 0},
+                {'cache_dir': '/tmp/non-hardware-test-cache', 'server': None, 'client_id': 'client-a'},
+            )
+        finally:
+            actor._preview_connector = original_connector
+            actor._run_list = original_run_list
+            actor._preview_wayland_env = original_env
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['details']['connector'], 'DP-2')
+        wlr_calls = [call for call in calls if call[0][0] == 'wlr-randr']
+        self.assertEqual(wlr_calls[0][0], ['wlr-randr', '--output', 'DP-2', '--off'])
+        self.assertEqual(wlr_calls[0][1]['env']['WAYLAND_DISPLAY'], 'wayland-1')
+
     def test_pending_display_settings_rejects_arbitrary_fields_and_vcp(self):
         valid = {
             'client_id': 'client-a',

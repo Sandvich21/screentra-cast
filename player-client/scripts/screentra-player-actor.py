@@ -203,9 +203,9 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     os.replace(temporary, path)
 
 
-def _run_list(args: list[str], timeout: int = 20, input_data: str | None = None) -> tuple[int, str, str]:
+def _run_list(args: list[str], timeout: int = 20, input_data: str | None = None, env: dict[str, str] | None = None) -> tuple[int, str, str]:
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, input=input_data)
+        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, input=input_data, env=env)
         return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
     except Exception as e:
         return 1, "", str(e)
@@ -704,6 +704,31 @@ def _preview_wayland_env() -> dict[str, str]:
     return env
 
 
+def apply_display_power(cache_dir: Path, display_index: int | None, state: str) -> tuple[bool, str, dict]:
+    """Apply Linux DPMS/KMS power state to one validated Wayland output."""
+    if display_index is None or display_index < 0 or display_index > 3:
+        return False, 'a display index from 0 to 3 is required', {}
+    if state not in {'on', 'off'}:
+        return False, 'display power state must be on or off', {}
+    connector = _preview_connector(cache_dir, display_index)
+    if not connector:
+        return False, f'no connector is recorded for display {display_index}', {'display_index': display_index}
+    env = _preview_wayland_env()
+    requested = '--on' if state == 'on' else '--off'
+    rc, out, err = _run_list(
+        ['wlr-randr', '--output', connector, requested],
+        timeout=10,
+        env=env,
+    )
+    message = out or err or ('display enabled' if state == 'on' else 'display disabled')
+    return rc == 0, message, {
+        'display_index': display_index,
+        'connector': connector,
+        'state': state,
+        'return_code': rc,
+    }
+
+
 def _upload_preview_frame(server: str, client_id: str, display_index: int, frame: bytes, cache_dir: Path) -> tuple[bool, str]:
     token = _preview_token(cache_dir)
     if not token:
@@ -1178,6 +1203,11 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
             'partial': 0 < succeeded < len(results), 'message': 'DDC display settings applied' if ok else ('DDC display settings partially applied' if succeeded else 'DDC display settings failed'),
             'details': {'settings': results, **{result['setting']: result for result in results}}, 'started_at': started,
         }
+
+    if action == 'display_power':
+        state = payload.get('state')
+        ok, message, details = apply_display_power(Path(ctx['cache_dir']), display_index, state)
+        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': message, 'details': details, 'started_at': started}
 
     # ── Display control (DDC/CI + CEC) ────────────────────────────────────────
     if action == 'ddc_set':
