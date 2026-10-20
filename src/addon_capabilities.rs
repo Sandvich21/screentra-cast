@@ -322,6 +322,7 @@ pub struct AddonApprovalRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalError {
     InvalidAddonId,
+    InvalidActivationInstance,
     InvalidVersion,
     InvalidArtifactDigest,
     InvalidRequest(CapabilityContractError),
@@ -572,9 +573,12 @@ impl AddonApprovalRecord {
     }
 }
 
+/// Pure server-side admission output. Building this plan performs no IO,
+/// image pull, process start, listener bind, or credential issuance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerExecutionPlan {
     pub addon_id: String,
+    pub activation_instance: String,
     pub addon_version: String,
     pub artifact_digest: String,
     pub image: String,
@@ -589,8 +593,13 @@ pub struct ServerExecutionPlan {
 }
 
 impl ServerExecutionPlan {
-    pub fn from_approved(record: &AddonApprovalRecord) -> Result<Self, ApprovalError> {
+    pub fn from_approved(
+        record: &AddonApprovalRecord,
+        activation_instance: &str,
+    ) -> Result<Self, ApprovalError> {
         record.validate()?;
+        addons::validate_addon_storage_namespace(activation_instance)
+            .map_err(|_| ApprovalError::InvalidActivationInstance)?;
         if !record.request.targets.contains(&ExecutionTarget::Server) {
             return Err(ApprovalError::TargetNotApproved);
         }
@@ -623,6 +632,7 @@ impl ServerExecutionPlan {
             .collect::<Vec<_>>();
         Ok(Self {
             addon_id: record.addon_id.clone(),
+            activation_instance: activation_instance.to_string(),
             addon_version: record.addon_version.clone(),
             artifact_digest: record.artifact_digest.clone(),
             image: container.image.clone(),
@@ -1028,8 +1038,10 @@ mod tests {
             .approve_target(ExecutionTarget::Server, "admin", "2026-10-20T14:30:00Z")
             .unwrap();
 
-        let plan = ServerExecutionPlan::from_approved(&approval).unwrap();
+        let plan =
+            ServerExecutionPlan::from_approved(&approval, "example-dual-plan-activation").unwrap();
         assert_eq!(plan.addon_id, "example.dual-plan");
+        assert_eq!(plan.activation_instance, "example-dual-plan-activation");
         assert_eq!(plan.image, "registry.example/server");
         assert_eq!(plan.image_digest, format!("sha256:{}", "a".repeat(64)));
         assert_eq!(plan.capabilities.len(), 2);
@@ -1040,11 +1052,43 @@ mod tests {
         assert_eq!(plan.network_allow_rules.len(), 1);
         assert_eq!(plan.host_api_scopes, vec!["clients".to_string()]);
         assert_eq!(
-            ServerExecutionPlan::from_approved(&AddonApprovalRecord {
-                target_approved: vec![false, false],
-                ..approval
-            }),
+            ServerExecutionPlan::from_approved(
+                &AddonApprovalRecord {
+                    target_approved: vec![false, false],
+                    ..approval
+                },
+                "example-dual-plan-activation",
+            ),
             Err(ApprovalError::TargetNotApproved)
+        );
+    }
+
+    #[test]
+    fn server_plan_rejects_invalid_activation_identity() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: vec![AddonCapabilityRequest::host_api_read(
+                ExecutionTarget::Server,
+                "clients",
+            )],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.server-plan",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval
+            .approve_target(ExecutionTarget::Server, "admin", "2026-10-20T14:30:00Z")
+            .unwrap();
+
+        assert_eq!(
+            ServerExecutionPlan::from_approved(&approval, "../escape"),
+            Err(ApprovalError::InvalidActivationInstance)
         );
     }
 
@@ -1069,7 +1113,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            ServerExecutionPlan::from_approved(&approval),
+            ServerExecutionPlan::from_approved(&approval, "example-client-only-activation"),
             Err(ApprovalError::TargetNotApproved)
         );
     }
