@@ -33,10 +33,12 @@ vm.runInNewContext(source, context, { filename: 'static/js/api.js' });
   await window.API.installAddonPackage(new Blob(['package']));
   await window.API.updateAddonPackage(new Blob(['package-v2']));
   await window.API.rollbackAddonPackage('example.client');
+  await window.API.rollbackAddon('example.declarative');
   assert.deepEqual(calls.map(call => [call.input, call.method]), [
     ['/api/addons/package', 'POST'],
     ['/api/addons/package', 'PUT'],
     ['/api/addons/package/example.client/rollback', 'POST'],
+    ['/api/addons/example.declarative/rollback', 'POST'],
   ]);
   console.log('addon package API integration: install, update, and rollback methods use bounded routes');
 })().catch(error => {
