@@ -873,7 +873,7 @@ const App = {
                     </div>
                     <div style="display:flex; gap:0.5rem; flex-wrap:wrap; justify-content:flex-end;">
                         <button class="btn btn-secondary btn-sm addon-toggle" data-id="${esc(addon.id)}" data-enabled="${addon.enabled}">${addon.enabled ? 'Disable' : 'Enable'}</button>
-                        ${addon.rollback_available ? `<button class="btn btn-secondary btn-sm addon-rollback" data-id="${esc(addon.id)}">Rollback to v${esc(addon.rollback_version)}</button>` : ''}
+                        ${addon.rollback_available ? `<button class="btn btn-secondary btn-sm addon-rollback" data-id="${esc(addon.id)}" data-kind="${esc(addon.kind)}">Rollback to v${esc(addon.rollback_version)}</button>` : ''}
                         <button class="btn btn-danger btn-sm addon-delete" data-id="${esc(addon.id)}">Remove</button>
                     </div>
                 </div>
@@ -888,9 +888,13 @@ const App = {
             });
             container.querySelectorAll('.addon-rollback').forEach(btn => {
                 btn.onclick = async () => {
-                    if (!(await App.confirm('Roll back this signed client package?', 'The retained previous package will be restored. Client execution remains disabled.'))) return;
+                    if (!(await App.confirm('Roll back this addon?', 'The retained previous manifest or package will be restored. Client execution remains disabled.'))) return;
                     try {
-                        await API.rollbackAddonPackage(btn.dataset.id);
+                        if (btn.dataset.kind === 'client_extension') {
+                            await API.rollbackAddonPackage(btn.dataset.id);
+                        } else {
+                            await API.rollbackAddon(btn.dataset.id);
+                        }
                         await this.loadAddons();
                     } catch (e) { alert('Addon rollback failed: ' + e.message); }
                 };

@@ -1620,10 +1620,6 @@ fn read_record_without_rollback(dir: &Path) -> Result<AddonRecord, AddonError> {
 
 fn read_record(dir: &Path) -> Result<AddonRecord, AddonError> {
     let mut record = read_record_without_rollback(dir)?;
-    if record.manifest.kind != "client_extension" {
-        return Ok(record);
-    }
-
     let root = dir
         .parent()
         .ok_or_else(|| AddonError::Invalid("Invalid addon directory parent".to_string()))?;
@@ -1644,13 +1640,9 @@ fn read_record(dir: &Path) -> Result<AddonRecord, AddonError> {
         Err(_) => return Ok(record),
     };
     if previous.manifest.id != record.manifest.id
-        || previous.manifest.kind != "client_extension"
+        || previous.manifest.kind != record.manifest.kind
         || previous.enabled != record.enabled
         || previous.installed_at != record.installed_at
-        || !client_package_version_is_newer(
-            &record.manifest.version,
-            &previous.manifest.version,
-        )
     {
         return Ok(record);
     }
@@ -1773,13 +1765,37 @@ pub fn update(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
         return Err(AddonError::Invalid("Invalid addon directory".to_string()));
     }
     let existing = read_record(&dir)?;
-    let manifest_text = serde_json::to_string_pretty(&manifest).map_err(io_error)?;
-    write_addon_file_atomic(
-        &dir.join(MANIFEST_FILE),
-        manifest_text.as_bytes(),
-        "manifest-update",
-    )?;
-    read_record(&dir)
+    if existing.manifest.id != manifest.id || existing.manifest.kind != manifest.kind {
+        return Err(AddonError::Invalid(
+            "Addon update identity or kind does not match installed addon".to_string(),
+        ));
+    }
+    let stage = root.join(format!(".manifest-update-{}", Uuid::new_v4()));
+    let result = (|| {
+        create_private_addon_directory(&stage)?;
+        let manifest_text = serde_json::to_string_pretty(&manifest).map_err(io_error)?;
+        let state = AddonState {
+            enabled: existing.enabled,
+            installed_at: existing.installed_at.clone(),
+        };
+        let state_text = serde_json::to_string_pretty(&state).map_err(io_error)?;
+        write_addon_file_atomic(
+            &stage.join(MANIFEST_FILE),
+            manifest_text.as_bytes(),
+            "manifest-update",
+        )?;
+        write_addon_file_atomic(&stage.join(STATE_FILE), state_text.as_bytes(), "state-update")?;
+        let rollback_root = checked_addon_rollback_root(&root, true)?.ok_or_else(|| {
+            AddonError::Io("Addon rollback storage is unavailable".to_string())
+        })?;
+        let backup = addon_dir(&rollback_root, &manifest.id)?;
+        replace_addon_directory_atomically(&stage, &dir, &backup)?;
+        read_record(&dir)
+    })();
+    if result.is_err() {
+        cleanup_staged_addon_directory(&root, &metadata, &stage);
+    }
+    result
 }
 
 pub fn set_enabled(id: &str, enabled: bool) -> Result<AddonRecord, AddonError> {
@@ -2882,17 +2898,23 @@ pub fn update_signed_client_package(archive: &Path) -> Result<AddonRecord, Addon
     result
 }
 
-/// Atomically restore the one retained, signed package for a client extension.
-/// This is package evidence only; it never loads or executes client JavaScript.
-pub fn rollback_signed_client_package(id: &str) -> Result<AddonRecord, AddonError> {
-    validate_id(id).map_err(|_| {
-        AddonError::Invalid("Invalid signed client package identity".to_string())
-    })?;
+fn rollback_addon_checked(
+    id: &str,
+    expected_kind: Option<&str>,
+    consume_backup: bool,
+) -> Result<AddonRecord, AddonError> {
+    validate_id(id).map_err(|_| AddonError::Invalid("Invalid addon identity".to_string()))?;
     let root = checked_addon_storage_dir(false)?.ok_or(AddonError::NotFound)?;
     let rollback_root = checked_addon_rollback_root(&root, false)?.ok_or(AddonError::NotFound)?;
     let destination = addon_dir(&root, id)?;
     let backup = addon_dir(&rollback_root, id)?;
-    let rollback_error = || AddonError::Invalid("Signed client package rollback failed".to_string());
+    let rollback_error = || {
+        if expected_kind == Some("client_extension") {
+            AddonError::Invalid("Signed client package rollback failed".to_string())
+        } else {
+            AddonError::Invalid("Addon rollback failed".to_string())
+        }
+    };
 
     let current_metadata = fs::symlink_metadata(&destination).map_err(|_| rollback_error())?;
     let backup_metadata = fs::symlink_metadata(&backup).map_err(|_| AddonError::NotFound)?;
@@ -2906,11 +2928,11 @@ pub fn rollback_signed_client_package(id: &str) -> Result<AddonRecord, AddonErro
     let current = read_record(&destination).map_err(|_| rollback_error())?;
     let previous = read_record(&backup).map_err(|_| rollback_error())?;
     if current.manifest.id != id
-        || current.manifest.kind != "client_extension"
         || previous.manifest.id != id
-        || previous.manifest.kind != "client_extension"
+        || current.manifest.kind != previous.manifest.kind
         || current.enabled != previous.enabled
         || current.installed_at != previous.installed_at
+        || expected_kind.is_some_and(|kind| current.manifest.kind != kind)
     {
         return Err(rollback_error());
     }
@@ -2923,7 +2945,16 @@ pub fn rollback_signed_client_package(id: &str) -> Result<AddonRecord, AddonErro
         let _ = fs::rename(&temporary, &destination);
         return Err(rollback_error());
     }
-    if let Err(_error) = fs::rename(&temporary, &backup) {
+    if consume_backup {
+        if let Err(_error) = fs::remove_dir_all(&temporary) {
+            let restored = fs::rename(&destination, &backup)
+                .and_then(|_| fs::rename(&temporary, &destination));
+            if restored.is_err() {
+                return Err(rollback_error());
+            }
+            return Err(rollback_error());
+        }
+    } else if let Err(_error) = fs::rename(&temporary, &backup) {
         let restored = fs::rename(&destination, &backup)
             .and_then(|_| fs::rename(&temporary, &destination));
         if restored.is_err() {
@@ -2932,6 +2963,17 @@ pub fn rollback_signed_client_package(id: &str) -> Result<AddonRecord, AddonErro
         return Err(rollback_error());
     }
     read_record(&destination)
+}
+
+/// Atomically restore the retained previous metadata-only addon.
+pub fn rollback_addon(id: &str) -> Result<AddonRecord, AddonError> {
+    rollback_addon_checked(id, None, true)
+}
+
+/// Atomically restore the one retained, signed package for a client extension.
+/// This is package evidence only; it never loads or executes client JavaScript.
+pub fn rollback_signed_client_package(id: &str) -> Result<AddonRecord, AddonError> {
+    rollback_addon_checked(id, Some("client_extension"), false)
 }
 
 #[cfg(test)]
@@ -3334,6 +3376,134 @@ mod tests {
         builder.append_dir_all("client", &client_root).unwrap();
         builder.into_inner().unwrap().finish().unwrap();
         archive
+    }
+
+    #[test]
+    fn declarative_update_retains_previous_manifest_for_rollback() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("screentra-declarative-update-{}", Uuid::new_v4()));
+        let data_root = root.join("data");
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_root);
+        }
+
+        let initial = manifest();
+        install(initial.clone()).unwrap();
+        set_enabled(&initial.id, false).unwrap();
+        let mut updated = initial.clone();
+        updated.version = "0.2.0".to_string();
+        updated.name = "Updated Example Weather".to_string();
+        let record = update(updated).unwrap();
+        let listed = list().unwrap().into_iter().find(|item| item.manifest.id == initial.id).unwrap();
+
+        if let Some(value) = old_data_root {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(record.manifest.version, "0.2.0");
+        assert!(!record.enabled);
+        assert!(listed.rollback_available);
+        assert_eq!(listed.rollback_version.as_deref(), Some("0.1.0"));
+    }
+
+    #[test]
+    fn declarative_rollback_restores_previous_manifest_and_state() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("screentra-declarative-rollback-{}", Uuid::new_v4()));
+        let data_root = root.join("data");
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_root);
+        }
+
+        let initial = manifest();
+        install(initial.clone()).unwrap();
+        set_enabled(&initial.id, false).unwrap();
+        let mut updated = initial.clone();
+        updated.version = "0.2.0".to_string();
+        updated.name = "Updated Example Weather".to_string();
+        let before_update = list().unwrap().into_iter().find(|item| item.manifest.id == initial.id).unwrap();
+        update(updated).unwrap();
+        let rolled_back = rollback_addon(&initial.id).unwrap();
+
+        if let Some(value) = old_data_root {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(rolled_back.manifest.version, "0.1.0");
+        assert!(!rolled_back.enabled);
+        assert_eq!(rolled_back.installed_at, before_update.installed_at);
+        assert!(!rolled_back.rollback_available);
+        assert!(rolled_back.rollback_version.is_none());
+    }
+
+    #[test]
+    fn declarative_rollback_rejects_tampered_backup_and_preserves_current_manifest() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-declarative-rollback-tamper-{}",
+            Uuid::new_v4()
+        ));
+        let data_root = root.join("data");
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_root);
+        }
+
+        let initial = manifest();
+        install(initial.clone()).unwrap();
+        let mut updated = initial.clone();
+        updated.version = "0.2.0".to_string();
+        update(updated).unwrap();
+        let backup = data_root.join("addons").join(ROLLBACK_DIR).join(&initial.id);
+        let mut tampered: serde_json::Value =
+            serde_json::from_slice(&fs::read(backup.join(MANIFEST_FILE)).unwrap()).unwrap();
+        tampered["id"] = serde_json::Value::String("tampered.weather".to_string());
+        fs::write(
+            backup.join(MANIFEST_FILE),
+            serde_json::to_vec(&tampered).unwrap(),
+        )
+        .unwrap();
+
+        let listed = list()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.manifest.id == initial.id)
+            .unwrap();
+        let rollback_result = rollback_addon(&initial.id);
+        let current = read_record(&data_root.join("addons").join(&initial.id)).unwrap();
+
+        if let Some(value) = old_data_root {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(!listed.rollback_available);
+        assert!(listed.rollback_version.is_none());
+        assert!(rollback_result.is_err());
+        assert_eq!(current.manifest.version, "0.2.0");
     }
 
     #[test]

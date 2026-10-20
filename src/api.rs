@@ -1328,6 +1328,10 @@ pub fn router(runtime_state: RuntimeState) -> Router {
                 .delete(delete_addon_storage)
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
+        .route(
+            "/api/addons/{id}/rollback",
+            post(rollback_addon_handler),
+        )
         .route("/api/addons/{id}/enable", post(enable_addon))
         .route("/api/addons/{id}/disable", post(disable_addon))
         .route("/api/addons/{id}", put(update_addon).delete(delete_addon))
@@ -2474,6 +2478,29 @@ async fn update_addon_package(
     multipart: Multipart,
 ) -> Result<(StatusCode, AxumJson<AddonRecord>), (StatusCode, String)> {
     upload_addon_package_with_mode(multipart, true).await
+}
+
+async fn rollback_addon_handler(
+    State(state): State<RuntimeState>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    Path(id): Path<String>,
+) -> Result<AxumJson<AddonRecord>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    let record = crate::addons::rollback_addon(&id).map_err(addon_error_response)?;
+    audit_trusted_service_stage_event(
+        &state,
+        &principal,
+        "addon_rollback",
+        &id,
+        "success",
+        None,
+    )
+    .await
+    .map_err(|error| {
+        log::error!("addon rollback audit persistence failed: {error}");
+        internal_server_error()
+    })?;
+    Ok(AxumJson(record))
 }
 
 async fn rollback_signed_client_package_handler(
@@ -10877,6 +10904,7 @@ mod signed_client_package_http_tests {
                 "/api/addons/package/{id}/rollback",
                 post(rollback_signed_client_package_handler),
             )
+            .route("/api/addons/{id}/rollback", post(rollback_addon_handler))
             .layer(Extension(crate::middleware::AuthenticatedPrincipal {
                 username: "test-user".to_string(),
                 role: role.to_string(),
@@ -11067,6 +11095,94 @@ mod signed_client_package_http_tests {
         let (status, _) = send_rollback(&operator_app, "example.weather").await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), old_payload);
+    }
+
+    #[tokio::test]
+    async fn declarative_addon_http_rollback_restores_manifest_and_audits_success() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("screentra-declarative-http-{}", Uuid::new_v4()));
+        let data_dir = root.join("data");
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &data_dir); }
+        let addon_id = format!("example.http.{}", Uuid::new_v4().simple());
+        let initial = AddonManifest {
+            schema_version: 1,
+            id: addon_id.clone(),
+            name: "HTTP declarative test".to_string(),
+            description: "metadata-only rollback test".to_string(),
+            version: "0.1.0".to_string(),
+            kind: "declarative".to_string(),
+            min_server_version: None,
+            min_client_version: None,
+            widget_types: Vec::new(),
+            permissions: Vec::new(),
+            client_capabilities: Vec::new(),
+            data_contract: None,
+            client_entrypoint: None,
+            server_entrypoint: None,
+            trusted_service: None,
+            client_service: None,
+            client_sha256: None,
+            client_api_version: None,
+        };
+        crate::addons::install(initial.clone()).expect("install declarative test addon");
+        let mut updated = initial;
+        updated.version = "0.2.0".to_string();
+        updated.name = "Updated HTTP declarative test".to_string();
+        crate::addons::update(updated).expect("update declarative test addon");
+
+        let state = RuntimeState::sqlite(Arc::new(
+            Database::open(":memory:").expect("open in-memory audit database"),
+        ));
+        let operator_app = rollback_app_with_state("operator", state.clone());
+        let denied = operator_app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/addons/{addon_id}/rollback"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let app = rollback_app_with_state("admin", state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/addons/{addon_id}/rollback"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let restored: AddonRecord = serde_json::from_slice(&body).expect("rollback response");
+
+        let events = state
+            .client_repository()
+            .list_audit_events(10)
+            .await
+            .expect("read addon rollback audit row");
+        if let Some(value) = old_data_dir {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = fs::remove_dir_all(root);
+
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(restored.manifest.version, "0.1.0");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "addon_rollback");
+        assert_eq!(events[0].target.as_deref(), Some(addon_id.as_str()));
+        assert_eq!(events[0].outcome, "success");
     }
 
     #[tokio::test]
