@@ -2486,7 +2486,24 @@ async fn rollback_addon_handler(
     Path(id): Path<String>,
 ) -> Result<AxumJson<AddonRecord>, (StatusCode, String)> {
     require_addon_storage_admin(&principal)?;
-    let record = crate::addons::rollback_addon(&id).map_err(addon_error_response)?;
+    let record = match crate::addons::rollback_addon(&id) {
+        Ok(record) => record,
+        Err(error) => {
+            if let Err(audit_error) = audit_trusted_service_stage_event(
+                &state,
+                &principal,
+                "addon_rollback",
+                &id,
+                "failure",
+                Some("rollback rejected"),
+            )
+            .await
+            {
+                log::error!("addon rollback failure audit persistence failed: {audit_error}");
+            }
+            return Err(addon_error_response(error));
+        }
+    };
     audit_trusted_service_stage_event(
         &state,
         &principal,
@@ -2509,8 +2526,24 @@ async fn rollback_signed_client_package_handler(
     Path(id): Path<String>,
 ) -> Result<AxumJson<AddonRecord>, (StatusCode, String)> {
     require_addon_storage_admin(&principal)?;
-    let record = crate::addons::rollback_signed_client_package(&id)
-        .map_err(addon_error_response)?;
+    let record = match crate::addons::rollback_signed_client_package(&id) {
+        Ok(record) => record,
+        Err(error) => {
+            if let Err(audit_error) = audit_trusted_service_stage_event(
+                &state,
+                &principal,
+                "signed_client_package_rollback",
+                &id,
+                "failure",
+                Some("rollback rejected"),
+            )
+            .await
+            {
+                log::error!("signed client package rollback failure audit persistence failed: {audit_error}");
+            }
+            return Err(addon_error_response(error));
+        }
+    };
     audit_trusted_service_stage_event(
         &state,
         &principal,
@@ -11021,7 +11054,10 @@ mod signed_client_package_http_tests {
             .lock()
             .unwrap();
         let (fixture, private_key) = setup_fixture();
-        let app = rollback_app("admin");
+        let state = RuntimeState::sqlite(Arc::new(
+            Database::open(":memory:").expect("open in-memory audit database"),
+        ));
+        let app = rollback_app_with_state("admin", state.clone());
         let old_payload = b"window.ScreentraAddon = { version: '0.1.0' };\\n";
         let new_payload = b"window.ScreentraAddon = { version: '0.2.0' };\\n";
         let install = package(
@@ -11059,11 +11095,29 @@ mod signed_client_package_http_tests {
         let (status, _) = send_rollback(&app, "example.weather").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
+        let events = state
+            .client_repository()
+            .list_audit_events(10)
+            .await
+            .expect("read signed rollback failure audit row");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "signed_client_package_rollback");
+        assert_eq!(events[0].outcome, "failure");
+        assert_eq!(events[0].detail.as_deref(), Some("rollback rejected"));
 
         fs::remove_dir_all(&rollback_dir).unwrap();
         let (status, _) = send_rollback(&app, "example.weather").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
+        let events = state
+            .client_repository()
+            .list_audit_events(10)
+            .await
+            .expect("read missing signed rollback failure audit row");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].event_type, "signed_client_package_rollback");
+        assert_eq!(events[1].outcome, "failure");
+        assert_eq!(events[1].detail.as_deref(), Some("rollback rejected"));
     }
 
     #[tokio::test]
@@ -11183,6 +11237,81 @@ mod signed_client_package_http_tests {
         assert_eq!(events[0].event_type, "addon_rollback");
         assert_eq!(events[0].target.as_deref(), Some(addon_id.as_str()));
         assert_eq!(events[0].outcome, "success");
+    }
+
+    #[tokio::test]
+    async fn declarative_addon_http_rollback_failure_is_audited_without_mutation() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("screentra-declarative-http-failure-{}", Uuid::new_v4()));
+        let data_dir = root.join("data");
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &data_dir); }
+        let addon_id = format!("example.http.failure.{}", Uuid::new_v4().simple());
+        let initial = AddonManifest {
+            schema_version: 1,
+            id: addon_id.clone(),
+            name: "HTTP declarative failure test".to_string(),
+            description: String::new(),
+            version: "0.1.0".to_string(),
+            kind: "declarative".to_string(),
+            min_server_version: None,
+            min_client_version: None,
+            widget_types: Vec::new(),
+            permissions: Vec::new(),
+            client_capabilities: Vec::new(),
+            data_contract: None,
+            client_entrypoint: None,
+            server_entrypoint: None,
+            trusted_service: None,
+            client_service: None,
+            client_sha256: None,
+            client_api_version: None,
+        };
+        crate::addons::install(initial).expect("install declarative test addon");
+
+        let state = RuntimeState::sqlite(Arc::new(
+            Database::open(":memory:").expect("open in-memory audit database"),
+        ));
+        let app = rollback_app_with_state("admin", state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/addons/{addon_id}/rollback"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let events = state
+            .client_repository()
+            .list_audit_events(10)
+            .await
+            .expect("read addon rollback failure audit row");
+        let current = crate::addons::list()
+            .expect("list addon after rejected rollback")
+            .into_iter()
+            .find(|record| record.manifest.id == addon_id)
+            .expect("current addon remains installed");
+        if let Some(value) = old_data_dir {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = fs::remove_dir_all(root);
+
+        assert_eq!(status, StatusCode::NOT_FOUND, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(current.manifest.version, "0.1.0");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "addon_rollback");
+        assert_eq!(events[0].target.as_deref(), Some(addon_id.as_str()));
+        assert_eq!(events[0].outcome, "failure");
+        assert_eq!(events[0].detail.as_deref(), Some("rollback rejected"));
     }
 
     #[tokio::test]
