@@ -936,6 +936,7 @@ const App = {
                 const request = record.request || {};
                 const capabilities = Array.isArray(request.capabilities) ? request.capabilities : [];
                 const approved = Array.isArray(record.capability_approved) ? record.capability_approved : [];
+                const targetApproved = Array.isArray(record.target_approved) ? record.target_approved : [];
                 const allApproved = capabilities.length === approved.length && approved.every(Boolean);
                 const finalized = record.state !== 'pending';
                 const capabilityHtml = capabilities.length
@@ -945,6 +946,18 @@ const App = {
                             ${labelCapability(capability)}
                         </label>`).join('')
                     : '<span style="color:var(--text-dim,#888);">No capabilities requested.</span>';
+                const targetHtml = Array.isArray(request.targets) && request.targets.length
+                    ? request.targets.map((target, index) => {
+                        const targetReady = capabilities.every((capability, capabilityIndex) => capability.target !== target || approved[capabilityIndex]);
+                        const isApproved = Boolean(targetApproved[index]);
+                        const action = isApproved ? 'revoke' : 'approve';
+                        const canAct = record.state !== 'revoked' && (isApproved || targetReady);
+                        return `<div style="display:flex; align-items:center; gap:0.5rem; margin:0.35rem 0;">
+                            <span>${esc(target)}: ${isApproved ? 'approved' : 'not approved'}</span>
+                            ${record.state !== 'revoked' ? `<button class="btn btn-secondary btn-sm addon-target-approval" data-addon-id="${esc(record.addon_id)}" data-target="${esc(target)}" data-action="${action}" ${canAct ? '' : 'disabled'}>${isApproved ? 'Revoke' : 'Approve'} ${esc(target)}</button>` : ''}
+                        </div>`;
+                    }).join('')
+                    : '<span style="color:var(--text-dim,#888);">No execution targets requested.</span>';
                 const targetText = Array.isArray(request.targets) ? request.targets.map(target => esc(target)).join(', ') : 'unknown';
                 const serverImage = request.server?.image ? `${esc(request.server.image)}@${esc(request.server.image_digest || '')}` : 'none';
                 const clientImage = request.client?.image ? `${esc(request.client.image)}@${esc(request.client.image_digest || '')}` : 'none';
@@ -962,7 +975,8 @@ const App = {
                                 ${record.state === 'approved' ? `<button class="btn btn-danger btn-sm addon-approval-revoke" data-addon-id="${esc(record.addon_id)}">Revoke approval</button>` : ''}
                             </div>
                         </div>
-                        <div style="margin-top:0.65rem; font-size:0.82rem;">${capabilityHtml}</div>
+                        <div style="margin-top:0.65rem; font-size:0.82rem;"><div style="font-weight:600; margin-bottom:0.3rem;">Target approvals</div>${targetHtml}</div>
+                        <div style="margin-top:0.65rem; font-size:0.82rem;"><div style="font-weight:600; margin-bottom:0.3rem;">Capability approvals</div>${capabilityHtml}</div>
                         <div class="addon-approval-status" data-addon-status="${esc(record.addon_id)}" style="margin-top:0.5rem; font-size:0.78rem; color:var(--text-dim,#888);"></div>
                     </div>`;
             }).join('');
@@ -978,6 +992,24 @@ const App = {
                     } catch (error) {
                         if (status) status.textContent = `Save failed: ${error.message}`;
                         input.checked = !input.checked;
+                    }
+                });
+            });
+            container.querySelectorAll('.addon-target-approval').forEach(button => {
+                button.addEventListener('click', async () => {
+                    const addonId = button.dataset.addonId;
+                    const target = button.dataset.target;
+                    const status = container.querySelector(`[data-addon-status="${CSS.escape(addonId)}"]`);
+                    if (status) status.textContent = `${button.dataset.action === 'approve' ? 'Approving' : 'Revoking'} ${target} execution…`;
+                    try {
+                        if (button.dataset.action === 'approve') {
+                            await API.approveAddonExecutionTarget(addonId, target);
+                        } else {
+                            await API.revokeAddonExecutionTarget(addonId, target);
+                        }
+                        await this.loadAddonExecutionApprovals();
+                    } catch (error) {
+                        if (status) status.textContent = `Target decision failed: ${error.message}`;
                     }
                 });
             });

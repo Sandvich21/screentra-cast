@@ -17,5 +17,6 @@ assert.match(indexSource, /\/js\/api\.js\?v=20261020-addon-execution-approval-v1
 assert.match(indexSource, /\/js\/app\.js\?v=20261020-addon-execution-approval-v1/);
 assert.match(appSource, /loadAddonExecutionApprovals/);
 assert.match(apiSource, /listAddonExecutionApprovals/);
+assert.match(apiSource, /approveAddonExecutionTarget/);
 
 console.log('addon manager integration: rollback is conditional, visible, and inert');

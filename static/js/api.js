@@ -285,6 +285,18 @@ window.API = {
         return res.json();
     },
 
+    async approveAddonExecutionTarget(id, target) {
+        const res = await fetch(`/api/addons/execution/approvals/${encodeURIComponent(id)}/targets/${encodeURIComponent(target)}/approve`, { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text() || 'Failed to approve addon execution target');
+        return res.json();
+    },
+
+    async revokeAddonExecutionTarget(id, target) {
+        const res = await fetch(`/api/addons/execution/approvals/${encodeURIComponent(id)}/targets/${encodeURIComponent(target)}/revoke`, { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text() || 'Failed to revoke addon execution target');
+        return res.json();
+    },
+
     async listAddonWidgetTypes() {
         const res = await fetch('/api/addons/widget-types');
         if (!res.ok) throw new Error('Failed to fetch addon widget types');

@@ -1306,6 +1306,14 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             "/api/addons/execution/approvals/{id}/revoke",
             post(revoke_addon_execution_approval),
         )
+        .route(
+            "/api/addons/execution/approvals/{id}/targets/{target}/approve",
+            post(approve_addon_execution_target),
+        )
+        .route(
+            "/api/addons/execution/approvals/{id}/targets/{target}/revoke",
+            post(revoke_addon_execution_target),
+        )
         .route("/api/addons/widget-types", get(list_addon_widget_types))
         .route(
             "/api/addons/package",
@@ -2369,6 +2377,72 @@ async fn revoke_addon_execution_approval(
         &record.addon_id,
         "revoked",
         Some("administrator revoked execution approval"),
+    )
+    .await
+    .map_err(|_| internal_server_error())?;
+    Ok(AxumJson(record))
+}
+
+fn parse_addon_execution_target(
+    target: &str,
+) -> Result<crate::addon_capabilities::ExecutionTarget, (StatusCode, String)> {
+    match target {
+        "server" => Ok(crate::addon_capabilities::ExecutionTarget::Server),
+        "client" => Ok(crate::addon_capabilities::ExecutionTarget::Client),
+        _ => Err((StatusCode::BAD_REQUEST, "Invalid execution target".to_string())),
+    }
+}
+
+async fn approve_addon_execution_target(
+    State(state): State<RuntimeState>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    Path((id, target)): Path<(String, String)>,
+) -> Result<AxumJson<crate::addon_capabilities::AddonApprovalRecord>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    let target = parse_addon_execution_target(&target)?;
+    let mut record = crate::addon_capabilities::AddonApprovalStore::load(&id)
+        .map_err(|_| (StatusCode::NOT_FOUND, "Approval record not found".to_string()))?;
+    let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    record
+        .approve_target(target, &principal.username, &timestamp)
+        .map_err(|error| (StatusCode::BAD_REQUEST, format!("Target approval rejected: {error:?}")))?;
+    crate::addon_capabilities::AddonApprovalStore::save(&record)
+        .map_err(|_| internal_server_error())?;
+    audit_trusted_service_stage_event(
+        &state,
+        &principal,
+        "addon_execution_approval",
+        &record.addon_id,
+        "target_approved",
+        Some("administrator approved one execution target"),
+    )
+    .await
+    .map_err(|_| internal_server_error())?;
+    Ok(AxumJson(record))
+}
+
+async fn revoke_addon_execution_target(
+    State(state): State<RuntimeState>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    Path((id, target)): Path<(String, String)>,
+) -> Result<AxumJson<crate::addon_capabilities::AddonApprovalRecord>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    let target = parse_addon_execution_target(&target)?;
+    let mut record = crate::addon_capabilities::AddonApprovalStore::load(&id)
+        .map_err(|_| (StatusCode::NOT_FOUND, "Approval record not found".to_string()))?;
+    let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    record
+        .revoke_target(target, &principal.username, &timestamp)
+        .map_err(|error| (StatusCode::BAD_REQUEST, format!("Target revocation rejected: {error:?}")))?;
+    crate::addon_capabilities::AddonApprovalStore::save(&record)
+        .map_err(|_| internal_server_error())?;
+    audit_trusted_service_stage_event(
+        &state,
+        &principal,
+        "addon_execution_approval",
+        &record.addon_id,
+        "target_revoked",
+        Some("administrator revoked one execution target"),
     )
     .await
     .map_err(|_| internal_server_error())?;

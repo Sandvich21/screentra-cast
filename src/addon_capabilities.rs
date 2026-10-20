@@ -307,6 +307,7 @@ pub struct AddonApprovalRecord {
     pub artifact_digest: String,
     pub request: AddonExecutionRequest,
     pub capability_approved: Vec<bool>,
+    pub target_approved: Vec<bool>,
     pub state: ApprovalState,
     #[serde(default)]
     pub approved_by: Option<String>,
@@ -325,8 +326,11 @@ pub enum ApprovalError {
     InvalidArtifactDigest,
     InvalidRequest(CapabilityContractError),
     CapabilityApprovalCountMismatch,
+    TargetApprovalCountMismatch,
     InvalidCapabilityIndex,
+    InvalidTarget,
     CapabilityNotApproved,
+    TargetNotApproved,
     ApprovalBindingMismatch,
     InvalidApprover,
     InvalidTimestamp,
@@ -344,11 +348,12 @@ impl AddonApprovalRecord {
         validate_approval_identity(addon_id, addon_version, artifact_digest)?;
         request.validate().map_err(ApprovalError::InvalidRequest)?;
         Ok(Self {
-            schema_version: 1,
+            schema_version: 2,
             addon_id: addon_id.to_string(),
             addon_version: addon_version.to_string(),
             artifact_digest: artifact_digest.to_string(),
             capability_approved: vec![false; request.capabilities.len()],
+            target_approved: vec![false; request.targets.len()],
             request,
             state: ApprovalState::Pending,
             approved_by: None,
@@ -359,7 +364,7 @@ impl AddonApprovalRecord {
     }
 
     pub fn validate(&self) -> Result<(), ApprovalError> {
-        if self.schema_version != 1 {
+        if self.schema_version != 2 {
             return Err(ApprovalError::InvalidRequest(
                 CapabilityContractError::InvalidTargets,
             ));
@@ -371,12 +376,15 @@ impl AddonApprovalRecord {
         if self.capability_approved.len() != self.request.capabilities.len() {
             return Err(ApprovalError::CapabilityApprovalCountMismatch);
         }
+        if self.target_approved.len() != self.request.targets.len() {
+            return Err(ApprovalError::TargetApprovalCountMismatch);
+        }
         if matches!(self.state, ApprovalState::Approved) {
             if self.approved_by.is_none() || self.approved_at.is_none() {
                 return Err(ApprovalError::NotApproved);
             }
-            if self.capability_approved.iter().any(|approved| !approved) {
-                return Err(ApprovalError::CapabilityNotApproved);
+            if self.target_approved.iter().all(|approved| !approved) {
+                return Err(ApprovalError::TargetNotApproved);
             }
         }
         Ok(())
@@ -398,6 +406,85 @@ impl AddonApprovalRecord {
         Ok(())
     }
 
+    pub fn set_target_approved(
+        &mut self,
+        target: ExecutionTarget,
+        approved: bool,
+    ) -> Result<(), ApprovalError> {
+        if self.state != ApprovalState::Pending {
+            return Err(ApprovalError::ApprovalAlreadyFinalized);
+        }
+        let index = self
+            .request
+            .targets
+            .iter()
+            .position(|candidate| *candidate == target)
+            .ok_or(ApprovalError::InvalidTarget)?;
+        self.target_approved[index] = approved;
+        Ok(())
+    }
+
+    pub fn approve_target(
+        &mut self,
+        target: ExecutionTarget,
+        approver: &str,
+        timestamp: &str,
+    ) -> Result<(), ApprovalError> {
+        if self.state == ApprovalState::Revoked {
+            return Err(ApprovalError::ApprovalAlreadyFinalized);
+        }
+        let index = self
+            .request
+            .targets
+            .iter()
+            .position(|candidate| *candidate == target)
+            .ok_or(ApprovalError::InvalidTarget)?;
+        if self
+            .request
+            .capabilities
+            .iter()
+            .enumerate()
+            .any(|(capability_index, capability)| {
+                capability.target == target && !self.capability_approved[capability_index]
+            })
+        {
+            return Err(ApprovalError::CapabilityNotApproved);
+        }
+        validate_approver(approver)?;
+        validate_timestamp(timestamp)?;
+        self.target_approved[index] = true;
+        self.approved_by = Some(approver.to_string());
+        self.approved_at = Some(timestamp.to_string());
+        self.state = ApprovalState::Approved;
+        self.validate()
+    }
+
+    pub fn revoke_target(
+        &mut self,
+        target: ExecutionTarget,
+        revoker: &str,
+        timestamp: &str,
+    ) -> Result<(), ApprovalError> {
+        if self.state != ApprovalState::Approved {
+            return Err(ApprovalError::NotApproved);
+        }
+        let index = self
+            .request
+            .targets
+            .iter()
+            .position(|candidate| *candidate == target)
+            .ok_or(ApprovalError::InvalidTarget)?;
+        validate_approver(revoker)?;
+        validate_timestamp(timestamp)?;
+        self.target_approved[index] = false;
+        self.revoked_by = Some(revoker.to_string());
+        self.revoked_at = Some(timestamp.to_string());
+        if self.target_approved.iter().all(|approved| !approved) {
+            self.state = ApprovalState::Revoked;
+        }
+        Ok(())
+    }
+
     pub fn approve(&mut self, approver: &str, timestamp: &str) -> Result<(), ApprovalError> {
         if self.state != ApprovalState::Pending {
             return Err(ApprovalError::ApprovalAlreadyFinalized);
@@ -407,6 +494,7 @@ impl AddonApprovalRecord {
         }
         validate_approver(approver)?;
         validate_timestamp(timestamp)?;
+        self.target_approved.fill(true);
         self.approved_by = Some(approver.to_string());
         self.approved_at = Some(timestamp.to_string());
         self.state = ApprovalState::Approved;
@@ -420,6 +508,7 @@ impl AddonApprovalRecord {
         validate_approver(revoker)?;
         validate_timestamp(timestamp)?;
         self.state = ApprovalState::Revoked;
+        self.target_approved.fill(false);
         self.revoked_by = Some(revoker.to_string());
         self.revoked_at = Some(timestamp.to_string());
         Ok(())
@@ -447,6 +536,37 @@ impl AddonApprovalRecord {
         }
         if self.state != ApprovalState::Approved {
             return Err(ApprovalError::NotApproved);
+        }
+        if self.target_approved.iter().any(|approved| !approved) {
+            return Err(ApprovalError::TargetNotApproved);
+        }
+        Ok(())
+    }
+
+    pub fn can_start_for_target(&self, target: ExecutionTarget) -> Result<(), ApprovalError> {
+        self.validate()?;
+        if self.state != ApprovalState::Approved {
+            return Err(ApprovalError::NotApproved);
+        }
+        let target_index = self
+            .request
+            .targets
+            .iter()
+            .position(|candidate| *candidate == target)
+            .ok_or(ApprovalError::InvalidTarget)?;
+        if !self.target_approved[target_index] {
+            return Err(ApprovalError::TargetNotApproved);
+        }
+        if self
+            .request
+            .capabilities
+            .iter()
+            .enumerate()
+            .any(|(index, capability)| {
+                capability.target == target && !self.capability_approved[index]
+            })
+        {
+            return Err(ApprovalError::CapabilityNotApproved);
         }
         Ok(())
     }
@@ -805,6 +925,57 @@ mod tests {
         assert_eq!(
             request.validate(),
             Err(CapabilityContractError::DuplicateCapability)
+        );
+    }
+
+    #[test]
+    fn server_and_client_targets_are_approved_and_revoked_independently() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server, ExecutionTarget::Client],
+            server: Some(container("registry.example/server", 'a')),
+            client: Some(container("registry.example/client", 'b')),
+            capabilities: vec![
+                AddonCapabilityRequest::host_api_read(ExecutionTarget::Server, "clients"),
+                AddonCapabilityRequest::microphone(ExecutionTarget::Client),
+            ],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.dual",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.set_capability_approved(1, true).unwrap();
+
+        approval
+            .approve_target(ExecutionTarget::Server, "admin", "2026-10-20T14:30:00Z")
+            .unwrap();
+        assert_eq!(
+            approval.can_start_for_target(ExecutionTarget::Server),
+            Ok(())
+        );
+        assert_eq!(
+            approval.can_start_for_target(ExecutionTarget::Client),
+            Err(ApprovalError::TargetNotApproved)
+        );
+
+        approval
+            .approve_target(ExecutionTarget::Client, "admin", "2026-10-20T14:31:00Z")
+            .unwrap();
+        assert_eq!(approval.can_start(), Ok(()));
+
+        approval
+            .revoke_target(ExecutionTarget::Server, "admin", "2026-10-20T14:32:00Z")
+            .unwrap();
+        assert_eq!(
+            approval.can_start_for_target(ExecutionTarget::Server),
+            Err(ApprovalError::TargetNotApproved)
+        );
+        assert_eq!(
+            approval.can_start_for_target(ExecutionTarget::Client),
+            Ok(())
         );
     }
 

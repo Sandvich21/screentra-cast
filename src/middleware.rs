@@ -623,6 +623,13 @@ mod authorization_tests {
             required_step_up_scope("/api/addons/execution/approvals/example/approve", "POST"),
             Some("addon-execution-approval".to_string())
         );
+        assert_eq!(
+            required_step_up_scope(
+                "/api/addons/execution/approvals/example/targets/client/approve",
+                "POST",
+            ),
+            Some("addon-execution-approval".to_string())
+        );
         assert_eq!(required_step_up_scope("/api/display-state", "POST"), None);
         assert_eq!(required_step_up_scope("/api/layouts/one", "PUT"), None);
         assert_eq!(required_step_up_scope("/api/clients/register", "POST"), None);
