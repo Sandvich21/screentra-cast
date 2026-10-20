@@ -327,6 +327,7 @@ pub enum ApprovalError {
     InvalidHostApiResponse,
     HostApiResponseLimitExceeded,
     HostApiOperationMismatch,
+    HostApiIdentityMismatch,
     InvalidNetworkBoundary,
     InvalidActivationInstance,
     InvalidVersion,
@@ -745,9 +746,17 @@ impl ServerNetworkBoundary {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ServerHostApiOperation {
     ListClients,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerHostApiRequest {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub operation: ServerHostApiOperation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -825,6 +834,32 @@ impl ServerHostApiContract {
             max_items: 100,
             max_response_bytes: 64 * 1024,
         })
+    }
+
+    pub fn request(
+        &self,
+        operation: ServerHostApiOperation,
+    ) -> Result<ServerHostApiRequest, ApprovalError> {
+        if !self.operations.contains(&operation) {
+            return Err(ApprovalError::HostApiOperationMismatch);
+        }
+        Ok(ServerHostApiRequest {
+            addon_id: self.addon_id.clone(),
+            activation_instance: self.activation_instance.clone(),
+            operation,
+        })
+    }
+
+    pub fn validate_request(&self, request: &ServerHostApiRequest) -> Result<(), ApprovalError> {
+        if request.addon_id != self.addon_id
+            || request.activation_instance != self.activation_instance
+        {
+            return Err(ApprovalError::HostApiIdentityMismatch);
+        }
+        if !self.operations.contains(&request.operation) {
+            return Err(ApprovalError::HostApiOperationMismatch);
+        }
+        Ok(())
     }
 
     pub fn validate_response(
@@ -1399,6 +1434,44 @@ mod tests {
         approval.set_capability_approved(1, true).unwrap();
         approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
         assert_eq!(approval.can_start(), Ok(()));
+    }
+
+    #[test]
+    fn server_host_api_request_is_bound_to_addon_and_activation() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: vec![AddonCapabilityRequest::host_api_read(
+                ExecutionTarget::Server,
+                "clients",
+            )],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.host-request",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ServerExecutionPlan::from_approved(&approval, "host-request-1").unwrap();
+        let contract = ServerHostApiContract::from_server_plan(&plan).unwrap();
+
+        let request = contract
+            .request(ServerHostApiOperation::ListClients)
+            .unwrap();
+        assert_eq!(contract.validate_request(&request), Ok(()));
+        assert_eq!(request.addon_id, "example.host-request");
+        assert_eq!(request.activation_instance, "host-request-1");
+
+        let mut mismatched = request.clone();
+        mismatched.activation_instance = "other-activation".to_string();
+        assert_eq!(
+            contract.validate_request(&mismatched),
+            Err(ApprovalError::HostApiIdentityMismatch)
+        );
     }
 
     #[test]
