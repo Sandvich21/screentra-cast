@@ -30,6 +30,10 @@ fn database_url_from(value: Option<String>) -> Result<String, String> {
     Ok(value)
 }
 
+fn persisted_layout_id(layout_id: &str) -> Option<&str> {
+    (!layout_id.trim().is_empty()).then_some(layout_id)
+}
+
 async fn connect() -> Result<Client, String> {
     let url = configured_database_url()?;
     let (client, connection) = tokio_postgres::connect(&url, NoTls)
@@ -1568,13 +1572,15 @@ impl PostgresStore {
     pub async fn create_schedule(&self, entry: &ScheduleEntry) -> Result<(), String> {
         let index = entry.display_index.unwrap_or(0);
         let control_method = entry.control_method.as_deref().unwrap_or("auto");
-        self.client.execute("INSERT INTO schedules (id,display,layout_id,layout_set_id,day_of_week,start_time,end_time,created_at,action,target_client,power_state,display_name,control_method,display_index,brightness,contrast) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)", &[&entry.id, &entry.display, &entry.layout_id, &entry.layout_set_id, &entry.day_of_week, &entry.start_time, &entry.end_time, &entry.created_at, &entry.action, &entry.target_client, &entry.power_state, &entry.display_name, &control_method, &index, &entry.brightness, &entry.contrast]).await.map(|_| ()).map_err(|error| format!("create schedule: {error}"))
+        let layout_id = persisted_layout_id(&entry.layout_id);
+        self.client.execute("INSERT INTO schedules (id,display,layout_id,layout_set_id,day_of_week,start_time,end_time,created_at,action,target_client,power_state,display_name,control_method,display_index,brightness,contrast) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)", &[&entry.id, &entry.display, &layout_id, &entry.layout_set_id, &entry.day_of_week, &entry.start_time, &entry.end_time, &entry.created_at, &entry.action, &entry.target_client, &entry.power_state, &entry.display_name, &control_method, &index, &entry.brightness, &entry.contrast]).await.map(|_| ()).map_err(|error| format!("create schedule: {error}"))
     }
 
     pub async fn update_schedule(&self, entry: &ScheduleEntry) -> Result<(), String> {
         let index = entry.display_index.unwrap_or(0);
         let control_method = entry.control_method.as_deref().unwrap_or("auto");
-        if self.client.execute("UPDATE schedules SET display=$2,layout_id=$3,layout_set_id=$4,day_of_week=$5,start_time=$6,end_time=$7,action=$8,target_client=$9,power_state=$10,display_name=$11,control_method=$12,display_index=$13,brightness=$14,contrast=$15,updated_at=$16 WHERE id=$1", &[&entry.id, &entry.display, &entry.layout_id, &entry.layout_set_id, &entry.day_of_week, &entry.start_time, &entry.end_time, &entry.action, &entry.target_client, &entry.power_state, &entry.display_name, &control_method, &index, &entry.brightness, &entry.contrast, &entry.created_at]).await.map_err(|error| format!("update schedule: {error}"))? == 0 { return Err("Schedule not found".into()); }
+        let layout_id = persisted_layout_id(&entry.layout_id);
+        if self.client.execute("UPDATE schedules SET display=$2,layout_id=$3,layout_set_id=$4,day_of_week=$5,start_time=$6,end_time=$7,action=$8,target_client=$9,power_state=$10,display_name=$11,control_method=$12,display_index=$13,brightness=$14,contrast=$15,updated_at=$16 WHERE id=$1", &[&entry.id, &entry.display, &layout_id, &entry.layout_set_id, &entry.day_of_week, &entry.start_time, &entry.end_time, &entry.action, &entry.target_client, &entry.power_state, &entry.display_name, &control_method, &index, &entry.brightness, &entry.contrast, &entry.created_at]).await.map_err(|error| format!("update schedule: {error}"))? == 0 { return Err("Schedule not found".into()); }
         Ok(())
     }
 
@@ -3014,7 +3020,7 @@ pub async fn apply_initial_schema() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_initial_schema, database_url_from, PostgresStore};
+    use super::{apply_initial_schema, database_url_from, persisted_layout_id, PostgresStore};
 
     #[test]
     fn database_url_requires_a_nonempty_value() {
@@ -3024,6 +3030,12 @@ mod tests {
             database_url_from(Some("postgresql://example.invalid/db".into())).unwrap(),
             "postgresql://example.invalid/db"
         );
+    }
+
+    #[test]
+    fn empty_postgres_schedule_layout_id_is_persisted_as_null() {
+        assert_eq!(persisted_layout_id(""), None);
+        assert_eq!(persisted_layout_id("layout-1"), Some("layout-1"));
     }
 
     #[tokio::test]
