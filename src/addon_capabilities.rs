@@ -327,6 +327,7 @@ pub enum ApprovalError {
     InvalidHostApiResponse,
     HostApiResponseLimitExceeded,
     HostApiOperationMismatch,
+    InvalidNetworkBoundary,
     InvalidActivationInstance,
     InvalidVersion,
     InvalidArtifactDigest,
@@ -699,6 +700,47 @@ impl ServerOciLaunchSpec {
             no_new_privileges: true,
             drop_all_capabilities: true,
             seccomp_default: true,
+        })
+    }
+}
+
+/// Contract-only network boundary. It performs no socket, route, or firewall changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerNetworkBoundary {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub deny_by_default: bool,
+    pub rules: Vec<NetworkAllowRule>,
+}
+
+impl ServerNetworkBoundary {
+    pub fn from_server_plan(plan: &ServerExecutionPlan) -> Result<Self, ApprovalError> {
+        for rule in &plan.network_allow_rules {
+            validate_network_rule(rule).map_err(|_| ApprovalError::InvalidNetworkBoundary)?;
+        }
+        Ok(Self {
+            addon_id: plan.addon_id.clone(),
+            activation_instance: plan.activation_instance.clone(),
+            deny_by_default: true,
+            rules: plan.network_allow_rules.clone(),
+        })
+    }
+
+    pub fn allows(
+        &self,
+        ip: IpAddr,
+        protocol: NetworkProtocol,
+        port: u16,
+        mac: Option<&str>,
+    ) -> bool {
+        self.rules.iter().any(|rule| {
+            rule.ip.parse::<IpAddr>().ok() == Some(ip)
+                && rule.protocol == protocol
+                && rule.ports.contains(&port)
+                && match rule.mac.as_deref() {
+                    Some(expected) => mac == Some(expected),
+                    None => true,
+                }
         })
     }
 }
@@ -1357,6 +1399,89 @@ mod tests {
         approval.set_capability_approved(1, true).unwrap();
         approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
         assert_eq!(approval.can_start(), Ok(()));
+    }
+
+    #[test]
+    fn server_network_boundary_is_deny_by_default_and_exactly_scoped() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: vec![AddonCapabilityRequest::network(
+                ExecutionTarget::Server,
+                NetworkAllowRule {
+                    name: "weather-api".to_string(),
+                    ip: "203.0.113.10".to_string(),
+                    mac: Some("02:00:00:00:00:01".to_string()),
+                    protocol: NetworkProtocol::Tcp,
+                    ports: vec![443],
+                },
+            )],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.network-boundary",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ServerExecutionPlan::from_approved(&approval, "network-boundary-1").unwrap();
+        let boundary = ServerNetworkBoundary::from_server_plan(&plan).unwrap();
+
+        assert!(boundary.deny_by_default);
+        assert!(boundary.allows(
+            "203.0.113.10".parse().unwrap(),
+            NetworkProtocol::Tcp,
+            443,
+            Some("02:00:00:00:00:01")
+        ));
+        assert!(!boundary.allows(
+            "203.0.113.11".parse().unwrap(),
+            NetworkProtocol::Tcp,
+            443,
+            Some("02:00:00:00:00:01")
+        ));
+        assert!(!boundary.allows(
+            "203.0.113.10".parse().unwrap(),
+            NetworkProtocol::Tcp,
+            80,
+            Some("02:00:00:00:00:01")
+        ));
+        assert!(!boundary.allows(
+            "203.0.113.10".parse().unwrap(),
+            NetworkProtocol::Tcp,
+            443,
+            None
+        ));
+    }
+
+    #[test]
+    fn server_network_boundary_without_approval_rules_denies_all() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: Vec::new(),
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.network-deny",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ServerExecutionPlan::from_approved(&approval, "network-deny-1").unwrap();
+        let boundary = ServerNetworkBoundary::from_server_plan(&plan).unwrap();
+
+        assert!(!boundary.allows(
+            "203.0.113.10".parse().unwrap(),
+            NetworkProtocol::Tcp,
+            443,
+            None
+        ));
     }
 
     #[test]
