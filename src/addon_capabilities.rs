@@ -339,6 +339,8 @@ pub enum ApprovalError {
     InvalidStorageBoundary,
     CameraCapabilityUnavailable,
     InvalidCameraBoundary,
+    MicrophoneCapabilityUnavailable,
+    InvalidMicrophoneBoundary,
     InvalidNetworkBoundary,
     InvalidActivationInstance,
     InvalidVersion,
@@ -911,6 +913,88 @@ impl ClientCameraContract {
             return Err(ApprovalError::InvalidCameraBoundary);
         }
         self.request(request.width, request.height, request.fps)
+            .map(|_| ())
+    }
+}
+
+/// Contract-only client microphone stream boundary. Audio remains local to the
+/// future client broker and cannot use a server command transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientMicrophoneContract {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub opt_in: bool,
+    pub server_command_transport: bool,
+    pub max_sample_rate_hz: u32,
+    pub max_channels: u8,
+    pub max_frame_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientMicrophoneStreamRequest {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub sample_rate_hz: u32,
+    pub channels: u8,
+    pub frame_ms: u32,
+}
+
+impl ClientMicrophoneContract {
+    pub fn from_client_plan(plan: &ClientExecutionPlan) -> Result<Self, ApprovalError> {
+        if !plan
+            .capabilities
+            .iter()
+            .any(|capability| capability.kind == CapabilityKind::MicrophoneCapture)
+        {
+            return Err(ApprovalError::MicrophoneCapabilityUnavailable);
+        }
+        Ok(Self {
+            addon_id: plan.addon_id.clone(),
+            activation_instance: plan.activation_instance.clone(),
+            opt_in: true,
+            server_command_transport: false,
+            max_sample_rate_hz: 48_000,
+            max_channels: 2,
+            max_frame_ms: 20,
+        })
+    }
+
+    pub fn request(
+        &self,
+        sample_rate_hz: u32,
+        channels: u8,
+        frame_ms: u32,
+    ) -> Result<ClientMicrophoneStreamRequest, ApprovalError> {
+        if !self.opt_in
+            || self.server_command_transport
+            || sample_rate_hz == 0
+            || channels == 0
+            || frame_ms == 0
+            || sample_rate_hz > self.max_sample_rate_hz
+            || channels > self.max_channels
+            || frame_ms > self.max_frame_ms
+        {
+            return Err(ApprovalError::InvalidMicrophoneBoundary);
+        }
+        Ok(ClientMicrophoneStreamRequest {
+            addon_id: self.addon_id.clone(),
+            activation_instance: self.activation_instance.clone(),
+            sample_rate_hz,
+            channels,
+            frame_ms,
+        })
+    }
+
+    pub fn validate_request(
+        &self,
+        request: &ClientMicrophoneStreamRequest,
+    ) -> Result<(), ApprovalError> {
+        if request.addon_id != self.addon_id
+            || request.activation_instance != self.activation_instance
+        {
+            return Err(ApprovalError::InvalidMicrophoneBoundary);
+        }
+        self.request(request.sample_rate_hz, request.channels, request.frame_ms)
             .map(|_| ())
     }
 }
@@ -1724,6 +1808,48 @@ mod tests {
         assert_eq!(
             contract.request(3840, 2160, 60),
             Err(ApprovalError::InvalidCameraBoundary)
+        );
+    }
+
+    #[test]
+    fn client_microphone_contract_is_local_bounded_and_identity_bound() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Client],
+            server: None,
+            client: Some(container("registry.example/client", 'b')),
+            capabilities: vec![AddonCapabilityRequest::microphone(ExecutionTarget::Client)],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.microphone-contract",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ClientExecutionPlan::from_approved(&approval, "microphone-contract-1").unwrap();
+        let contract = ClientMicrophoneContract::from_client_plan(&plan).unwrap();
+
+        assert!(contract.opt_in);
+        assert!(!contract.server_command_transport);
+        assert_eq!(contract.max_sample_rate_hz, 48_000);
+        assert_eq!(contract.max_channels, 2);
+        assert_eq!(contract.max_frame_ms, 20);
+        let stream = contract.request(16_000, 1, 20).unwrap();
+        assert_eq!(contract.validate_request(&stream), Ok(()));
+        assert_eq!(stream.addon_id, "example.microphone-contract");
+        assert_eq!(stream.activation_instance, "microphone-contract-1");
+
+        let mut mismatched = stream.clone();
+        mismatched.activation_instance = "other-activation".to_string();
+        assert_eq!(
+            contract.validate_request(&mismatched),
+            Err(ApprovalError::InvalidMicrophoneBoundary)
+        );
+        assert_eq!(
+            contract.request(96_000, 2, 20),
+            Err(ApprovalError::InvalidMicrophoneBoundary)
         );
     }
 
