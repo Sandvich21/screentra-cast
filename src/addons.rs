@@ -211,6 +211,10 @@ pub struct AddonRecord {
     pub manifest: AddonManifest,
     pub enabled: bool,
     pub installed_at: String,
+    #[serde(default)]
+    pub rollback_available: bool,
+    #[serde(default)]
+    pub rollback_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1574,7 +1578,7 @@ fn write_addon_file_atomic(
     result
 }
 
-fn read_record(dir: &Path) -> Result<AddonRecord, AddonError> {
+fn read_record_without_rollback(dir: &Path) -> Result<AddonRecord, AddonError> {
     let manifest_path = dir.join(MANIFEST_FILE);
     let state_path = dir.join(STATE_FILE);
     validate_private_addon_metadata_file(&manifest_path, "addon manifest")?;
@@ -1609,7 +1613,50 @@ fn read_record(dir: &Path) -> Result<AddonRecord, AddonError> {
         manifest,
         enabled: state.enabled,
         installed_at: state.installed_at,
+        rollback_available: false,
+        rollback_version: None,
     })
+}
+
+fn read_record(dir: &Path) -> Result<AddonRecord, AddonError> {
+    let mut record = read_record_without_rollback(dir)?;
+    if record.manifest.kind != "client_extension" {
+        return Ok(record);
+    }
+
+    let root = dir
+        .parent()
+        .ok_or_else(|| AddonError::Invalid("Invalid addon directory parent".to_string()))?;
+    let Some(rollback_root) = checked_addon_rollback_root(root, false)? else {
+        return Ok(record);
+    };
+    let backup = addon_dir(&rollback_root, &record.manifest.id)?;
+    let backup_metadata = match fs::symlink_metadata(&backup) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(record),
+        Err(error) => return Err(io_error(error)),
+    };
+    if validate_private_addon_rollback_directory(&backup_metadata).is_err() {
+        return Ok(record);
+    }
+    let previous = match read_record_without_rollback(&backup) {
+        Ok(previous) => previous,
+        Err(_) => return Ok(record),
+    };
+    if previous.manifest.id != record.manifest.id
+        || previous.manifest.kind != "client_extension"
+        || previous.enabled != record.enabled
+        || previous.installed_at != record.installed_at
+        || !client_package_version_is_newer(
+            &record.manifest.version,
+            &previous.manifest.version,
+        )
+    {
+        return Ok(record);
+    }
+    record.rollback_available = true;
+    record.rollback_version = Some(previous.manifest.version);
+    Ok(record)
 }
 
 pub fn list() -> Result<Vec<AddonRecord>, AddonError> {
@@ -1706,6 +1753,8 @@ pub fn install(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
         manifest,
         enabled: state.enabled,
         installed_at,
+        rollback_available: false,
+        rollback_version: None,
     })
 }
 
@@ -1730,11 +1779,7 @@ pub fn update(manifest: AddonManifest) -> Result<AddonRecord, AddonError> {
         manifest_text.as_bytes(),
         "manifest-update",
     )?;
-    Ok(AddonRecord {
-        manifest,
-        enabled: existing.enabled,
-        installed_at: existing.installed_at,
-    })
+    read_record(&dir)
 }
 
 pub fn set_enabled(id: &str, enabled: bool) -> Result<AddonRecord, AddonError> {
@@ -2644,6 +2689,8 @@ pub fn install_signed_client_package(archive: &Path) -> Result<AddonRecord, Addo
             manifest: staged.manifest,
             enabled: true,
             installed_at,
+            rollback_available: false,
+            rollback_version: None,
         })
     })();
     if result.is_err() {
@@ -2827,11 +2874,7 @@ pub fn update_signed_client_package(archive: &Path) -> Result<AddonRecord, Addon
         let backup = addon_dir(&rollback_root, &staged.manifest.id)?;
         validate_addon_storage_root_identity(&root, &root_metadata)?;
         replace_addon_directory_atomically(&staged.directory, &destination, &backup)?;
-        Ok(AddonRecord {
-            manifest: staged.manifest,
-            enabled: existing.enabled,
-            installed_at: existing.installed_at,
-        })
+        read_record(&destination)
     })();
     if result.is_err() {
         cleanup_staged_addon_directory(&root, &root_metadata, &staged.directory);
@@ -2888,7 +2931,7 @@ pub fn rollback_signed_client_package(id: &str) -> Result<AddonRecord, AddonErro
         }
         return Err(rollback_error());
     }
-    Ok(previous)
+    read_record(&destination)
 }
 
 #[cfg(test)]
@@ -3326,6 +3369,8 @@ mod tests {
             .unwrap();
         assert!(!persisted.enabled);
         assert_eq!(persisted.manifest.version, "0.2.0");
+        assert!(persisted.rollback_available);
+        assert_eq!(persisted.rollback_version.as_deref(), Some("0.1.0"));
     }
 
     #[test]
@@ -3372,6 +3417,8 @@ mod tests {
         assert_eq!(retained_current.manifest.version, "0.2.0");
         assert!(!retained_current.enabled);
         assert_eq!(retained_current.installed_at, before_update.installed_at);
+        assert!(!retained_current.rollback_available);
+        assert!(retained_current.rollback_version.is_none());
     }
 
     #[test]
@@ -3405,7 +3452,14 @@ mod tests {
             fs::read(fixture.addon_dir.join("client/index.js")).unwrap(),
             new_payload
         );
-        assert_eq!(read_record(&fixture.addon_dir).unwrap().manifest.version, "0.2.0");
+        let listed = list()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.manifest.id == "example.weather")
+            .unwrap();
+        assert!(!listed.rollback_available);
+        assert!(listed.rollback_version.is_none());
+        assert!(read_record(&fixture.addon_dir).is_ok());
     }
 
     #[test]
@@ -3450,7 +3504,14 @@ mod tests {
         symlink(&outside, &backup).unwrap();
 
         assert!(rollback_signed_client_package("example.weather").is_err());
-        assert_eq!(read_record(&fixture.addon_dir).unwrap().manifest.version, "0.2.0");
+        let listed = list()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.manifest.id == "example.weather")
+            .unwrap();
+        assert!(!listed.rollback_available);
+        assert!(listed.rollback_version.is_none());
+        assert!(read_record(&fixture.addon_dir).is_ok());
         assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
     }
 
@@ -3482,7 +3543,14 @@ mod tests {
         symlink(&outside, &backup).unwrap();
 
         assert!(remove("example.weather").is_err());
-        assert_eq!(read_record(&fixture.addon_dir).unwrap().manifest.version, "0.2.0");
+        let listed = list()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.manifest.id == "example.weather")
+            .unwrap();
+        assert!(!listed.rollback_available);
+        assert!(listed.rollback_version.is_none());
+        assert!(read_record(&fixture.addon_dir).is_ok());
         assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
         assert!(backup.is_symlink());
         assert!(outside.is_dir());
@@ -3513,7 +3581,14 @@ mod tests {
         fs::write(&backup, b"not a rollback directory").unwrap();
 
         assert!(remove("example.weather").is_err());
-        assert_eq!(read_record(&fixture.addon_dir).unwrap().manifest.version, "0.2.0");
+        let listed = list()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.manifest.id == "example.weather")
+            .unwrap();
+        assert!(!listed.rollback_available);
+        assert!(listed.rollback_version.is_none());
+        assert!(read_record(&fixture.addon_dir).is_ok());
         assert_eq!(fs::read(fixture.addon_dir.join("client/index.js")).unwrap(), new_payload);
         assert!(backup.is_file());
     }
@@ -3659,7 +3734,14 @@ mod tests {
         .unwrap();
 
         assert!(rollback_signed_client_package("example.weather").is_err());
-        assert_eq!(read_record(&fixture.addon_dir).unwrap().manifest.version, "0.2.0");
+        let listed = list()
+            .unwrap()
+            .into_iter()
+            .find(|record| record.manifest.id == "example.weather")
+            .unwrap();
+        assert!(!listed.rollback_available);
+        assert!(listed.rollback_version.is_none());
+        assert!(read_record(&fixture.addon_dir).is_ok());
     }
 
     #[test]

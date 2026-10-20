@@ -869,9 +869,11 @@ const App = {
                         <div style="font-weight:bold;">${esc(addon.name)} <span style="font-weight:normal; color:var(--text-dim);">v${esc(addon.version)}</span></div>
                         <div style="font-size:0.78rem; color:var(--text-dim);">${esc(addon.id)} · ${addon.widget_types.length} widget type(s) · ${addon.enabled ? 'Enabled' : 'Disabled'}</div>
                         <div style="font-size:0.8rem; color:var(--text-dim);">${esc(addon.description || 'No description')}</div>
+                        ${addon.kind === 'client_extension' ? `<div style="font-size:0.78rem; color:var(--text-dim);">Signed client package · Client execution remains disabled${addon.rollback_available ? ` · rollback available: v${esc(addon.rollback_version)}` : ' · no retained rollback'}</div>` : ''}
                     </div>
                     <div style="display:flex; gap:0.5rem; flex-wrap:wrap; justify-content:flex-end;">
                         <button class="btn btn-secondary btn-sm addon-toggle" data-id="${esc(addon.id)}" data-enabled="${addon.enabled}">${addon.enabled ? 'Disable' : 'Enable'}</button>
+                        ${addon.rollback_available ? `<button class="btn btn-secondary btn-sm addon-rollback" data-id="${esc(addon.id)}">Rollback to v${esc(addon.rollback_version)}</button>` : ''}
                         <button class="btn btn-danger btn-sm addon-delete" data-id="${esc(addon.id)}">Remove</button>
                     </div>
                 </div>
@@ -882,6 +884,15 @@ const App = {
                         await API.setAddonEnabled(btn.dataset.id, btn.dataset.enabled !== 'true');
                         await this.loadAddons();
                     } catch (e) { alert('Addon update failed: ' + e.message); }
+                };
+            });
+            container.querySelectorAll('.addon-rollback').forEach(btn => {
+                btn.onclick = async () => {
+                    if (!(await App.confirm('Roll back this signed client package?', 'The retained previous package will be restored. Client execution remains disabled.'))) return;
+                    try {
+                        await API.rollbackAddonPackage(btn.dataset.id);
+                        await this.loadAddons();
+                    } catch (e) { alert('Addon rollback failed: ' + e.message); }
                 };
             });
             container.querySelectorAll('.addon-delete').forEach(btn => {
