@@ -3,3 +3,4 @@
 -- recorded 0002 as applied.
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS brightness integer;
 ALTER TABLE schedules ADD COLUMN IF NOT EXISTS contrast integer;
+ALTER TABLE schedules ADD COLUMN IF NOT EXISTS end_action text NOT NULL DEFAULT 'none';

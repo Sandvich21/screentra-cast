@@ -41,6 +41,7 @@ fn rebuild_schedules_layout_id_nullable(conn: &Connection) -> Result<(), Box<dyn
         "display_index",
         "brightness",
         "contrast",
+        "end_action",
     ];
     let layout_id_notnull: i64 = conn
         .query_row(
@@ -81,14 +82,15 @@ fn rebuild_schedules_layout_id_nullable(conn: &Connection) -> Result<(), Box<dyn
             display_index   INTEGER NOT NULL DEFAULT 0,
             brightness      INTEGER,
             contrast        INTEGER,
+            end_action      TEXT NOT NULL DEFAULT 'none',
             FOREIGN KEY(layout_id) REFERENCES layouts(id) ON DELETE SET NULL
         );
         INSERT INTO schedules_new
             (id, display, layout_id, day_of_week, start_time, end_time, created_at, updated_at,
-             layout_set_id, action, target_client, power_state, display_name, control_method, display_index, brightness, contrast)
+             layout_set_id, action, target_client, power_state, display_name, control_method, display_index, brightness, contrast, end_action)
         SELECT {id}, {display}, {layout_id}, {day_of_week}, {start_time}, {end_time}, {created_at},
                {updated_at}, {layout_set_id}, {action}, {target_client}, {power_state}, {display_name},
-               {control_method}, {display_index}, {brightness}, {contrast}
+               {control_method}, {display_index}, {brightness}, {contrast}, {end_action}
         FROM schedules;
         DROP TABLE schedules;
         ALTER TABLE schedules_new RENAME TO schedules;
@@ -112,6 +114,7 @@ fn rebuild_schedules_layout_id_nullable(conn: &Connection) -> Result<(), Box<dyn
         display_index = expr("display_index", "0"),
         brightness = expr("brightness", "NULL"),
         contrast = expr("contrast", "NULL"),
+        end_action = expr("end_action", "'none'"),
     );
     conn.execute_batch(&sql)?;
     Ok(())
@@ -1655,10 +1658,16 @@ impl Database {
                 display_index   INTEGER NOT NULL DEFAULT 0,
                 brightness     INTEGER,
                 contrast       INTEGER,
+                end_action     TEXT NOT NULL DEFAULT 'none', -- none | power_on
                 FOREIGN KEY(layout_id) REFERENCES layouts(id) ON DELETE SET NULL
             );
             CREATE INDEX IF NOT EXISTS idx_schedules_display ON schedules(display);
             CREATE INDEX IF NOT EXISTS idx_schedules_layout_set_id ON schedules(layout_set_id);
+            CREATE TABLE IF NOT EXISTS schedule_runtime_state (
+                schedule_id TEXT PRIMARY KEY,
+                active INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS clients (
                 id              TEXT PRIMARY KEY,
@@ -3040,7 +3049,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
     pub fn list_schedules(&self) -> Result<Vec<ScheduleEntry>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, display_name, control_method, display_index, brightness, contrast FROM schedules ORDER BY start_time ASC")
+            .prepare("SELECT id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, display_name, control_method, display_index, brightness, contrast, end_action FROM schedules ORDER BY start_time ASC")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
@@ -3061,6 +3070,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
                     display_index: row.get::<_, Option<i32>>(13)?.map(|v| v),
                     brightness: row.get::<_, Option<i32>>(14)?,
                     contrast: row.get::<_, Option<i32>>(15)?,
+                    end_action: row.get::<_, String>(16)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -3083,7 +3093,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
             Some(&entry.layout_id)
         };
         conn.execute(
-            "INSERT INTO schedules (id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, updated_at, display_name, control_method, display_index, brightness, contrast) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO schedules (id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, updated_at, display_name, control_method, display_index, brightness, contrast, end_action) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             rusqlite::params![
                 entry.id,
                 entry.display,
@@ -3102,16 +3112,19 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
                 entry.display_index.unwrap_or(0),
                 entry.brightness,
                 entry.contrast,
+                &entry.end_action,
             ],
         )
         .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM schedule_runtime_state WHERE schedule_id = ?1", [&entry.id])
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub fn get_schedule(&self, id: &str) -> Result<Option<ScheduleEntry>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, display_name, control_method, display_index, brightness, contrast FROM schedules WHERE id = ?1")
+            .prepare("SELECT id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, display_name, control_method, display_index, brightness, contrast, end_action FROM schedules WHERE id = ?1")
             .map_err(|e| e.to_string())?;
         let mut rows = stmt
             .query_map([id], |row| {
@@ -3132,6 +3145,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
                     display_index: row.get::<_, Option<i32>>(13)?,
                     brightness: row.get::<_, Option<i32>>(14)?,
                     contrast: row.get::<_, Option<i32>>(15)?,
+                    end_action: row.get::<_, String>(16)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -3153,7 +3167,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
             Some(&entry.layout_id)
         };
         conn.execute(
-            "INSERT INTO schedules (id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, updated_at, display_name, control_method, display_index, brightness, contrast) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) ON CONFLICT(id) DO UPDATE SET display=excluded.display, layout_id=excluded.layout_id, day_of_week=excluded.day_of_week, start_time=excluded.start_time, end_time=excluded.end_time, layout_set_id=excluded.layout_set_id, action=excluded.action, target_client=excluded.target_client, power_state=excluded.power_state, updated_at=excluded.updated_at, display_name=COALESCE(NULLIF(excluded.display_name, ''), schedules.display_name), control_method=excluded.control_method, display_index=excluded.display_index, brightness=excluded.brightness, contrast=excluded.contrast",
+            "INSERT INTO schedules (id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, updated_at, display_name, control_method, display_index, brightness, contrast, end_action) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18) ON CONFLICT(id) DO UPDATE SET display=excluded.display, layout_id=excluded.layout_id, day_of_week=excluded.day_of_week, start_time=excluded.start_time, end_time=excluded.end_time, layout_set_id=excluded.layout_set_id, action=excluded.action, target_client=excluded.target_client, power_state=excluded.power_state, updated_at=excluded.updated_at, display_name=COALESCE(NULLIF(excluded.display_name, ''), schedules.display_name), control_method=excluded.control_method, display_index=excluded.display_index, brightness=excluded.brightness, contrast=excluded.contrast, end_action=excluded.end_action",
             rusqlite::params![
                 entry.id,
                 entry.display,
@@ -3172,9 +3186,12 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
                 entry.display_index.unwrap_or(0),
                 entry.brightness,
                 entry.contrast,
+                &entry.end_action,
             ],
         )
         .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM schedule_runtime_state WHERE schedule_id = ?1", [&entry.id])
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -3182,7 +3199,31 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM schedules WHERE id = ?1", [id])
             .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM schedule_runtime_state WHERE schedule_id = ?1", [id])
+            .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn get_schedule_runtime_active(&self, id: &str) -> Result<Option<bool>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT active FROM schedule_runtime_state WHERE schedule_id = ?1",
+            [id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map(|value| value.map(|active| active != 0))
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn set_schedule_runtime_active(&self, id: &str, active: bool) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO schedule_runtime_state (schedule_id, active, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(schedule_id) DO UPDATE SET active=excluded.active, updated_at=excluded.updated_at",
+            rusqlite::params![id, if active { 1 } else { 0 }, chrono::Utc::now().to_rfc3339()],
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
     }
 
     pub fn get_active_schedules_full(
@@ -3198,7 +3239,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         let day_bit = 1i32 << day_of_week;
         let previous_day_bit = 1i32 << ((day_of_week + 6) % 7);
         let mut stmt = conn
-            .prepare("SELECT id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, display_name, control_method, display_index, brightness, contrast FROM schedules WHERE (start_time <= end_time AND (day_of_week = -1 OR (day_of_week & ?1) != 0) AND start_time <= ?3 AND end_time >= ?3) OR (start_time > end_time AND (((day_of_week = -1 OR (day_of_week & ?1) != 0) AND start_time <= ?3) OR ((day_of_week = -1 OR (day_of_week & ?2) != 0) AND end_time >= ?3)))")
+            .prepare("SELECT id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, display_name, control_method, display_index, brightness, contrast, end_action FROM schedules WHERE (start_time <= end_time AND (day_of_week = -1 OR (day_of_week & ?1) != 0) AND start_time <= ?3 AND end_time >= ?3) OR (start_time > end_time AND (((day_of_week = -1 OR (day_of_week & ?1) != 0) AND start_time <= ?3) OR ((day_of_week = -1 OR (day_of_week & ?2) != 0) AND end_time >= ?3)))")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([day_bit.to_string(), previous_day_bit.to_string(), current_time.to_string()], |row| {
@@ -3224,6 +3265,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
                     display_index: row.get::<_, Option<i32>>(13)?,
                     brightness: row.get::<_, Option<i32>>(14)?,
                     contrast: row.get::<_, Option<i32>>(15)?,
+                    end_action: row.get::<_, String>(16)?,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -4243,6 +4285,7 @@ mod tests {
             display_index: Some(1),
             brightness: Some(35),
             contrast: Some(80),
+            end_action: "none".into(),
         };
         db.create_schedule(&entry).expect("create");
         let loaded = db.get_schedule("settings-1").expect("get").expect("row");

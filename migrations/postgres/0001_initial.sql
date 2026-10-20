@@ -145,10 +145,16 @@ CREATE TABLE IF NOT EXISTS schedules (
     control_method text NOT NULL DEFAULT 'auto',
     display_index integer NOT NULL DEFAULT 0,
     brightness integer,
-    contrast integer
+    contrast integer,
+    end_action text NOT NULL DEFAULT 'none'
 );
 CREATE INDEX IF NOT EXISTS idx_schedules_display ON schedules(display);
 CREATE INDEX IF NOT EXISTS idx_schedules_layout_set_id ON schedules(layout_set_id);
+CREATE TABLE IF NOT EXISTS schedule_runtime_state (
+    schedule_id text PRIMARY KEY,
+    active boolean NOT NULL DEFAULT false,
+    updated_at text NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS clients (
     id text PRIMARY KEY,

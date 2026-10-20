@@ -2202,6 +2202,7 @@ const App = {
                 const isSettings = s.action === 'display_settings';
                 const actionLabel = isSettings ? 'DDC Brightness / Contrast' : s.action === 'power_on' ? 'Power On' : s.action === 'display_sleep' ? 'Display Sleep' : 'Power Off';
                 const settingSummary = isSettings ? ` &nbsp;|&nbsp; Brightness <strong>${s.brightness === null || s.brightness === undefined ? '—' : esc(String(s.brightness))}</strong> · Contrast <strong>${s.contrast === null || s.contrast === undefined ? '—' : esc(String(s.contrast))}</strong>` : '';
+                const endSummary = s.end_action === 'power_on' ? ' &nbsp;|&nbsp; End: <strong>Power On</strong>' : '';
                 card.innerHTML = `
                     <div style="display:flex; flex-direction:column; gap:0.2rem;">
                         <div style="font-weight:bold; font-size:1rem;">
@@ -2210,7 +2211,7 @@ const App = {
                         <div style="font-size:0.85rem; color:var(--text-dim);">
                             Client: <strong>${esc(s.target_client || '—')}</strong> &nbsp;|&nbsp;
                             Display <strong>${esc(String(displayIdx))}</strong> &nbsp;|&nbsp;
-                            <strong>${actionLabel}</strong> via <strong>${esc(method)}</strong>${settingSummary}
+                            <strong>${actionLabel}</strong> via <strong>${esc(method)}</strong>${settingSummary}${endSummary}
                         </div>
                     </div>
                     <div style="display:flex; gap:0.5rem;">
@@ -2424,6 +2425,7 @@ const App = {
             const existingClientId = existing ? (existing.target_client || '') : '';
             const existingDisplayIdx = existing ? (existing.display_index !== undefined && existing.display_index !== null ? String(existing.display_index) : '0') : '0';
             const existingPowerState = existing ? (existing.power_state || 'on') : 'on';
+            const existingEndAction = existing ? (existing.end_action || 'none') : 'none';
             const isDdcWake = existingMethod === 'ddc';
             const existingBrightness = existing && existing.brightness !== undefined && existing.brightness !== null ? String(existing.brightness) : '';
             const existingContrast = existing && existing.contrast !== undefined && existing.contrast !== null ? String(existing.contrast) : '';
@@ -2450,6 +2452,14 @@ const App = {
                             <option value="power_off" ${existingAction === 'power_off' ? 'selected' : ''}>Power Off</option>
                             <option value="display_settings" ${existingAction === 'display_settings' ? 'selected' : ''}>DDC Brightness / Contrast</option>
                         </select>
+                    </div>
+                    <div class="prop-group">
+                        <label>Schedule End Action</label>
+                        <select id="sched-power-end-action" class="select">
+                            <option value="none" ${existingEndAction === 'none' ? 'selected' : ''}>None</option>
+                            <option value="power_on" ${existingEndAction === 'power_on' ? 'selected' : ''}>Power On Display</option>
+                        </select>
+                        <div style="font-size:0.75rem; color:var(--text-dim); margin-top:0.25rem;">For Display Sleep or Power Off schedules, turn the same display back on when the active window ends.</div>
                     </div>
                     <div class="prop-group">
                         <label>Control Method</label>
@@ -2703,6 +2713,7 @@ ${targetSection}
             const cmdPreview = overlay.querySelector('#sched-cmd-preview');
             const methodPreview = overlay.querySelector('#sched-method-preview');
             const actionSel = overlay.querySelector('#sched-power-action');
+            const endActionSel = overlay.querySelector('#sched-power-end-action');
 
             const settingsSection = overlay.querySelector('#sched-display-settings');
             const ddcNote = overlay.querySelector('#sched-ddc-method-note');
@@ -2743,9 +2754,12 @@ ${targetSection}
             function updatePreview() {
                 const action = actionSel.value;
                 const isSettings = action === 'display_settings';
+                const canEndPowerOn = action === 'display_sleep' || action === 'power_off';
                 settingsSection.style.display = isSettings ? 'block' : 'none';
                 ddcNote.style.display = isSettings ? 'block' : 'none';
                 methodSel.disabled = isSettings;
+                endActionSel.disabled = !canEndPowerOn;
+                if (!canEndPowerOn) endActionSel.value = 'none';
                 if (isSettings) methodSel.value = 'ddc';
                 const method = methodSel.value;
                 const labels = { auto: 'Auto', cec: 'HDMI-CEC', ddc: 'DDC/CI', dpms: 'Linux DPMS (KMS)', ir: 'IR', none: 'None' };
@@ -2789,7 +2803,7 @@ ${targetSection}
             // task_id. The backend doesn't have a "task" concept yet; we still create a
             // schedule row with a placeholder display/layout so the schedule can be tracked.
             // Future work: add a `tasks` table and proper task_id foreign key.
-            let display, layout_id, action, target_client, power_state, control_method, display_index, display_name, brightness, contrast;
+            let display, layout_id, action, target_client, power_state, control_method, display_index, display_name, brightness, contrast, end_action;
             if (mode === 'power') {
                 const clientSel = overlay.querySelector('#sched-power-client');
                 const displaySel = overlay.querySelector('#sched-power-display');
@@ -2815,6 +2829,8 @@ ${targetSection}
                     return;
                 }
                 ({ display, display_name, display_index, power_state, control_method, brightness, contrast } = powerPayload);
+                end_action = overlay.querySelector('#sched-power-end-action').value;
+                if (action !== 'display_sleep' && action !== 'power_off') end_action = 'none';
                 layout_id = '';
                 if (!target_client) {
                     alert('Please select a client.');
@@ -2866,6 +2882,7 @@ ${targetSection}
                 brightness: mode === 'power' && action === 'display_settings' ? brightness : null,
                 contrast: mode === 'power' && action === 'display_settings' ? contrast : null,
                 display_name: mode === 'power' ? display_name : mode === 'layout' ? (overlay.querySelector('#sched-layout-display option:checked')?.dataset.connector || '') : null,
+                end_action: mode === 'power' ? end_action : 'none',
             };
 
             try {

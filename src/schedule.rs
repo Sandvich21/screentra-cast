@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
@@ -74,10 +75,19 @@ pub struct ScheduleEntry {
     /// DDC/CI contrast (VCP 12) for `display_settings` schedules.
     #[serde(default)]
     pub contrast: Option<i32>,
+
+    /// Action to queue once the active schedule window ends.
+    /// Currently supported values are `none` and `power_on`.
+    #[serde(default = "default_end_action")]
+    pub end_action: String,
 }
 
 fn default_action() -> String {
     "switch_layout".to_string()
+}
+
+fn default_end_action() -> String {
+    "none".to_string()
 }
 
 /// Background scheduler started from `main.rs`.
@@ -113,7 +123,12 @@ pub async fn run_repository_scheduler(repository: crate::api::ClientRepository) 
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
     loop {
         interval.tick().await;
-        if let Err(e) = apply_repository_schedules_at(&repository, Local::now()).await {
+        if let Err(e) = apply_repository_schedules_at(
+            &repository,
+            Local::now(),
+        )
+        .await
+        {
             log::error!("Scheduler error: {e}");
         }
     }
@@ -128,6 +143,10 @@ async fn apply_repository_schedules_at(
     let active = repository
         .get_active_schedules_full(&current_time, day)
         .await?;
+    let current_active: HashSet<String> = active
+        .iter()
+        .map(|schedule| schedule.id.clone())
+        .collect();
     if !active.is_empty() {
         log::info!(
             "Scheduler active schedules count={} local_time={} day={}",
@@ -222,7 +241,55 @@ async fn apply_repository_schedules_at(
             }
         }
     }
+    let all_schedules = repository.list_schedules().await?;
+    let mut previously_active = HashSet::new();
+    for schedule in &all_schedules {
+        if repository
+            .get_schedule_runtime_active(&schedule.id)
+            .await?
+            .unwrap_or(false)
+        {
+            previously_active.insert(schedule.id.clone());
+        }
+    }
+    let ended_ids: HashSet<String> = schedules_needing_end_action(
+        &previously_active,
+        &current_active,
+        &all_schedules,
+    )
+    .into_iter()
+    .collect();
+    for schedule in &all_schedules {
+        let is_active = current_active.contains(&schedule.id);
+        if is_active {
+            repository.set_schedule_runtime_active(&schedule.id, true).await?;
+            continue;
+        }
+        if ended_ids.contains(&schedule.id) {
+            if apply_repository_end_action(repository, schedule, &now_rfc).await? {
+                repository.set_schedule_runtime_active(&schedule.id, false).await?;
+            }
+        } else {
+            repository.set_schedule_runtime_active(&schedule.id, false).await?;
+        }
+    }
     Ok(())
+}
+
+fn schedules_needing_end_action(
+    previously_active: &HashSet<String>,
+    current_active: &HashSet<String>,
+    schedules: &[ScheduleEntry],
+) -> Vec<String> {
+    schedules
+        .iter()
+        .filter(|schedule| {
+            previously_active.contains(&schedule.id)
+                && !current_active.contains(&schedule.id)
+                && schedule.end_action == "power_on"
+        })
+        .map(|schedule| schedule.id.clone())
+        .collect()
 }
 
 async fn resolve_repository_layout(
@@ -345,6 +412,36 @@ async fn apply_repository_power_action(
         }
     }
     Ok(())
+}
+
+async fn apply_repository_end_action(
+    repository: &crate::api::ClientRepository,
+    schedule: &ScheduleEntry,
+    now_rfc: &str,
+) -> Result<bool, String> {
+    let target = schedule.target_client.as_deref().unwrap_or("");
+    if target.is_empty() {
+        let message = format!("end action for schedule {} has no target_client", schedule.id);
+        let _ = repository
+            .log_schedule_run(&schedule.id, "end_power_on", "", false, Some(&message), now_rfc)
+            .await;
+        return Ok(false);
+    }
+    let method = schedule.control_method.as_deref().unwrap_or("auto");
+    let display_index = schedule.display_index.unwrap_or(0);
+    let (command, payload) = power_command(method, "on", display_index);
+    let payload_json = payload.to_string();
+    let result = repository
+        .queue_client_command(target, &command, Some(&payload_json), now_rfc, Some("scheduler-end"))
+        .await;
+    let (success, message) = match result {
+        Ok(()) => (true, format!("queued end action {command}")),
+        Err(error) => (false, error),
+    };
+    let _ = repository
+        .log_schedule_run(&schedule.id, "end_power_on", target, success, Some(&message), now_rfc)
+        .await;
+    Ok(success)
 }
 
 fn power_command(
@@ -823,6 +920,20 @@ mod tests {
     }
 
     #[test]
+    fn schedule_end_action_fires_only_after_active_window_ends() {
+        let mut schedule = active_schedule("end-1", "client-a:DP-1", "");
+        schedule.action = "display_sleep".to_string();
+        schedule.end_action = "power_on".to_string();
+        let previous = std::collections::HashSet::from([schedule.id.clone()]);
+        let current = std::collections::HashSet::new();
+        let ended = schedules_needing_end_action(&previous, &current, &[schedule.clone()]);
+        assert_eq!(ended, vec!["end-1"]);
+
+        let still_active = std::collections::HashSet::from([schedule.id.clone()]);
+        assert!(schedules_needing_end_action(&previous, &still_active, &[schedule]).is_empty());
+    }
+
+    #[test]
     fn display_settings_command_contains_only_bounded_requested_values() {
         let (action, payload) = display_settings_command(2, Some(35), Some(80));
         assert_eq!(action, "display_settings");
@@ -910,6 +1021,7 @@ mod tests {
             display_index: None,
             brightness: None,
             contrast: None,
+            end_action: "none".to_string(),
         }
     }
 
@@ -937,6 +1049,7 @@ mod tests {
             display_index: None,
             brightness: None,
             contrast: None,
+            end_action: "none".to_string(),
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: ScheduleEntry = serde_json::from_str(&json).unwrap();
@@ -1282,6 +1395,7 @@ mod tests {
                 display_index: None,
             brightness: None,
             contrast: None,
+            end_action: "none".to_string(),
             };
             db.create_schedule(&sched).expect("create schedule");
 

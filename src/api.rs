@@ -348,6 +348,20 @@ impl ClientRepository {
         }
     }
 
+    pub(crate) async fn get_schedule_runtime_active(&self, id: &str) -> Result<Option<bool>, String> {
+        match self {
+            Self::Sqlite(db) => db.get_schedule_runtime_active(id),
+            Self::Postgres(db) => db.get_schedule_runtime_active(id).await,
+        }
+    }
+
+    pub(crate) async fn set_schedule_runtime_active(&self, id: &str, active: bool) -> Result<(), String> {
+        match self {
+            Self::Sqlite(db) => db.set_schedule_runtime_active(id, active),
+            Self::Postgres(db) => db.set_schedule_runtime_active(id, active).await,
+        }
+    }
+
     pub(crate) async fn get_display_assignment(&self, display: &str) -> Result<Option<DisplayAssignment>, String> {
         match self {
             Self::Sqlite(db) => db.get_display_assignment(display),
@@ -813,7 +827,7 @@ impl ClientRepository {
         }
     }
 
-    async fn list_schedules(&self) -> Result<Vec<ScheduleEntry>, String> {
+    pub(crate) async fn list_schedules(&self) -> Result<Vec<ScheduleEntry>, String> {
         match self {
             Self::Sqlite(db) => db.list_schedules(),
             Self::Postgres(db) => db.list_schedules().await,
@@ -4543,6 +4557,22 @@ fn validate_schedule_entry(entry: &ScheduleEntry) -> Result<(), (StatusCode, Str
             }
         }
         _ => return Err(bad("Invalid schedule action")),
+    }
+    match entry.end_action.as_str() {
+        "none" => {}
+        "power_on" => {
+            if !matches!(entry.action.as_str(), "power_off" | "display_sleep") {
+                return Err(bad("Schedule end power-on requires a power-off or sleep start action"));
+            }
+            if entry
+                .target_client
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(bad("Schedule end power-on requires a target client"));
+            }
+        }
+        _ => return Err(bad("Invalid schedule end action")),
     }
     if let Some(method) = entry.control_method.as_deref() {
         if !matches!(method, "auto" | "ddc" | "cec" | "dpms" | "ir") {
@@ -11146,6 +11176,7 @@ mod audit_validation_tests {
             display_index: None,
             brightness: None,
             contrast: None,
+            end_action: "none".into(),
         }
     }
 
