@@ -6,7 +6,9 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use crate::addons;
-use crate::trusted_service_database::TrustedServiceDatabaseContract;
+use crate::trusted_service_database::{
+    DatabaseOperation, DatabaseRequest, TrustedServiceDatabaseContract,
+};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -777,6 +779,20 @@ impl ServerStorageContract {
             .map_err(|_| ApprovalError::InvalidStorageBoundary)?;
         Ok(Self { database })
     }
+
+    pub fn request(&self, operation: DatabaseOperation) -> DatabaseRequest {
+        DatabaseRequest {
+            addon_id: self.database.addon_id.clone(),
+            activation_instance: self.database.activation_instance.clone(),
+            operation,
+        }
+    }
+
+    pub fn validate_request(&self, request: &DatabaseRequest) -> Result<(), ApprovalError> {
+        request
+            .validate_against(&self.database)
+            .map_err(|_| ApprovalError::InvalidStorageBoundary)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1506,6 +1522,18 @@ mod tests {
         assert!(!contract
             .database
             .binds_identity("example.storage-contract", "other-activation"));
+
+        let request = contract.request(crate::trusted_service_database::DatabaseOperation::Put {
+            key: "settings".to_string(),
+            value_json: "{\"enabled\":true}".to_string(),
+        });
+        assert_eq!(contract.validate_request(&request), Ok(()));
+        let mut mismatched = request.clone();
+        mismatched.activation_instance = "other-activation".to_string();
+        assert_eq!(
+            contract.validate_request(&mismatched),
+            Err(ApprovalError::InvalidStorageBoundary)
+        );
     }
 
     #[test]
