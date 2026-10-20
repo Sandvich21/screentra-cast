@@ -322,6 +322,7 @@ pub struct AddonApprovalRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalError {
     InvalidAddonId,
+    OciCapabilityBoundaryUnavailable(CapabilityKind),
     InvalidActivationInstance,
     InvalidVersion,
     InvalidArtifactDigest,
@@ -644,6 +645,56 @@ impl ServerExecutionPlan {
             capabilities,
             host_api_scopes,
             network_allow_rules,
+        })
+    }
+}
+
+/// Contract-only OCI policy for a server add-on. It is never a launch handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerOciLaunchSpec {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub image_ref: String,
+    pub memory_bytes: u64,
+    pub cpu_millis: u32,
+    pub pids: u32,
+    pub writable_bytes: u64,
+    pub rootless: bool,
+    pub non_root: bool,
+    pub network_disabled: bool,
+    pub read_only_rootfs: bool,
+    pub no_new_privileges: bool,
+    pub drop_all_capabilities: bool,
+    pub seccomp_default: bool,
+}
+
+impl ServerOciLaunchSpec {
+    pub fn from_server_plan(plan: &ServerExecutionPlan) -> Result<Self, ApprovalError> {
+        if let Some(capability) = plan.capabilities.iter().find(|capability| {
+            matches!(
+                capability.kind,
+                CapabilityKind::HostApiRead | CapabilityKind::NetworkEgress
+            )
+        }) {
+            return Err(ApprovalError::OciCapabilityBoundaryUnavailable(
+                capability.kind,
+            ));
+        }
+        Ok(Self {
+            addon_id: plan.addon_id.clone(),
+            activation_instance: plan.activation_instance.clone(),
+            image_ref: format!("{}@{}", plan.image, plan.image_digest),
+            memory_bytes: plan.memory_bytes,
+            cpu_millis: plan.cpu_millis,
+            pids: plan.pids,
+            writable_bytes: plan.writable_bytes,
+            rootless: true,
+            non_root: true,
+            network_disabled: true,
+            read_only_rootfs: true,
+            no_new_privileges: true,
+            drop_all_capabilities: true,
+            seccomp_default: true,
         })
     }
 }
@@ -1196,6 +1247,110 @@ mod tests {
         approval.set_capability_approved(1, true).unwrap();
         approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
         assert_eq!(approval.can_start(), Ok(()));
+    }
+
+    #[test]
+    fn approved_server_plan_produces_hardened_inert_oci_spec() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: Vec::new(),
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.inert-server",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+
+        let plan = ServerExecutionPlan::from_approved(&approval, "inert-server-1").unwrap();
+        let spec = ServerOciLaunchSpec::from_server_plan(&plan).unwrap();
+        assert_eq!(spec.addon_id, "example.inert-server");
+        assert_eq!(spec.activation_instance, "inert-server-1");
+        assert_eq!(
+            spec.image_ref,
+            "registry.example/server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(spec.memory_bytes, 512 * 1024 * 1024);
+        assert_eq!(spec.cpu_millis, 1_000);
+        assert_eq!(spec.pids, 128);
+        assert_eq!(spec.writable_bytes, 128 * 1024 * 1024);
+        assert!(spec.rootless);
+        assert!(spec.non_root);
+        assert!(spec.network_disabled);
+        assert!(spec.read_only_rootfs);
+        assert!(spec.no_new_privileges);
+        assert!(spec.drop_all_capabilities);
+        assert!(spec.seccomp_default);
+    }
+
+    #[test]
+    fn inert_oci_spec_rejects_unimplemented_host_boundaries() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: vec![AddonCapabilityRequest::host_api_read(
+                ExecutionTarget::Server,
+                "clients",
+            )],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.host-api",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ServerExecutionPlan::from_approved(&approval, "host-api-1").unwrap();
+
+        assert_eq!(
+            ServerOciLaunchSpec::from_server_plan(&plan),
+            Err(ApprovalError::OciCapabilityBoundaryUnavailable(
+                CapabilityKind::HostApiRead
+            ))
+        );
+    }
+
+    #[test]
+    fn inert_oci_spec_rejects_unimplemented_network_boundary() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: vec![AddonCapabilityRequest::network(
+                ExecutionTarget::Server,
+                NetworkAllowRule {
+                    name: "api".to_string(),
+                    ip: "192.0.2.10".to_string(),
+                    mac: None,
+                    protocol: NetworkProtocol::Tcp,
+                    ports: vec![443],
+                },
+            )],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.network",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ServerExecutionPlan::from_approved(&approval, "network-1").unwrap();
+
+        assert_eq!(
+            ServerOciLaunchSpec::from_server_plan(&plan),
+            Err(ApprovalError::OciCapabilityBoundaryUnavailable(
+                CapabilityKind::NetworkEgress
+            ))
+        );
     }
 
     #[test]
