@@ -1,13 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8">
-<script>
-(function () {
-  var requested = new URLSearchParams(location.search).get('fit') || 'cover';
-  var allowed = ['cover', 'contain', 'fill', 'none', 'scale-down'];
-  document.documentElement.dataset.videoFit = allowed.indexOf(requested) >= 0 ? requested : 'cover';
-})();
-</script>
+<script src="/js/youtube-fit.js?v=20261020-csp-v1"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
 html,body{width:100%;height:100%;background:#000;overflow:hidden;}
