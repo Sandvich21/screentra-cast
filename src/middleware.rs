@@ -407,7 +407,10 @@ fn role_has_capability(role: &str, capability: &str) -> bool {
         _ => false,
     }
 }
-fn required_step_up_scope(path: &str, _method: &str) -> Option<String> {
+fn required_step_up_scope(path: &str, method: &str) -> Option<String> {
+    if path.starts_with("/api/addons/execution/approvals") && is_unsafe_method(method) {
+        return Some("addon-execution-approval".to_string());
+    }
     if path == "/api/version/export"
         || path == "/api/version/update/export"
         || path == "/api/version/update/import"
@@ -479,13 +482,11 @@ pub async fn require_auth(
     });
     let mut response = next.run(req).await;
     if let Some(scope) = required_step_up_scope(&path, method.as_str()) {
-        if scope == "server-update" {
-            let cookie = auth.step_up_cookie_value(&username, &scope);
-            if let Ok(value) = axum::http::HeaderValue::from_str(&cookie) {
-                response
-                    .headers_mut()
-                    .append(axum::http::header::SET_COOKIE, value);
-            }
+        let cookie = auth.step_up_cookie_value(&username, &scope);
+        if let Ok(value) = axum::http::HeaderValue::from_str(&cookie) {
+            response
+                .headers_mut()
+                .append(axum::http::header::SET_COOKIE, value);
         }
     }
     Ok(response)
@@ -617,6 +618,11 @@ mod authorization_tests {
         assert_eq!(required_capability("/api/version/update/github", "GET"), "server_admin");
         assert_eq!(required_step_up_scope("/api/clients/one/displays/0/layout", "POST"), None);
         assert_eq!(required_step_up_scope("/api/layouts/one/publish", "POST"), None);
+        assert_eq!(required_step_up_scope("/api/addons/execution/approvals", "GET"), None);
+        assert_eq!(
+            required_step_up_scope("/api/addons/execution/approvals/example/approve", "POST"),
+            Some("addon-execution-approval".to_string())
+        );
         assert_eq!(required_step_up_scope("/api/display-state", "POST"), None);
         assert_eq!(required_step_up_scope("/api/layouts/one", "PUT"), None);
         assert_eq!(required_step_up_scope("/api/clients/register", "POST"), None);

@@ -1286,6 +1286,26 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         )
         .route("/api/system", get(system_status))
         .route("/api/addons", get(list_addons).post(install_addon))
+        .route(
+            "/api/addons/execution/approvals",
+            get(list_addon_execution_approvals).post(create_addon_execution_approval),
+        )
+        .route(
+            "/api/addons/execution/approvals/{id}",
+            get(get_addon_execution_approval),
+        )
+        .route(
+            "/api/addons/execution/approvals/{id}/capabilities",
+            patch(update_addon_execution_capabilities),
+        )
+        .route(
+            "/api/addons/execution/approvals/{id}/approve",
+            post(approve_addon_execution_approval),
+        )
+        .route(
+            "/api/addons/execution/approvals/{id}/revoke",
+            post(revoke_addon_execution_approval),
+        )
         .route("/api/addons/widget-types", get(list_addon_widget_types))
         .route(
             "/api/addons/package",
@@ -2179,6 +2199,180 @@ async fn list_addons() -> Result<AxumJson<Vec<AddonRecord>>, (StatusCode, String
     crate::addons::list()
         .map(AxumJson)
         .map_err(addon_error_response)
+}
+
+async fn list_addon_execution_approvals(
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+) -> Result<AxumJson<Vec<crate::addon_capabilities::AddonApprovalRecord>>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    crate::addon_capabilities::AddonApprovalStore::list()
+        .map(AxumJson)
+        .map_err(|error| {
+            log::error!("addon approval listing failed: {error}");
+            internal_server_error()
+        })
+}
+
+async fn get_addon_execution_approval(
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    Path(id): Path<String>,
+) -> Result<AxumJson<crate::addon_capabilities::AddonApprovalRecord>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    crate::addon_capabilities::AddonApprovalStore::load(&id)
+        .map(AxumJson)
+        .map_err(|error| {
+            if error == "Approval record not found" {
+                (StatusCode::NOT_FOUND, error)
+            } else {
+                log::error!("addon approval read failed: {error}");
+                internal_server_error()
+            }
+        })
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAddonExecutionApproval {
+    addon_id: String,
+    addon_version: String,
+    artifact_digest: String,
+    request: crate::addon_capabilities::AddonExecutionRequest,
+}
+
+#[derive(Debug, Deserialize)]
+struct CapabilityApprovalUpdate {
+    approved: Vec<bool>,
+}
+
+async fn create_addon_execution_approval(
+    State(state): State<RuntimeState>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    AxumJson(payload): AxumJson<CreateAddonExecutionApproval>,
+) -> Result<AxumJson<crate::addon_capabilities::AddonApprovalRecord>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    if let Ok(existing) = crate::addon_capabilities::AddonApprovalStore::load(&payload.addon_id) {
+        if existing.state != crate::addon_capabilities::ApprovalState::Pending {
+            return Err((
+                StatusCode::CONFLICT,
+                "An approval already exists for this add-on".to_string(),
+            ));
+        }
+        return Err((
+            StatusCode::CONFLICT,
+            "An approval is already pending for this add-on".to_string(),
+        ));
+    }
+    let record = crate::addon_capabilities::AddonApprovalRecord::pending(
+        &payload.addon_id,
+        &payload.addon_version,
+        &payload.artifact_digest,
+        payload.request,
+    )
+    .map_err(|error| (StatusCode::BAD_REQUEST, format!("Invalid approval request: {error:?}")))?;
+    crate::addon_capabilities::AddonApprovalStore::save(&record)
+        .map_err(|error| {
+            log::error!("addon approval save failed: {error}");
+            internal_server_error()
+        })?;
+    audit_trusted_service_stage_event(
+        &state,
+        &principal,
+        "addon_execution_approval",
+        &record.addon_id,
+        "pending",
+        Some("execution approval staged for administrator review"),
+    )
+    .await
+    .map_err(|_| internal_server_error())?;
+    Ok(AxumJson(record))
+}
+
+async fn update_addon_execution_capabilities(
+    State(state): State<RuntimeState>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    Path(id): Path<String>,
+    AxumJson(payload): AxumJson<CapabilityApprovalUpdate>,
+) -> Result<AxumJson<crate::addon_capabilities::AddonApprovalRecord>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    let mut record = crate::addon_capabilities::AddonApprovalStore::load(&id)
+        .map_err(|_| (StatusCode::NOT_FOUND, "Approval record not found".to_string()))?;
+    if record.state != crate::addon_capabilities::ApprovalState::Pending {
+        return Err((StatusCode::CONFLICT, "Approval is already finalized".to_string()));
+    }
+    if payload.approved.len() != record.request.capabilities.len() {
+        return Err((StatusCode::BAD_REQUEST, "Capability approval count mismatch".to_string()));
+    }
+    for (index, approved) in payload.approved.into_iter().enumerate() {
+        record
+            .set_capability_approved(index, approved)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid capability approval".to_string()))?;
+    }
+    crate::addon_capabilities::AddonApprovalStore::save(&record)
+        .map_err(|_| internal_server_error())?;
+    audit_trusted_service_stage_event(
+        &state,
+        &principal,
+        "addon_execution_approval",
+        &record.addon_id,
+        "capabilities_updated",
+        Some("capability decisions updated"),
+    )
+    .await
+    .map_err(|_| internal_server_error())?;
+    Ok(AxumJson(record))
+}
+
+async fn approve_addon_execution_approval(
+    State(state): State<RuntimeState>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    Path(id): Path<String>,
+) -> Result<AxumJson<crate::addon_capabilities::AddonApprovalRecord>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    let mut record = crate::addon_capabilities::AddonApprovalStore::load(&id)
+        .map_err(|_| (StatusCode::NOT_FOUND, "Approval record not found".to_string()))?;
+    let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    record
+        .approve(&principal.username, &timestamp)
+        .map_err(|error| (StatusCode::BAD_REQUEST, format!("Approval rejected: {error:?}")))?;
+    crate::addon_capabilities::AddonApprovalStore::save(&record)
+        .map_err(|_| internal_server_error())?;
+    audit_trusted_service_stage_event(
+        &state,
+        &principal,
+        "addon_execution_approval",
+        &record.addon_id,
+        "approved",
+        Some("administrator approved requested execution capabilities"),
+    )
+    .await
+    .map_err(|_| internal_server_error())?;
+    Ok(AxumJson(record))
+}
+
+async fn revoke_addon_execution_approval(
+    State(state): State<RuntimeState>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    Path(id): Path<String>,
+) -> Result<AxumJson<crate::addon_capabilities::AddonApprovalRecord>, (StatusCode, String)> {
+    require_addon_storage_admin(&principal)?;
+    let mut record = crate::addon_capabilities::AddonApprovalStore::load(&id)
+        .map_err(|_| (StatusCode::NOT_FOUND, "Approval record not found".to_string()))?;
+    let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    record
+        .revoke(&principal.username, &timestamp)
+        .map_err(|error| (StatusCode::BAD_REQUEST, format!("Revocation rejected: {error:?}")))?;
+    crate::addon_capabilities::AddonApprovalStore::save(&record)
+        .map_err(|_| internal_server_error())?;
+    audit_trusted_service_stage_event(
+        &state,
+        &principal,
+        "addon_execution_approval",
+        &record.addon_id,
+        "revoked",
+        Some("administrator revoked execution approval"),
+    )
+    .await
+    .map_err(|_| internal_server_error())?;
+    Ok(AxumJson(record))
 }
 
 async fn list_addon_widget_types() -> Result<AxumJson<Vec<AddonWidgetRegistration>>, (StatusCode, String)> {
@@ -9792,6 +9986,110 @@ fn reverse_name(ip: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn addon_execution_approval_list_requires_admin() {
+        let result = list_addon_execution_approvals(Extension(crate::middleware::AuthenticatedPrincipal {
+            username: "operator".to_string(),
+            role: "operator".to_string(),
+        }))
+        .await;
+        assert_eq!(result.unwrap_err().0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn addon_execution_approval_api_persists_review_and_revoke() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        let data_root = std::env::temp_dir().join(format!("screentra-addon-approval-api-{}", Uuid::new_v4()));
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_root);
+        }
+        let db_path = std::env::temp_dir().join(format!("screentra-addon-approval-api-{}.db", Uuid::new_v4()));
+        let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open test database"));
+        let state = RuntimeState::sqlite(db);
+        let admin = crate::middleware::AuthenticatedPrincipal {
+            username: "approval-admin".to_string(),
+            role: "admin".to_string(),
+        };
+        let addon_id = "example.execution".to_string();
+        let request = crate::addon_capabilities::AddonExecutionRequest {
+            targets: vec![crate::addon_capabilities::ExecutionTarget::Client],
+            server: None,
+            client: Some(crate::addon_capabilities::AddonContainerSpec {
+                image: "registry.example/execution".to_string(),
+                image_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                memory_bytes: 128 * 1024 * 1024,
+                cpu_millis: 500,
+                pids: 32,
+                writable_bytes: 16 * 1024 * 1024,
+            }),
+            capabilities: vec![crate::addon_capabilities::AddonCapabilityRequest::camera(
+                crate::addon_capabilities::ExecutionTarget::Client,
+            )],
+        };
+        let created = create_addon_execution_approval(
+            State(state.clone()),
+            Extension(admin.clone()),
+            AxumJson(CreateAddonExecutionApproval {
+                addon_id: addon_id.clone(),
+                addon_version: "1.0.0".to_string(),
+                artifact_digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                request,
+            }),
+        )
+        .await
+        .expect("admin should create pending approval");
+        assert_eq!(created.0.state, crate::addon_capabilities::ApprovalState::Pending);
+
+        let updated = update_addon_execution_capabilities(
+            State(state.clone()),
+            Extension(admin.clone()),
+            Path(addon_id.clone()),
+            AxumJson(CapabilityApprovalUpdate { approved: vec![true] }),
+        )
+        .await
+        .expect("admin should save capability decision");
+        assert_eq!(updated.0.capability_approved, vec![true]);
+
+        let approved = approve_addon_execution_approval(
+            State(state.clone()),
+            Extension(admin.clone()),
+            Path(addon_id.clone()),
+        )
+        .await
+        .expect("admin should approve execution");
+        assert_eq!(approved.0.state, crate::addon_capabilities::ApprovalState::Approved);
+        assert!(approved.0.can_start().is_ok());
+
+        let revoked = revoke_addon_execution_approval(
+            State(state),
+            Extension(admin),
+            Path(addon_id.clone()),
+        )
+        .await
+        .expect("admin should revoke execution");
+        assert_eq!(revoked.0.state, crate::addon_capabilities::ApprovalState::Revoked);
+        assert!(revoked.0.can_start().is_err());
+
+        let loaded = crate::addon_capabilities::AddonApprovalStore::load(&addon_id)
+            .expect("revoked approval should persist");
+        assert_eq!(loaded.state, crate::addon_capabilities::ApprovalState::Revoked);
+        if let Some(value) = old_data_dir {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = std::fs::remove_dir_all(data_root);
+        let _ = std::fs::remove_file(db_path);
+    }
 
     #[test]
     fn trusted_service_upload_files_are_exclusive_and_private() {

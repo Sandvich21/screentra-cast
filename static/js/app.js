@@ -579,6 +579,7 @@ const App = {
 
             this.loadBackups();
             this.loadAddons();
+            this.loadAddonExecutionApprovals();
             this.loadAddonClientStatuses();
         } catch (e) {
             document.getElementById('system-info').innerHTML = `<p>Error: ${esc(e.message)}</p>`;
@@ -910,6 +911,102 @@ const App = {
             });
         } catch (e) {
             container.innerHTML = `<p>Error loading addons: ${esc(e.message)}</p>`;
+        }
+    },
+    async loadAddonExecutionApprovals() {
+        const container = document.getElementById('addon-execution-approvals');
+        if (!container) return;
+        const labelCapability = (capability) => {
+            const kind = String(capability?.kind || 'unknown').replace(/_/g, ' ');
+            const target = String(capability?.target || 'unknown');
+            const scope = capability?.scope ? ` · scope: ${esc(capability.scope)}` : '';
+            const network = capability?.network;
+            const networkText = network
+                ? ` · ${esc(network.ip || '')}${network.mac ? ` / ${esc(network.mac)}` : ''} · ${esc(network.protocol || '')} · ports ${esc((network.ports || []).join(', '))}`
+                : '';
+            return `${esc(kind)} · ${esc(target)}${scope}${networkText}`;
+        };
+        try {
+            const approvals = await API.listAddonExecutionApprovals();
+            if (!approvals.length) {
+                container.innerHTML = '<p style="color:var(--text-dim,#888);">No executable add-ons are awaiting administrator review.</p>';
+                return;
+            }
+            container.innerHTML = approvals.map(record => {
+                const request = record.request || {};
+                const capabilities = Array.isArray(request.capabilities) ? request.capabilities : [];
+                const approved = Array.isArray(record.capability_approved) ? record.capability_approved : [];
+                const allApproved = capabilities.length === approved.length && approved.every(Boolean);
+                const finalized = record.state !== 'pending';
+                const capabilityHtml = capabilities.length
+                    ? capabilities.map((capability, index) => `
+                        <label style="display:block; margin:0.35rem 0;">
+                            <input type="checkbox" class="addon-capability-approval" data-addon-id="${esc(record.addon_id)}" data-index="${index}" ${approved[index] ? 'checked' : ''} ${finalized ? 'disabled' : ''}>
+                            ${labelCapability(capability)}
+                        </label>`).join('')
+                    : '<span style="color:var(--text-dim,#888);">No capabilities requested.</span>';
+                const targetText = Array.isArray(request.targets) ? request.targets.map(target => esc(target)).join(', ') : 'unknown';
+                const serverImage = request.server?.image ? `${esc(request.server.image)}@${esc(request.server.image_digest || '')}` : 'none';
+                const clientImage = request.client?.image ? `${esc(request.client.image)}@${esc(request.client.image_digest || '')}` : 'none';
+                return `
+                    <div class="sys-card addon-execution-approval" style="margin-bottom:0.75rem; padding:0.9rem 1rem;">
+                        <div style="display:flex; justify-content:space-between; gap:1rem; align-items:flex-start; flex-wrap:wrap;">
+                            <div>
+                                <div style="font-weight:600;">${esc(record.addon_id)} <span style="color:var(--text-dim);">v${esc(record.addon_version)}</span></div>
+                                <div style="font-size:0.78rem; color:var(--text-dim);">Targets: ${targetText} · state: ${esc(record.state)}</div>
+                                <div style="font-size:0.76rem; color:var(--text-dim); word-break:break-word;">Digest: ${esc(record.artifact_digest)}</div>
+                                <div style="font-size:0.76rem; color:var(--text-dim);">Server image: ${serverImage}<br>Client image: ${clientImage}</div>
+                            </div>
+                            <div style="display:flex; gap:0.45rem; flex-wrap:wrap;">
+                                ${!finalized ? `<button class="btn btn-primary btn-sm addon-approval-approve" data-addon-id="${esc(record.addon_id)}" ${allApproved ? '' : 'disabled'}>Approve selected capabilities</button>` : ''}
+                                ${record.state === 'approved' ? `<button class="btn btn-danger btn-sm addon-approval-revoke" data-addon-id="${esc(record.addon_id)}">Revoke approval</button>` : ''}
+                            </div>
+                        </div>
+                        <div style="margin-top:0.65rem; font-size:0.82rem;">${capabilityHtml}</div>
+                        <div class="addon-approval-status" data-addon-status="${esc(record.addon_id)}" style="margin-top:0.5rem; font-size:0.78rem; color:var(--text-dim,#888);"></div>
+                    </div>`;
+            }).join('');
+            container.querySelectorAll('.addon-capability-approval').forEach(input => {
+                input.addEventListener('change', async () => {
+                    const addonId = input.dataset.addonId;
+                    const status = container.querySelector(`[data-addon-status="${CSS.escape(addonId)}"]`);
+                    const checks = [...container.querySelectorAll(`.addon-capability-approval[data-addon-id="${CSS.escape(addonId)}"]`)].map(item => item.checked);
+                    if (status) status.textContent = 'Saving capability decision…';
+                    try {
+                        await API.updateAddonExecutionCapabilities(addonId, checks);
+                        await this.loadAddonExecutionApprovals();
+                    } catch (error) {
+                        if (status) status.textContent = `Save failed: ${error.message}`;
+                        input.checked = !input.checked;
+                    }
+                });
+            });
+            container.querySelectorAll('.addon-approval-approve').forEach(button => {
+                button.addEventListener('click', async () => {
+                    const status = container.querySelector(`[data-addon-status="${CSS.escape(button.dataset.addonId)}"]`);
+                    if (status) status.textContent = 'Saving administrator approval…';
+                    try {
+                        await API.approveAddonExecution(button.dataset.addonId);
+                        await this.loadAddonExecutionApprovals();
+                    } catch (error) {
+                        if (status) status.textContent = `Approval failed: ${error.message}`;
+                    }
+                });
+            });
+            container.querySelectorAll('.addon-approval-revoke').forEach(button => {
+                button.addEventListener('click', async () => {
+                    const status = container.querySelector(`[data-addon-status="${CSS.escape(button.dataset.addonId)}"]`);
+                    if (status) status.textContent = 'Revoking administrator approval…';
+                    try {
+                        await API.revokeAddonExecution(button.dataset.addonId);
+                        await this.loadAddonExecutionApprovals();
+                    } catch (error) {
+                        if (status) status.textContent = `Revocation failed: ${error.message}`;
+                    }
+                });
+            });
+        } catch (error) {
+            container.innerHTML = `<p>Error loading execution approvals: ${esc(error.message)}</p>`;
         }
     },
     async loadAddonClientStatuses() {

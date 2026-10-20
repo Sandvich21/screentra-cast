@@ -1000,6 +1000,11 @@
                         </div>
                         <div id="addons-list" class="backups-list"><p>Loading addons...</p></div>
                         <div class="sys-card" style="padding:1rem 1.25rem; margin-top:1rem;">
+                            <div style="font-weight:600; margin-bottom:0.35rem;">Executable add-on approval review</div>
+                            <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.75rem;">Execution is disabled. This review records administrator decisions only; it does not install packages, pull images, start containers, access camera/microphone/speaker devices, or enable local inference. Approvals are bound to the exact add-on version, artifact digest, targets, resources, and requested capabilities.</div>
+                            <div id="addon-execution-approvals"><p>Loading approval records...</p></div>
+                        </div>
+                        <div class="sys-card" style="padding:1rem 1.25rem; margin-top:1rem;">
                             <div style="font-weight:600; margin-bottom:0.5rem;">Client extension status</div>
                             <label for="addon-client-status-select" style="display:block; font-size:0.8rem; margin-bottom:0.35rem;">Client</label>
                             <select id="addon-client-status-select" style="max-width:28rem; width:100%;">
@@ -1189,7 +1194,7 @@
 
     <script defer src="/js/auth.js?v=20261003004000"></script>
     <script defer src="/js/traffic-runtime.js?v=20261011140500-manual-traffic-closure-classification"></script>
-    <script defer src="/js/api.js?v=20261020-addon-rollback-v1"></script>
+    <script defer src="/js/api.js?v=20261020-addon-execution-approval-v1"></script>
     <script src="/js/filebrowser.js?v=1789404930"></script>
     
     <script src="/js/weather-icons.js?v=1791477110-alert-condition-icons"></script>
@@ -1212,7 +1217,7 @@
         </div>
     </div>
 
-<script defer src="/js/app.js?v=20261020-addon-rollback-v1"></script>
+<script defer src="/js/app.js?v=20261020-addon-execution-approval-v1"></script>
 
 <script src="/js/ripley-link-guard.js?v=1789404930"></script>
 </body>

@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::fs;
+use std::io::{Read, Write};
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 
 use crate::addons;
 
@@ -504,6 +507,220 @@ fn validate_timestamp(value: &str) -> Result<(), ApprovalError> {
     Ok(())
 }
 
+const APPROVAL_ROOT: &str = "addon-approvals";
+const APPROVAL_FILE_SUFFIX: &str = ".approval.json";
+const MAX_APPROVAL_BYTES: u64 = 256 * 1024;
+
+pub struct AddonApprovalStore;
+
+impl AddonApprovalStore {
+    pub fn save(record: &AddonApprovalRecord) -> Result<(), String> {
+        record
+            .validate()
+            .map_err(|error| format!("Invalid approval record: {error:?}"))?;
+        let (root, root_metadata) = checked_approval_root(true)?;
+        let path = approval_path(&root, &record.addon_id);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err("Invalid approval record file".to_string());
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                    if metadata.nlink() != 1 || metadata.permissions().mode() & 0o777 != 0o600 {
+                        return Err("Approval record permissions are insecure".to_string());
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Failed to inspect approval record: {error}")),
+        }
+        let temp = root.join(format!(".approval-{}.tmp", uuid::Uuid::new_v4()));
+        let bytes = serde_json::to_vec_pretty(record)
+            .map_err(|_| "Failed to encode approval record".to_string())?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|error| format!("Failed to create approval staging file: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(error) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
+                let _ = fs::remove_file(&temp);
+                return Err(format!("Failed to protect approval staging file: {error}"));
+            }
+        }
+        let result = (|| {
+            file.write_all(&bytes)
+                .map_err(|error| format!("Failed to write approval record: {error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("Failed to sync approval record: {error}"))?;
+            validate_approval_root_identity(&root, &root_metadata)?;
+            fs::rename(&temp, &path)
+                .map_err(|error| format!("Failed to publish approval record: {error}"))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        result
+    }
+
+    pub fn load(addon_id: &str) -> Result<AddonApprovalRecord, String> {
+        addons::validate_addon_storage_namespace(addon_id)
+            .map_err(|_| "Invalid approval addon ID".to_string())?;
+        let (root, _) = checked_approval_root(false)?;
+        let path = approval_path(&root, addon_id);
+        let metadata = validate_existing_approval_file(&path)?;
+        if metadata.len() > MAX_APPROVAL_BYTES {
+            return Err("Approval record is too large".to_string());
+        }
+        let mut file = fs::File::open(&path)
+            .map_err(|error| format!("Failed to read approval record: {error}"))?;
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.read_to_end(&mut bytes)
+            .map_err(|error| format!("Failed to read approval record: {error}"))?;
+        let record: AddonApprovalRecord =
+            serde_json::from_slice(&bytes).map_err(|_| "Invalid approval record".to_string())?;
+        record
+            .validate()
+            .map_err(|error| format!("Invalid approval record: {error:?}"))?;
+        if record.addon_id != addon_id {
+            return Err("Approval record identity mismatch".to_string());
+        }
+        record
+            .validate_binding(
+                &record.addon_id,
+                &record.addon_version,
+                &record.artifact_digest,
+            )
+            .map_err(|error| format!("Invalid approval binding: {error:?}"))?;
+        Ok(record)
+    }
+
+    pub fn list() -> Result<Vec<AddonApprovalRecord>, String> {
+        let (root, _) = match checked_approval_root(false) {
+            Ok(value) => value,
+            Err(error) if error == "Approval record not found" => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut records = Vec::new();
+        for entry in fs::read_dir(&root)
+            .map_err(|error| format!("Failed to list approval records: {error}"))?
+        {
+            if records.len() >= 256 {
+                return Err("Too many approval records".to_string());
+            }
+            let entry =
+                entry.map_err(|error| format!("Failed to inspect approval record: {error}"))?;
+            let path = entry.path();
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| "Invalid approval record filename".to_string())?;
+            if !name.ends_with(APPROVAL_FILE_SUFFIX) {
+                return Err("Unexpected approval directory entry".to_string());
+            }
+            let addon_id = name
+                .strip_suffix(APPROVAL_FILE_SUFFIX)
+                .ok_or_else(|| "Invalid approval record filename".to_string())?;
+            addons::validate_addon_storage_namespace(addon_id)
+                .map_err(|_| "Invalid approval record filename".to_string())?;
+            let record = Self::load(addon_id)?;
+            if record.addon_id != addon_id || path != approval_path(&root, addon_id) {
+                return Err("Approval record identity mismatch".to_string());
+            }
+            records.push(record);
+        }
+        records.sort_by(|left, right| left.addon_id.cmp(&right.addon_id));
+        Ok(records)
+    }
+}
+fn checked_approval_root(create: bool) -> Result<(PathBuf, fs::Metadata), String> {
+    let data_root = addons::checked_addon_data_root(create)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Addon data directory is unavailable".to_string())?;
+    let root = data_root.join(APPROVAL_ROOT);
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) => {
+            validate_private_approval_root(&metadata)?;
+            Ok((root, metadata))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            fs::create_dir(&root)
+                .map_err(|error| format!("Failed to create approval directory: {error}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+                    .map_err(|error| format!("Failed to protect approval directory: {error}"))?;
+            }
+            let metadata = fs::symlink_metadata(&root).map_err(|error| error.to_string())?;
+            validate_private_approval_root(&metadata)?;
+            Ok((root, metadata))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err("Approval record not found".to_string())
+        }
+        Err(error) => Err(format!("Failed to inspect approval directory: {error}")),
+    }
+}
+
+fn validate_private_approval_root(metadata: &fs::Metadata) -> Result<(), String> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Invalid approval directory".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o777 != 0o700 {
+            return Err("Approval directory permissions are insecure".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_approval_root_identity(root: &Path, expected: &fs::Metadata) -> Result<(), String> {
+    let current = fs::symlink_metadata(root).map_err(|error| error.to_string())?;
+    validate_private_approval_root(&current)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (current.dev(), current.ino()) != (expected.dev(), expected.ino()) {
+            return Err("Approval directory changed".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn approval_path(root: &Path, addon_id: &str) -> PathBuf {
+    root.join(format!("{addon_id}{APPROVAL_FILE_SUFFIX}"))
+}
+
+fn validate_existing_approval_file(path: &Path) -> Result<fs::Metadata, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err("Invalid approval record file".to_string());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                if metadata.nlink() != 1 || metadata.permissions().mode() & 0o777 != 0o600 {
+                    return Err("Approval record permissions are insecure".to_string());
+                }
+            }
+            Ok(metadata)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err("Approval record not found".to_string())
+        }
+        Err(error) => Err(format!("Failed to inspect approval record: {error}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,6 +874,154 @@ mod tests {
             ),
             Err(ApprovalError::ApprovalBindingMismatch)
         );
+    }
+
+    #[test]
+    fn approval_store_round_trips_private_records() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root =
+            std::env::temp_dir().join(format!("screentra-addon-approval-{}", uuid::Uuid::new_v4()));
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: vec![AddonCapabilityRequest::host_api_read(
+                ExecutionTarget::Server,
+                "clients",
+            )],
+        };
+        let approval = AddonApprovalRecord::pending(
+            "example.store",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        AddonApprovalStore::save(&approval).unwrap();
+        let loaded = AddonApprovalStore::load("example.store").unwrap();
+        assert_eq!(loaded, approval);
+        if let Some(value) = old_data_dir {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn approval_store_lists_persisted_records_deterministically() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-addon-approval-list-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        for addon_id in ["example.zulu", "example.alpha"] {
+            let approval = AddonApprovalRecord::pending(
+                addon_id,
+                "1.0.0",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                AddonExecutionRequest {
+                    targets: vec![ExecutionTarget::Server],
+                    server: Some(container("registry.example/server", 'a')),
+                    client: None,
+                    capabilities: vec![AddonCapabilityRequest::host_api_read(
+                        ExecutionTarget::Server,
+                        "clients",
+                    )],
+                },
+            )
+            .unwrap();
+            AddonApprovalStore::save(&approval).unwrap();
+        }
+        let listed = AddonApprovalStore::list().unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|record| record.addon_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["example.alpha", "example.zulu"]
+        );
+        if let Some(value) = old_data_dir {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn approval_store_rejects_path_identity_mismatch() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-addon-approval-identity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: vec![AddonCapabilityRequest::host_api_read(
+                ExecutionTarget::Server,
+                "clients",
+            )],
+        };
+        let approval = AddonApprovalRecord::pending(
+            "example.path",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        AddonApprovalStore::save(&approval).unwrap();
+        let mut tampered = approval.clone();
+        tampered.addon_id = "example.other".to_string();
+        let path = root
+            .join(APPROVAL_ROOT)
+            .join(format!("{}{}", approval.addon_id, APPROVAL_FILE_SUFFIX));
+        std::fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        assert_eq!(
+            AddonApprovalStore::load(&approval.addon_id),
+            Err("Approval record identity mismatch".to_string())
+        );
+        if let Some(value) = old_data_dir {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn container(image: &str, digest_byte: char) -> AddonContainerSpec {

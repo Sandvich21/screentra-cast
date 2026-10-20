@@ -6,6 +6,7 @@ function _stepUpScopeForRequest(input, init) {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
     const path = new URL(url, window.location.href).pathname;
     if (path === '/api/version/update/export' || path === '/api/version/update/import' || path === '/api/version/update/apply' || path === '/api/version/update/github/settings') return 'server-update';
+    if (path.startsWith('/api/addons/execution/approvals') && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') return 'addon-execution-approval';
     if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
 
     }
@@ -253,6 +254,34 @@ window.API = {
     async listAddons() {
         const res = await fetch('/api/addons');
         if (!res.ok) throw new Error('Failed to fetch addons');
+        return res.json();
+    },
+
+    async listAddonExecutionApprovals() {
+        const res = await fetch('/api/addons/execution/approvals');
+        if (!res.ok) throw new Error(await res.text() || 'Failed to fetch addon execution approvals');
+        return res.json();
+    },
+
+    async updateAddonExecutionCapabilities(id, approved) {
+        const res = await fetch(`/api/addons/execution/approvals/${encodeURIComponent(id)}/capabilities`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ approved }),
+        });
+        if (!res.ok) throw new Error(await res.text() || 'Failed to save addon capability approvals');
+        return res.json();
+    },
+
+    async approveAddonExecution(id) {
+        const res = await fetch(`/api/addons/execution/approvals/${encodeURIComponent(id)}/approve`, { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text() || 'Failed to approve addon execution');
+        return res.json();
+    },
+
+    async revokeAddonExecution(id) {
+        const res = await fetch(`/api/addons/execution/approvals/${encodeURIComponent(id)}/revoke`, { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text() || 'Failed to revoke addon execution');
         return res.json();
     },
 

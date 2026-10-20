@@ -13,7 +13,9 @@ assert.match(appSource, /addon-rollback/);
 assert.match(appSource, /API\.rollbackAddonPackage\(btn\.dataset\.id\)/);
 assert.match(appSource, /Client execution remains disabled/);
 assert.match(apiSource, /async rollbackAddonPackage\(id\)/);
-assert.match(indexSource, /\/js\/api\.js\?v=20261020-addon-rollback-v1/);
-assert.match(indexSource, /\/js\/app\.js\?v=20261020-addon-rollback-v1/);
+assert.match(indexSource, /\/js\/api\.js\?v=20261020-addon-execution-approval-v1/);
+assert.match(indexSource, /\/js\/app\.js\?v=20261020-addon-execution-approval-v1/);
+assert.match(appSource, /loadAddonExecutionApprovals/);
+assert.match(apiSource, /listAddonExecutionApprovals/);
 
 console.log('addon manager integration: rollback is conditional, visible, and inert');
