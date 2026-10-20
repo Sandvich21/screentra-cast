@@ -6,6 +6,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use crate::addons;
+use crate::trusted_service_database::TrustedServiceDatabaseContract;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -84,6 +85,10 @@ impl AddonCapabilityRequest {
 
     pub fn speaker(target: ExecutionTarget) -> Self {
         Self::simple(target, CapabilityKind::SpeakerOutput)
+    }
+
+    pub fn storage(target: ExecutionTarget) -> Self {
+        Self::simple(target, CapabilityKind::AddonStorage)
     }
 
     pub fn network(target: ExecutionTarget, network: NetworkAllowRule) -> Self {
@@ -328,6 +333,8 @@ pub enum ApprovalError {
     HostApiResponseLimitExceeded,
     HostApiOperationMismatch,
     HostApiIdentityMismatch,
+    StorageCapabilityUnavailable,
+    InvalidStorageBoundary,
     InvalidNetworkBoundary,
     InvalidActivationInstance,
     InvalidVersion,
@@ -743,6 +750,32 @@ impl ServerNetworkBoundary {
                     None => true,
                 }
         })
+    }
+}
+
+/// Contract-only private storage boundary for an approved server add-on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerStorageContract {
+    pub database: TrustedServiceDatabaseContract,
+}
+
+impl ServerStorageContract {
+    pub fn from_server_plan(plan: &ServerExecutionPlan) -> Result<Self, ApprovalError> {
+        if !plan
+            .capabilities
+            .iter()
+            .any(|capability| capability.kind == CapabilityKind::AddonStorage)
+        {
+            return Err(ApprovalError::StorageCapabilityUnavailable);
+        }
+        let database = TrustedServiceDatabaseContract::core_storage_api(
+            &plan.addon_id,
+            &plan.activation_instance,
+        );
+        database
+            .validate()
+            .map_err(|_| ApprovalError::InvalidStorageBoundary)?;
+        Ok(Self { database })
     }
 }
 
@@ -1434,6 +1467,69 @@ mod tests {
         approval.set_capability_approved(1, true).unwrap();
         approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
         assert_eq!(approval.can_start(), Ok(()));
+    }
+
+    #[test]
+    fn server_storage_contract_is_private_and_identity_bound() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: vec![AddonCapabilityRequest::storage(ExecutionTarget::Server)],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.storage-contract",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ServerExecutionPlan::from_approved(&approval, "storage-contract-1").unwrap();
+        let contract = ServerStorageContract::from_server_plan(&plan).unwrap();
+
+        assert_eq!(contract.database.addon_id, "example.storage-contract");
+        assert_eq!(contract.database.activation_instance, "storage-contract-1");
+        assert_eq!(
+            contract.database.storage_namespace,
+            "example.storage-contract"
+        );
+        assert!(!contract.database.allow_raw_sql);
+        assert!(!contract.database.allow_core_tables);
+        assert!(!contract.database.allow_migrations);
+        assert!(!contract.database.allow_sqlite_file_mount);
+        assert!(contract.database.audit_required);
+        assert!(contract
+            .database
+            .binds_identity("example.storage-contract", "storage-contract-1"));
+        assert!(!contract
+            .database
+            .binds_identity("example.storage-contract", "other-activation"));
+    }
+
+    #[test]
+    fn server_storage_contract_requires_explicit_approval() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: Vec::new(),
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.storage-deny",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ServerExecutionPlan::from_approved(&approval, "storage-deny-1").unwrap();
+
+        assert_eq!(
+            ServerStorageContract::from_server_plan(&plan),
+            Err(ApprovalError::StorageCapabilityUnavailable)
+        );
     }
 
     #[test]
