@@ -34,11 +34,11 @@ const addons = [
   },
   {
     id: 'declarative.weather',
-    name: 'Declarative Weather',
+    name: '<img src=x onerror=alert(1)>',
     version: '0.2.0',
     widget_types: [],
     enabled: false,
-    description: '',
+    description: '<script>alert(1)</script>',
     kind: 'declarative',
     rollback_available: true,
     rollback_version: '0.1.0',
@@ -110,6 +110,9 @@ vm.runInNewContext(`${appSource}\nthis.__App = App;`, context, {
     addonContainer.innerHTML,
     /data-id="client\.extension" data-kind="client_extension"/,
   );
+  assert.match(addonContainer.innerHTML, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.doesNotMatch(addonContainer.innerHTML, /<img src=x onerror=alert\(1\)>/);
+  assert.match(addonContainer.innerHTML, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.match(addonContainer.innerHTML, /Client execution remains disabled/);
 
   rollbackButtons.splice(0, rollbackButtons.length,
