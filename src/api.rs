@@ -10165,6 +10165,130 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
+    #[tokio::test]
+    async fn addon_execution_target_approval_is_persisted_independently() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        let data_root = std::env::temp_dir().join(format!("screentra-addon-target-api-{}", Uuid::new_v4()));
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &data_root);
+        }
+        let db_path = std::env::temp_dir().join(format!("screentra-addon-target-api-{}.db", Uuid::new_v4()));
+        let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open target test database"));
+        let state = RuntimeState::sqlite(db);
+        let admin = crate::middleware::AuthenticatedPrincipal {
+            username: "target-admin".to_string(),
+            role: "admin".to_string(),
+        };
+        let addon_id = "example.dual-api".to_string();
+        let request = crate::addon_capabilities::AddonExecutionRequest {
+            targets: vec![
+                crate::addon_capabilities::ExecutionTarget::Server,
+                crate::addon_capabilities::ExecutionTarget::Client,
+            ],
+            server: Some(crate::addon_capabilities::AddonContainerSpec {
+                image: "registry.example/server".to_string(),
+                image_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                memory_bytes: 128 * 1024 * 1024,
+                cpu_millis: 500,
+                pids: 32,
+                writable_bytes: 16 * 1024 * 1024,
+            }),
+            client: Some(crate::addon_capabilities::AddonContainerSpec {
+                image: "registry.example/client".to_string(),
+                image_digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                memory_bytes: 128 * 1024 * 1024,
+                cpu_millis: 500,
+                pids: 32,
+                writable_bytes: 16 * 1024 * 1024,
+            }),
+            capabilities: vec![
+                crate::addon_capabilities::AddonCapabilityRequest::host_api_read(
+                    crate::addon_capabilities::ExecutionTarget::Server,
+                    "clients",
+                ),
+                crate::addon_capabilities::AddonCapabilityRequest::camera(
+                    crate::addon_capabilities::ExecutionTarget::Client,
+                ),
+            ],
+        };
+        let _ = create_addon_execution_approval(
+            State(state.clone()),
+            Extension(admin.clone()),
+            AxumJson(CreateAddonExecutionApproval {
+                addon_id: addon_id.clone(),
+                addon_version: "1.0.0".to_string(),
+                artifact_digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
+                request,
+            }),
+        )
+        .await
+        .expect("admin should create dual-target approval");
+        let _ = update_addon_execution_capabilities(
+            State(state.clone()),
+            Extension(admin.clone()),
+            Path(addon_id.clone()),
+            AxumJson(CapabilityApprovalUpdate { approved: vec![true, true] }),
+        )
+        .await
+        .expect("admin should approve both requested capabilities");
+
+        let server_approved = approve_addon_execution_target(
+            State(state.clone()),
+            Extension(admin.clone()),
+            Path((addon_id.clone(), "server".to_string())),
+        )
+        .await
+        .expect("server target approval should persist");
+        assert_eq!(server_approved.0.target_approved, vec![true, false]);
+        assert!(server_approved.0.can_start_for_target(crate::addon_capabilities::ExecutionTarget::Server).is_ok());
+        assert_eq!(
+            server_approved.0.can_start_for_target(crate::addon_capabilities::ExecutionTarget::Client),
+            Err(crate::addon_capabilities::ApprovalError::TargetNotApproved)
+        );
+
+        let client_approved = approve_addon_execution_target(
+            State(state.clone()),
+            Extension(admin.clone()),
+            Path((addon_id.clone(), "client".to_string())),
+        )
+        .await
+        .expect("client target approval should persist independently");
+        assert_eq!(client_approved.0.target_approved, vec![true, true]);
+
+        let server_revoked = revoke_addon_execution_target(
+            State(state.clone()),
+            Extension(admin),
+            Path((addon_id.clone(), "server".to_string())),
+        )
+        .await
+        .expect("server target revocation should persist independently");
+        assert_eq!(server_revoked.0.target_approved, vec![false, true]);
+        assert_eq!(
+            server_revoked.0.can_start_for_target(crate::addon_capabilities::ExecutionTarget::Server),
+            Err(crate::addon_capabilities::ApprovalError::TargetNotApproved)
+        );
+        assert!(server_revoked.0.can_start_for_target(crate::addon_capabilities::ExecutionTarget::Client).is_ok());
+        let loaded = crate::addon_capabilities::AddonApprovalStore::load(&addon_id)
+            .expect("target decisions should persist");
+        assert_eq!(loaded.target_approved, vec![false, true]);
+
+        if let Some(value) = old_data_dir {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = std::fs::remove_dir_all(data_root);
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[test]
     fn trusted_service_upload_files_are_exclusive_and_private() {
         let root = std::env::temp_dir().join(format!("screentra-upload-{}", Uuid::new_v4()));

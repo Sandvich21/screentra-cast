@@ -572,6 +572,72 @@ impl AddonApprovalRecord {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerExecutionPlan {
+    pub addon_id: String,
+    pub addon_version: String,
+    pub artifact_digest: String,
+    pub image: String,
+    pub image_digest: String,
+    pub memory_bytes: u64,
+    pub cpu_millis: u32,
+    pub pids: u32,
+    pub writable_bytes: u64,
+    pub capabilities: Vec<AddonCapabilityRequest>,
+    pub host_api_scopes: Vec<String>,
+    pub network_allow_rules: Vec<NetworkAllowRule>,
+}
+
+impl ServerExecutionPlan {
+    pub fn from_approved(record: &AddonApprovalRecord) -> Result<Self, ApprovalError> {
+        record.validate()?;
+        if !record.request.targets.contains(&ExecutionTarget::Server) {
+            return Err(ApprovalError::TargetNotApproved);
+        }
+        record.can_start_for_target(ExecutionTarget::Server)?;
+        let container = record
+            .request
+            .server
+            .as_ref()
+            .ok_or(ApprovalError::InvalidRequest(
+                CapabilityContractError::MissingContainerSpec(ExecutionTarget::Server),
+            ))?;
+        let capabilities = record
+            .request
+            .capabilities
+            .iter()
+            .filter(|capability| capability.target == ExecutionTarget::Server)
+            .cloned()
+            .collect::<Vec<_>>();
+        let host_api_scopes = capabilities
+            .iter()
+            .filter_map(|capability| {
+                (capability.kind == CapabilityKind::HostApiRead)
+                    .then(|| capability.scope.clone())
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        let network_allow_rules = capabilities
+            .iter()
+            .filter_map(|capability| capability.network.clone())
+            .collect::<Vec<_>>();
+        Ok(Self {
+            addon_id: record.addon_id.clone(),
+            addon_version: record.addon_version.clone(),
+            artifact_digest: record.artifact_digest.clone(),
+            image: container.image.clone(),
+            image_digest: container.image_digest.clone(),
+            memory_bytes: container.memory_bytes,
+            cpu_millis: container.cpu_millis,
+            pids: container.pids,
+            writable_bytes: container.writable_bytes,
+            capabilities,
+            host_api_scopes,
+            network_allow_rules,
+        })
+    }
+}
+
 fn validate_approval_identity(
     addon_id: &str,
     addon_version: &str,
@@ -925,6 +991,86 @@ mod tests {
         assert_eq!(
             request.validate(),
             Err(CapabilityContractError::DuplicateCapability)
+        );
+    }
+
+    #[test]
+    fn approved_server_plan_contains_only_server_scoped_capabilities() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server, ExecutionTarget::Client],
+            server: Some(container("registry.example/server", 'a')),
+            client: Some(container("registry.example/client", 'b')),
+            capabilities: vec![
+                AddonCapabilityRequest::host_api_read(ExecutionTarget::Server, "clients"),
+                AddonCapabilityRequest::network(
+                    ExecutionTarget::Server,
+                    NetworkAllowRule {
+                        name: "weather-api".to_string(),
+                        ip: "192.0.2.10".to_string(),
+                        mac: None,
+                        protocol: NetworkProtocol::Tcp,
+                        ports: vec![443],
+                    },
+                ),
+                AddonCapabilityRequest::camera(ExecutionTarget::Client),
+            ],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.dual-plan",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.set_capability_approved(1, true).unwrap();
+        approval
+            .approve_target(ExecutionTarget::Server, "admin", "2026-10-20T14:30:00Z")
+            .unwrap();
+
+        let plan = ServerExecutionPlan::from_approved(&approval).unwrap();
+        assert_eq!(plan.addon_id, "example.dual-plan");
+        assert_eq!(plan.image, "registry.example/server");
+        assert_eq!(plan.image_digest, format!("sha256:{}", "a".repeat(64)));
+        assert_eq!(plan.capabilities.len(), 2);
+        assert!(plan
+            .capabilities
+            .iter()
+            .all(|capability| capability.target == ExecutionTarget::Server));
+        assert_eq!(plan.network_allow_rules.len(), 1);
+        assert_eq!(plan.host_api_scopes, vec!["clients".to_string()]);
+        assert_eq!(
+            ServerExecutionPlan::from_approved(&AddonApprovalRecord {
+                target_approved: vec![false, false],
+                ..approval
+            }),
+            Err(ApprovalError::TargetNotApproved)
+        );
+    }
+
+    #[test]
+    fn server_plan_rejects_client_only_approval() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Client],
+            server: None,
+            client: Some(container("registry.example/client", 'b')),
+            capabilities: vec![AddonCapabilityRequest::camera(ExecutionTarget::Client)],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.client-only",
+            "1.0.0",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval
+            .approve_target(ExecutionTarget::Client, "admin", "2026-10-20T14:30:00Z")
+            .unwrap();
+
+        assert_eq!(
+            ServerExecutionPlan::from_approved(&approval),
+            Err(ApprovalError::TargetNotApproved)
         );
     }
 
