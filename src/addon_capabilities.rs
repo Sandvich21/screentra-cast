@@ -324,6 +324,9 @@ pub enum ApprovalError {
     InvalidAddonId,
     OciCapabilityBoundaryUnavailable(CapabilityKind),
     UnsupportedHostApiScope,
+    InvalidHostApiResponse,
+    HostApiResponseLimitExceeded,
+    HostApiOperationMismatch,
     InvalidActivationInstance,
     InvalidVersion,
     InvalidArtifactDigest,
@@ -705,6 +708,43 @@ pub enum ServerHostApiOperation {
     ListClients,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerClientSummary {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub version: Option<String>,
+    pub last_seen: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ServerHostApiResponse {
+    Clients { items: Vec<ServerClientSummary> },
+}
+
+impl ServerHostApiResponse {
+    pub fn clients(items: Vec<ServerClientSummary>) -> Result<Self, ApprovalError> {
+        for item in &items {
+            validate_host_api_text(&item.id, 128)?;
+            validate_host_api_text(&item.name, 160)?;
+            validate_host_api_text(&item.status, 64)?;
+            if let Some(version) = &item.version {
+                validate_host_api_text(version, 64)?;
+            }
+            validate_host_api_text(&item.last_seen, 64)?;
+        }
+        Ok(Self::Clients { items })
+    }
+}
+
+fn validate_host_api_text(value: &str, maximum_bytes: usize) -> Result<(), ApprovalError> {
+    if value.is_empty() || value.len() > maximum_bytes || value.chars().any(char::is_control) {
+        return Err(ApprovalError::InvalidHostApiResponse);
+    }
+    Ok(())
+}
+
 /// Typed, read-only host API boundary for approved server add-ons.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerHostApiContract {
@@ -743,6 +783,29 @@ impl ServerHostApiContract {
             max_items: 100,
             max_response_bytes: 64 * 1024,
         })
+    }
+
+    pub fn validate_response(
+        &self,
+        operation: ServerHostApiOperation,
+        response: &ServerHostApiResponse,
+    ) -> Result<(), ApprovalError> {
+        if !self.operations.contains(&operation) {
+            return Err(ApprovalError::HostApiOperationMismatch);
+        }
+        match (operation, response) {
+            (ServerHostApiOperation::ListClients, ServerHostApiResponse::Clients { items }) => {
+                if items.len() > self.max_items as usize {
+                    return Err(ApprovalError::HostApiResponseLimitExceeded);
+                }
+                let encoded = serde_json::to_vec(response)
+                    .map_err(|_| ApprovalError::InvalidHostApiResponse)?;
+                if encoded.len() > self.max_response_bytes {
+                    return Err(ApprovalError::HostApiResponseLimitExceeded);
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1294,6 +1357,90 @@ mod tests {
         approval.set_capability_approved(1, true).unwrap();
         approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
         assert_eq!(approval.can_start(), Ok(()));
+    }
+
+    #[test]
+    fn server_host_api_contract_bounds_typed_client_responses_without_credentials() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: vec![AddonCapabilityRequest::host_api_read(
+                ExecutionTarget::Server,
+                "clients",
+            )],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.host-response",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ServerExecutionPlan::from_approved(&approval, "host-response-1").unwrap();
+        let contract = ServerHostApiContract::from_server_plan(&plan).unwrap();
+
+        let response = ServerHostApiResponse::clients(vec![ServerClientSummary {
+            id: "client-1".to_string(),
+            name: "Mirror".to_string(),
+            status: "online".to_string(),
+            version: Some("1.2.3".to_string()),
+            last_seen: "2026-10-20T14:30:00Z".to_string(),
+        }])
+        .unwrap();
+        assert_eq!(
+            contract.validate_response(ServerHostApiOperation::ListClients, &response),
+            Ok(())
+        );
+        assert!(!serde_json::to_string(&response)
+            .unwrap()
+            .contains("pairing"));
+        assert!(!serde_json::to_string(&response)
+            .unwrap()
+            .contains("credential"));
+    }
+
+    #[test]
+    fn server_host_api_contract_rejects_oversized_typed_client_responses() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: vec![AddonCapabilityRequest::host_api_read(
+                ExecutionTarget::Server,
+                "clients",
+            )],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.host-response-limit",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ServerExecutionPlan::from_approved(&approval, "host-response-limit-1").unwrap();
+        let contract = ServerHostApiContract::from_server_plan(&plan).unwrap();
+        let response = ServerHostApiResponse::clients(
+            (0..101)
+                .map(|index| ServerClientSummary {
+                    id: format!("client-{index}"),
+                    name: "Mirror".to_string(),
+                    status: "online".to_string(),
+                    version: None,
+                    last_seen: "2026-10-20T14:30:00Z".to_string(),
+                })
+                .collect(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            contract.validate_response(ServerHostApiOperation::ListClients, &response),
+            Err(ApprovalError::HostApiResponseLimitExceeded)
+        );
     }
 
     #[test]
