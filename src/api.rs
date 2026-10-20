@@ -4477,7 +4477,9 @@ async fn fonts_full_preview_css_handler(
 
 fn validate_schedule_entry(entry: &ScheduleEntry) -> Result<(), (StatusCode, String)> {
     let bad = |message: &'static str| (StatusCode::BAD_REQUEST, message.to_string());
-    if entry.display.trim().is_empty() || entry.display.len() > 256 {
+    if entry.display.len() > 256
+        || (entry.action == "switch_layout" && entry.display.trim().is_empty())
+    {
         return Err(bad("Invalid schedule display"));
     }
     if entry.day_of_week != crate::schedule::DAY_EVERY
@@ -11155,6 +11157,19 @@ mod audit_validation_tests {
         entry.start_time = "08:00".into();
         entry.layout_set_id = Some("set-1".into());
         assert!(validate_schedule_entry(&entry).is_err());
+    }
+
+    #[test]
+    fn schedule_validation_accepts_client_targeted_power_schedule_without_legacy_display() {
+        let mut entry = layout_schedule();
+        entry.display.clear();
+        entry.layout_id.clear();
+        entry.target_client = Some("client-1".into());
+        entry.action = "power_off".into();
+        entry.power_state = Some("off".into());
+        entry.display_index = Some(0);
+
+        assert!(validate_schedule_entry(&entry).is_ok());
     }
 
     #[test]
