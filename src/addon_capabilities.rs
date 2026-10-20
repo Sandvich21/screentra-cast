@@ -323,6 +323,7 @@ pub struct AddonApprovalRecord {
 pub enum ApprovalError {
     InvalidAddonId,
     OciCapabilityBoundaryUnavailable(CapabilityKind),
+    UnsupportedHostApiScope,
     InvalidActivationInstance,
     InvalidVersion,
     InvalidArtifactDigest,
@@ -695,6 +696,52 @@ impl ServerOciLaunchSpec {
             no_new_privileges: true,
             drop_all_capabilities: true,
             seccomp_default: true,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerHostApiOperation {
+    ListClients,
+}
+
+/// Typed, read-only host API boundary for approved server add-ons.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerHostApiContract {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub operations: Vec<ServerHostApiOperation>,
+    pub read_only: bool,
+    pub allow_database: bool,
+    pub allow_credentials: bool,
+    pub allow_os_control: bool,
+    pub max_items: u32,
+    pub max_response_bytes: usize,
+}
+
+impl ServerHostApiContract {
+    pub fn from_server_plan(plan: &ServerExecutionPlan) -> Result<Self, ApprovalError> {
+        let mut operations = Vec::new();
+        for scope in &plan.host_api_scopes {
+            match scope.as_str() {
+                "clients" => {
+                    if !operations.contains(&ServerHostApiOperation::ListClients) {
+                        operations.push(ServerHostApiOperation::ListClients);
+                    }
+                }
+                _ => return Err(ApprovalError::UnsupportedHostApiScope),
+            }
+        }
+        Ok(Self {
+            addon_id: plan.addon_id.clone(),
+            activation_instance: plan.activation_instance.clone(),
+            operations,
+            read_only: true,
+            allow_database: false,
+            allow_credentials: false,
+            allow_os_control: false,
+            max_items: 100,
+            max_response_bytes: 64 * 1024,
         })
     }
 }
@@ -1247,6 +1294,71 @@ mod tests {
         approval.set_capability_approved(1, true).unwrap();
         approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
         assert_eq!(approval.can_start(), Ok(()));
+    }
+
+    #[test]
+    fn server_host_api_contract_is_read_only_and_typed() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: vec![AddonCapabilityRequest::host_api_read(
+                ExecutionTarget::Server,
+                "clients",
+            )],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.host-contract",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ServerExecutionPlan::from_approved(&approval, "host-contract-1").unwrap();
+
+        let contract = ServerHostApiContract::from_server_plan(&plan).unwrap();
+        assert_eq!(contract.addon_id, "example.host-contract");
+        assert_eq!(contract.activation_instance, "host-contract-1");
+        assert_eq!(
+            contract.operations,
+            vec![ServerHostApiOperation::ListClients]
+        );
+        assert!(contract.read_only);
+        assert!(!contract.allow_database);
+        assert!(!contract.allow_credentials);
+        assert!(!contract.allow_os_control);
+        assert_eq!(contract.max_items, 100);
+        assert_eq!(contract.max_response_bytes, 64 * 1024);
+    }
+
+    #[test]
+    fn server_host_api_contract_rejects_unknown_scope() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Server],
+            server: Some(container("registry.example/server", 'a')),
+            client: None,
+            capabilities: vec![AddonCapabilityRequest::host_api_read(
+                ExecutionTarget::Server,
+                "database",
+            )],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.unknown-scope",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ServerExecutionPlan::from_approved(&approval, "unknown-scope-1").unwrap();
+
+        assert_eq!(
+            ServerHostApiContract::from_server_plan(&plan),
+            Err(ApprovalError::UnsupportedHostApiScope)
+        );
     }
 
     #[test]
