@@ -1053,6 +1053,7 @@ const App = {
         const button = document.getElementById('btn-addon-install');
         const input = document.getElementById('addon-manifest-input');
         const packageButton = document.getElementById('btn-addon-package');
+        const packageUpdateButton = document.getElementById('btn-addon-package-update');
         const packageInput = document.getElementById('addon-package-file');
         const status = document.getElementById('addon-install-status');
         if (!button || !input || button.dataset.wired === 'true') return;
@@ -1076,22 +1077,38 @@ const App = {
                 status.textContent = '✕ ' + e.message;
             }
         };
-        if (packageButton && packageInput) {
-            packageButton.onclick = () => packageInput.click();
+        if ((packageButton || packageUpdateButton) && packageInput) {
+            let packageMode = 'install';
+            const choosePackage = (mode) => {
+                packageMode = mode;
+                packageInput.value = '';
+                packageInput.click();
+            };
+            if (packageButton) packageButton.onclick = () => choosePackage('install');
+            if (packageUpdateButton) packageUpdateButton.onclick = () => choosePackage('update');
             packageInput.onchange = async () => {
                 const file = packageInput.files && packageInput.files[0];
                 if (!file) return;
-                packageButton.disabled = true;
-                status.textContent = 'Uploading and verifying signature…';
+                if (packageButton) packageButton.disabled = true;
+                if (packageUpdateButton) packageUpdateButton.disabled = true;
+                status.textContent = packageMode === 'update'
+                    ? 'Uploading and verifying signed update…'
+                    : 'Uploading and verifying signature…';
                 try {
-                    await API.installAddonPackage(file);
-                    status.textContent = '✓ Signed client package installed';
+                    if (packageMode === 'update') {
+                        await API.updateAddonPackage(file);
+                        status.textContent = '✓ Signed client package updated';
+                    } else {
+                        await API.installAddonPackage(file);
+                        status.textContent = '✓ Signed client package installed';
+                    }
                     packageInput.value = '';
                     await this.loadAddons();
                 } catch (e) {
                     status.textContent = '✕ ' + e.message;
                 } finally {
-                    packageButton.disabled = false;
+                    if (packageButton) packageButton.disabled = false;
+                    if (packageUpdateButton) packageUpdateButton.disabled = false;
                 }
             };
         }
