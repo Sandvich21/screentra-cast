@@ -1,3 +1,4 @@
+use crate::addons;
 use crate::trusted_service_database::{
     DatabaseOperation, DatabaseRequest, DatabaseResponse, TrustedServiceDatabaseContract,
     MAX_REQUEST_BYTES,
@@ -223,6 +224,36 @@ pub fn decode_request_frame(
 
 pub fn encode_response_frame(response: &DatabaseResponse) -> Result<Vec<u8>, String> {
     let payload = encode_response(response)?;
+    encode_gateway_frame(&payload, MAX_RESPONSE_BYTES)
+}
+
+pub fn encode_bound_response(
+    binding: &GatewayResponseBinding,
+    response: &DatabaseResponse,
+) -> Result<Vec<u8>, String> {
+    binding.validate()?;
+    let payload = encode_response(response)?;
+    let response_envelope: GatewayResponseEnvelope =
+        serde_json::from_slice(&payload).map_err(|_| "Invalid gateway response".to_string())?;
+    let envelope = GatewayBoundResponseEnvelope {
+        addon_id: binding.addon_id.clone(),
+        activation_instance: binding.activation_instance.clone(),
+        request_id: binding.request_id.clone(),
+        response: response_envelope,
+    };
+    let bytes =
+        serde_json::to_vec(&envelope).map_err(|_| "Invalid gateway response".to_string())?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err("Gateway response is too large".to_string());
+    }
+    Ok(bytes)
+}
+
+pub fn encode_bound_response_frame(
+    binding: &GatewayResponseBinding,
+    response: &DatabaseResponse,
+) -> Result<Vec<u8>, String> {
+    let payload = encode_bound_response(binding, response)?;
     encode_gateway_frame(&payload, MAX_RESPONSE_BYTES)
 }
 
@@ -657,6 +688,17 @@ impl GatewaySession {
         self.established
     }
 
+    pub fn response_binding(&self, request_id: &str) -> Result<GatewayResponseBinding, String> {
+        if !self.established || self.retired {
+            return Err("Gateway session is not active".to_string());
+        }
+        GatewayResponseBinding::new(
+            &self.binding.contract.addon_id,
+            &self.binding.contract.activation_instance,
+            request_id,
+        )
+    }
+
     pub fn admit(&mut self, bytes: &[u8], now: Instant) -> Result<DecodedGatewayRequest, String> {
         if !self.established {
             return Err("Gateway connection hello is required".to_string());
@@ -998,7 +1040,8 @@ async fn handle_unix_connection(
         .await
         .map_err(|_| "Gateway operation timed out".to_string())?
         .map_err(|_| "Gateway operation failed".to_string())?;
-        let frame = encode_response_frame(&response)?;
+        let response_binding = session.response_binding(&decoded.request_id)?;
+        let frame = encode_bound_response_frame(&response_binding, &response)?;
         stream
             .write_all(&frame)
             .await
@@ -1009,6 +1052,45 @@ async fn handle_unix_connection(
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 pub const MAX_OPERATIONS_PER_CONNECTION: u32 = 100;
 pub const MAX_REQUEST_DURATION: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayResponseBinding {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub request_id: String,
+}
+
+impl GatewayResponseBinding {
+    pub fn new(
+        addon_id: &str,
+        activation_instance: &str,
+        request_id: &str,
+    ) -> Result<Self, String> {
+        addons::validate_addon_storage_namespace(addon_id)
+            .map_err(|_| "Gateway response addon identity is invalid".to_string())?;
+        addons::validate_addon_storage_namespace(activation_instance)
+            .map_err(|_| "Gateway response activation identity is invalid".to_string())?;
+        validate_request_id(request_id)?;
+        Ok(Self {
+            addon_id: addon_id.to_string(),
+            activation_instance: activation_instance.to_string(),
+            request_id: request_id.to_string(),
+        })
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        Self::new(&self.addon_id, &self.activation_instance, &self.request_id).map(|_| ())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayBoundResponseEnvelope {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub request_id: String,
+    pub response: GatewayResponseEnvelope,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "response", rename_all = "snake_case", deny_unknown_fields)]
@@ -1078,18 +1160,41 @@ pub fn encode_response(response: &DatabaseResponse) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+fn database_response_from_envelope(envelope: GatewayResponseEnvelope) -> DatabaseResponse {
+    match envelope {
+        GatewayResponseEnvelope::Value { value_json } => DatabaseResponse::Value(value_json),
+        GatewayResponseEnvelope::Written {} => DatabaseResponse::Written,
+        GatewayResponseEnvelope::Deleted { deleted } => DatabaseResponse::Deleted(deleted),
+        GatewayResponseEnvelope::Entries { entries } => DatabaseResponse::Entries(entries),
+    }
+}
+
 pub fn decode_response(bytes: &[u8]) -> Result<DatabaseResponse, String> {
     if bytes.len() > MAX_RESPONSE_BYTES {
         return Err("Gateway response is too large".to_string());
     }
     let envelope: GatewayResponseEnvelope =
         serde_json::from_slice(bytes).map_err(|_| "Invalid gateway response".to_string())?;
-    Ok(match envelope {
-        GatewayResponseEnvelope::Value { value_json } => DatabaseResponse::Value(value_json),
-        GatewayResponseEnvelope::Written {} => DatabaseResponse::Written,
-        GatewayResponseEnvelope::Deleted { deleted } => DatabaseResponse::Deleted(deleted),
-        GatewayResponseEnvelope::Entries { entries } => DatabaseResponse::Entries(entries),
-    })
+    Ok(database_response_from_envelope(envelope))
+}
+
+pub fn decode_bound_response(
+    bytes: &[u8],
+    binding: &GatewayResponseBinding,
+) -> Result<DatabaseResponse, String> {
+    binding.validate()?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err("Gateway response is too large".to_string());
+    }
+    let envelope: GatewayBoundResponseEnvelope =
+        serde_json::from_slice(bytes).map_err(|_| "Invalid gateway response".to_string())?;
+    if envelope.addon_id != binding.addon_id
+        || envelope.activation_instance != binding.activation_instance
+        || envelope.request_id != binding.request_id
+    {
+        return Err("Gateway response identity is not permitted".to_string());
+    }
+    Ok(database_response_from_envelope(envelope.response))
 }
 
 pub fn decode_response_frame(bytes: &[u8]) -> Result<Option<(DatabaseResponse, usize)>, String> {
@@ -1097,6 +1202,16 @@ pub fn decode_response_frame(bytes: &[u8]) -> Result<Option<(DatabaseResponse, u
         return Ok(None);
     };
     Ok(Some((decode_response(&payload)?, consumed)))
+}
+
+pub fn decode_bound_response_frame(
+    bytes: &[u8],
+    binding: &GatewayResponseBinding,
+) -> Result<Option<(DatabaseResponse, usize)>, String> {
+    let Some((payload, consumed)) = decode_gateway_frame(bytes, MAX_RESPONSE_BYTES)? else {
+        return Ok(None);
+    };
+    Ok(Some((decode_bound_response(&payload, binding)?, consumed)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1165,6 +1280,7 @@ mod tests {
         decode_request, decode_request_frame, decode_response_frame, encode_connection_hello,
         encode_connection_hello_frame, encode_gateway_frame, encode_request, encode_request_frame,
         encode_response, encode_response_frame, validate_connection_hello,
+        decode_bound_response_frame, encode_bound_response_frame, GatewayResponseBinding,
         GatewayActivationBinding, GatewayActivationState, GatewayAdmissionState,
         GatewayConnectionHello, GatewayOperationBudget, GatewayOperationHandler, GatewayReadiness,
         GatewayPeerCredentials, GatewayPeerPolicy,
@@ -1367,6 +1483,32 @@ mod tests {
         assert!(encode_gateway_frame(&[0u8; 17], 16).is_err());
         let oversized_length = (17u32).to_be_bytes();
         assert!(decode_gateway_frame(&oversized_length, 16).is_err());
+    }
+
+    #[test]
+    fn bound_response_frame_rejects_cross_request_reuse() {
+        let response = DatabaseResponse::Written;
+        let binding = GatewayResponseBinding::new(
+            "example.weather",
+            "activation-1",
+            "request-1",
+        )
+        .expect("response binding");
+        let frame = encode_bound_response_frame(&binding, &response)
+            .expect("bound response frame should encode");
+        let (decoded, consumed) = decode_bound_response_frame(&frame, &binding)
+            .unwrap()
+            .expect("bound response frame should decode");
+        assert_eq!(decoded, response);
+        assert_eq!(consumed, frame.len());
+
+        let other_request = GatewayResponseBinding::new(
+            "example.weather",
+            "activation-1",
+            "request-2",
+        )
+        .expect("other response binding");
+        assert!(decode_bound_response_frame(&frame, &other_request).is_err());
     }
 
     #[test]
