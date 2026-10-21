@@ -89,6 +89,10 @@ impl AddonCapabilityRequest {
         Self::simple(target, CapabilityKind::SpeakerOutput)
     }
 
+    pub fn local_inference(target: ExecutionTarget) -> Self {
+        Self::simple(target, CapabilityKind::LocalInference)
+    }
+
     pub fn storage(target: ExecutionTarget) -> Self {
         Self::simple(target, CapabilityKind::AddonStorage)
     }
@@ -343,6 +347,8 @@ pub enum ApprovalError {
     InvalidMicrophoneBoundary,
     SpeakerCapabilityUnavailable,
     InvalidSpeakerBoundary,
+    LocalInferenceCapabilityUnavailable,
+    InvalidLocalInferenceBoundary,
     InvalidNetworkBoundary,
     InvalidActivationInstance,
     InvalidVersion,
@@ -1083,6 +1089,104 @@ impl ClientSpeakerContract {
         self.request(request.sample_rate_hz, request.channels, request.chunk_ms)
             .map(|_| ())
     }
+}
+
+/// Contract-only client local-inference boundary. It carries bounded metadata
+/// only; model loading, inference, and transport remain disabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientInferenceContract {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub opt_in: bool,
+    pub local_only: bool,
+    pub server_command_transport: bool,
+    pub max_input_bytes: usize,
+    pub max_output_tokens: u32,
+    pub max_duration_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientInferenceRequest {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub model_digest: String,
+    pub input_bytes: usize,
+    pub max_output_tokens: u32,
+    pub max_duration_ms: u32,
+}
+
+impl ClientInferenceContract {
+    pub fn from_client_plan(plan: &ClientExecutionPlan) -> Result<Self, ApprovalError> {
+        if !plan
+            .capabilities
+            .iter()
+            .any(|capability| capability.kind == CapabilityKind::LocalInference)
+        {
+            return Err(ApprovalError::LocalInferenceCapabilityUnavailable);
+        }
+        Ok(Self {
+            addon_id: plan.addon_id.clone(),
+            activation_instance: plan.activation_instance.clone(),
+            opt_in: true,
+            local_only: true,
+            server_command_transport: false,
+            max_input_bytes: 64 * 1024,
+            max_output_tokens: 2_048,
+            max_duration_ms: 5_000,
+        })
+    }
+
+    pub fn request(
+        &self,
+        model_digest: &str,
+        input_bytes: usize,
+        max_output_tokens: u32,
+        max_duration_ms: u32,
+    ) -> Result<ClientInferenceRequest, ApprovalError> {
+        if !self.opt_in
+            || !self.local_only
+            || self.server_command_transport
+            || !is_sha256_digest(model_digest)
+            || input_bytes > self.max_input_bytes
+            || max_output_tokens == 0
+            || max_output_tokens > self.max_output_tokens
+            || max_duration_ms == 0
+            || max_duration_ms > self.max_duration_ms
+        {
+            return Err(ApprovalError::InvalidLocalInferenceBoundary);
+        }
+        Ok(ClientInferenceRequest {
+            addon_id: self.addon_id.clone(),
+            activation_instance: self.activation_instance.clone(),
+            model_digest: model_digest.to_string(),
+            input_bytes,
+            max_output_tokens,
+            max_duration_ms,
+        })
+    }
+
+    pub fn validate_request(&self, request: &ClientInferenceRequest) -> Result<(), ApprovalError> {
+        if request.addon_id != self.addon_id
+            || request.activation_instance != self.activation_instance
+        {
+            return Err(ApprovalError::InvalidLocalInferenceBoundary);
+        }
+        self.request(
+            &request.model_digest,
+            request.input_bytes,
+            request.max_output_tokens,
+            request.max_duration_ms,
+        )
+        .map(|_| ())
+    }
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.len() == "sha256:".len() + 64
+        && value.starts_with("sha256:")
+        && value["sha256:".len()..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
 }
 
 /// Contract-only network boundary. It performs no socket, route, or firewall changes.
@@ -1979,6 +2083,68 @@ mod tests {
         assert_eq!(
             contract.request(48_000, 2, 21),
             Err(ApprovalError::InvalidSpeakerBoundary)
+        );
+    }
+
+    #[test]
+    fn client_local_inference_contract_is_local_bounded_and_identity_bound() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Client],
+            server: None,
+            client: Some(container("registry.example/client", 'b')),
+            capabilities: vec![AddonCapabilityRequest::local_inference(
+                ExecutionTarget::Client,
+            )],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.local-inference-contract",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan =
+            ClientExecutionPlan::from_approved(&approval, "local-inference-contract-1").unwrap();
+        let contract = ClientInferenceContract::from_client_plan(&plan).unwrap();
+
+        assert!(contract.opt_in);
+        assert!(contract.local_only);
+        assert!(!contract.server_command_transport);
+        assert_eq!(contract.max_input_bytes, 64 * 1024);
+        assert_eq!(contract.max_output_tokens, 2_048);
+        assert_eq!(contract.max_duration_ms, 5_000);
+        let inference = contract
+            .request(
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                1024,
+                512,
+                1_000,
+            )
+            .unwrap();
+        assert_eq!(contract.validate_request(&inference), Ok(()));
+        assert_eq!(inference.addon_id, "example.local-inference-contract");
+        assert_eq!(inference.activation_instance, "local-inference-contract-1");
+
+        let mut mismatched = inference.clone();
+        mismatched.activation_instance = "other-activation".to_string();
+        assert_eq!(
+            contract.validate_request(&mismatched),
+            Err(ApprovalError::InvalidLocalInferenceBoundary)
+        );
+        assert_eq!(
+            contract.request("not-a-digest", 1024, 512, 1_000),
+            Err(ApprovalError::InvalidLocalInferenceBoundary)
+        );
+        assert_eq!(
+            contract.request(
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                65 * 1024,
+                512,
+                1_000,
+            ),
+            Err(ApprovalError::InvalidLocalInferenceBoundary)
         );
     }
 
