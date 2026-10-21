@@ -1672,6 +1672,7 @@ pub enum ClientHostApiOperation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ClientHostApiRequest {
     pub addon_id: String,
     pub activation_instance: String,
@@ -1679,7 +1680,7 @@ pub struct ClientHostApiRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientHostApiResponse {
     ClientInfo {
         client_id: String,
@@ -1690,6 +1691,7 @@ pub enum ClientHostApiResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ClientHostApiResponseEnvelope {
     pub addon_id: String,
     pub activation_instance: String,
@@ -1877,6 +1879,7 @@ pub enum ServerHostApiOperation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ServerHostApiRequest {
     pub addon_id: String,
     pub activation_instance: String,
@@ -1884,6 +1887,7 @@ pub struct ServerHostApiRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ServerClientSummary {
     pub id: String,
     pub name: String,
@@ -1893,12 +1897,13 @@ pub struct ServerClientSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServerHostApiResponse {
     Clients { items: Vec<ServerClientSummary> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ServerHostApiResponseEnvelope {
     pub addon_id: String,
     pub activation_instance: String,
@@ -2976,6 +2981,11 @@ mod tests {
         approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
         let plan = ClientExecutionPlan::from_approved(&approval, "client-host-api-1").unwrap();
         let contract = ClientHostApiContract::from_client_plan(&plan).unwrap();
+
+        let unknown_request: Result<ClientHostApiRequest, _> = serde_json::from_str(
+            r#"{"addon_id":"example.client-host-api","activation_instance":"client-host-api-1","operation":"get_client_info","unexpected":true}"#,
+        );
+        assert!(unknown_request.is_err());
 
         let mut tampered_contract = contract.clone();
         tampered_contract.read_only = false;
