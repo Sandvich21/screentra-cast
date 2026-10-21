@@ -1011,7 +1011,7 @@ pub const MAX_OPERATIONS_PER_CONNECTION: u32 = 100;
 pub const MAX_REQUEST_DURATION: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "response", rename_all = "snake_case")]
+#[serde(tag = "response", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GatewayResponseEnvelope {
     Value { value_json: Option<String> },
     Written,
@@ -1273,6 +1273,9 @@ mod tests {
 
         let request = br#"{"addon_id":"example.weather","activation_instance":"activation-1","request_id":"request-1","capability":"storage","operation":{"operation":"get","key":"state"},"unexpected":true}"#;
         assert!(decode_request(request, &binding()).is_err());
+
+        let response = br#"{"response":"value","value_json":null,"unexpected":true}"#;
+        assert!(super::decode_response(response).is_err());
     }
 
     fn request() -> GatewayRequestEnvelope {
