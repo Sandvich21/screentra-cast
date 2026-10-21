@@ -1146,6 +1146,7 @@ pub struct ClientInferenceRequest {
 pub struct ClientInferenceResult {
     pub addon_id: String,
     pub activation_instance: String,
+    pub model_digest: String,
     pub output_bytes: usize,
     pub output_tokens: u32,
     pub duration_ms: u32,
@@ -1249,6 +1250,7 @@ impl ClientInferenceContract {
         Ok(ClientInferenceResult {
             addon_id: self.addon_id.clone(),
             activation_instance: self.activation_instance.clone(),
+            model_digest: self.model_digest.clone(),
             output_bytes,
             output_tokens,
             duration_ms,
@@ -1258,6 +1260,7 @@ impl ClientInferenceContract {
     pub fn validate_result(&self, result: &ClientInferenceResult) -> Result<(), ApprovalError> {
         if result.addon_id != self.addon_id
             || result.activation_instance != self.activation_instance
+            || result.model_digest != self.model_digest
         {
             return Err(ApprovalError::InvalidLocalInferenceBoundary);
         }
@@ -2578,11 +2581,22 @@ mod tests {
         assert_eq!(contract.validate_result(&result), Ok(()));
         assert_eq!(result.addon_id, "example.local-inference-contract");
         assert_eq!(result.activation_instance, "local-inference-contract-1");
+        assert_eq!(
+            result.model_digest,
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
         assert_eq!(result.output_bytes, 4096);
         assert_eq!(result.output_tokens, 256);
         assert_eq!(result.duration_ms, 250);
         assert_eq!(
             contract.result(64 * 1024 + 1, 256, 250),
+            Err(ApprovalError::InvalidLocalInferenceBoundary)
+        );
+        let mut mismatched_result = result.clone();
+        mismatched_result.model_digest =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        assert_eq!(
+            contract.validate_result(&mismatched_result),
             Err(ApprovalError::InvalidLocalInferenceBoundary)
         );
         assert_eq!(inference.addon_id, "example.local-inference-contract");
