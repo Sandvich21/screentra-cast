@@ -1417,6 +1417,139 @@ impl ServerStorageContract {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum ClientHostApiOperation {
+    GetClientInfo,
+    GetDisplayInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientHostApiRequest {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub operation: ClientHostApiOperation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClientHostApiResponse {
+    ClientInfo {
+        client_id: String,
+        name: String,
+        version: String,
+        display_count: u32,
+    },
+}
+
+impl ClientHostApiResponse {
+    pub fn client_info(
+        client_id: &str,
+        name: &str,
+        version: &str,
+        display_count: u32,
+    ) -> Result<Self, ApprovalError> {
+        validate_host_api_text(client_id, 128)?;
+        validate_host_api_text(name, 160)?;
+        validate_host_api_text(version, 64)?;
+        if display_count == 0 || display_count > 16 {
+            return Err(ApprovalError::InvalidHostApiResponse);
+        }
+        Ok(Self::ClientInfo {
+            client_id: client_id.to_string(),
+            name: name.to_string(),
+            version: version.to_string(),
+            display_count,
+        })
+    }
+}
+
+/// Typed, read-only host API boundary for approved client add-ons.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientHostApiContract {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub operations: Vec<ClientHostApiOperation>,
+    pub read_only: bool,
+    pub allow_database: bool,
+    pub allow_credentials: bool,
+    pub allow_os_control: bool,
+    pub max_response_bytes: usize,
+}
+
+impl ClientHostApiContract {
+    pub fn from_client_plan(plan: &ClientExecutionPlan) -> Result<Self, ApprovalError> {
+        let mut operations = Vec::new();
+        for scope in &plan.host_api_scopes {
+            match scope.as_str() {
+                "client_info" => {
+                    if !operations.contains(&ClientHostApiOperation::GetClientInfo) {
+                        operations.push(ClientHostApiOperation::GetClientInfo);
+                    }
+                }
+                _ => return Err(ApprovalError::UnsupportedHostApiScope),
+            }
+        }
+        Ok(Self {
+            addon_id: plan.addon_id.clone(),
+            activation_instance: plan.activation_instance.clone(),
+            operations,
+            read_only: true,
+            allow_database: false,
+            allow_credentials: false,
+            allow_os_control: false,
+            max_response_bytes: 16 * 1024,
+        })
+    }
+
+    pub fn request(
+        &self,
+        operation: ClientHostApiOperation,
+    ) -> Result<ClientHostApiRequest, ApprovalError> {
+        if !self.operations.contains(&operation) {
+            return Err(ApprovalError::HostApiOperationMismatch);
+        }
+        Ok(ClientHostApiRequest {
+            addon_id: self.addon_id.clone(),
+            activation_instance: self.activation_instance.clone(),
+            operation,
+        })
+    }
+
+    pub fn validate_request(&self, request: &ClientHostApiRequest) -> Result<(), ApprovalError> {
+        if request.addon_id != self.addon_id
+            || request.activation_instance != self.activation_instance
+        {
+            return Err(ApprovalError::HostApiIdentityMismatch);
+        }
+        if !self.operations.contains(&request.operation) {
+            return Err(ApprovalError::HostApiOperationMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn validate_response(
+        &self,
+        operation: ClientHostApiOperation,
+        response: &ClientHostApiResponse,
+    ) -> Result<(), ApprovalError> {
+        if !self.operations.contains(&operation) {
+            return Err(ApprovalError::HostApiOperationMismatch);
+        }
+        match (operation, response) {
+            (ClientHostApiOperation::GetClientInfo, ClientHostApiResponse::ClientInfo { .. }) => {
+                let encoded = serde_json::to_vec(response)
+                    .map_err(|_| ApprovalError::InvalidHostApiResponse)?;
+                if encoded.len() > self.max_response_bytes {
+                    return Err(ApprovalError::HostApiResponseLimitExceeded);
+                }
+                Ok(())
+            }
+            _ => Err(ApprovalError::HostApiOperationMismatch),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ServerHostApiOperation {
     ListClients,
 }
@@ -2338,6 +2471,57 @@ mod tests {
                 value_bytes: 1,
             })),
             Err(ApprovalError::InvalidClientStorageBoundary)
+        );
+    }
+
+    #[test]
+    fn client_host_api_contract_is_read_only_typed_and_identity_bound() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Client],
+            server: None,
+            client: Some(container("registry.example/client", 'b')),
+            capabilities: vec![AddonCapabilityRequest::host_api_read(
+                ExecutionTarget::Client,
+                "client_info",
+            )],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.client-host-api",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ClientExecutionPlan::from_approved(&approval, "client-host-api-1").unwrap();
+        let contract = ClientHostApiContract::from_client_plan(&plan).unwrap();
+
+        assert!(contract.read_only);
+        assert!(!contract.allow_database);
+        assert!(!contract.allow_credentials);
+        assert!(!contract.allow_os_control);
+        let request = contract
+            .request(ClientHostApiOperation::GetClientInfo)
+            .unwrap();
+        assert_eq!(contract.validate_request(&request), Ok(()));
+        assert_eq!(
+            contract.validate_response(
+                ClientHostApiOperation::GetClientInfo,
+                &ClientHostApiResponse::client_info("client-1", "Mirror", "1.2.3", 1,).unwrap(),
+            ),
+            Ok(())
+        );
+
+        let mut mismatched = request.clone();
+        mismatched.activation_instance = "other-activation".to_string();
+        assert_eq!(
+            contract.validate_request(&mismatched),
+            Err(ApprovalError::HostApiIdentityMismatch)
+        );
+        assert_eq!(
+            contract.request(ClientHostApiOperation::GetDisplayInfo),
+            Err(ApprovalError::HostApiOperationMismatch)
         );
     }
 
