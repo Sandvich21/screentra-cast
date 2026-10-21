@@ -1388,6 +1388,34 @@ impl ClientPrivateStorageContract {
         self.response(response.result.clone()).map(|_| ())
     }
 
+    pub fn validate_response_for_request(
+        &self,
+        request: &ClientStorageRequest,
+        response: &ClientStorageResponse,
+    ) -> Result<(), ApprovalError> {
+        self.validate_request(request)?;
+        let operation_matches = matches!(
+            (&request.operation, &response.result),
+            (
+                ClientStorageOperation::Get { .. },
+                ClientStorageResult::Get { .. }
+            ) | (
+                ClientStorageOperation::Put { .. },
+                ClientStorageResult::Put { .. }
+            ) | (
+                ClientStorageOperation::Delete { .. },
+                ClientStorageResult::Delete { .. }
+            ) | (
+                ClientStorageOperation::List { .. },
+                ClientStorageResult::List { .. }
+            )
+        );
+        if !operation_matches {
+            return Err(ApprovalError::InvalidClientStorageBoundary);
+        }
+        self.validate_response(response)
+    }
+
     pub fn validate_request(&self, request: &ClientStorageRequest) -> Result<(), ApprovalError> {
         if request.addon_id != self.addon_id
             || request.activation_instance != self.activation_instance
@@ -2718,6 +2746,18 @@ mod tests {
             })
             .unwrap();
         assert_eq!(contract.validate_response(&response), Ok(()));
+        assert_eq!(
+            contract.validate_response_for_request(&get, &response),
+            Ok(())
+        );
+        let put_request = contract.request(ClientStorageOperation::Put {
+            key: "profile".to_string(),
+            value_bytes: 1024,
+        });
+        assert_eq!(
+            contract.validate_response_for_request(&put_request, &response),
+            Err(ApprovalError::InvalidClientStorageBoundary)
+        );
         assert_eq!(response.addon_id, "example.client-storage");
         assert_eq!(response.activation_instance, "client-storage-1");
         assert_eq!(
