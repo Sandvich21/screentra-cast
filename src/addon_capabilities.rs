@@ -1150,6 +1150,33 @@ pub struct ClientInferenceResult {
 }
 
 impl ClientInferenceContract {
+    pub fn validate(&self) -> Result<(), ApprovalError> {
+        addons::validate_addon_storage_namespace(&self.addon_id)
+            .map_err(|_| ApprovalError::InvalidLocalInferenceBoundary)?;
+        addons::validate_addon_storage_namespace(&self.activation_instance)
+            .map_err(|_| ApprovalError::InvalidLocalInferenceBoundary)?;
+        if !self.opt_in
+            || !self.local_only
+            || self.server_command_transport
+            || !is_sha256_digest(&self.model_digest)
+            || self.memory_bytes == 0
+            || self.cpu_millis == 0
+            || self.pids == 0
+            || self.writable_bytes == 0
+            || self.max_input_bytes == 0
+            || self.max_input_bytes > 64 * 1024
+            || self.max_output_bytes == 0
+            || self.max_output_bytes > 64 * 1024
+            || self.max_output_tokens == 0
+            || self.max_output_tokens > 2_048
+            || self.max_duration_ms == 0
+            || self.max_duration_ms > 5_000
+        {
+            return Err(ApprovalError::InvalidLocalInferenceBoundary);
+        }
+        Ok(())
+    }
+
     pub fn from_client_plan(plan: &ClientExecutionPlan) -> Result<Self, ApprovalError> {
         if !plan
             .capabilities
@@ -1165,7 +1192,7 @@ impl ClientInferenceContract {
             .and_then(|capability| capability.scope.clone())
             .filter(|digest| is_sha256_digest(digest))
             .ok_or(ApprovalError::InvalidLocalInferenceBoundary)?;
-        Ok(Self {
+        let contract = Self {
             addon_id: plan.addon_id.clone(),
             activation_instance: plan.activation_instance.clone(),
             opt_in: true,
@@ -1180,7 +1207,9 @@ impl ClientInferenceContract {
             max_output_bytes: 64 * 1024,
             max_output_tokens: 2_048,
             max_duration_ms: 5_000,
-        })
+        };
+        contract.validate()?;
+        Ok(contract)
     }
 
     pub fn request(
@@ -1190,6 +1219,7 @@ impl ClientInferenceContract {
         max_output_tokens: u32,
         max_duration_ms: u32,
     ) -> Result<ClientInferenceRequest, ApprovalError> {
+        self.validate()?;
         if !self.opt_in
             || !self.local_only
             || self.server_command_transport
@@ -1234,6 +1264,7 @@ impl ClientInferenceContract {
         output_tokens: u32,
         duration_ms: u32,
     ) -> Result<ClientInferenceResult, ApprovalError> {
+        self.validate()?;
         if !self.opt_in
             || !self.local_only
             || self.server_command_transport
@@ -2876,6 +2907,51 @@ mod tests {
                 512,
                 1_000,
             ),
+            Err(ApprovalError::InvalidLocalInferenceBoundary)
+        );
+    }
+
+    #[test]
+    fn client_local_inference_contract_rejects_tampered_policy() {
+        let contract = ClientInferenceContract {
+            addon_id: "example.local-inference".to_string(),
+            activation_instance: "activation-1".to_string(),
+            opt_in: true,
+            local_only: true,
+            server_command_transport: false,
+            model_digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_string(),
+            memory_bytes: 512 * 1024 * 1024,
+            cpu_millis: 1_000,
+            pids: 128,
+            writable_bytes: 128 * 1024 * 1024,
+            max_input_bytes: 64 * 1024,
+            max_output_bytes: 64 * 1024,
+            max_output_tokens: 2_048,
+            max_duration_ms: 5_000,
+        };
+        assert_eq!(contract.validate(), Ok(()));
+
+        let mut tampered = contract.clone();
+        tampered.server_command_transport = true;
+        assert_eq!(
+            tampered.validate(),
+            Err(ApprovalError::InvalidLocalInferenceBoundary)
+        );
+        assert_eq!(
+            tampered.request(
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                1,
+                1,
+                1,
+            ),
+            Err(ApprovalError::InvalidLocalInferenceBoundary)
+        );
+
+        let mut oversized = contract.clone();
+        oversized.max_output_tokens = 2_049;
+        assert_eq!(
+            oversized.validate(),
             Err(ApprovalError::InvalidLocalInferenceBoundary)
         );
     }
