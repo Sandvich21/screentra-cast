@@ -1094,6 +1094,27 @@ pub struct ClientSpeakerStreamRequest {
 }
 
 impl ClientSpeakerContract {
+    pub fn validate(&self) -> Result<(), ApprovalError> {
+        addons::validate_addon_storage_namespace(&self.addon_id)
+            .map_err(|_| ApprovalError::InvalidSpeakerBoundary)?;
+        addons::validate_addon_storage_namespace(&self.activation_instance)
+            .map_err(|_| ApprovalError::InvalidSpeakerBoundary)?;
+        if !self.opt_in
+            || self.server_command_transport
+            || self.max_sample_rate_hz == 0
+            || self.max_sample_rate_hz > 48_000
+            || self.max_channels == 0
+            || self.max_channels > 2
+            || self.max_chunk_ms == 0
+            || self.max_chunk_ms > 20
+            || self.max_buffer_bytes == 0
+            || self.max_buffer_bytes > 64 * 1024
+        {
+            return Err(ApprovalError::InvalidSpeakerBoundary);
+        }
+        Ok(())
+    }
+
     pub fn from_client_plan(plan: &ClientExecutionPlan) -> Result<Self, ApprovalError> {
         if !plan
             .capabilities
@@ -1102,7 +1123,7 @@ impl ClientSpeakerContract {
         {
             return Err(ApprovalError::SpeakerCapabilityUnavailable);
         }
-        Ok(Self {
+        let contract = Self {
             addon_id: plan.addon_id.clone(),
             activation_instance: plan.activation_instance.clone(),
             opt_in: true,
@@ -1111,7 +1132,9 @@ impl ClientSpeakerContract {
             max_channels: 2,
             max_chunk_ms: 20,
             max_buffer_bytes: 64 * 1024,
-        })
+        };
+        contract.validate()?;
+        Ok(contract)
     }
 
     pub fn request(
@@ -1120,6 +1143,7 @@ impl ClientSpeakerContract {
         channels: u8,
         chunk_ms: u32,
     ) -> Result<ClientSpeakerStreamRequest, ApprovalError> {
+        self.validate()?;
         if !self.opt_in
             || self.server_command_transport
             || sample_rate_hz == 0
@@ -1144,6 +1168,7 @@ impl ClientSpeakerContract {
         &self,
         request: &ClientSpeakerStreamRequest,
     ) -> Result<(), ApprovalError> {
+        self.validate()?;
         if request.addon_id != self.addon_id
             || request.activation_instance != self.activation_instance
         {
@@ -2967,6 +2992,44 @@ mod tests {
         );
         assert_eq!(
             contract.request(48_000, 2, 21),
+            Err(ApprovalError::InvalidSpeakerBoundary)
+        );
+    }
+
+    #[test]
+    fn client_speaker_contract_rejects_tampered_policy() {
+        let contract = ClientSpeakerContract {
+            addon_id: "example.speaker".to_string(),
+            activation_instance: "activation-1".to_string(),
+            opt_in: true,
+            server_command_transport: false,
+            max_sample_rate_hz: 48_000,
+            max_channels: 2,
+            max_chunk_ms: 20,
+            max_buffer_bytes: 64 * 1024,
+        };
+        assert_eq!(contract.validate(), Ok(()));
+        let request = contract.request(48_000, 2, 20).unwrap();
+
+        let mut tampered = contract.clone();
+        tampered.server_command_transport = true;
+        assert_eq!(
+            tampered.validate(),
+            Err(ApprovalError::InvalidSpeakerBoundary)
+        );
+        assert_eq!(
+            tampered.request(48_000, 2, 20),
+            Err(ApprovalError::InvalidSpeakerBoundary)
+        );
+        assert_eq!(
+            tampered.validate_request(&request),
+            Err(ApprovalError::InvalidSpeakerBoundary)
+        );
+
+        let mut oversized = contract.clone();
+        oversized.max_buffer_bytes = 64 * 1024 + 1;
+        assert_eq!(
+            oversized.validate(),
             Err(ApprovalError::InvalidSpeakerBoundary)
         );
     }
