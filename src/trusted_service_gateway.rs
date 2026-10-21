@@ -27,7 +27,7 @@ use tokio::net::{UnixListener, UnixStream};
 use std::os::unix::fs::MetadataExt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "operation", rename_all = "snake_case")]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GatewayStorageOperation {
     Get { key: String },
     Put { key: String, value_json: String },
@@ -39,6 +39,7 @@ pub const GATEWAY_PROTOCOL_VERSION: u16 = 1;
 pub const GATEWAY_SOCKET_PATH: &str = "/run/screentra/gateway.sock";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct GatewayConnectionHello {
     pub protocol_version: u16,
     pub addon_id: String,
@@ -149,6 +150,7 @@ impl GatewayPeerPolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct GatewayRequestEnvelope {
     pub addon_id: String,
     pub activation_instance: String,
@@ -1262,6 +1264,15 @@ mod tests {
             .await
             .expect_err("disabled gateway must not bind");
         assert!(error.contains("disabled"));
+    }
+
+    #[test]
+    fn gateway_wire_contract_rejects_unknown_fields() {
+        let hello = br#"{"protocol_version":1,"addon_id":"example.weather","activation_instance":"activation-1","unexpected":true}"#;
+        assert!(decode_connection_hello(hello, &binding()).is_err());
+
+        let request = br#"{"addon_id":"example.weather","activation_instance":"activation-1","request_id":"request-1","capability":"storage","operation":{"operation":"get","key":"state"},"unexpected":true}"#;
+        assert!(decode_request(request, &binding()).is_err());
     }
 
     fn request() -> GatewayRequestEnvelope {
