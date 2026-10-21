@@ -1808,6 +1808,18 @@ impl ClientHostApiContract {
         self.validate_response(envelope.operation, &envelope.response)
     }
 
+    pub fn validate_response_for_request(
+        &self,
+        request: &ClientHostApiRequest,
+        envelope: &ClientHostApiResponseEnvelope,
+    ) -> Result<(), ApprovalError> {
+        self.validate_request(request)?;
+        if request.operation != envelope.operation {
+            return Err(ApprovalError::HostApiOperationMismatch);
+        }
+        self.validate_response_envelope(envelope)
+    }
+
     pub fn validate_response(
         &self,
         operation: ClientHostApiOperation,
@@ -1978,6 +1990,18 @@ impl ServerHostApiContract {
             return Err(ApprovalError::HostApiIdentityMismatch);
         }
         self.validate_response(envelope.operation, &envelope.response)
+    }
+
+    pub fn validate_response_for_request(
+        &self,
+        request: &ServerHostApiRequest,
+        envelope: &ServerHostApiResponseEnvelope,
+    ) -> Result<(), ApprovalError> {
+        self.validate_request(request)?;
+        if request.operation != envelope.operation {
+            return Err(ApprovalError::HostApiOperationMismatch);
+        }
+        self.validate_response_envelope(envelope)
     }
 
     pub fn validate_response(
@@ -2900,6 +2924,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(contract.validate_response_envelope(&host_response), Ok(()));
+        assert_eq!(
+            contract.validate_response_for_request(&request, &host_response),
+            Ok(())
+        );
+        let mut mismatched_request = request.clone();
+        mismatched_request.activation_instance = "other-activation".to_string();
+        assert_eq!(
+            contract.validate_response_for_request(&mismatched_request, &host_response),
+            Err(ApprovalError::HostApiIdentityMismatch)
+        );
         let mut mismatched_response = host_response.clone();
         mismatched_response.activation_instance = "other-activation".to_string();
         assert_eq!(
@@ -3350,6 +3384,19 @@ mod tests {
             .response(ServerHostApiOperation::ListClients, response.clone())
             .unwrap();
         assert_eq!(contract.validate_response_envelope(&envelope), Ok(()));
+        let request = contract
+            .request(ServerHostApiOperation::ListClients)
+            .unwrap();
+        assert_eq!(
+            contract.validate_response_for_request(&request, &envelope),
+            Ok(())
+        );
+        let mut mismatched_request = request.clone();
+        mismatched_request.activation_instance = "other-activation".to_string();
+        assert_eq!(
+            contract.validate_response_for_request(&mismatched_request, &envelope),
+            Err(ApprovalError::HostApiIdentityMismatch)
+        );
         let mut mismatched_envelope = envelope.clone();
         mismatched_envelope.addon_id = "other.addon".to_string();
         assert_eq!(
