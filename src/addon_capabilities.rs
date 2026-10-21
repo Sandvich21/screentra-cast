@@ -341,6 +341,8 @@ pub enum ApprovalError {
     InvalidCameraBoundary,
     MicrophoneCapabilityUnavailable,
     InvalidMicrophoneBoundary,
+    SpeakerCapabilityUnavailable,
+    InvalidSpeakerBoundary,
     InvalidNetworkBoundary,
     InvalidActivationInstance,
     InvalidVersion,
@@ -995,6 +997,90 @@ impl ClientMicrophoneContract {
             return Err(ApprovalError::InvalidMicrophoneBoundary);
         }
         self.request(request.sample_rate_hz, request.channels, request.frame_ms)
+            .map(|_| ())
+    }
+}
+
+/// Contract-only client speaker stream boundary. Audio output remains local to
+/// the future client broker and cannot use a server command transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientSpeakerContract {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub opt_in: bool,
+    pub server_command_transport: bool,
+    pub max_sample_rate_hz: u32,
+    pub max_channels: u8,
+    pub max_chunk_ms: u32,
+    pub max_buffer_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientSpeakerStreamRequest {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub sample_rate_hz: u32,
+    pub channels: u8,
+    pub chunk_ms: u32,
+}
+
+impl ClientSpeakerContract {
+    pub fn from_client_plan(plan: &ClientExecutionPlan) -> Result<Self, ApprovalError> {
+        if !plan
+            .capabilities
+            .iter()
+            .any(|capability| capability.kind == CapabilityKind::SpeakerOutput)
+        {
+            return Err(ApprovalError::SpeakerCapabilityUnavailable);
+        }
+        Ok(Self {
+            addon_id: plan.addon_id.clone(),
+            activation_instance: plan.activation_instance.clone(),
+            opt_in: true,
+            server_command_transport: false,
+            max_sample_rate_hz: 48_000,
+            max_channels: 2,
+            max_chunk_ms: 20,
+            max_buffer_bytes: 64 * 1024,
+        })
+    }
+
+    pub fn request(
+        &self,
+        sample_rate_hz: u32,
+        channels: u8,
+        chunk_ms: u32,
+    ) -> Result<ClientSpeakerStreamRequest, ApprovalError> {
+        if !self.opt_in
+            || self.server_command_transport
+            || sample_rate_hz == 0
+            || channels == 0
+            || chunk_ms == 0
+            || sample_rate_hz > self.max_sample_rate_hz
+            || channels > self.max_channels
+            || chunk_ms > self.max_chunk_ms
+        {
+            return Err(ApprovalError::InvalidSpeakerBoundary);
+        }
+        Ok(ClientSpeakerStreamRequest {
+            addon_id: self.addon_id.clone(),
+            activation_instance: self.activation_instance.clone(),
+            sample_rate_hz,
+            channels,
+            chunk_ms,
+        })
+    }
+
+    pub fn validate_request(
+        &self,
+        request: &ClientSpeakerStreamRequest,
+    ) -> Result<(), ApprovalError> {
+        if request.addon_id != self.addon_id
+            || request.activation_instance != self.activation_instance
+        {
+            return Err(ApprovalError::InvalidSpeakerBoundary);
+        }
+        self.request(request.sample_rate_hz, request.channels, request.chunk_ms)
             .map(|_| ())
     }
 }
@@ -1850,6 +1936,49 @@ mod tests {
         assert_eq!(
             contract.request(96_000, 2, 20),
             Err(ApprovalError::InvalidMicrophoneBoundary)
+        );
+    }
+
+    #[test]
+    fn client_speaker_contract_is_local_bounded_and_identity_bound() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Client],
+            server: None,
+            client: Some(container("registry.example/client", 'b')),
+            capabilities: vec![AddonCapabilityRequest::speaker(ExecutionTarget::Client)],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.speaker-contract",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ClientExecutionPlan::from_approved(&approval, "speaker-contract-1").unwrap();
+        let contract = ClientSpeakerContract::from_client_plan(&plan).unwrap();
+
+        assert!(contract.opt_in);
+        assert!(!contract.server_command_transport);
+        assert_eq!(contract.max_sample_rate_hz, 48_000);
+        assert_eq!(contract.max_channels, 2);
+        assert_eq!(contract.max_chunk_ms, 20);
+        assert_eq!(contract.max_buffer_bytes, 64 * 1024);
+        let stream = contract.request(48_000, 2, 20).unwrap();
+        assert_eq!(contract.validate_request(&stream), Ok(()));
+        assert_eq!(stream.addon_id, "example.speaker-contract");
+        assert_eq!(stream.activation_instance, "speaker-contract-1");
+
+        let mut mismatched = stream.clone();
+        mismatched.activation_instance = "other-activation".to_string();
+        assert_eq!(
+            contract.validate_request(&mismatched),
+            Err(ApprovalError::InvalidSpeakerBoundary)
+        );
+        assert_eq!(
+            contract.request(48_000, 2, 21),
+            Err(ApprovalError::InvalidSpeakerBoundary)
         );
     }
 
