@@ -1014,7 +1014,7 @@ pub const MAX_REQUEST_DURATION: Duration = Duration::from_secs(5);
 #[serde(tag = "response", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GatewayResponseEnvelope {
     Value { value_json: Option<String> },
-    Written,
+    Written {},
     Deleted { deleted: bool },
     Entries { entries: Vec<(String, String)> },
 }
@@ -1062,7 +1062,7 @@ pub fn encode_response(response: &DatabaseResponse) -> Result<Vec<u8>, String> {
         DatabaseResponse::Value(value_json) => GatewayResponseEnvelope::Value {
             value_json: value_json.clone(),
         },
-        DatabaseResponse::Written => GatewayResponseEnvelope::Written,
+        DatabaseResponse::Written => GatewayResponseEnvelope::Written {},
         DatabaseResponse::Deleted(deleted) => {
             GatewayResponseEnvelope::Deleted { deleted: *deleted }
         }
@@ -1086,7 +1086,7 @@ pub fn decode_response(bytes: &[u8]) -> Result<DatabaseResponse, String> {
         serde_json::from_slice(bytes).map_err(|_| "Invalid gateway response".to_string())?;
     Ok(match envelope {
         GatewayResponseEnvelope::Value { value_json } => DatabaseResponse::Value(value_json),
-        GatewayResponseEnvelope::Written => DatabaseResponse::Written,
+        GatewayResponseEnvelope::Written {} => DatabaseResponse::Written,
         GatewayResponseEnvelope::Deleted { deleted } => DatabaseResponse::Deleted(deleted),
         GatewayResponseEnvelope::Entries { entries } => DatabaseResponse::Entries(entries),
     })
