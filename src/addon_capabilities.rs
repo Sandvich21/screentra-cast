@@ -1486,6 +1486,9 @@ impl ServerNetworkBoundary {
         port: u16,
         mac: Option<&str>,
     ) -> bool {
+        if !self.deny_by_default {
+            return false;
+        }
         self.rules.iter().any(|rule| {
             rule.ip.parse::<IpAddr>().ok() == Some(ip)
                 && rule.protocol == protocol
@@ -1528,6 +1531,9 @@ impl ClientNetworkBoundary {
         port: u16,
         mac: Option<&str>,
     ) -> bool {
+        if !self.deny_by_default {
+            return false;
+        }
         self.rules.iter().any(|rule| {
             rule.ip.parse::<IpAddr>().ok() == Some(ip)
                 && rule.protocol == protocol
@@ -1605,6 +1611,9 @@ impl ClientNetworkBoundary {
         port: u16,
         mac: Option<&str>,
     ) -> bool {
+        if !self.deny_by_default {
+            return false;
+        }
         self.rules.iter().any(|rule| {
             rule.name == device_name
                 && rule.ip.parse::<IpAddr>().ok() == Some(ip)
@@ -3114,6 +3123,18 @@ mod tests {
         mismatched.activation_instance = "other-activation".to_string();
         assert_eq!(
             boundary.validate_request(&mismatched),
+            Err(ApprovalError::InvalidNetworkBoundary)
+        );
+        let mut non_deny_boundary = boundary.clone();
+        non_deny_boundary.deny_by_default = false;
+        assert_eq!(
+            non_deny_boundary.request(
+                "weather-api",
+                "203.0.113.10",
+                NetworkProtocol::Tcp,
+                443,
+                Some("02:00:00:00:00:01"),
+            ),
             Err(ApprovalError::InvalidNetworkBoundary)
         );
     }
