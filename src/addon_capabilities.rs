@@ -1303,6 +1303,21 @@ pub enum ClientStorageOperation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientStorageResult {
+    Get { found: bool, value_bytes: usize },
+    Put { stored_bytes: usize },
+    Delete { removed: bool },
+    List { item_count: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientStorageResponse {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub result: ClientStorageResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientStorageRequest {
     pub addon_id: String,
     pub activation_instance: String,
@@ -1335,6 +1350,42 @@ impl ClientPrivateStorageContract {
             activation_instance: self.activation_instance.clone(),
             operation,
         }
+    }
+
+    pub fn response(
+        &self,
+        result: ClientStorageResult,
+    ) -> Result<ClientStorageResponse, ApprovalError> {
+        match &result {
+            ClientStorageResult::Get { value_bytes, .. }
+            | ClientStorageResult::Put {
+                stored_bytes: value_bytes,
+            } => {
+                if *value_bytes > self.max_value_bytes {
+                    return Err(ApprovalError::InvalidClientStorageBoundary);
+                }
+            }
+            ClientStorageResult::Delete { .. } => {}
+            ClientStorageResult::List { item_count } => {
+                if *item_count > self.max_list_items {
+                    return Err(ApprovalError::InvalidClientStorageBoundary);
+                }
+            }
+        }
+        Ok(ClientStorageResponse {
+            addon_id: self.addon_id.clone(),
+            activation_instance: self.activation_instance.clone(),
+            result,
+        })
+    }
+
+    pub fn validate_response(&self, response: &ClientStorageResponse) -> Result<(), ApprovalError> {
+        if response.addon_id != self.addon_id
+            || response.activation_instance != self.activation_instance
+        {
+            return Err(ApprovalError::InvalidClientStorageBoundary);
+        }
+        self.response(response.result.clone()).map(|_| ())
     }
 
     pub fn validate_request(&self, request: &ClientStorageRequest) -> Result<(), ApprovalError> {
@@ -2656,6 +2707,25 @@ mod tests {
         assert_eq!(contract.max_key_bytes, 128);
         assert_eq!(contract.max_value_bytes, 64 * 1024);
         assert_eq!(contract.max_list_items, 1_000);
+        let get = contract.request(ClientStorageOperation::Get {
+            key: "profile".to_string(),
+        });
+        assert_eq!(contract.validate_request(&get), Ok(()));
+        let response = contract
+            .response(ClientStorageResult::Get {
+                found: true,
+                value_bytes: 1024,
+            })
+            .unwrap();
+        assert_eq!(contract.validate_response(&response), Ok(()));
+        assert_eq!(response.addon_id, "example.client-storage");
+        assert_eq!(response.activation_instance, "client-storage-1");
+        assert_eq!(
+            contract.response(ClientStorageResult::Put {
+                stored_bytes: 64 * 1024 + 1,
+            }),
+            Err(ApprovalError::InvalidClientStorageBoundary)
+        );
         let request = contract.request(ClientStorageOperation::Put {
             key: "settings".to_string(),
             value_bytes: 1024,
