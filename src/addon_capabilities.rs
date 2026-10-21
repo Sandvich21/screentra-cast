@@ -988,6 +988,25 @@ pub struct ClientMicrophoneStreamRequest {
 }
 
 impl ClientMicrophoneContract {
+    pub fn validate(&self) -> Result<(), ApprovalError> {
+        addons::validate_addon_storage_namespace(&self.addon_id)
+            .map_err(|_| ApprovalError::InvalidMicrophoneBoundary)?;
+        addons::validate_addon_storage_namespace(&self.activation_instance)
+            .map_err(|_| ApprovalError::InvalidMicrophoneBoundary)?;
+        if !self.opt_in
+            || self.server_command_transport
+            || self.max_sample_rate_hz == 0
+            || self.max_sample_rate_hz > 48_000
+            || self.max_channels == 0
+            || self.max_channels > 2
+            || self.max_frame_ms == 0
+            || self.max_frame_ms > 20
+        {
+            return Err(ApprovalError::InvalidMicrophoneBoundary);
+        }
+        Ok(())
+    }
+
     pub fn from_client_plan(plan: &ClientExecutionPlan) -> Result<Self, ApprovalError> {
         if !plan
             .capabilities
@@ -996,7 +1015,7 @@ impl ClientMicrophoneContract {
         {
             return Err(ApprovalError::MicrophoneCapabilityUnavailable);
         }
-        Ok(Self {
+        let contract = Self {
             addon_id: plan.addon_id.clone(),
             activation_instance: plan.activation_instance.clone(),
             opt_in: true,
@@ -1004,7 +1023,9 @@ impl ClientMicrophoneContract {
             max_sample_rate_hz: 48_000,
             max_channels: 2,
             max_frame_ms: 20,
-        })
+        };
+        contract.validate()?;
+        Ok(contract)
     }
 
     pub fn request(
@@ -1013,6 +1034,7 @@ impl ClientMicrophoneContract {
         channels: u8,
         frame_ms: u32,
     ) -> Result<ClientMicrophoneStreamRequest, ApprovalError> {
+        self.validate()?;
         if !self.opt_in
             || self.server_command_transport
             || sample_rate_hz == 0
@@ -1037,6 +1059,7 @@ impl ClientMicrophoneContract {
         &self,
         request: &ClientMicrophoneStreamRequest,
     ) -> Result<(), ApprovalError> {
+        self.validate()?;
         if request.addon_id != self.addon_id
             || request.activation_instance != self.activation_instance
         {
@@ -2864,6 +2887,43 @@ mod tests {
         );
         assert_eq!(
             contract.request(96_000, 2, 20),
+            Err(ApprovalError::InvalidMicrophoneBoundary)
+        );
+    }
+
+    #[test]
+    fn client_microphone_contract_rejects_tampered_policy() {
+        let contract = ClientMicrophoneContract {
+            addon_id: "example.microphone".to_string(),
+            activation_instance: "activation-1".to_string(),
+            opt_in: true,
+            server_command_transport: false,
+            max_sample_rate_hz: 48_000,
+            max_channels: 2,
+            max_frame_ms: 20,
+        };
+        assert_eq!(contract.validate(), Ok(()));
+        let request = contract.request(16_000, 1, 20).unwrap();
+
+        let mut tampered = contract.clone();
+        tampered.server_command_transport = true;
+        assert_eq!(
+            tampered.validate(),
+            Err(ApprovalError::InvalidMicrophoneBoundary)
+        );
+        assert_eq!(
+            tampered.request(16_000, 1, 20),
+            Err(ApprovalError::InvalidMicrophoneBoundary)
+        );
+        assert_eq!(
+            tampered.validate_request(&request),
+            Err(ApprovalError::InvalidMicrophoneBoundary)
+        );
+
+        let mut oversized = contract.clone();
+        oversized.max_sample_rate_hz = 48_001;
+        assert_eq!(
+            oversized.validate(),
             Err(ApprovalError::InvalidMicrophoneBoundary)
         );
     }
