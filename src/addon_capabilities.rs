@@ -1353,6 +1353,25 @@ pub struct ClientStorageRequest {
 }
 
 impl ClientPrivateStorageContract {
+    pub fn validate(&self) -> Result<(), ApprovalError> {
+        addons::validate_addon_storage_namespace(&self.addon_id)
+            .map_err(|_| ApprovalError::InvalidClientStorageBoundary)?;
+        addons::validate_addon_storage_namespace(&self.activation_instance)
+            .map_err(|_| ApprovalError::InvalidClientStorageBoundary)?;
+        if !self.private_local
+            || self.server_command_transport
+            || self.max_key_bytes == 0
+            || self.max_key_bytes > 128
+            || self.max_value_bytes == 0
+            || self.max_value_bytes > 64 * 1024
+            || self.max_list_items == 0
+            || self.max_list_items > 1_000
+        {
+            return Err(ApprovalError::InvalidClientStorageBoundary);
+        }
+        Ok(())
+    }
+
     pub fn from_client_plan(plan: &ClientExecutionPlan) -> Result<Self, ApprovalError> {
         if !plan
             .capabilities
@@ -1361,7 +1380,7 @@ impl ClientPrivateStorageContract {
         {
             return Err(ApprovalError::ClientStorageCapabilityUnavailable);
         }
-        Ok(Self {
+        let contract = Self {
             addon_id: plan.addon_id.clone(),
             activation_instance: plan.activation_instance.clone(),
             private_local: true,
@@ -1369,7 +1388,9 @@ impl ClientPrivateStorageContract {
             max_key_bytes: 128,
             max_value_bytes: 64 * 1024,
             max_list_items: 1_000,
-        })
+        };
+        contract.validate()?;
+        Ok(contract)
     }
 
     pub fn request(&self, operation: ClientStorageOperation) -> ClientStorageRequest {
@@ -1384,6 +1405,7 @@ impl ClientPrivateStorageContract {
         &self,
         result: ClientStorageResult,
     ) -> Result<ClientStorageResponse, ApprovalError> {
+        self.validate()?;
         match &result {
             ClientStorageResult::Get { value_bytes, .. }
             | ClientStorageResult::Put {
@@ -1408,6 +1430,7 @@ impl ClientPrivateStorageContract {
     }
 
     pub fn validate_response(&self, response: &ClientStorageResponse) -> Result<(), ApprovalError> {
+        self.validate()?;
         if response.addon_id != self.addon_id
             || response.activation_instance != self.activation_instance
         {
@@ -1445,6 +1468,7 @@ impl ClientPrivateStorageContract {
     }
 
     pub fn validate_request(&self, request: &ClientStorageRequest) -> Result<(), ApprovalError> {
+        self.validate()?;
         if request.addon_id != self.addon_id
             || request.activation_instance != self.activation_instance
             || !self.private_local
@@ -2953,6 +2977,51 @@ mod tests {
         assert_eq!(
             oversized.validate(),
             Err(ApprovalError::InvalidLocalInferenceBoundary)
+        );
+    }
+
+    #[test]
+    fn client_private_storage_contract_rejects_tampered_policy() {
+        let contract = ClientPrivateStorageContract {
+            addon_id: "example.client-storage".to_string(),
+            activation_instance: "activation-1".to_string(),
+            private_local: true,
+            server_command_transport: false,
+            max_key_bytes: 128,
+            max_value_bytes: 64 * 1024,
+            max_list_items: 1_000,
+        };
+        assert_eq!(contract.validate(), Ok(()));
+        let request = contract.request(ClientStorageOperation::Get {
+            key: "profile".to_string(),
+        });
+        let response = contract
+            .response(ClientStorageResult::Get {
+                found: true,
+                value_bytes: 1,
+            })
+            .unwrap();
+
+        let mut tampered = contract.clone();
+        tampered.server_command_transport = true;
+        assert_eq!(
+            tampered.validate(),
+            Err(ApprovalError::InvalidClientStorageBoundary)
+        );
+        assert_eq!(
+            tampered.validate_request(&request),
+            Err(ApprovalError::InvalidClientStorageBoundary)
+        );
+        assert_eq!(
+            tampered.validate_response(&response),
+            Err(ApprovalError::InvalidClientStorageBoundary)
+        );
+
+        let mut zero_limit = contract.clone();
+        zero_limit.max_key_bytes = 0;
+        assert_eq!(
+            zero_limit.validate(),
+            Err(ApprovalError::InvalidClientStorageBoundary)
         );
     }
 
