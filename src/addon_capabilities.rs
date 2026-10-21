@@ -1122,6 +1122,10 @@ pub struct ClientInferenceContract {
     pub local_only: bool,
     pub server_command_transport: bool,
     pub model_digest: String,
+    pub memory_bytes: u64,
+    pub cpu_millis: u32,
+    pub pids: u32,
+    pub writable_bytes: u64,
     pub max_input_bytes: usize,
     pub max_output_tokens: u32,
     pub max_duration_ms: u32,
@@ -1160,6 +1164,10 @@ impl ClientInferenceContract {
             local_only: true,
             server_command_transport: false,
             model_digest,
+            memory_bytes: plan.memory_bytes,
+            cpu_millis: plan.cpu_millis,
+            pids: plan.pids,
+            writable_bytes: plan.writable_bytes,
             max_input_bytes: 64 * 1024,
             max_output_tokens: 2_048,
             max_duration_ms: 5_000,
@@ -2423,6 +2431,10 @@ mod tests {
         assert_eq!(contract.max_input_bytes, 64 * 1024);
         assert_eq!(contract.max_output_tokens, 2_048);
         assert_eq!(contract.max_duration_ms, 5_000);
+        assert_eq!(contract.memory_bytes, 512 * 1024 * 1024);
+        assert_eq!(contract.cpu_millis, 1_000);
+        assert_eq!(contract.pids, 128);
+        assert_eq!(contract.writable_bytes, 128 * 1024 * 1024);
         assert_eq!(
             contract.model_digest,
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
