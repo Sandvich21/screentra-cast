@@ -1404,10 +1404,85 @@ impl ClientNetworkBoundary {
             rule.ip.parse::<IpAddr>().ok() == Some(ip)
                 && rule.protocol == protocol
                 && rule.ports.contains(&port)
-                && match rule.mac.as_deref() {
-                    Some(expected) => mac == Some(expected),
-                    None => true,
-                }
+                && mac == rule.mac.as_deref()
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientNetworkRequest {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub device_name: String,
+    pub ip: String,
+    pub mac: Option<String>,
+    pub protocol: NetworkProtocol,
+    pub port: u16,
+}
+
+impl ClientNetworkBoundary {
+    pub fn request(
+        &self,
+        device_name: &str,
+        ip: &str,
+        protocol: NetworkProtocol,
+        port: u16,
+        mac: Option<&str>,
+    ) -> Result<ClientNetworkRequest, ApprovalError> {
+        let ip = ip
+            .parse::<IpAddr>()
+            .map_err(|_| ApprovalError::InvalidNetworkBoundary)?;
+        if !self.allows_device(device_name, ip, protocol, port, mac) {
+            return Err(ApprovalError::InvalidNetworkBoundary);
+        }
+        Ok(ClientNetworkRequest {
+            addon_id: self.addon_id.clone(),
+            activation_instance: self.activation_instance.clone(),
+            device_name: device_name.to_string(),
+            ip: ip.to_string(),
+            mac: mac.map(str::to_string),
+            protocol,
+            port,
+        })
+    }
+
+    pub fn validate_request(&self, request: &ClientNetworkRequest) -> Result<(), ApprovalError> {
+        if request.addon_id != self.addon_id
+            || request.activation_instance != self.activation_instance
+        {
+            return Err(ApprovalError::InvalidNetworkBoundary);
+        }
+        let ip = request
+            .ip
+            .parse::<IpAddr>()
+            .map_err(|_| ApprovalError::InvalidNetworkBoundary)?;
+        if self.allows_device(
+            &request.device_name,
+            ip,
+            request.protocol,
+            request.port,
+            request.mac.as_deref(),
+        ) {
+            Ok(())
+        } else {
+            Err(ApprovalError::InvalidNetworkBoundary)
+        }
+    }
+
+    fn allows_device(
+        &self,
+        device_name: &str,
+        ip: IpAddr,
+        protocol: NetworkProtocol,
+        port: u16,
+        mac: Option<&str>,
+    ) -> bool {
+        self.rules.iter().any(|rule| {
+            rule.name == device_name
+                && rule.ip.parse::<IpAddr>().ok() == Some(ip)
+                && rule.protocol == protocol
+                && rule.ports.contains(&port)
+                && mac == rule.mac.as_deref()
         })
     }
 }
@@ -2838,6 +2913,32 @@ mod tests {
             443,
             None
         ));
+        let access = boundary
+            .request(
+                "weather-api",
+                "203.0.113.10",
+                NetworkProtocol::Tcp,
+                443,
+                Some("02:00:00:00:00:01"),
+            )
+            .unwrap();
+        assert_eq!(boundary.validate_request(&access), Ok(()));
+        assert_eq!(
+            boundary.request(
+                "other-device",
+                "203.0.113.10",
+                NetworkProtocol::Tcp,
+                443,
+                Some("02:00:00:00:00:01"),
+            ),
+            Err(ApprovalError::InvalidNetworkBoundary)
+        );
+        let mut mismatched = access.clone();
+        mismatched.activation_instance = "other-activation".to_string();
+        assert_eq!(
+            boundary.validate_request(&mismatched),
+            Err(ApprovalError::InvalidNetworkBoundary)
+        );
     }
 
     #[test]
