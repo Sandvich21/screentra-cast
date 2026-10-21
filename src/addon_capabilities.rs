@@ -1584,7 +1584,6 @@ impl ServerStorageContract {
 #[serde(rename_all = "snake_case")]
 pub enum ClientHostApiOperation {
     GetClientInfo,
-    GetDisplayInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1699,17 +1698,17 @@ impl ClientHostApiContract {
         if !self.operations.contains(&operation) {
             return Err(ApprovalError::HostApiOperationMismatch);
         }
-        match (operation, response) {
-            (ClientHostApiOperation::GetClientInfo, ClientHostApiResponse::ClientInfo { .. }) => {
-                let encoded = serde_json::to_vec(response)
-                    .map_err(|_| ApprovalError::InvalidHostApiResponse)?;
-                if encoded.len() > self.max_response_bytes {
-                    return Err(ApprovalError::HostApiResponseLimitExceeded);
-                }
-                Ok(())
-            }
-            _ => Err(ApprovalError::HostApiOperationMismatch),
+        if operation != ClientHostApiOperation::GetClientInfo
+            || !matches!(response, ClientHostApiResponse::ClientInfo { .. })
+        {
+            return Err(ApprovalError::HostApiOperationMismatch);
         }
+        let encoded =
+            serde_json::to_vec(response).map_err(|_| ApprovalError::InvalidHostApiResponse)?;
+        if encoded.len() > self.max_response_bytes {
+            return Err(ApprovalError::HostApiResponseLimitExceeded);
+        }
+        Ok(())
     }
 }
 
@@ -2724,10 +2723,6 @@ mod tests {
         assert_eq!(
             contract.validate_request(&mismatched),
             Err(ApprovalError::HostApiIdentityMismatch)
-        );
-        assert_eq!(
-            contract.request(ClientHostApiOperation::GetDisplayInfo),
-            Err(ApprovalError::HostApiOperationMismatch)
         );
     }
 
