@@ -351,6 +351,7 @@ pub enum ApprovalError {
     OciCapabilityBoundaryUnavailable(CapabilityKind),
     UnsupportedHostApiScope,
     InvalidHostApiResponse,
+    InvalidHostApiBoundary,
     HostApiResponseLimitExceeded,
     HostApiOperationMismatch,
     HostApiIdentityMismatch,
@@ -1744,7 +1745,7 @@ impl ClientHostApiContract {
                 _ => return Err(ApprovalError::UnsupportedHostApiScope),
             }
         }
-        Ok(Self {
+        let contract = Self {
             addon_id: plan.addon_id.clone(),
             activation_instance: plan.activation_instance.clone(),
             operations,
@@ -1753,13 +1754,37 @@ impl ClientHostApiContract {
             allow_credentials: false,
             allow_os_control: false,
             max_response_bytes: 16 * 1024,
-        })
+        };
+        contract.validate()?;
+        Ok(contract)
+    }
+
+    pub fn validate(&self) -> Result<(), ApprovalError> {
+        validate_host_api_identity(&self.addon_id, &self.activation_instance)?;
+        if !self.read_only
+            || self.allow_database
+            || self.allow_credentials
+            || self.allow_os_control
+            || self.max_response_bytes == 0
+            || self.max_response_bytes > 64 * 1024
+        {
+            return Err(ApprovalError::InvalidHostApiBoundary);
+        }
+        let mut seen = Vec::new();
+        for operation in &self.operations {
+            if *operation != ClientHostApiOperation::GetClientInfo || seen.contains(operation) {
+                return Err(ApprovalError::InvalidHostApiBoundary);
+            }
+            seen.push(*operation);
+        }
+        Ok(())
     }
 
     pub fn request(
         &self,
         operation: ClientHostApiOperation,
     ) -> Result<ClientHostApiRequest, ApprovalError> {
+        self.validate()?;
         if !self.operations.contains(&operation) {
             return Err(ApprovalError::HostApiOperationMismatch);
         }
@@ -1771,6 +1796,7 @@ impl ClientHostApiContract {
     }
 
     pub fn validate_request(&self, request: &ClientHostApiRequest) -> Result<(), ApprovalError> {
+        self.validate()?;
         if request.addon_id != self.addon_id
             || request.activation_instance != self.activation_instance
         {
@@ -1800,6 +1826,7 @@ impl ClientHostApiContract {
         &self,
         envelope: &ClientHostApiResponseEnvelope,
     ) -> Result<(), ApprovalError> {
+        self.validate()?;
         if envelope.addon_id != self.addon_id
             || envelope.activation_instance != self.activation_instance
         {
@@ -1825,6 +1852,7 @@ impl ClientHostApiContract {
         operation: ClientHostApiOperation,
         response: &ClientHostApiResponse,
     ) -> Result<(), ApprovalError> {
+        self.validate()?;
         if !self.operations.contains(&operation) {
             return Err(ApprovalError::HostApiOperationMismatch);
         }
@@ -1893,6 +1921,17 @@ impl ServerHostApiResponse {
     }
 }
 
+fn validate_host_api_identity(
+    addon_id: &str,
+    activation_instance: &str,
+) -> Result<(), ApprovalError> {
+    addons::validate_addon_storage_namespace(addon_id)
+        .map_err(|_| ApprovalError::InvalidHostApiBoundary)?;
+    addons::validate_addon_storage_namespace(activation_instance)
+        .map_err(|_| ApprovalError::InvalidHostApiBoundary)?;
+    Ok(())
+}
+
 fn validate_host_api_text(value: &str, maximum_bytes: usize) -> Result<(), ApprovalError> {
     if value.is_empty() || value.len() > maximum_bytes || value.chars().any(char::is_control) {
         return Err(ApprovalError::InvalidHostApiResponse);
@@ -1927,7 +1966,7 @@ impl ServerHostApiContract {
                 _ => return Err(ApprovalError::UnsupportedHostApiScope),
             }
         }
-        Ok(Self {
+        let contract = Self {
             addon_id: plan.addon_id.clone(),
             activation_instance: plan.activation_instance.clone(),
             operations,
@@ -1937,13 +1976,39 @@ impl ServerHostApiContract {
             allow_os_control: false,
             max_items: 100,
             max_response_bytes: 64 * 1024,
-        })
+        };
+        contract.validate()?;
+        Ok(contract)
+    }
+
+    pub fn validate(&self) -> Result<(), ApprovalError> {
+        validate_host_api_identity(&self.addon_id, &self.activation_instance)?;
+        if !self.read_only
+            || self.allow_database
+            || self.allow_credentials
+            || self.allow_os_control
+            || self.max_items == 0
+            || self.max_items > 100
+            || self.max_response_bytes == 0
+            || self.max_response_bytes > 64 * 1024
+        {
+            return Err(ApprovalError::InvalidHostApiBoundary);
+        }
+        let mut seen = Vec::new();
+        for operation in &self.operations {
+            if *operation != ServerHostApiOperation::ListClients || seen.contains(operation) {
+                return Err(ApprovalError::InvalidHostApiBoundary);
+            }
+            seen.push(*operation);
+        }
+        Ok(())
     }
 
     pub fn request(
         &self,
         operation: ServerHostApiOperation,
     ) -> Result<ServerHostApiRequest, ApprovalError> {
+        self.validate()?;
         if !self.operations.contains(&operation) {
             return Err(ApprovalError::HostApiOperationMismatch);
         }
@@ -1955,6 +2020,7 @@ impl ServerHostApiContract {
     }
 
     pub fn validate_request(&self, request: &ServerHostApiRequest) -> Result<(), ApprovalError> {
+        self.validate()?;
         if request.addon_id != self.addon_id
             || request.activation_instance != self.activation_instance
         {
@@ -1984,6 +2050,7 @@ impl ServerHostApiContract {
         &self,
         envelope: &ServerHostApiResponseEnvelope,
     ) -> Result<(), ApprovalError> {
+        self.validate()?;
         if envelope.addon_id != self.addon_id
             || envelope.activation_instance != self.activation_instance
         {
@@ -2009,6 +2076,7 @@ impl ServerHostApiContract {
         operation: ServerHostApiOperation,
         response: &ServerHostApiResponse,
     ) -> Result<(), ApprovalError> {
+        self.validate()?;
         if !self.operations.contains(&operation) {
             return Err(ApprovalError::HostApiOperationMismatch);
         }
@@ -2909,6 +2977,10 @@ mod tests {
         let plan = ClientExecutionPlan::from_approved(&approval, "client-host-api-1").unwrap();
         let contract = ClientHostApiContract::from_client_plan(&plan).unwrap();
 
+        let mut tampered_contract = contract.clone();
+        tampered_contract.read_only = false;
+        assert!(tampered_contract.validate().is_err());
+
         assert!(contract.read_only);
         assert!(!contract.allow_database);
         assert!(!contract.allow_credentials);
@@ -3367,6 +3439,10 @@ mod tests {
         approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
         let plan = ServerExecutionPlan::from_approved(&approval, "host-response-1").unwrap();
         let contract = ServerHostApiContract::from_server_plan(&plan).unwrap();
+
+        let mut tampered_contract = contract.clone();
+        tampered_contract.allow_database = true;
+        assert!(tampered_contract.validate().is_err());
 
         let response = ServerHostApiResponse::clients(vec![ServerClientSummary {
             id: "client-1".to_string(),
