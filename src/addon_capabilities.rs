@@ -1858,6 +1858,14 @@ pub enum ServerHostApiResponse {
     Clients { items: Vec<ServerClientSummary> },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerHostApiResponseEnvelope {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub operation: ServerHostApiOperation,
+    pub response: ServerHostApiResponse,
+}
+
 impl ServerHostApiResponse {
     pub fn clients(items: Vec<ServerClientSummary>) -> Result<Self, ApprovalError> {
         for item in &items {
@@ -1944,6 +1952,32 @@ impl ServerHostApiContract {
             return Err(ApprovalError::HostApiOperationMismatch);
         }
         Ok(())
+    }
+
+    pub fn response(
+        &self,
+        operation: ServerHostApiOperation,
+        response: ServerHostApiResponse,
+    ) -> Result<ServerHostApiResponseEnvelope, ApprovalError> {
+        self.validate_response(operation, &response)?;
+        Ok(ServerHostApiResponseEnvelope {
+            addon_id: self.addon_id.clone(),
+            activation_instance: self.activation_instance.clone(),
+            operation,
+            response,
+        })
+    }
+
+    pub fn validate_response_envelope(
+        &self,
+        envelope: &ServerHostApiResponseEnvelope,
+    ) -> Result<(), ApprovalError> {
+        if envelope.addon_id != self.addon_id
+            || envelope.activation_instance != self.activation_instance
+        {
+            return Err(ApprovalError::HostApiIdentityMismatch);
+        }
+        self.validate_response(envelope.operation, &envelope.response)
     }
 
     pub fn validate_response(
@@ -3311,6 +3345,16 @@ mod tests {
         assert_eq!(
             contract.validate_response(ServerHostApiOperation::ListClients, &response),
             Ok(())
+        );
+        let envelope = contract
+            .response(ServerHostApiOperation::ListClients, response.clone())
+            .unwrap();
+        assert_eq!(contract.validate_response_envelope(&envelope), Ok(()));
+        let mut mismatched_envelope = envelope.clone();
+        mismatched_envelope.addon_id = "other.addon".to_string();
+        assert_eq!(
+            contract.validate_response_envelope(&mismatched_envelope),
+            Err(ApprovalError::HostApiIdentityMismatch)
         );
         assert!(!serde_json::to_string(&response)
             .unwrap()
