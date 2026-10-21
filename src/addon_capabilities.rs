@@ -1127,6 +1127,7 @@ pub struct ClientInferenceContract {
     pub pids: u32,
     pub writable_bytes: u64,
     pub max_input_bytes: usize,
+    pub max_output_bytes: usize,
     pub max_output_tokens: u32,
     pub max_duration_ms: u32,
 }
@@ -1139,6 +1140,15 @@ pub struct ClientInferenceRequest {
     pub input_bytes: usize,
     pub max_output_tokens: u32,
     pub max_duration_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientInferenceResult {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub output_bytes: usize,
+    pub output_tokens: u32,
+    pub duration_ms: u32,
 }
 
 impl ClientInferenceContract {
@@ -1169,6 +1179,7 @@ impl ClientInferenceContract {
             pids: plan.pids,
             writable_bytes: plan.writable_bytes,
             max_input_bytes: 64 * 1024,
+            max_output_bytes: 64 * 1024,
             max_output_tokens: 2_048,
             max_duration_ms: 5_000,
         })
@@ -1215,6 +1226,45 @@ impl ClientInferenceContract {
             request.input_bytes,
             request.max_output_tokens,
             request.max_duration_ms,
+        )
+        .map(|_| ())
+    }
+
+    pub fn result(
+        &self,
+        output_bytes: usize,
+        output_tokens: u32,
+        duration_ms: u32,
+    ) -> Result<ClientInferenceResult, ApprovalError> {
+        if !self.opt_in
+            || !self.local_only
+            || self.server_command_transport
+            || output_bytes > self.max_output_bytes
+            || output_tokens > self.max_output_tokens
+            || duration_ms == 0
+            || duration_ms > self.max_duration_ms
+        {
+            return Err(ApprovalError::InvalidLocalInferenceBoundary);
+        }
+        Ok(ClientInferenceResult {
+            addon_id: self.addon_id.clone(),
+            activation_instance: self.activation_instance.clone(),
+            output_bytes,
+            output_tokens,
+            duration_ms,
+        })
+    }
+
+    pub fn validate_result(&self, result: &ClientInferenceResult) -> Result<(), ApprovalError> {
+        if result.addon_id != self.addon_id
+            || result.activation_instance != self.activation_instance
+        {
+            return Err(ApprovalError::InvalidLocalInferenceBoundary);
+        }
+        self.result(
+            result.output_bytes,
+            result.output_tokens,
+            result.duration_ms,
         )
         .map(|_| ())
     }
@@ -2506,6 +2556,7 @@ mod tests {
         assert_eq!(contract.max_input_bytes, 64 * 1024);
         assert_eq!(contract.max_output_tokens, 2_048);
         assert_eq!(contract.max_duration_ms, 5_000);
+        assert_eq!(contract.max_output_bytes, 64 * 1024);
         assert_eq!(contract.memory_bytes, 512 * 1024 * 1024);
         assert_eq!(contract.cpu_millis, 1_000);
         assert_eq!(contract.pids, 128);
@@ -2523,6 +2574,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(contract.validate_request(&inference), Ok(()));
+        let result = contract.result(4096, 256, 250).unwrap();
+        assert_eq!(contract.validate_result(&result), Ok(()));
+        assert_eq!(result.addon_id, "example.local-inference-contract");
+        assert_eq!(result.activation_instance, "local-inference-contract-1");
+        assert_eq!(result.output_bytes, 4096);
+        assert_eq!(result.output_tokens, 256);
+        assert_eq!(result.duration_ms, 250);
+        assert_eq!(
+            contract.result(64 * 1024 + 1, 256, 250),
+            Err(ApprovalError::InvalidLocalInferenceBoundary)
+        );
         assert_eq!(inference.addon_id, "example.local-inference-contract");
         assert_eq!(inference.activation_instance, "local-inference-contract-1");
 
