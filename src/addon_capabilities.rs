@@ -349,6 +349,8 @@ pub enum ApprovalError {
     InvalidSpeakerBoundary,
     LocalInferenceCapabilityUnavailable,
     InvalidLocalInferenceBoundary,
+    ClientStorageCapabilityUnavailable,
+    InvalidClientStorageBoundary,
     InvalidNetworkBoundary,
     InvalidActivationInstance,
     InvalidVersion,
@@ -1187,6 +1189,107 @@ fn is_sha256_digest(value: &str) -> bool {
         && value["sha256:".len()..]
             .chars()
             .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+}
+
+/// Contract-only client private key/value storage boundary. It exposes no path,
+/// file handle, database handle, SQL, or server transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientPrivateStorageContract {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub private_local: bool,
+    pub server_command_transport: bool,
+    pub max_key_bytes: usize,
+    pub max_value_bytes: usize,
+    pub max_list_items: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientStorageOperation {
+    Get { key: String },
+    Put { key: String, value_bytes: usize },
+    Delete { key: String },
+    List { prefix: String, limit: u32 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientStorageRequest {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub operation: ClientStorageOperation,
+}
+
+impl ClientPrivateStorageContract {
+    pub fn from_client_plan(plan: &ClientExecutionPlan) -> Result<Self, ApprovalError> {
+        if !plan
+            .capabilities
+            .iter()
+            .any(|capability| capability.kind == CapabilityKind::AddonStorage)
+        {
+            return Err(ApprovalError::ClientStorageCapabilityUnavailable);
+        }
+        Ok(Self {
+            addon_id: plan.addon_id.clone(),
+            activation_instance: plan.activation_instance.clone(),
+            private_local: true,
+            server_command_transport: false,
+            max_key_bytes: 128,
+            max_value_bytes: 64 * 1024,
+            max_list_items: 1_000,
+        })
+    }
+
+    pub fn request(&self, operation: ClientStorageOperation) -> ClientStorageRequest {
+        ClientStorageRequest {
+            addon_id: self.addon_id.clone(),
+            activation_instance: self.activation_instance.clone(),
+            operation,
+        }
+    }
+
+    pub fn validate_request(&self, request: &ClientStorageRequest) -> Result<(), ApprovalError> {
+        if request.addon_id != self.addon_id
+            || request.activation_instance != self.activation_instance
+            || !self.private_local
+            || self.server_command_transport
+        {
+            return Err(ApprovalError::InvalidClientStorageBoundary);
+        }
+        match &request.operation {
+            ClientStorageOperation::Get { key } | ClientStorageOperation::Delete { key } => {
+                validate_client_storage_key(key, self.max_key_bytes)?;
+            }
+            ClientStorageOperation::Put { key, value_bytes } => {
+                validate_client_storage_key(key, self.max_key_bytes)?;
+                if *value_bytes > self.max_value_bytes {
+                    return Err(ApprovalError::InvalidClientStorageBoundary);
+                }
+            }
+            ClientStorageOperation::List { prefix, limit } => {
+                if !prefix.is_empty() {
+                    validate_client_storage_key(prefix, self.max_key_bytes)?;
+                }
+                if *limit == 0 || *limit > self.max_list_items {
+                    return Err(ApprovalError::InvalidClientStorageBoundary);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_client_storage_key(value: &str, maximum_bytes: usize) -> Result<(), ApprovalError> {
+    if value.is_empty()
+        || value.len() > maximum_bytes
+        || value == "."
+        || value == ".."
+        || value.contains('/')
+        || value.contains('\\')
+        || value.chars().any(char::is_control)
+    {
+        return Err(ApprovalError::InvalidClientStorageBoundary);
+    }
+    Ok(())
 }
 
 /// Contract-only network boundary. It performs no socket, route, or firewall changes.
@@ -2187,6 +2290,54 @@ mod tests {
                 1_000,
             ),
             Err(ApprovalError::InvalidLocalInferenceBoundary)
+        );
+    }
+
+    #[test]
+    fn client_private_storage_contract_is_local_bounded_and_identity_bound() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Client],
+            server: None,
+            client: Some(container("registry.example/client", 'b')),
+            capabilities: vec![AddonCapabilityRequest::storage(ExecutionTarget::Client)],
+        };
+        let mut approval = AddonApprovalRecord::pending(
+            "example.client-storage",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            request,
+        )
+        .unwrap();
+        approval.set_capability_approved(0, true).unwrap();
+        approval.approve("admin", "2026-10-20T14:30:00Z").unwrap();
+        let plan = ClientExecutionPlan::from_approved(&approval, "client-storage-1").unwrap();
+        let contract = ClientPrivateStorageContract::from_client_plan(&plan).unwrap();
+
+        assert!(contract.private_local);
+        assert!(!contract.server_command_transport);
+        assert_eq!(contract.max_key_bytes, 128);
+        assert_eq!(contract.max_value_bytes, 64 * 1024);
+        assert_eq!(contract.max_list_items, 1_000);
+        let request = contract.request(ClientStorageOperation::Put {
+            key: "settings".to_string(),
+            value_bytes: 1024,
+        });
+        assert_eq!(contract.validate_request(&request), Ok(()));
+        assert_eq!(request.addon_id, "example.client-storage");
+        assert_eq!(request.activation_instance, "client-storage-1");
+
+        let mut mismatched = request.clone();
+        mismatched.activation_instance = "other-activation".to_string();
+        assert_eq!(
+            contract.validate_request(&mismatched),
+            Err(ApprovalError::InvalidClientStorageBoundary)
+        );
+        assert_eq!(
+            contract.validate_request(&contract.request(ClientStorageOperation::Put {
+                key: "../escape".to_string(),
+                value_bytes: 1,
+            })),
+            Err(ApprovalError::InvalidClientStorageBoundary)
         );
     }
 
