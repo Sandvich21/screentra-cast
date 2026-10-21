@@ -886,6 +886,24 @@ pub struct ClientCameraStreamRequest {
 }
 
 impl ClientCameraContract {
+    pub fn validate(&self) -> Result<(), ApprovalError> {
+        addons::validate_addon_storage_namespace(&self.addon_id)
+            .map_err(|_| ApprovalError::InvalidCameraBoundary)?;
+        addons::validate_addon_storage_namespace(&self.activation_instance)
+            .map_err(|_| ApprovalError::InvalidCameraBoundary)?;
+        if !self.opt_in
+            || self.max_width == 0
+            || self.max_width > 1_920
+            || self.max_height == 0
+            || self.max_height > 1_080
+            || self.max_fps == 0
+            || self.max_fps > 30
+        {
+            return Err(ApprovalError::InvalidCameraBoundary);
+        }
+        Ok(())
+    }
+
     pub fn from_client_plan(plan: &ClientExecutionPlan) -> Result<Self, ApprovalError> {
         if !plan
             .capabilities
@@ -894,14 +912,16 @@ impl ClientCameraContract {
         {
             return Err(ApprovalError::CameraCapabilityUnavailable);
         }
-        Ok(Self {
+        let contract = Self {
             addon_id: plan.addon_id.clone(),
             activation_instance: plan.activation_instance.clone(),
             opt_in: true,
             max_width: 1920,
             max_height: 1080,
             max_fps: 30,
-        })
+        };
+        contract.validate()?;
+        Ok(contract)
     }
 
     pub fn request(
@@ -910,6 +930,7 @@ impl ClientCameraContract {
         height: u32,
         fps: u32,
     ) -> Result<ClientCameraStreamRequest, ApprovalError> {
+        self.validate()?;
         if !self.opt_in
             || width == 0
             || height == 0
@@ -933,6 +954,7 @@ impl ClientCameraContract {
         &self,
         request: &ClientCameraStreamRequest,
     ) -> Result<(), ApprovalError> {
+        self.validate()?;
         if request.addon_id != self.addon_id
             || request.activation_instance != self.activation_instance
         {
@@ -2764,6 +2786,42 @@ mod tests {
         );
         assert_eq!(
             contract.request(3840, 2160, 60),
+            Err(ApprovalError::InvalidCameraBoundary)
+        );
+    }
+
+    #[test]
+    fn client_camera_contract_rejects_tampered_policy() {
+        let contract = ClientCameraContract {
+            addon_id: "example.camera".to_string(),
+            activation_instance: "activation-1".to_string(),
+            opt_in: true,
+            max_width: 1_920,
+            max_height: 1_080,
+            max_fps: 30,
+        };
+        assert_eq!(contract.validate(), Ok(()));
+        let request = contract.request(1_280, 720, 30).unwrap();
+
+        let mut tampered = contract.clone();
+        tampered.opt_in = false;
+        assert_eq!(
+            tampered.validate(),
+            Err(ApprovalError::InvalidCameraBoundary)
+        );
+        assert_eq!(
+            tampered.request(1_280, 720, 30),
+            Err(ApprovalError::InvalidCameraBoundary)
+        );
+        assert_eq!(
+            tampered.validate_request(&request),
+            Err(ApprovalError::InvalidCameraBoundary)
+        );
+
+        let mut oversized = contract.clone();
+        oversized.max_width = 1_921;
+        assert_eq!(
+            oversized.validate(),
             Err(ApprovalError::InvalidCameraBoundary)
         );
     }
