@@ -93,6 +93,15 @@ impl AddonCapabilityRequest {
         Self::simple(target, CapabilityKind::LocalInference)
     }
 
+    pub fn local_inference_with_model(target: ExecutionTarget, model_digest: &str) -> Self {
+        Self {
+            target,
+            kind: CapabilityKind::LocalInference,
+            scope: Some(model_digest.to_string()),
+            network: None,
+        }
+    }
+
     pub fn storage(target: ExecutionTarget) -> Self {
         Self::simple(target, CapabilityKind::AddonStorage)
     }
@@ -136,6 +145,7 @@ pub enum CapabilityContractError {
     CapabilityTargetMismatch,
     DuplicateCapability,
     InvalidHostApiScope,
+    InvalidModelDigest,
     MissingNetworkRule,
     UnboundedNetworkRule,
     InvalidNetworkRule,
@@ -249,6 +259,15 @@ impl AddonExecutionRequest {
                     .as_ref()
                     .ok_or(CapabilityContractError::MissingNetworkRule)?;
                 validate_network_rule(rule)?;
+            }
+            CapabilityKind::LocalInference => {
+                let model_digest = request
+                    .scope
+                    .as_deref()
+                    .ok_or(CapabilityContractError::InvalidModelDigest)?;
+                if !is_sha256_digest(model_digest) || request.network.is_some() {
+                    return Err(CapabilityContractError::InvalidModelDigest);
+                }
             }
             _ => {
                 if request.scope.is_some() || request.network.is_some() {
@@ -1102,6 +1121,7 @@ pub struct ClientInferenceContract {
     pub opt_in: bool,
     pub local_only: bool,
     pub server_command_transport: bool,
+    pub model_digest: String,
     pub max_input_bytes: usize,
     pub max_output_tokens: u32,
     pub max_duration_ms: u32,
@@ -1126,12 +1146,20 @@ impl ClientInferenceContract {
         {
             return Err(ApprovalError::LocalInferenceCapabilityUnavailable);
         }
+        let model_digest = plan
+            .capabilities
+            .iter()
+            .find(|capability| capability.kind == CapabilityKind::LocalInference)
+            .and_then(|capability| capability.scope.clone())
+            .filter(|digest| is_sha256_digest(digest))
+            .ok_or(ApprovalError::InvalidLocalInferenceBoundary)?;
         Ok(Self {
             addon_id: plan.addon_id.clone(),
             activation_instance: plan.activation_instance.clone(),
             opt_in: true,
             local_only: true,
             server_command_transport: false,
+            model_digest,
             max_input_bytes: 64 * 1024,
             max_output_tokens: 2_048,
             max_duration_ms: 5_000,
@@ -1148,6 +1176,7 @@ impl ClientInferenceContract {
         if !self.opt_in
             || !self.local_only
             || self.server_command_transport
+            || model_digest != self.model_digest
             || !is_sha256_digest(model_digest)
             || input_bytes > self.max_input_bytes
             || max_output_tokens == 0
@@ -2370,8 +2399,9 @@ mod tests {
             targets: vec![ExecutionTarget::Client],
             server: None,
             client: Some(container("registry.example/client", 'b')),
-            capabilities: vec![AddonCapabilityRequest::local_inference(
+            capabilities: vec![AddonCapabilityRequest::local_inference_with_model(
                 ExecutionTarget::Client,
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             )],
         };
         let mut approval = AddonApprovalRecord::pending(
@@ -2393,6 +2423,10 @@ mod tests {
         assert_eq!(contract.max_input_bytes, 64 * 1024);
         assert_eq!(contract.max_output_tokens, 2_048);
         assert_eq!(contract.max_duration_ms, 5_000);
+        assert_eq!(
+            contract.model_digest,
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
         let inference = contract
             .request(
                 "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -2409,6 +2443,15 @@ mod tests {
         mismatched.activation_instance = "other-activation".to_string();
         assert_eq!(
             contract.validate_request(&mismatched),
+            Err(ApprovalError::InvalidLocalInferenceBoundary)
+        );
+        assert_eq!(
+            contract.request(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                1024,
+                512,
+                1_000,
+            ),
             Err(ApprovalError::InvalidLocalInferenceBoundary)
         );
         assert_eq!(
