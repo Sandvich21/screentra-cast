@@ -3193,6 +3193,14 @@ mod tests {
             443,
             None
         ));
+        let mut non_deny_boundary = boundary.clone();
+        non_deny_boundary.deny_by_default = false;
+        assert!(!non_deny_boundary.allows(
+            "203.0.113.10".parse().unwrap(),
+            NetworkProtocol::Tcp,
+            443,
+            Some("02:00:00:00:00:01")
+        ));
     }
 
     #[test]
