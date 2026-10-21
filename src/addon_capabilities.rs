@@ -1688,6 +1688,14 @@ pub enum ClientHostApiResponse {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientHostApiResponseEnvelope {
+    pub addon_id: String,
+    pub activation_instance: String,
+    pub operation: ClientHostApiOperation,
+    pub response: ClientHostApiResponse,
+}
+
 impl ClientHostApiResponse {
     pub fn client_info(
         client_id: &str,
@@ -1772,6 +1780,32 @@ impl ClientHostApiContract {
             return Err(ApprovalError::HostApiOperationMismatch);
         }
         Ok(())
+    }
+
+    pub fn response(
+        &self,
+        operation: ClientHostApiOperation,
+        response: ClientHostApiResponse,
+    ) -> Result<ClientHostApiResponseEnvelope, ApprovalError> {
+        self.validate_response(operation, &response)?;
+        Ok(ClientHostApiResponseEnvelope {
+            addon_id: self.addon_id.clone(),
+            activation_instance: self.activation_instance.clone(),
+            operation,
+            response,
+        })
+    }
+
+    pub fn validate_response_envelope(
+        &self,
+        envelope: &ClientHostApiResponseEnvelope,
+    ) -> Result<(), ApprovalError> {
+        if envelope.addon_id != self.addon_id
+            || envelope.activation_instance != self.activation_instance
+        {
+            return Err(ApprovalError::HostApiIdentityMismatch);
+        }
+        self.validate_response(envelope.operation, &envelope.response)
     }
 
     pub fn validate_response(
@@ -2825,6 +2859,19 @@ mod tests {
             .request(ClientHostApiOperation::GetClientInfo)
             .unwrap();
         assert_eq!(contract.validate_request(&request), Ok(()));
+        let host_response = contract
+            .response(
+                ClientHostApiOperation::GetClientInfo,
+                ClientHostApiResponse::client_info("client-1", "Mirror", "1.2.3", 1).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(contract.validate_response_envelope(&host_response), Ok(()));
+        let mut mismatched_response = host_response.clone();
+        mismatched_response.activation_instance = "other-activation".to_string();
+        assert_eq!(
+            contract.validate_response_envelope(&mismatched_response),
+            Err(ApprovalError::HostApiIdentityMismatch)
+        );
         assert_eq!(
             contract.validate_response(
                 ClientHostApiOperation::GetClientInfo,
