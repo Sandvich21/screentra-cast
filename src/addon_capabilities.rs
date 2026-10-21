@@ -89,10 +89,6 @@ impl AddonCapabilityRequest {
         Self::simple(target, CapabilityKind::SpeakerOutput)
     }
 
-    pub fn local_inference(target: ExecutionTarget) -> Self {
-        Self::simple(target, CapabilityKind::LocalInference)
-    }
-
     pub fn local_inference_with_model(target: ExecutionTarget, model_digest: &str) -> Self {
         Self {
             target,
