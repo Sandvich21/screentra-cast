@@ -82,6 +82,8 @@ pub struct TrustedServiceRuntimeRecord {
     #[serde(default)]
     pub resource_policy_verified: bool,
     #[serde(default)]
+    pub network_boundary_verified: bool,
+    #[serde(default)]
     pub readiness_verified: bool,
     #[serde(default)]
     pub credential_broker_verified: bool,
@@ -308,6 +310,11 @@ fn activation_gates() -> Vec<ActivationGate> {
             name: "resource_policy".to_string(),
             passed: false,
             reason: "OCI resource and network flags are contract-validated, but runtime enforcement evidence is incomplete".to_string(),
+        },
+        ActivationGate {
+            name: "network_boundary".to_string(),
+            passed: false,
+            reason: "network allowlists are contract-validated, but container-boundary enforcement evidence is incomplete".to_string(),
         },
         ActivationGate {
             name: "image_transport".to_string(),
@@ -547,6 +554,7 @@ fn record_from_stage(
         image_digest: service.image_digest.clone(),
         image_signature_verified: true,
         resource_policy_verified: false,
+        network_boundary_verified: false,
         readiness_verified: false,
         credential_broker_verified: false,
         database_boundary_verified: false,
@@ -1297,6 +1305,7 @@ impl<R: TrustedServiceRuntime> TrustedServiceSupervisor<R> {
             ("database_boundary", record.database_boundary_verified),
             ("controlled_gateway", record.controlled_gateway_verified),
             ("audit", record.audit_verified),
+            ("network_boundary", record.network_boundary_verified),
             ("image_transport", record.image_transport_verified),
             ("lifecycle_rollback", record.lifecycle_rollback_verified),
             ("cleanup", record.cleanup_verified),
@@ -3032,6 +3041,7 @@ mod tests {
         assert!(harness.supervisor.runtime().actions().is_empty());
 
         all_gates_passed.resource_policy_verified = false;
+        all_gates_passed.network_boundary_verified = false;
         let resource_blocked = TrustedServiceSupervisor::<FakeTrustedServiceRuntime>::activation_plan(
             &all_gates_passed,
         )
@@ -3040,8 +3050,13 @@ mod tests {
             .blocked_by
             .iter()
             .any(|gate| gate == "resource_policy"));
+        assert!(resource_blocked
+            .blocked_by
+            .iter()
+            .any(|gate| gate == "network_boundary"));
 
         all_gates_passed.resource_policy_verified = true;
+        all_gates_passed.network_boundary_verified = true;
         all_gates_passed.readiness_verified = false;
         let readiness_blocked = TrustedServiceSupervisor::<FakeTrustedServiceRuntime>::activation_plan(
             &all_gates_passed,
@@ -3109,6 +3124,7 @@ mod tests {
             image_digest: format!("sha256:{}", "a".repeat(64)),
             image_signature_verified: true,
             resource_policy_verified: true,
+            network_boundary_verified: true,
             readiness_verified: true,
             credential_broker_verified: true,
             database_boundary_verified: true,
