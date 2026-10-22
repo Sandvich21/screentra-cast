@@ -368,6 +368,7 @@ pub enum ApprovalError {
     ClientStorageCapabilityUnavailable,
     InvalidClientStorageBoundary,
     InvalidNetworkBoundary,
+    InvalidOciLaunchSpec,
     InvalidActivationInstance,
     InvalidVersion,
     InvalidArtifactDigest,
@@ -788,7 +789,70 @@ pub struct ServerOciLaunchSpec {
     pub seccomp_default: bool,
 }
 
+fn validate_oci_launch_policy(
+    addon_id: &str,
+    activation_instance: &str,
+    image_ref: &str,
+    memory_bytes: u64,
+    cpu_millis: u32,
+    pids: u32,
+    writable_bytes: u64,
+    rootless: bool,
+    non_root: bool,
+    network_disabled: bool,
+    read_only_rootfs: bool,
+    no_new_privileges: bool,
+    drop_all_capabilities: bool,
+    seccomp_default: bool,
+) -> Result<(), ApprovalError> {
+    addons::validate_addon_storage_namespace(addon_id)
+        .map_err(|_| ApprovalError::InvalidOciLaunchSpec)?;
+    addons::validate_addon_storage_namespace(activation_instance)
+        .map_err(|_| ApprovalError::InvalidOciLaunchSpec)?;
+    let (image, digest) = image_ref
+        .split_once('@')
+        .ok_or(ApprovalError::InvalidOciLaunchSpec)?;
+    addons::validate_trusted_service_image_reference(image)
+        .map_err(|_| ApprovalError::InvalidOciLaunchSpec)?;
+    addons::validate_trusted_service_image_digest(digest)
+        .map_err(|_| ApprovalError::InvalidOciLaunchSpec)?;
+    if memory_bytes == 0
+        || cpu_millis == 0
+        || pids == 0
+        || writable_bytes == 0
+        || !rootless
+        || !non_root
+        || !network_disabled
+        || !read_only_rootfs
+        || !no_new_privileges
+        || !drop_all_capabilities
+        || !seccomp_default
+    {
+        return Err(ApprovalError::InvalidOciLaunchSpec);
+    }
+    Ok(())
+}
+
 impl ServerOciLaunchSpec {
+    pub fn validate(&self) -> Result<(), ApprovalError> {
+        validate_oci_launch_policy(
+            &self.addon_id,
+            &self.activation_instance,
+            &self.image_ref,
+            self.memory_bytes,
+            self.cpu_millis,
+            self.pids,
+            self.writable_bytes,
+            self.rootless,
+            self.non_root,
+            self.network_disabled,
+            self.read_only_rootfs,
+            self.no_new_privileges,
+            self.drop_all_capabilities,
+            self.seccomp_default,
+        )
+    }
+
     pub fn from_server_plan(plan: &ServerExecutionPlan) -> Result<Self, ApprovalError> {
         if let Some(capability) = plan.capabilities.iter().find(|capability| {
             matches!(
@@ -800,7 +864,7 @@ impl ServerOciLaunchSpec {
                 capability.kind,
             ));
         }
-        Ok(Self {
+        let spec = Self {
             addon_id: plan.addon_id.clone(),
             activation_instance: plan.activation_instance.clone(),
             image_ref: format!("{}@{}", plan.image, plan.image_digest),
@@ -815,7 +879,9 @@ impl ServerOciLaunchSpec {
             no_new_privileges: true,
             drop_all_capabilities: true,
             seccomp_default: true,
-        })
+        };
+        spec.validate()?;
+        Ok(spec)
     }
 }
 
@@ -839,13 +905,32 @@ pub struct ClientOciLaunchSpec {
 }
 
 impl ClientOciLaunchSpec {
+    pub fn validate(&self) -> Result<(), ApprovalError> {
+        validate_oci_launch_policy(
+            &self.addon_id,
+            &self.activation_instance,
+            &self.image_ref,
+            self.memory_bytes,
+            self.cpu_millis,
+            self.pids,
+            self.writable_bytes,
+            self.rootless,
+            self.non_root,
+            self.network_disabled,
+            self.read_only_rootfs,
+            self.no_new_privileges,
+            self.drop_all_capabilities,
+            self.seccomp_default,
+        )
+    }
+
     pub fn from_client_plan(plan: &ClientExecutionPlan) -> Result<Self, ApprovalError> {
         if let Some(capability) = plan.capabilities.first() {
             return Err(ApprovalError::OciCapabilityBoundaryUnavailable(
                 capability.kind,
             ));
         }
-        Ok(Self {
+        let spec = Self {
             addon_id: plan.addon_id.clone(),
             activation_instance: plan.activation_instance.clone(),
             image_ref: format!("{}@{}", plan.image, plan.image_digest),
@@ -860,7 +945,9 @@ impl ClientOciLaunchSpec {
             no_new_privileges: true,
             drop_all_capabilities: true,
             seccomp_default: true,
-        })
+        };
+        spec.validate()?;
+        Ok(spec)
     }
 }
 
@@ -3434,6 +3521,51 @@ mod tests {
         assert_eq!(plan.capabilities.len(), 1);
         assert_eq!(plan.capabilities[0].target, ExecutionTarget::Client);
         assert_eq!(plan.capabilities[0].kind, CapabilityKind::CameraCapture);
+    }
+
+    #[test]
+    fn inert_oci_launch_specs_reject_tampered_isolation_policy() {
+        let server = ServerOciLaunchSpec {
+            addon_id: "example.server-oci".to_string(),
+            activation_instance: "activation-1".to_string(),
+            image_ref: format!("registry.example/server@sha256:{}", "a".repeat(64)),
+            memory_bytes: 512 * 1024 * 1024,
+            cpu_millis: 1_000,
+            pids: 128,
+            writable_bytes: 128 * 1024 * 1024,
+            rootless: true,
+            non_root: true,
+            network_disabled: true,
+            read_only_rootfs: true,
+            no_new_privileges: true,
+            drop_all_capabilities: true,
+            seccomp_default: true,
+        };
+        assert_eq!(server.validate(), Ok(()));
+        let mut server_tampered = server.clone();
+        server_tampered.rootless = false;
+        assert!(server_tampered.validate().is_err());
+
+        let client = ClientOciLaunchSpec {
+            addon_id: "example.client-oci".to_string(),
+            activation_instance: "activation-1".to_string(),
+            image_ref: format!("registry.example/client@sha256:{}", "b".repeat(64)),
+            memory_bytes: 512 * 1024 * 1024,
+            cpu_millis: 1_000,
+            pids: 128,
+            writable_bytes: 128 * 1024 * 1024,
+            rootless: true,
+            non_root: true,
+            network_disabled: true,
+            read_only_rootfs: true,
+            no_new_privileges: true,
+            drop_all_capabilities: true,
+            seccomp_default: true,
+        };
+        assert_eq!(client.validate(), Ok(()));
+        let mut client_tampered = client.clone();
+        client_tampered.image_ref = "registry.example/client:latest".to_string();
+        assert!(client_tampered.validate().is_err());
     }
 
     #[test]
