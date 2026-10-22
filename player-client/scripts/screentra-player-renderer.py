@@ -1144,7 +1144,7 @@ def _live_player_url() -> str | None:
         try:
             server_path = Path.home() / '.local/share/screentra-client/server'
             if server_path.exists():
-                server = server_path.read_text().strip()
+                server = _read_real_file(server_path, 4096).decode('utf-8').strip()
         except Exception:
             pass
     server = server.rstrip('/')
@@ -1162,7 +1162,7 @@ def _client_id_from_cache() -> str | None:
     try:
         cid_path = Path.home() / '.local/share/screentra-client/client-id'
         if cid_path.exists():
-            v = cid_path.read_text().strip()
+            v = _read_real_file(cid_path, 4096).decode('utf-8').strip()
             return v or None
     except Exception:
         pass
