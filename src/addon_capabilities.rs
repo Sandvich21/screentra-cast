@@ -1672,12 +1672,18 @@ impl ClientPrivateStorageContract {
         Ok(contract)
     }
 
-    pub fn request(&self, operation: ClientStorageOperation) -> ClientStorageRequest {
-        ClientStorageRequest {
+    pub fn request(
+        &self,
+        operation: ClientStorageOperation,
+    ) -> Result<ClientStorageRequest, ApprovalError> {
+        self.validate()?;
+        let request = ClientStorageRequest {
             addon_id: self.addon_id.clone(),
             activation_instance: self.activation_instance.clone(),
             operation,
-        }
+        };
+        self.validate_request(&request)?;
+        Ok(request)
     }
 
     pub fn response(
@@ -3473,9 +3479,11 @@ mod tests {
             max_list_items: 1_000,
         };
         assert_eq!(contract.validate(), Ok(()));
-        let request = contract.request(ClientStorageOperation::Get {
-            key: "profile".to_string(),
-        });
+        let request = contract
+            .request(ClientStorageOperation::Get {
+                key: "profile".to_string(),
+            })
+            .unwrap();
         let response = contract
             .response(ClientStorageResult::Get {
                 found: true,
@@ -3491,6 +3499,12 @@ mod tests {
         );
         assert_eq!(
             tampered.validate_request(&request),
+            Err(ApprovalError::InvalidClientStorageBoundary)
+        );
+        assert_eq!(
+            tampered.request(ClientStorageOperation::Get {
+                key: "profile".to_string(),
+            }),
             Err(ApprovalError::InvalidClientStorageBoundary)
         );
         assert_eq!(
@@ -3531,9 +3545,11 @@ mod tests {
         assert_eq!(contract.max_key_bytes, 128);
         assert_eq!(contract.max_value_bytes, 64 * 1024);
         assert_eq!(contract.max_list_items, 1_000);
-        let get = contract.request(ClientStorageOperation::Get {
-            key: "profile".to_string(),
-        });
+        let get = contract
+            .request(ClientStorageOperation::Get {
+                key: "profile".to_string(),
+            })
+            .unwrap();
         assert_eq!(contract.validate_request(&get), Ok(()));
         let response = contract
             .response(ClientStorageResult::Get {
@@ -3546,10 +3562,12 @@ mod tests {
             contract.validate_response_for_request(&get, &response),
             Ok(())
         );
-        let put_request = contract.request(ClientStorageOperation::Put {
-            key: "profile".to_string(),
-            value_bytes: 1024,
-        });
+        let put_request = contract
+            .request(ClientStorageOperation::Put {
+                key: "profile".to_string(),
+                value_bytes: 1024,
+            })
+            .unwrap();
         assert_eq!(
             contract.validate_response_for_request(&put_request, &response),
             Err(ApprovalError::InvalidClientStorageBoundary)
@@ -3562,10 +3580,12 @@ mod tests {
             }),
             Err(ApprovalError::InvalidClientStorageBoundary)
         );
-        let request = contract.request(ClientStorageOperation::Put {
-            key: "settings".to_string(),
-            value_bytes: 1024,
-        });
+        let request = contract
+            .request(ClientStorageOperation::Put {
+                key: "settings".to_string(),
+                value_bytes: 1024,
+            })
+            .unwrap();
         assert_eq!(contract.validate_request(&request), Ok(()));
         assert_eq!(request.addon_id, "example.client-storage");
         assert_eq!(request.activation_instance, "client-storage-1");
@@ -3577,10 +3597,10 @@ mod tests {
             Err(ApprovalError::InvalidClientStorageBoundary)
         );
         assert_eq!(
-            contract.validate_request(&contract.request(ClientStorageOperation::Put {
+            contract.request(ClientStorageOperation::Put {
                 key: "../escape".to_string(),
                 value_bytes: 1,
-            })),
+            }),
             Err(ApprovalError::InvalidClientStorageBoundary)
         );
     }
