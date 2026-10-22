@@ -57,6 +57,10 @@ class HeartbeatAddonCacheTests(unittest.TestCase):
         with mock.patch.object(heartbeat, 'urlopen_ripley', return_value=InventoryResponse(inventory)):
             return heartbeat.sync_client_addons('https://server.example', 'client-a', cache_dir)
 
+    def test_addon_manifest_rejects_duplicate_json_keys(self):
+        with self.assertRaises(ValueError):
+            heartbeat._parse_addon_manifest(b'{"id":"demo.addon","id":"attacker"}')
+
     def test_inventory_response_body_is_bounded(self):
         with tempfile.TemporaryDirectory() as temp:
             result = self.sync(

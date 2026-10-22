@@ -600,7 +600,7 @@ def _verify_cached_addon(target, active, expected):
     signature_path = target / 'manifest.sig'
     manifest_bytes = _read_real_file(manifest_path, MAX_ADDON_MANIFEST_BYTES)
     try:
-        manifest = json.loads(manifest_bytes.decode('utf-8'))
+        manifest = _parse_addon_manifest(manifest_bytes)
     except (UnicodeError, ValueError, json.JSONDecodeError):
         raise ValueError('addon cache manifest is invalid')
     entrypoint, digest = _validate_addon_manifest_metadata(manifest, expected)
@@ -648,6 +648,28 @@ def _safe_addon_member(name):
     return normalized
 
 
+def _parse_addon_manifest(manifest_bytes):
+    def reject_duplicate_fields(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('addon manifest contains duplicate JSON fields')
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(
+            manifest_bytes.decode('utf-8'),
+            object_pairs_hook=reject_duplicate_fields,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError('addon manifest is not valid JSON') from exc
+    if not isinstance(value, dict):
+        raise ValueError('addon manifest must be an object')
+    return value
+
+
 def _extract_verified_addon_package(package_bytes, expected, staging_parent=None):
     if len(package_bytes) > MAX_ADDON_PACKAGE_BYTES:
         raise ValueError('addon package exceeds the client limit')
@@ -685,7 +707,7 @@ def _extract_verified_addon_package(package_bytes, expected, staging_parent=None
         manifest_bytes = manifest_path.read_bytes()
         if len(manifest_bytes) > MAX_ADDON_MANIFEST_BYTES:
             raise ValueError('addon manifest is too large')
-        manifest = json.loads(manifest_bytes.decode('utf-8'))
+        manifest = _parse_addon_manifest(manifest_bytes)
         entrypoint, digest = _validate_addon_manifest_metadata(manifest, expected)
         client_path = staging / entrypoint
         if not client_path.is_file() or hashlib.sha256(client_path.read_bytes()).hexdigest().lower() != digest.lower():
