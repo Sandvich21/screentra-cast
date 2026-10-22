@@ -10,6 +10,7 @@ pub const SUPPORTED_ROOTLESS_RUNTIMES: &[&str] = &["podman", "nerdctl"];
 pub const MAX_OCI_COMMAND_ARGS: usize = 64;
 pub const MAX_OCI_COMMAND_PART_BYTES: usize = 256;
 pub const MAX_OCI_COMMAND_BYTES: usize = 4 * 1024;
+pub const MAX_OCI_ARGV_BYTES: usize = 4 * 1024;
 pub const MAX_OCI_ALLOWED_REGISTRIES: usize = 64;
 pub const REQUIRED_OCI_ACTIVATION_GATES: &[&str] = &[
     "manifest_signature",
@@ -274,6 +275,24 @@ fn default_seccomp_option(runtime_name: &str) -> String {
     }
 }
 
+fn validate_built_argv(argv: &[String]) -> Result<(), String> {
+    if argv.is_empty()
+        || argv.len() > MAX_OCI_COMMAND_ARGS + 16
+        || argv
+            .iter()
+            .any(|part| part.is_empty() || part.len() > MAX_OCI_COMMAND_PART_BYTES * 2)
+    {
+        return Err("OCI runtime argv contains an invalid argument".to_string());
+    }
+    let total_bytes = argv
+        .iter()
+        .try_fold(0usize, |total, part| total.checked_add(part.len()));
+    if total_bytes.map_or(true, |bytes| bytes > MAX_OCI_ARGV_BYTES) {
+        return Err("OCI runtime argv exceeds the bounded payload size".to_string());
+    }
+    Ok(())
+}
+
 pub fn build_rootless_argv(
     runtime_name: &str,
     spec: &OciLaunchSpec,
@@ -304,6 +323,7 @@ pub fn build_rootless_argv(
         format!("{}@{}", spec.image, spec.image_digest),
     ]);
     argv.extend(spec.command.iter().cloned());
+    validate_built_argv(&argv)?;
     Ok(argv)
 }
 
@@ -321,6 +341,7 @@ pub fn build_rootless_argv_for_path(
         .ok_or_else(|| "rootless runtime name is unavailable".to_string())?;
     let mut argv = build_rootless_argv(runtime_name, spec)?;
     argv[0] = runtime_path.to_string_lossy().into_owned();
+    validate_built_argv(&argv)?;
     Ok(argv)
 }
 
@@ -667,6 +688,16 @@ mod tests {
     }
 
     #[test]
+    fn rootless_argv_rejects_an_oversized_final_payload() {
+        let mut spec = safe_spec();
+        spec.command = vec!["x".repeat(MAX_OCI_COMMAND_PART_BYTES); MAX_OCI_COMMAND_ARGS / 4];
+        assert!(
+            super::build_rootless_argv("podman", &spec).is_err(),
+            "the complete runtime argv must remain bounded"
+        );
+    }
+
+    #[test]
     fn activation_gate_validation_rejects_duplicates_and_incomplete_passes() {
         let complete = REQUIRED_OCI_ACTIVATION_GATES
             .iter()
@@ -843,6 +874,45 @@ mod tests {
         assert!(!args
             .iter()
             .any(|arg| arg == "-c" || arg == "--volume" || arg == "-v"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_runtime_path_builder_rechecks_final_argv_bounds() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!(
+            "screentra-oci-long-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut root = base.clone();
+        for _ in 0..18 {
+            root = root.join(format!("n{}", "a".repeat(200)));
+        }
+        fs::create_dir_all(&root).expect("long runtime fixture directory should be created");
+        for ancestor in root.ancestors().take_while(|path| path.starts_with(&base)) {
+            fs::set_permissions(ancestor, fs::Permissions::from_mode(0o700))
+                .expect("runtime fixture directories should be private");
+        }
+        let runtime_path = root.join("podman");
+        fs::write(&runtime_path, b"not executed").expect("runtime fixture should be created");
+        fs::set_permissions(&runtime_path, fs::Permissions::from_mode(0o755))
+            .expect("runtime fixture should be executable");
+
+        let mut spec = safe_spec();
+        spec.command = vec!["x".repeat(200); 16];
+        let report = probe_oci_runtime(&runtime_path);
+        assert!(
+            report.executable_present,
+            "runtime fixture should pass preflight: {:?}",
+            report.blocked_by
+        );
+        let error = build_rootless_argv_for_path(&runtime_path, &spec)
+            .expect_err("the explicit runtime path should exceed the final argv bound");
+        assert!(
+            error.contains("argv"),
+            "unexpected rejection reason: {error}"
+        );
+        fs::remove_dir_all(root).expect("runtime fixture should be removed");
     }
 
     #[cfg(unix)]
