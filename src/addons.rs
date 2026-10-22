@@ -1135,6 +1135,7 @@ pub fn validate_manifest(manifest: &AddonManifest) -> Result<(), AddonError> {
 /// consumed by the editor. The player continues using the selected trusted
 /// base renderer; no addon code is loaded at runtime in this phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddonWidgetRegistration {
     pub id: String,
     pub addon_id: String,
@@ -3231,6 +3232,23 @@ mod tests {
         let mut record_value = serde_json::to_value(record).unwrap();
         record_value["unexpected"] = serde_json::Value::Bool(true);
         assert!(serde_json::from_value::<AddonRecord>(record_value).is_err());
+    }
+
+    #[test]
+    fn addon_widget_registration_wire_schema_rejects_unknown_fields() {
+        let mut registration = serde_json::json!({
+            "id": "weather",
+            "addon_id": "example.weather",
+            "addon_version": "1.0.0",
+            "name": "Weather",
+            "description": "Weather widget",
+            "host_renderer": "weather",
+            "icon": "weather",
+            "schema": {},
+            "default_props": {},
+            "unexpected": true
+        });
+        assert!(serde_json::from_value::<AddonWidgetRegistration>(registration.take()).is_err());
     }
 
     fn launch_profile() -> TrustedServiceLaunchProfile {
