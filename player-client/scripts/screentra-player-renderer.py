@@ -495,7 +495,16 @@ def _current_touch_binding() -> dict:
 def _write_touch_binding(payload: dict) -> dict:
     cfg = _load_client_config()
     dev_path = payload.get('device_path') or payload.get('path')
-    dev_name = _resolve_touch_name(dev_path, payload.get('device_name'))
+    if dev_path is not None:
+        if not isinstance(dev_path, str) or len(dev_path) > 256 or not dev_path.startswith('/dev/'):
+            raise ValueError('touch device path is invalid')
+        detected_paths = {
+            device.get('path') for device in _nl_detect_touch_devices()
+            if isinstance(device, dict) and isinstance(device.get('path'), str)
+        }
+        if dev_path not in detected_paths:
+            raise ValueError('touch device path is not a detected touchscreen')
+    dev_name = _resolve_touch_name(dev_path)
     allow_joined = bool(payload.get('allow_joined_displays'))
     raw_indexes = payload.get('target_display_indexes') or payload.get('display_indexes') or payload.get('display_index') or [0]
     if not isinstance(raw_indexes, list):

@@ -3,6 +3,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / 'player-client/scripts/screentra-player-renderer.py'
@@ -34,6 +35,16 @@ class PlayerRendererFileTests(unittest.TestCase):
             redirected = root / 'service.log'
             redirected.symlink_to(outside)
             self.assertNotIn('secret log', renderer._read_tail(redirected))
+
+    def test_touch_binding_rejects_undetected_device_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp) / 'cache'
+            cache.mkdir()
+            renderer.Handler.cache_dir = cache
+            with mock.patch.object(renderer, '_safe_run', return_value={'ok': True}), \
+                    mock.patch.object(renderer, '_display_connectors_for_indexes', return_value=[]):
+                with self.assertRaises(ValueError):
+                    renderer._write_touch_binding({'device_path': '/dev/not-a-detected-touchscreen'})
 
     def test_backup_root_rejects_symlinked_directory(self):
         with tempfile.TemporaryDirectory() as temp:
