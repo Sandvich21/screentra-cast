@@ -146,7 +146,7 @@ def run(cmd: str) -> str:
     if args is None:
         return ''
     try:
-        output = subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL)
+        output = subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=3)
         return output.strip()
     except Exception:
         return ''
