@@ -10069,6 +10069,29 @@ mod tests {
             r#"{"approved":[],"unexpected":true}"#,
         );
         assert!(update.is_err());
+
+        let create: Result<CreateAddonExecutionApproval, _> = serde_json::from_str(
+            r#"{
+                "addon_id":"example.payload",
+                "addon_version":"1.0.0",
+                "artifact_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "request":{
+                    "targets":["server"],
+                    "server":{
+                        "image":"registry.example/server",
+                        "image_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        "memory_bytes":536870912,
+                        "cpu_millis":1000,
+                        "pids":128,
+                        "writable_bytes":134217728
+                    },
+                    "client":null,
+                    "capabilities":[]
+                },
+                "unexpected":true
+            }"#,
+        );
+        assert!(create.is_err());
     }
     #[tokio::test]
     async fn addon_execution_approval_list_requires_admin() {
