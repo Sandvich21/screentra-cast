@@ -295,7 +295,9 @@ def tls_context():
     if not cafile or not Path(cafile).is_file():
         raise RuntimeError('Screentra Cast CA certificate is unavailable')
     try:
-        return ssl.create_default_context(cafile=cafile)
+        return ssl.create_default_context(
+            cadata=_read_real_file(Path(cafile), max_bytes=256 * 1024).decode('utf-8')
+        )
     except Exception as e:
         raise RuntimeError('Screentra Cast CA certificate is invalid') from e
 
@@ -327,8 +329,8 @@ def client_auth_token():
         str(Path.home() / '.local/share/screentra-client/client-auth-token'),
     )
     try:
-        return Path(path).read_text().strip()
-    except OSError:
+        return _read_real_file(Path(path), max_bytes=4096).decode('utf-8').strip()
+    except (OSError, UnicodeError, ValueError):
         return ''
 
 
@@ -1101,7 +1103,7 @@ def main():
         srv = Path.home() / '.local/share/screentra-client/server'
         if srv.exists():
             try:
-                v = srv.read_text().strip()
+                v = _read_real_file(srv, max_bytes=4096).decode('utf-8').strip()
                 if v:
                     return v
             except Exception:
@@ -1193,11 +1195,11 @@ def main():
             try:
                 subprocess.run(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'], check=True, timeout=15)
                 print(f'layout changed {previous_layout_id} -> {current_layout_id}; kiosk restarted', flush=True)
-                prev_layout_path.write_text(current_layout_id or '')
+                _atomic_write_text(prev_layout_path, current_layout_id or '')
             except Exception as e:
                 print(f'layout-change restart failed: {e}', flush=True)
         elif cfg and current_layout_id:
-            prev_layout_path.write_text(current_layout_id or '')
+            _atomic_write_text(prev_layout_path, current_layout_id or '')
         if cfg and current_orientation != previous_orientation:
             try:
                 subprocess.run(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'], check=True, timeout=15)
@@ -1228,7 +1230,10 @@ def main():
             for d in data.get('displays') or []:
                 idx = d.get('display_index')
                 if idx is None: continue
-                Path(args.cache_dir, f'display-{idx}.json').write_text(__import__('json').dumps(d))
+                _atomic_write_text(
+                    Path(args.cache_dir, f'display-{idx}.json'),
+                    __import__('json').dumps(d),
+                )
         except Exception:
             pass
 
@@ -1243,7 +1248,10 @@ def main():
                 'pairing_code': client_pairing_code(data['client_id']),
             }
             Path(args.cache_dir).mkdir(parents=True, exist_ok=True)
-            (Path(args.cache_dir) / 'last-heartbeat.json').write_text(__import__('json').dumps(status_payload))
+            _atomic_write_text(
+                Path(args.cache_dir) / 'last-heartbeat.json',
+                __import__('json').dumps(status_payload),
+            )
         except Exception:
             pass
         if args.once:

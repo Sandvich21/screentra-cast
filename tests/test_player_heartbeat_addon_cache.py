@@ -476,6 +476,19 @@ class HeartbeatAddonCacheTests(unittest.TestCase):
             redirected.symlink_to(outside)
             self.assertEqual(heartbeat._read_json_file(redirected, {'safe': True}), {'safe': True})
 
+    def test_client_auth_token_reader_rejects_symlinked_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / 'outside.token'
+            outside.write_text('secret-token', encoding='utf-8')
+            redirected = root / 'client-auth-token'
+            redirected.symlink_to(outside)
+            with mock.patch.dict(os.environ, {
+                'RIPLEY_CLIENT_AUTH_TOKEN': '',
+                'RIPLEY_CLIENT_AUTH_TOKEN_FILE': str(redirected),
+            }, clear=False):
+                self.assertEqual(heartbeat.client_auth_token(), '')
+
 
 if __name__ == '__main__':
     unittest.main()
