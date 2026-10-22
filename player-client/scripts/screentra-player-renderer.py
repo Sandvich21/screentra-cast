@@ -27,6 +27,7 @@ from pathlib import Path
 MAX_REQUEST_BODY_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
 MAX_BACKUP_DOWNLOAD_BYTES = 256 * 1024 * 1024
+MAX_CACHED_ASSET_BYTES = 16 * 1024 * 1024
 
 
 def client_pairing_code(client_id):
@@ -1610,17 +1611,28 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(200, json.dumps(_read_json_file(target, {})), 'application/json')
         # Optional cached asset serving under cache/assets
         safe = Path(path.lstrip('/'))
-        target = (self.cache_dir / safe).resolve()
+        candidate = self.cache_dir / safe
+        try:
+            candidate_metadata = os.lstat(candidate)
+        except FileNotFoundError:
+            return self.send_text(404, 'not found')
+        if stat.S_ISLNK(candidate_metadata.st_mode) or not stat.S_ISREG(candidate_metadata.st_mode):
+            return self.send_text(403, 'forbidden')
+        target = candidate.resolve()
         try:
             target.relative_to(self.cache_dir.resolve())
         except Exception:
             return self.send_text(403, 'forbidden')
-        if target.exists() and target.is_file():
-            data = target.read_bytes()
-            self.send_response(200)
-            self.send_header('Content-Type', mimetypes.guess_type(str(target))[0] or 'application/octet-stream')
-            self.send_header('Content-Length', str(len(data)))
-            self.end_headers(); self.wfile.write(data); return
+        try:
+            data = _read_real_file(candidate, maximum=MAX_CACHED_ASSET_BYTES)
+        except ValueError as error:
+            if 'exceeds' in str(error) or 'bounded' in str(error):
+                return self.send_text(413, 'asset too large')
+            return self.send_text(403, 'forbidden')
+        self.send_response(200)
+        self.send_header('Content-Type', mimetypes.guess_type(str(target))[0] or 'application/octet-stream')
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers(); self.wfile.write(data); return
         return self.send_text(404, 'not found')
 
 def main():
