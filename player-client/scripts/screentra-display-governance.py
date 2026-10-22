@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -61,12 +62,50 @@ def detect_full(max_scan: int = 16) -> List[Dict[str, Any]]:
     return _det.detect_displays(max_displays=max_scan)
 
 
+def _ensure_real_directory(path: Path, create: bool = False) -> bool:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            if not create:
+                return False
+            current.mkdir()
+            metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError('display governance directory is not a real directory')
+    return True
+
+
+def _read_real_file(path: Path, maximum: int = 1 << 20) -> bytes:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError('display governance path contains a symlink')
+    descriptor = os.open(absolute, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+            raise ValueError('display governance file is not bounded')
+        raw = os.read(descriptor, maximum + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > maximum:
+        raise ValueError('display governance file exceeds its bound')
+    return raw
+
+
 def load_config(config_path: Path) -> Dict[str, Any]:
     """Load config.json (or return defaults) without writing."""
     if not config_path.exists():
         return dict(CONFIG_DEFAULTS)
     try:
-        cfg = json.loads(config_path.read_text())
+        cfg = json.loads(_read_real_file(config_path).decode('utf-8'))
     except Exception:
         # Corrupt config.json → return defaults but don't clobber; caller decides.
         return dict(CONFIG_DEFAULTS)
@@ -89,7 +128,7 @@ def write_config(config_path: Path, *, installer_detected_max_displays: int,
         "max_displays": max_displays,
         "last_detected_displays": last_detected_displays,
     })
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(config_path.parent, create=True)
     with tempfile.NamedTemporaryFile(
         mode="w",
         dir=config_path.parent,
