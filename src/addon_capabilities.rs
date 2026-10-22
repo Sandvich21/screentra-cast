@@ -1593,16 +1593,35 @@ pub struct ServerNetworkBoundary {
 }
 
 impl ServerNetworkBoundary {
+    pub fn validate(&self) -> Result<(), ApprovalError> {
+        addons::validate_addon_storage_namespace(&self.addon_id)
+            .map_err(|_| ApprovalError::InvalidNetworkBoundary)?;
+        addons::validate_addon_storage_namespace(&self.activation_instance)
+            .map_err(|_| ApprovalError::InvalidNetworkBoundary)?;
+        if !self.deny_by_default {
+            return Err(ApprovalError::InvalidNetworkBoundary);
+        }
+        for (index, rule) in self.rules.iter().enumerate() {
+            validate_network_rule(rule).map_err(|_| ApprovalError::InvalidNetworkBoundary)?;
+            if self.rules[..index].iter().any(|previous| previous == rule) {
+                return Err(ApprovalError::InvalidNetworkBoundary);
+            }
+        }
+        Ok(())
+    }
+
     pub fn from_server_plan(plan: &ServerExecutionPlan) -> Result<Self, ApprovalError> {
         for rule in &plan.network_allow_rules {
             validate_network_rule(rule).map_err(|_| ApprovalError::InvalidNetworkBoundary)?;
         }
-        Ok(Self {
+        let boundary = Self {
             addon_id: plan.addon_id.clone(),
             activation_instance: plan.activation_instance.clone(),
             deny_by_default: true,
             rules: plan.network_allow_rules.clone(),
-        })
+        };
+        boundary.validate()?;
+        Ok(boundary)
     }
 
     pub fn allows(
@@ -1612,7 +1631,7 @@ impl ServerNetworkBoundary {
         port: u16,
         mac: Option<&str>,
     ) -> bool {
-        if !self.deny_by_default {
+        if self.validate().is_err() || !self.deny_by_default {
             return false;
         }
         self.rules.iter().any(|rule| {
@@ -3720,6 +3739,37 @@ mod tests {
         unbounded.rules[0].protocol = NetworkProtocol::Any;
         assert_eq!(
             unbounded.validate(),
+            Err(ApprovalError::InvalidNetworkBoundary)
+        );
+    }
+
+    #[test]
+    fn server_network_boundary_rejects_tampered_policy() {
+        let boundary = ServerNetworkBoundary {
+            addon_id: "example.server-network".to_string(),
+            activation_instance: "activation-1".to_string(),
+            deny_by_default: true,
+            rules: vec![NetworkAllowRule {
+                name: "weather-api".to_string(),
+                ip: "203.0.113.10".to_string(),
+                mac: Some("02:00:00:00:00:01".to_string()),
+                protocol: NetworkProtocol::Tcp,
+                ports: vec![443],
+            }],
+        };
+        assert_eq!(boundary.validate(), Ok(()));
+
+        let mut tampered = boundary.clone();
+        tampered.deny_by_default = false;
+        assert_eq!(
+            tampered.validate(),
+            Err(ApprovalError::InvalidNetworkBoundary)
+        );
+
+        let mut duplicate = boundary.clone();
+        duplicate.rules.push(duplicate.rules[0].clone());
+        assert_eq!(
+            duplicate.validate(),
             Err(ApprovalError::InvalidNetworkBoundary)
         );
     }
