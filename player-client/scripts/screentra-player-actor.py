@@ -523,10 +523,21 @@ def audio_list() -> tuple[bool, str, dict]:
     return True, f'Found {len(devices)} audio output device(s)', {'devices': devices}
 
 
+def _validate_audio_sink_id(value: str) -> str:
+    if not isinstance(value, str) or value == '@DEFAULT_AUDIO_SINK@':
+        if value == '@DEFAULT_AUDIO_SINK@':
+            return value
+        raise ValueError('audio sink identifier is invalid')
+    if not re.fullmatch(r'[0-9]{1,8}', value):
+        raise ValueError('audio sink identifier is invalid')
+    return value
+
+
 def audio_set_default(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
-    sink_id = str(payload.get('sink_id') or '').strip()
-    if not sink_id.isdigit():
+    try:
+        sink_id = _validate_audio_sink_id(str(payload.get('sink_id') or '').strip())
+    except ValueError:
         return False, 'A valid audio output device is required', {}
     if shutil.which('wpctl') is None:
         return False, 'wpctl is not installed on this client', {}
@@ -538,8 +549,8 @@ def audio_set_default(payload: dict | None) -> tuple[bool, str, dict]:
 
 def audio_set_volume(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
-    sink_id = str(payload.get('sink_id') or '@DEFAULT_AUDIO_SINK@').strip()
     try:
+        sink_id = _validate_audio_sink_id(str(payload.get('sink_id') or '@DEFAULT_AUDIO_SINK@').strip())
         value = max(0, min(100, int(payload.get('value'))))
     except (TypeError, ValueError):
         return False, 'Volume must be a number from 0 to 100', {}

@@ -20,6 +20,14 @@ actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 's
 
 
 class PlayerClientAuditTests(unittest.TestCase):
+    def test_audio_sink_identifiers_are_bounded(self):
+        self.assertEqual(actor._validate_audio_sink_id('12'), '12')
+        self.assertEqual(actor._validate_audio_sink_id('@DEFAULT_AUDIO_SINK@'), '@DEFAULT_AUDIO_SINK@')
+        with self.assertRaises(ValueError):
+            actor._validate_audio_sink_id('9' * 64)
+        with self.assertRaises(ValueError):
+            actor._validate_audio_sink_id('sink-name')
+
     def test_ddc_fields_are_bounded(self):
         self.assertEqual(actor._validate_ddc_vcp('D6'), 'D6')
         self.assertEqual(actor._validate_ddc_value(100), 100)
