@@ -100,12 +100,24 @@ def _read_real_file(path: Path, maximum: int = 1 << 20) -> bytes:
     return raw
 
 
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate JSON object key')
+        result[key] = value
+    return result
+
+
 def load_config(config_path: Path) -> Dict[str, Any]:
     """Load config.json (or return defaults) without writing."""
     if not config_path.exists():
         return dict(CONFIG_DEFAULTS)
     try:
-        cfg = json.loads(_read_real_file(config_path).decode('utf-8'))
+        cfg = json.loads(
+            _read_real_file(config_path).decode('utf-8'),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
     except Exception:
         # Corrupt config.json → return defaults but don't clobber; caller decides.
         return dict(CONFIG_DEFAULTS)

@@ -22,6 +22,12 @@ class DisplayGovernanceFileTests(unittest.TestCase):
             redirected.symlink_to(outside)
             self.assertEqual(governance.load_config(redirected), governance.CONFIG_DEFAULTS)
 
+    def test_load_config_rejects_duplicate_json_keys(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'config.json'
+            path.write_text('{"max_displays":1,"max_displays":2}', encoding='utf-8')
+            self.assertEqual(governance.load_config(path), governance.CONFIG_DEFAULTS)
+
     def test_write_config_rejects_symlinked_parent(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
