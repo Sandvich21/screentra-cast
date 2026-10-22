@@ -579,17 +579,30 @@ def _verify_addon_manifest_signature(manifest_path, signature_path):
     _read_real_file(signature_path, MAX_ADDON_SIGNATURE_BYTES)
     public_key = addon_public_key_path()
     try:
-        _read_real_file(public_key, 64 * 1024)
+        public_key_bytes = _read_real_file(public_key, 64 * 1024)
     except (OSError, ValueError):
         raise ValueError('addon signing public key is unavailable')
-    result = subprocess.run(
-        ['openssl', 'pkeyutl', '-verify', '-rawin', '-pubin', '-inkey', str(public_key),
-         '-sigfile', str(signature_path), '-in', str(manifest_path)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=10,
-        check=False,
-    )
+    temporary_key = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(prefix='.addon-key-', suffix='.pub')
+        temporary_key = Path(temporary_name)
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(public_key_bytes)
+        os.chmod(temporary_key, 0o600)
+        result = subprocess.run(
+            ['openssl', 'pkeyutl', '-verify', '-rawin', '-pubin', '-inkey', str(temporary_key),
+             '-sigfile', str(signature_path), '-in', str(manifest_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    finally:
+        if temporary_key is not None:
+            try:
+                temporary_key.unlink()
+            except FileNotFoundError:
+                pass
     if result.returncode != 0:
         raise ValueError('addon manifest signature verification failed')
 
