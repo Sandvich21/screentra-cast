@@ -23,6 +23,12 @@ class PlayerRendererFileTests(unittest.TestCase):
             redirected.symlink_to(outside)
             self.assertEqual(renderer._read_json_file(redirected, {'safe': True}), {'safe': True})
 
+    def test_login_payload_requires_bounded_strings(self):
+        with self.assertRaises(ValueError):
+            renderer._validate_login_payload({'username': ['admin'], 'password': 'secret'})
+        with self.assertRaises(ValueError):
+            renderer._validate_login_payload({'username': 'admin', 'password': 'x' * 257})
+
     def test_request_json_rejects_duplicate_keys(self):
         with self.assertRaises(ValueError):
             renderer._parse_request_json('{"action":"one","action":"two"}')

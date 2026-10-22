@@ -117,6 +117,16 @@ def _parse_request_json(text: str) -> dict:
     return value
 
 
+def _validate_login_payload(payload: dict) -> tuple[str, str]:
+    username = payload.get('username')
+    password = payload.get('password')
+    if not isinstance(username, str) or not 1 <= len(username) <= 128:
+        raise ValueError('username must be a bounded string')
+    if not isinstance(password, str) or not 1 <= len(password) <= 256:
+        raise ValueError('password must be a bounded string')
+    return username, password
+
+
 def _request_body(handler) -> str:
     raw_length = handler.headers.get('Content-Length')
     if raw_length is None:
@@ -492,18 +502,23 @@ def _current_touch_binding() -> dict:
             pass
     return binding or {'device_path': None, 'device_name': None, 'target_display_indexes': [0], 'target_connectors': _display_connectors_for_indexes([0]), 'allow_joined_displays': False}
 
+def _validate_touch_device_path(dev_path: str | None) -> None:
+    if dev_path is None:
+        return
+    if not isinstance(dev_path, str) or len(dev_path) > 256 or not dev_path.startswith('/dev/'):
+        raise ValueError('touch device path is invalid')
+    detected_paths = {
+        device.get('path') for device in _nl_detect_touch_devices()
+        if isinstance(device, dict) and isinstance(device.get('path'), str)
+    }
+    if dev_path not in detected_paths:
+        raise ValueError('touch device path is not a detected touchscreen')
+
+
 def _write_touch_binding(payload: dict) -> dict:
     cfg = _load_client_config()
     dev_path = payload.get('device_path') or payload.get('path')
-    if dev_path is not None:
-        if not isinstance(dev_path, str) or len(dev_path) > 256 or not dev_path.startswith('/dev/'):
-            raise ValueError('touch device path is invalid')
-        detected_paths = {
-            device.get('path') for device in _nl_detect_touch_devices()
-            if isinstance(device, dict) and isinstance(device.get('path'), str)
-        }
-        if dev_path not in detected_paths:
-            raise ValueError('touch device path is not a detected touchscreen')
+    _validate_touch_device_path(dev_path)
     dev_name = _resolve_touch_name(dev_path)
     allow_joined = bool(payload.get('allow_joined_displays'))
     raw_indexes = payload.get('target_display_indexes') or payload.get('display_indexes') or payload.get('display_index') or [0]
@@ -1317,8 +1332,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/admin/auth/login':
             try:
                 payload = _parse_request_json(body) if body and body.strip() else {}
-                username = str(payload.get('username') or '')
-                password = str(payload.get('password') or '')
+                username, password = _validate_login_payload(payload)
                 ok, info = _check_login(username, password)
                 if not ok:
                     return self.send_text(401, json.dumps({'ok': False, **info}), 'application/json')
@@ -1346,6 +1360,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = _parse_request_json(body)
                 selected = payload.get('path')
+                _validate_touch_device_path(selected)
                 Handler.cache_dir.mkdir(parents=True, exist_ok=True)
                 _atomic_write_text(Handler.cache_dir / 'touch-device.json', json.dumps({'path': selected}))
                 # Tell the actor to restart the kiosk so the choice takes effect
