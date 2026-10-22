@@ -230,26 +230,32 @@ def _parse_pending_command(text):
         raise ValueError('pending command JSON is invalid') from exc
 
 
+def _read_bounded_text(path: Path, maximum: int) -> str:
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+        raise ValueError('file bound is invalid')
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError('file path contains a symlink')
+    descriptor = os.open(absolute, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+            raise ValueError('file is not a bounded regular file')
+        raw = os.read(descriptor, maximum + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > maximum:
+        raise ValueError('file exceeds its bound')
+    return raw.decode('utf-8')
+
+
 def _read_json_file(path: Path, default):
     try:
-        absolute = Path(os.path.abspath(os.fspath(path)))
-        current = Path(absolute.anchor)
-        for part in absolute.parts[1:]:
-            current /= part
-            metadata = os.lstat(current)
-            if stat.S_ISLNK(metadata.st_mode):
-                return default
-        descriptor = os.open(absolute, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
-        try:
-            metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_JSON_FILE_BYTES:
-                return default
-            raw = os.read(descriptor, MAX_JSON_FILE_BYTES + 1)
-        finally:
-            os.close(descriptor)
-        if len(raw) > MAX_JSON_FILE_BYTES:
-            return default
-        return json.loads(raw.decode('utf-8'))
+        return json.loads(_read_bounded_text(path, MAX_JSON_FILE_BYTES))
     except Exception:
         return default
 
@@ -766,7 +772,7 @@ def _preview_state_path(cache_dir: Path, display_index: int) -> Path:
 def _preview_token(cache_dir: Path) -> str:
     token_path = cache_dir.parent / 'client-auth-token'
     try:
-        token = token_path.read_text(encoding='utf-8').strip()
+        token = _read_bounded_text(token_path, 4096).strip()
     except Exception:
         return ''
     return token
@@ -891,7 +897,7 @@ def run_preview_loop(server: str, client_id: str, cache_dir: Path, display_index
             time.sleep(interval)
     finally:
         try:
-            if pid_path.read_text(encoding='utf-8').strip() == str(os.getpid()):
+            if _read_bounded_text(pid_path, 64).strip() == str(os.getpid()):
                 pid_path.unlink()
         except Exception:
             pass
@@ -906,7 +912,7 @@ def run_preview_loop(server: str, client_id: str, cache_dir: Path, display_index
 
 def _preview_process_alive(pid_path: Path) -> bool:
     try:
-        pid = int(pid_path.read_text(encoding='utf-8').strip())
+        pid = int(_read_bounded_text(pid_path, 64).strip())
         os.kill(pid, 0)
         return True
     except Exception:
@@ -961,7 +967,7 @@ def stop_display_preview(ctx: dict, display_index: int) -> tuple[bool, str, dict
     cache_dir = Path(ctx['cache_dir'])
     pid_path = _preview_pid_path(cache_dir, display_index)
     try:
-        pid = int(pid_path.read_text(encoding='utf-8').strip())
+        pid = int(_read_bounded_text(pid_path, 64).strip())
     except Exception:
         pid = None
     if pid is not None:
@@ -1398,9 +1404,9 @@ def main() -> int:
         if not pending_path.exists():
             return False
         try:
-            if pending_path.stat().st_size > MAX_PENDING_BYTES:
-                raise ValueError(f'pending command exceeds {MAX_PENDING_BYTES} bytes')
-            spec = _parse_pending_command(pending_path.read_text(encoding='utf-8'))
+            spec = _parse_pending_command(
+                _read_bounded_text(pending_path, MAX_PENDING_BYTES)
+            )
         except Exception as e:
             result = {'action': 'unknown', 'ok': False, 'message': f'bad pending file: {e}', 'started_at': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z'}
             _atomic_write_text(result_path, json.dumps(result, indent=2))

@@ -95,6 +95,15 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn('tarfile.open', bootstrap)
         self.assertNotIn('extractall', bootstrap)
         self.assertIn('pkeyutl', bootstrap)
+    def test_actor_bounded_text_reader_rejects_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / 'outside.txt'
+            outside.write_text('secret', encoding='utf-8')
+            redirected = root / 'token'
+            redirected.symlink_to(outside)
+            with self.assertRaises(ValueError):
+                actor._read_bounded_text(redirected, 64)
 
 
 if __name__ == '__main__':
