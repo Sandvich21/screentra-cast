@@ -317,6 +317,7 @@ def _run_list(args: list[str], timeout: int = 20, input_data: str | None = None,
 
 def ddcutil_detect(bus: str | None = None) -> tuple[bool, str]:
     """Run ddcutil detect to refresh display cache. Returns (ok, message)."""
+    bus = _validate_ddc_bus(bus)
     args = ['sudo', '-n', 'ddcutil', 'detect']
     if bus:
         args.extend(['--bus', bus])
@@ -326,10 +327,37 @@ def ddcutil_detect(bus: str | None = None) -> tuple[bool, str]:
     return False, err.strip() or out.strip()
 
 
+_DDC_VCP_RE = re.compile(r'^[0-9A-Fa-f]{1,2}$')
+_DDC_BUS_RE = re.compile(r'^[1-9][0-9]{0,2}$')
+
+
+def _validate_ddc_vcp(value: str) -> str:
+    if not isinstance(value, str) or _DDC_VCP_RE.fullmatch(value) is None:
+        raise ValueError('DDC VCP code is not allowlisted')
+    return value
+
+
+def _validate_ddc_value(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 65535:
+        raise ValueError('DDC value is outside its bound')
+    return value
+
+
+def _validate_ddc_bus(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or _DDC_BUS_RE.fullmatch(value) is None or int(value) > 255:
+        raise ValueError('DDC bus is not allowlisted')
+    return value
+
+
 def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_layout: bool = False) -> tuple[bool, str]:
-    """Set a DDC/CI VCP value via ddcutil. Returns (ok, message).
-    If has_layout=True and the display is not initially detected (ddcutil_no_bus),
-    runs ddcutil detect once and retries before returning failure."""
+    """Set a bounded DDC/CI VCP value via ddcutil."""
+    vcp_code = _validate_ddc_vcp(vcp_code)
+    value = _validate_ddc_value(value)
+    bus = _validate_ddc_bus(bus)
+    if not isinstance(has_layout, bool):
+        raise ValueError('DDC layout flag is invalid')
     args = ['sudo', '-n', 'ddcutil', 'setvcp']
     if bus:
         args.extend(['--bus', bus])

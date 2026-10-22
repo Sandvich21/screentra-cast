@@ -20,6 +20,17 @@ actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 's
 
 
 class PlayerClientAuditTests(unittest.TestCase):
+    def test_ddc_fields_are_bounded(self):
+        self.assertEqual(actor._validate_ddc_vcp('D6'), 'D6')
+        self.assertEqual(actor._validate_ddc_value(100), 100)
+        self.assertEqual(actor._validate_ddc_bus('1'), '1')
+        with self.assertRaises(ValueError):
+            actor._validate_ddc_vcp('--output')
+        with self.assertRaises(ValueError):
+            actor._validate_ddc_value(70000)
+        with self.assertRaises(ValueError):
+            actor._validate_ddc_bus('9999')
+
     def test_cec_command_is_bounded_and_allowlisted(self):
         self.assertEqual(actor._validate_cec_command('pow 0'), 'pow 0')
         with self.assertRaises(ValueError):
