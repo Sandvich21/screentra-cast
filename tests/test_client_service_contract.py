@@ -82,6 +82,16 @@ class ClientServiceContractTests(unittest.TestCase):
                 {**valid, 'payload': {'service_id': 'x' * (actor.MAX_COMMAND_PAYLOAD_BYTES + 1)}},
                 'client-a',
             )
+        with self.assertRaises(ValueError):
+            actor.validate_pending_command(
+                {
+                    'client_id': 'client-a',
+                    'action': 'refresh_cache',
+                    'payload': {'marker': float('nan')},
+                    'requested_at': '2026-10-18T18:00:00Z',
+                },
+                'client-a',
+            )
 
     def test_transcribe_request_payload_is_strictly_bounded(self):
         valid = {

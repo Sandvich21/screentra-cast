@@ -152,7 +152,14 @@ def validate_pending_command(spec, expected_client_id):
     if payload is not None and not isinstance(payload, dict):
         raise ValueError('client command payload must be a JSON object')
     if payload is not None:
-        encoded = json.dumps(payload, separators=(',', ':')).encode('utf-8')
+        try:
+            encoded = json.dumps(
+                payload,
+                allow_nan=False,
+                separators=(',', ':'),
+            ).encode('utf-8')
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ValueError('client command payload is not bounded JSON') from exc
         if len(encoded) > MAX_COMMAND_PAYLOAD_BYTES:
             raise ValueError(f'client command payload exceeds {MAX_COMMAND_PAYLOAD_BYTES} bytes')
         if 'client_id' in payload:
