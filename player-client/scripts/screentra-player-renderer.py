@@ -101,6 +101,22 @@ def _read_json_file(path: Path, default):
         return default
 
 
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate JSON object key')
+        result[key] = value
+    return result
+
+
+def _parse_request_json(text: str) -> dict:
+    value = json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
+    if not isinstance(value, dict):
+        raise ValueError('request JSON must be an object')
+    return value
+
+
 def _request_body(handler) -> str:
     raw_length = handler.headers.get('Content-Length')
     if raw_length is None:
@@ -1291,7 +1307,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(401, json.dumps({'error': 'auth required', **_auth_source()}), 'application/json')
         if path == '/api/admin/auth/login':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
+                payload = _parse_request_json(body) if body and body.strip() else {}
                 username = str(payload.get('username') or '')
                 password = str(payload.get('password') or '')
                 ok, info = _check_login(username, password)
@@ -1319,7 +1335,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(401, json.dumps({'error': 'auth required', **_auth_source()}), 'application/json')
         if path == '/api/touchscreen/select':
             try:
-                payload = json.loads(body)
+                payload = _parse_request_json(body)
                 selected = payload.get('path')
                 Handler.cache_dir.mkdir(parents=True, exist_ok=True)
                 _atomic_write_text(Handler.cache_dir / 'touch-device.json', json.dumps({'path': selected}))
@@ -1338,7 +1354,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_text(500, json.dumps({'error': str(e)}), 'application/json')
         if path == '/api/touch-calibration.json':
             try:
-                data = json.loads(body) if body and body.strip() else {}
+                data = _parse_request_json(body) if body and body.strip() else {}
                 data.setdefault('received_at', _iso_now())
                 # Tag per-display calibration results so the heartbeat
                 # can attribute intermittent failures to a specific
@@ -1364,14 +1380,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(200, json.dumps(_refresh_ca_from_server()), 'application/json')
         if path == '/api/admin/device/reboot':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
+                payload = _parse_request_json(body) if body and body.strip() else {}
             except Exception:
                 payload = {}
             result = _reboot_device(bool(payload.get('confirm')))
             return self.send_text(200 if result.get('ok') else 400, json.dumps(result), 'application/json')
         if path == '/api/admin/display-count':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
+                payload = _parse_request_json(body) if body and body.strip() else {}
                 value = payload.get('max_displays')
                 result = _write_display_count(None if value in (None, '', 'auto') else int(value))
                 return self.send_text(200, json.dumps(result), 'application/json')
@@ -1379,7 +1395,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_text(400, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
         if path == '/api/admin/touch-binding':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
+                payload = _parse_request_json(body) if body and body.strip() else {}
                 result = _write_touch_binding(payload)
                 return self.send_text(200, json.dumps(result), 'application/json')
             except Exception as e:
@@ -1402,7 +1418,7 @@ class Handler(BaseHTTPRequestHandler):
         # Heartbeat reads this on next cycle and sends it to the server.
         if method == 'POST' and path == '/api/client-config.json':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
+                payload = _parse_request_json(body) if body and body.strip() else {}
             except Exception:
                 return self.send_text(400, json.dumps({'ok': False, 'error': 'invalid json'}), 'application/json')
             cfg_path = Handler.cache_dir / 'client-config.json'

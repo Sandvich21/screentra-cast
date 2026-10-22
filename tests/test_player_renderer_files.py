@@ -22,6 +22,10 @@ class PlayerRendererFileTests(unittest.TestCase):
             redirected.symlink_to(outside)
             self.assertEqual(renderer._read_json_file(redirected, {'safe': True}), {'safe': True})
 
+    def test_request_json_rejects_duplicate_keys(self):
+        with self.assertRaises(ValueError):
+            renderer._parse_request_json('{"action":"one","action":"two"}')
+
     def test_log_tail_rejects_symlinked_files(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
