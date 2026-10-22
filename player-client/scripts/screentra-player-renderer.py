@@ -12,6 +12,8 @@ import sys
 import urllib.parse
 import socket
 import ssl
+import stat
+import tempfile
 import time
 import hashlib
 import hmac
@@ -32,19 +34,67 @@ def client_pairing_code(client_id):
     return f'{int.from_bytes(digest[:4], "big") % 1_000_000:06d}'
 
 
+def _ensure_real_directory(path: Path, create: bool = False) -> bool:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            if not create:
+                return False
+            current.mkdir()
+            metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError('renderer cache directory is not a real directory')
+    return True
+
+
+def _read_real_file(path: Path, maximum: int = MAX_JSON_FILE_BYTES) -> bytes:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError('renderer cache path contains a symlink')
+    descriptor = os.open(absolute, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+            raise ValueError('renderer cache file is not bounded')
+        raw = os.read(descriptor, maximum + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > maximum:
+        raise ValueError('renderer cache file exceeds its bound')
+    return raw
+
+
 def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
-    temporary.write_text(text, encoding='utf-8')
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
+    _ensure_real_directory(path.parent, create=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f'.{path.name}.', suffix='.tmp', dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _read_json_file(path: Path, default):
     try:
-        if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
-            return default
-        return json.loads(path.read_text(encoding='utf-8'))
+        return json.loads(_read_real_file(path).decode('utf-8'))
     except Exception:
         return default
 
