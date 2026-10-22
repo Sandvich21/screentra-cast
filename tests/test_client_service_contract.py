@@ -220,6 +220,13 @@ class ClientServiceContractTests(unittest.TestCase):
             result = actor.execute(action, None, {'client_id': 'client-a', 'cache_dir': '/tmp'})
             self.assertFalse(result['ok'])
             self.assertEqual(result['code'], 'unsupported_action')
+    def test_actor_server_response_body_is_bounded(self):
+        class Response:
+            def read(self, limit):
+                return b'x' * (limit + 1)
+
+        with self.assertRaises(ValueError):
+            actor._read_bounded_response(Response(), 32)
 
 
 if __name__ == '__main__':

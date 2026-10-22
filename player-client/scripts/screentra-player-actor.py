@@ -76,6 +76,7 @@ _STATUS_REQUEST_ADMISSION = _load_status_request_admission()
 
 MAX_PENDING_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
+MAX_SERVER_RESPONSE_BYTES = 1 << 20
 MAX_COMMAND_PAYLOAD_BYTES = 64 * 1024
 MAX_CLIENT_ID_BYTES = 200
 CLIENT_SERVICE_IDENTIFIER_MAX_BYTES = 128
@@ -201,6 +202,15 @@ def validate_pending_command(spec, expected_client_id):
                 raise ValueError(f'display_settings {field} must be between 0 and 100')
     validate_client_service_payload(action, payload)
     return spec
+
+
+def _read_bounded_response(response, maximum):
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+        raise ValueError('response bound is invalid')
+    data = response.read(maximum + 1)
+    if not isinstance(data, (bytes, bytearray)) or len(data) > maximum:
+        raise ValueError('server response exceeds its bound')
+    return bytes(data).decode('utf-8')
 
 
 def _reject_duplicate_json_keys(pairs):
@@ -934,7 +944,7 @@ def fetch_config(server: str, client_id: str, cache_dir: Path, display_index: in
         target = f'assigned-layout-display-{display_index}.json'
     try:
         with urlopen_ripley(url, timeout=10, cache_dir=cache_dir) as r:
-            data = json.loads(r.read().decode())
+            data = json.loads(_read_bounded_response(r, MAX_SERVER_RESPONSE_BYTES))
         # The server display-config payload does not include local-admin theme.
         try:
             previous = _read_json_file(cache_dir / 'client-config.json', {})
@@ -975,7 +985,7 @@ def fetch_all_display_configs(server: str, client_id: str, cache_dir: Path) -> b
     try:
         url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/displays'
         with urlopen_ripley(url, timeout=10, cache_dir=cache_dir) as r:
-            displays = json.loads(r.read().decode())
+            displays = json.loads(_read_bounded_response(r, MAX_SERVER_RESPONSE_BYTES))
         ok = True
         seen = set()
         for d in displays:
