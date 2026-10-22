@@ -117,6 +117,12 @@ def _parse_request_json(text: str) -> dict:
     return value
 
 
+def _require_request_fields(payload: dict, allowed: set[str]) -> None:
+    unknown = set(payload) - allowed
+    if unknown:
+        raise ValueError('request contains unsupported fields')
+
+
 def _validate_login_payload(payload: dict) -> tuple[str, str]:
     username = payload.get('username')
     password = payload.get('password')
@@ -1332,6 +1338,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/admin/auth/login':
             try:
                 payload = _parse_request_json(body) if body and body.strip() else {}
+                _require_request_fields(payload, {'username', 'password'})
                 username, password = _validate_login_payload(payload)
                 ok, info = _check_login(username, password)
                 if not ok:
@@ -1359,6 +1366,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/touchscreen/select':
             try:
                 payload = _parse_request_json(body)
+                _require_request_fields(payload, {'path'})
                 selected = payload.get('path')
                 _validate_touch_device_path(selected)
                 Handler.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1405,13 +1413,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/admin/device/reboot':
             try:
                 payload = _parse_request_json(body) if body and body.strip() else {}
-            except Exception:
-                payload = {}
-            result = _reboot_device(bool(payload.get('confirm')))
+                _require_request_fields(payload, {'confirm'})
+                result = _reboot_device(bool(payload.get('confirm')))
+            except Exception as e:
+                return self.send_text(400, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
             return self.send_text(200 if result.get('ok') else 400, json.dumps(result), 'application/json')
         if path == '/api/admin/display-count':
             try:
                 payload = _parse_request_json(body) if body and body.strip() else {}
+                _require_request_fields(payload, {'max_displays'})
                 value = payload.get('max_displays')
                 result = _write_display_count(None if value in (None, '', 'auto') else int(value))
                 return self.send_text(200, json.dumps(result), 'application/json')
@@ -1420,6 +1430,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/admin/touch-binding':
             try:
                 payload = _parse_request_json(body) if body and body.strip() else {}
+                _require_request_fields(payload, {
+                    'device_path', 'path', 'device_name', 'target_display_indexes',
+                    'display_indexes', 'display_index', 'allow_joined_displays', 'requested_by',
+                })
                 result = _write_touch_binding(payload)
                 return self.send_text(200, json.dumps(result), 'application/json')
             except Exception as e:

@@ -29,6 +29,10 @@ class PlayerRendererFileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             renderer._validate_login_payload({'username': 'admin', 'password': 'x' * 257})
 
+    def test_request_field_validation_rejects_unknown_fields(self):
+        with self.assertRaises(ValueError):
+            renderer._require_request_fields({'confirm': True, 'extra': 1}, {'confirm'})
+
     def test_request_json_rejects_duplicate_keys(self):
         with self.assertRaises(ValueError):
             renderer._parse_request_json('{"action":"one","action":"two"}')
