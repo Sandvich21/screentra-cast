@@ -225,6 +225,7 @@ pub struct AddonRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddonState {
     enabled: bool,
     installed_at: String,
@@ -3205,6 +3206,16 @@ mod tests {
             "unexpected": true
         });
         assert!(serde_json::from_value::<AddonDataEndpoint>(endpoint_value.take()).is_err());
+    }
+
+    #[test]
+    fn addon_state_wire_schema_rejects_unknown_fields() {
+        let mut state = serde_json::json!({
+            "enabled": true,
+            "installed_at": "2026-10-21T12:00:00Z",
+            "unexpected": true
+        });
+        assert!(serde_json::from_value::<AddonState>(state.take()).is_err());
     }
 
     fn launch_profile() -> TrustedServiceLaunchProfile {
