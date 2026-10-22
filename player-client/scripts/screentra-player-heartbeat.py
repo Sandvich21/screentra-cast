@@ -704,15 +704,19 @@ def _extract_verified_addon_package(package_bytes, expected, staging_parent=None
                     raise ValueError('addon package member size changed while reading')
         manifest_path = staging / 'manifest.json'
         signature_path = staging / 'manifest.sig'
-        if not manifest_path.is_file() or not signature_path.is_file():
-            raise ValueError('addon package is missing its manifest or signature')
-        manifest_bytes = manifest_path.read_bytes()
-        if len(manifest_bytes) > MAX_ADDON_MANIFEST_BYTES:
-            raise ValueError('addon manifest is too large')
+        try:
+            manifest_bytes = _read_real_file(manifest_path, MAX_ADDON_MANIFEST_BYTES)
+            _read_real_file(signature_path, MAX_ADDON_SIGNATURE_BYTES)
+        except (OSError, ValueError) as exc:
+            raise ValueError('addon package is missing or redirects its metadata') from exc
         manifest = _parse_addon_manifest(manifest_bytes)
         entrypoint, digest = _validate_addon_manifest_metadata(manifest, expected)
         client_path = staging / entrypoint
-        if not client_path.is_file() or hashlib.sha256(client_path.read_bytes()).hexdigest().lower() != digest.lower():
+        try:
+            client_bytes = _read_real_file(client_path, MAX_ADDON_MEMBER_BYTES)
+        except (OSError, ValueError) as exc:
+            raise ValueError('addon entrypoint is missing or redirects its content') from exc
+        if hashlib.sha256(client_bytes).hexdigest().lower() != digest.lower():
             raise ValueError('addon entrypoint SHA-256 verification failed')
         _verify_addon_manifest_signature(manifest_path, signature_path)
         return staging, manifest, entrypoint
