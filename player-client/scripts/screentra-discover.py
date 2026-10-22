@@ -66,6 +66,22 @@ def validate_record(raw: object) -> dict[str, str] | None:
     }
 
 
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("discovery JSON contains duplicate fields")
+        result[key] = value
+    return result
+
+
+def _parse_discovery_json(text):
+    try:
+        return json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ValueError("discovery response is not valid JSON") from exc
+
+
 def discover(port: int, timeout: float) -> list[dict[str, str]]:
     request = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     request.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -82,8 +98,8 @@ def discover(port: int, timeout: float) -> list[dict[str, str]]:
             except socket.timeout:
                 continue
             try:
-                raw = json.loads(data.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
+                raw = _parse_discovery_json(data.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
                 continue
             record = validate_record(raw)
             if record:

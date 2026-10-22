@@ -23,6 +23,13 @@ class DiscoveryHelperTests(unittest.TestCase):
         self.assertEqual(record["url"], "https://10.0.0.25:3000")
         self.assertTrue(record["ca_pem_b64"])
 
+    def test_rejects_duplicate_discovery_json_fields(self):
+        with self.assertRaises(ValueError):
+            module._parse_discovery_json(
+                '{"protocol":"screentra-cast-discovery-v1",'
+                '"protocol":"other"}'
+            )
+
     def test_rejects_unknown_discovery_fields(self):
         ca = "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n"
         record = {
