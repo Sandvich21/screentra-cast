@@ -1320,6 +1320,31 @@ mod tests {
     }
 
     #[test]
+    fn established_session_creates_request_bound_response_binding() {
+        let hello = GatewayConnectionHello {
+            protocol_version: GATEWAY_PROTOCOL_VERSION,
+            addon_id: "example.weather".to_string(),
+            activation_instance: "activation-1".to_string(),
+        };
+        let peer = GatewayPeerCredentials::from_os_credentials(1000, 1001, 42);
+        let policy = GatewayPeerPolicy::new(1000, 1001, 42).expect("peer policy");
+        let mut session = GatewaySession::new(binding(), policy, GatewayAdmissionState::new());
+        session
+            .accept_hello(&encode_connection_hello(&hello).expect("hello"), peer)
+            .expect("matching hello should establish the session");
+
+        let response_binding = session
+            .response_binding("request-1")
+            .expect("active session should bind responses");
+        assert_eq!(response_binding.addon_id, "example.weather");
+        assert_eq!(response_binding.activation_instance, "activation-1");
+        assert_eq!(response_binding.request_id, "request-1");
+
+        session.retire().expect("session should retire");
+        assert!(session.response_binding("request-2").is_err());
+    }
+
+    #[test]
     fn gateway_credential_lease_binding_rejects_revoked_requests() {
         let lease = crate::trusted_service_credentials::CredentialLease {
             addon_id: "example.weather".to_string(),
