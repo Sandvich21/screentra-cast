@@ -45,6 +45,7 @@ pub enum DatabaseBackupScope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct TrustedServiceDatabaseContract {
     pub addon_id: String,
     pub activation_instance: String,
@@ -793,6 +794,13 @@ mod tests {
                 }
             })
         }
+    }
+
+    #[test]
+    fn database_contract_wire_schema_rejects_unknown_fields() {
+        let mut value = serde_json::to_value(sqlite_contract()).expect("serialize database contract");
+        value["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<TrustedServiceDatabaseContract>(value).is_err());
     }
 
     #[test]
