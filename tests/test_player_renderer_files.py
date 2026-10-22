@@ -22,6 +22,15 @@ class PlayerRendererFileTests(unittest.TestCase):
             redirected.symlink_to(outside)
             self.assertEqual(renderer._read_json_file(redirected, {'safe': True}), {'safe': True})
 
+    def test_log_tail_rejects_symlinked_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / 'outside.log'
+            outside.write_text('secret log', encoding='utf-8')
+            redirected = root / 'service.log'
+            redirected.symlink_to(outside)
+            self.assertNotIn('secret log', renderer._read_tail(redirected))
+
     def test_backup_root_rejects_symlinked_directory(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

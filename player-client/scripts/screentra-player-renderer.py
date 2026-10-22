@@ -568,10 +568,7 @@ def _wlr_outputs() -> list[dict]:
 
 def _read_tail(path: Path, max_bytes: int = 40000) -> str:
     try:
-        if not path.exists() or not path.is_file():
-            return ''
-        with path.open('rb') as f:
-            f.seek(0, os.SEEK_END); size = f.tell(); f.seek(max(0, size - max_bytes)); data = f.read()
+        data = _read_real_file(path, maximum=max(max_bytes, 4 * 1024 * 1024))
         return data.decode('utf-8', 'replace')[-max_bytes:]
     except Exception as e:
         return f'error reading {path}: {e}'
