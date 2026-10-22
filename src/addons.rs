@@ -1891,6 +1891,7 @@ pub fn remove(id: &str) -> Result<(), AddonError> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrustedServiceStage {
     pub manifest: AddonManifest,
     pub state: String,
@@ -3249,6 +3250,18 @@ mod tests {
             "unexpected": true
         });
         assert!(serde_json::from_value::<AddonWidgetRegistration>(registration.take()).is_err());
+    }
+
+    #[test]
+    fn trusted_service_stage_wire_schema_rejects_unknown_fields() {
+        let stage = TrustedServiceStage {
+            manifest: manifest(),
+            state: "staged".to_string(),
+            staged_at: "2026-10-21T12:00:00Z".to_string(),
+        };
+        let mut stage_value = serde_json::to_value(stage).unwrap();
+        stage_value["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<TrustedServiceStage>(stage_value).is_err());
     }
 
     fn launch_profile() -> TrustedServiceLaunchProfile {
