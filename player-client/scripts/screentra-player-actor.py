@@ -203,6 +203,22 @@ def validate_pending_command(spec, expected_client_id):
     return spec
 
 
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('pending command contains duplicate JSON fields')
+        result[key] = value
+    return result
+
+
+def _parse_pending_command(text):
+    try:
+        return json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ValueError('pending command JSON is invalid') from exc
+
+
 def _read_json_file(path: Path, default):
     try:
         if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
@@ -1314,7 +1330,7 @@ def main() -> int:
         try:
             if pending_path.stat().st_size > MAX_PENDING_BYTES:
                 raise ValueError(f'pending command exceeds {MAX_PENDING_BYTES} bytes')
-            spec = json.loads(pending_path.read_text(encoding='utf-8'))
+            spec = _parse_pending_command(pending_path.read_text(encoding='utf-8'))
         except Exception as e:
             result = {'action': 'unknown', 'ok': False, 'message': f'bad pending file: {e}', 'started_at': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z'}
             _atomic_write_text(result_path, json.dumps(result, indent=2))

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import json
 import re
 import unittest
 from pathlib import Path
@@ -106,6 +107,13 @@ class ClientServiceContractTests(unittest.TestCase):
             actor.validate_pending_command(
                 {**valid, 'requested_by': {'not': 'text'}},
                 'client-a',
+            )
+
+    def test_pending_command_json_rejects_duplicate_object_keys(self):
+        with self.assertRaises(ValueError):
+            actor._parse_pending_command(
+                json.dumps({'client_id': 'client-a', 'action': 'refresh_cache'})[:-1]
+                + ',"action":"restart_client"}'
             )
 
     def test_transcribe_request_payload_is_strictly_bounded(self):
