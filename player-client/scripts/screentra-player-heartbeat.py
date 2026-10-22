@@ -1177,7 +1177,7 @@ def main():
         # Track previous layout assignment to detect changes.
         prev_layout_path = Path(args.cache_dir) / 'previous-layout-id.txt'
         try:
-            previous_layout_id = prev_layout_path.read_text().strip() or None
+            previous_layout_id = _read_bounded_text(prev_layout_path, 4096).strip() or None
         except Exception:
             previous_layout_id = None
         cfg = fetch_config(args.server, data['client_id'], args.cache_dir, display_index=0, config_pattern=args.display_config_pattern)
