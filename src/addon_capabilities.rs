@@ -2573,6 +2573,9 @@ impl AddonApprovalStore {
         let temp = root.join(format!(".approval-{}.tmp", uuid::Uuid::new_v4()));
         let bytes = serde_json::to_vec_pretty(record)
             .map_err(|_| "Failed to encode approval record".to_string())?;
+        if bytes.len() as u64 > MAX_APPROVAL_BYTES {
+            return Err("Approval record is too large".to_string());
+        }
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -4617,6 +4620,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn approval_store_rejects_oversized_records_before_persisting() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "screentra-addon-approval-oversized-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe {
+            std::env::set_var("SIGNAGE_DATA_DIR", &root);
+        }
+        let mut approval = AddonApprovalRecord::pending(
+            "example.oversized",
+            "1.0.0",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            AddonExecutionRequest {
+                targets: vec![ExecutionTarget::Server],
+                server: Some(container("registry.example/server", 'a')),
+                client: None,
+                capabilities: Vec::new(),
+            },
+        )
+        .unwrap();
+        approval.request.capabilities = (0..6_000)
+            .map(|index| {
+                AddonCapabilityRequest::host_api_read(
+                    ExecutionTarget::Server,
+                    &format!("scope-{index:04}"),
+                )
+            })
+            .collect();
+        approval.capability_approved = vec![false; approval.request.capabilities.len()];
+        let encoded = serde_json::to_vec(&approval).unwrap();
+        assert!(encoded.len() > MAX_APPROVAL_BYTES as usize);
+        assert!(AddonApprovalStore::save(&approval).is_err());
+
+        if let Some(value) = old_data_dir {
+            unsafe {
+                std::env::set_var("SIGNAGE_DATA_DIR", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("SIGNAGE_DATA_DIR");
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
     #[test]
     fn approval_store_lists_persisted_records_deterministically() {
         let _guard = crate::PROCESS_ENV_TEST_LOCK
