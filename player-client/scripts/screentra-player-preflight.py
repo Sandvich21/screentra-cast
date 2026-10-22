@@ -18,6 +18,7 @@ import shutil
 import time
 import ssl
 import socket
+import stat
 import subprocess
 import sys
 import urllib.request
@@ -79,11 +80,34 @@ def has_display_session(retries: int = 6, retry_delay: float = 1.0) -> tuple[boo
             time.sleep(retry_delay)
     return False, "no Wayland/X11 display session detected (system-level screentra-cast-kiosk@.service is not active; install or start it from a TTY)"
 
+def _read_real_file(path: Path, maximum: int = 256 * 1024) -> bytes:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError('CA path contains a symlink')
+    descriptor = os.open(absolute, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+            raise ValueError('CA file is not bounded')
+        data = os.read(descriptor, maximum + 1)
+    finally:
+        os.close(descriptor)
+    if len(data) > maximum:
+        raise ValueError('CA file exceeds its bound')
+    return data
+
+
 def tls_context():
     cafile = os.environ.get('SCREENTRA_CA_CERT') or os.environ.get('RIPLEY_CA_CERT') or str(Path.home() / '.local/share/screentra-client/screentra-cast-signage-ca.crt')
     if cafile and Path(cafile).exists():
         try:
-            return ssl.create_default_context(cafile=cafile)
+            return ssl.create_default_context(
+                cadata=_read_real_file(Path(cafile)).decode('utf-8')
+            )
         except Exception as e:
             return None
     return None
@@ -113,10 +137,18 @@ def add(name: str, ok: bool, detail: str = "", required: bool = True) -> None:
 
 
 def run(cmd: str) -> str:
+    commands = {
+        "systemctl --user status >/dev/null 2>&1 && echo ok":
+            ['systemctl', '--user', 'status'],
+    }
+    args = commands.get(cmd)
+    if args is None:
+        return ''
     try:
-        return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+        subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL)
+        return 'ok'
     except Exception:
-        return ""
+        return ''
 
 
 def find_browser() -> str | None:
