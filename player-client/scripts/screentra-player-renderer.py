@@ -26,6 +26,7 @@ from pathlib import Path
 
 MAX_REQUEST_BODY_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
+MAX_BACKUP_DOWNLOAD_BYTES = 256 * 1024 * 1024
 
 
 def client_pairing_code(client_id):
@@ -773,7 +774,7 @@ def _system_metrics() -> dict:
 
 def _client_backup_root() -> Path:
     p = Handler.cache_dir.parent / 'backups'
-    p.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(p, create=True)
     return p
 
 def _safe_tar_add(tar, path: Path, arcname: str, *, exclude_state: bool = True) -> int:
@@ -1500,14 +1501,22 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             fname = (query.get('file') or [''])[0]
             safe_name = Path(fname).name
-            target = (_client_backup_root() / safe_name).resolve()
+            root = _client_backup_root()
+            candidate = root / safe_name
+            metadata = os.lstat(candidate) if candidate.exists() or candidate.is_symlink() else None
+            if metadata is None or stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                return self.send_text(404, 'backup not found')
+            target = candidate.resolve()
             try:
-                target.relative_to(_client_backup_root().resolve())
+                target.relative_to(root.resolve())
             except Exception:
                 return self.send_text(403, 'forbidden')
-            if not target.exists() or not target.is_file():
-                return self.send_text(404, 'backup not found')
-            data = target.read_bytes()
+            try:
+                data = _read_real_file(candidate, maximum=MAX_BACKUP_DOWNLOAD_BYTES)
+            except ValueError as error:
+                if 'exceeds' in str(error) or 'bounded' in str(error):
+                    return self.send_text(413, 'backup too large')
+                return self.send_text(403, 'forbidden')
             self.send_response(200)
             self.send_header('Content-Type', 'application/gzip')
             self.send_header('Content-Length', str(len(data)))
