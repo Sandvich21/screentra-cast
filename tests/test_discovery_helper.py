@@ -23,6 +23,18 @@ class DiscoveryHelperTests(unittest.TestCase):
         self.assertEqual(record["url"], "https://10.0.0.25:3000")
         self.assertTrue(record["ca_pem_b64"])
 
+    def test_rejects_unknown_discovery_fields(self):
+        ca = "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n"
+        record = {
+            "protocol": module.DISCOVERY_PROTOCOL,
+            "server_name": "Signage",
+            "url": "https://10.0.0.25:3000",
+            "ca_pem_b64": module.base64.b64encode(ca.encode()).decode(),
+            "ca_sha256": module.sha256_bytes(ca.encode()),
+            "unexpected": "ignored?",
+        }
+        self.assertIsNone(module.validate_record(record))
+
     def test_rejects_http_or_mismatched_ca(self):
         ca = "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n"
         base = {

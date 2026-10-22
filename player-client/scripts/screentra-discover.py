@@ -15,6 +15,9 @@ import urllib.parse
 DISCOVERY_PROTOCOL = "screentra-cast-discovery-v1"
 DISCOVERY_REQUEST = b"SCREENTRA_CAST_DISCOVER_V1"
 MAX_RESPONSE_BYTES = 64 * 1024
+_DISCOVERY_FIELDS = frozenset({
+    "protocol", "server_name", "url", "ca_pem_b64", "ca_sha256",
+})
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -22,7 +25,7 @@ def sha256_bytes(value: bytes) -> str:
 
 
 def validate_record(raw: object) -> dict[str, str] | None:
-    if not isinstance(raw, dict) or raw.get("protocol") != DISCOVERY_PROTOCOL:
+    if not isinstance(raw, dict) or set(raw) != _DISCOVERY_FIELDS or raw.get("protocol") != DISCOVERY_PROTOCOL:
         return None
     name = raw.get("server_name")
     url = raw.get("url")
