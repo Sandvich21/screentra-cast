@@ -330,6 +330,7 @@ pub enum ApprovalState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AddonApprovalRecord {
     pub schema_version: u32,
     pub addon_id: String,
@@ -2758,6 +2759,35 @@ fn validate_existing_approval_file(path: &Path) -> Result<fs::Metadata, String> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn approval_records_reject_unknown_fields() {
+        let record: Result<AddonApprovalRecord, _> = serde_json::from_str(
+            r#"{
+                "schema_version":2,
+                "addon_id":"example.approval",
+                "addon_version":"1.0.0",
+                "artifact_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "request":{
+                    "targets":["server"],
+                    "server":{
+                        "image":"registry.example/server",
+                        "image_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        "memory_bytes":536870912,
+                        "cpu_millis":1000,
+                        "pids":128,
+                        "writable_bytes":134217728
+                    },
+                    "client":null,
+                    "capabilities":[]
+                },
+                "capability_approved":[],
+                "target_approved":[false],
+                "state":"pending",
+                "unexpected":true
+            }"#,
+        );
+        assert!(record.is_err());
+    }
     #[test]
     fn execution_wire_schemas_reject_unknown_fields() {
         let root_unknown: Result<AddonExecutionRequest, _> = serde_json::from_str(
