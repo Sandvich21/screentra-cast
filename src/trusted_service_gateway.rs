@@ -1355,7 +1355,7 @@ mod tests {
         };
         let mut ledger = crate::trusted_service_credentials::CredentialLeaseLedger::default();
         ledger
-            .register(lease)
+            .register(lease.clone())
             .expect("future metadata lease should register");
         let ledger = Arc::new(std::sync::Mutex::new(ledger));
         let binding = GatewayActivationBinding::new(contract())
@@ -1375,7 +1375,7 @@ mod tests {
         ledger
             .lock()
             .expect("ledger lock")
-            .revoke("gateway-lease-1")
+            .revoke_lease(&lease)
             .expect("revoke lease");
         assert!(session.admit(&encode_request(&request()).expect("request"), Instant::now()).is_err());
     }

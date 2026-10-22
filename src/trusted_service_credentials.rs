@@ -211,8 +211,17 @@ impl CredentialLeaseLedger {
         Ok(())
     }
 
-    pub fn revoke(&mut self, lease_id: &str) -> Result<(), CredentialError> {
-        let (_, state) = self.leases.get_mut(lease_id).ok_or(CredentialError::NotFound)?;
+    pub fn revoke_lease(&mut self, lease: &CredentialLease) -> Result<(), CredentialError> {
+        lease.validate()?;
+        let (registered, state) = self
+            .leases
+            .get_mut(&lease.lease_id)
+            .ok_or(CredentialError::NotFound)?;
+        if registered != lease {
+            return Err(CredentialError::Invalid(
+                "Trusted service credential lease identity does not match".to_string(),
+            ));
+        }
         *state = CredentialLeaseState::Revoked;
         Ok(())
     }
@@ -477,7 +486,7 @@ mod tests {
         ledger
             .validate_for_use("ledger-lease-1", &scope(), now)
             .expect("active registered lease should validate");
-        ledger.revoke("ledger-lease-1").expect("revoke lease");
+        ledger.revoke_lease(&lease).expect("revoke lease");
         assert!(matches!(
             ledger.validate_for_use("ledger-lease-1", &scope(), now),
             Err(CredentialError::Blocked(_))
@@ -486,8 +495,15 @@ mod tests {
             ledger.validate_for_use("missing", &scope(), now),
             Err(CredentialError::NotFound)
         ));
+        let missing = CredentialLease {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-missing".to_string(),
+            capabilities: vec!["storage".to_string()],
+            lease_id: "missing".to_string(),
+            expires_at: "2030-01-01T00:00:00Z".to_string(),
+        };
         assert!(matches!(
-            ledger.revoke("missing"),
+            ledger.revoke_lease(&missing),
             Err(CredentialError::NotFound)
         ));
     }
@@ -518,6 +534,24 @@ mod tests {
         assert!(matches!(error, CredentialError::Blocked(_)));
     }
 
+    #[test]
+    fn ledger_revocation_requires_the_registered_lease_identity() {
+        let lease = CredentialLease {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
+            capabilities: vec!["storage".to_string()],
+            lease_id: "identity-lease-1".to_string(),
+            expires_at: "2030-01-01T00:00:00Z".to_string(),
+        };
+        let mut ledger = CredentialLeaseLedger::default();
+        ledger.register(lease.clone()).unwrap();
+        let mut mismatched = lease;
+        mismatched.activation_instance = "activation-2".to_string();
+        assert!(matches!(
+            ledger.revoke_lease(&mismatched),
+            Err(CredentialError::Invalid(_))
+        ));
+    }
     #[test]
     fn disabled_broker_never_accepts_a_revoke_as_activation() {
         let mut broker = DisabledCredentialBroker;
