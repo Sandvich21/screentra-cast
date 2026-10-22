@@ -80,6 +80,7 @@ pub fn validate_addon_storage_value(value: &str) -> Result<(), String> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct TrustedServiceLaunchProfile {
     pub command: Vec<String>,
     pub gateway_socket_path: String,

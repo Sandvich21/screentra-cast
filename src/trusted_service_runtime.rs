@@ -3142,6 +3142,11 @@ mod tests {
             .insert("unexpected".to_string(), serde_json::Value::Bool(true));
         let decoded = serde_json::from_value::<TrustedServiceRuntimeRecord>(value);
         assert!(decoded.is_err());
+
+        let mut nested = serde_json::to_value(test_record()).unwrap();
+        nested["launch_profile"]["unexpected"] = serde_json::Value::Bool(true);
+        let nested_decoded = serde_json::from_value::<TrustedServiceRuntimeRecord>(nested);
+        assert!(nested_decoded.is_err());
     }
     #[test]
     fn supervisor_rejects_unbound_capabilities_before_runtime_start() {
