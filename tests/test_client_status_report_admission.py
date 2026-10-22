@@ -121,6 +121,17 @@ class ClientStatusReportAdmissionTests(unittest.TestCase):
                     valid_report(services=[{'id': 'speech-to-text'}]),
                 )
 
+    def test_heartbeat_command_json_rejects_duplicate_keys(self):
+        heartbeat = load_module(
+            ROOT / 'player-client/scripts/screentra-player-heartbeat.py',
+            'screentra_player_heartbeat_duplicate_command_test',
+        )
+        with self.assertRaises(ValueError):
+            heartbeat._parse_server_json(
+                '{"client_id":"client-1","action":"refresh_cache",'
+                '"action":"restart_client"}'
+            )
+
     def test_heartbeat_writes_only_admitted_reports(self):
         heartbeat = load_module(
             ROOT / 'player-client/scripts/screentra-player-heartbeat.py',

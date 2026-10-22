@@ -917,13 +917,29 @@ def post_addon_status(server, client_id, status):
         raise
 
 
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('server JSON contains duplicate fields')
+        result[key] = value
+    return result
+
+
+def _parse_server_json(text):
+    try:
+        return json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ValueError('server response is not valid JSON') from exc
+
+
 def poll_command(server, client_id, client_token):
     url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/command'
     try:
         req = urllib.request.Request(url, headers=client_auth_headers(client_token))
         with urlopen_ripley(req, timeout=5) as r:
             data = r.read().decode()
-            return json.loads(data)
+            return _parse_server_json(data)
     except urllib.error.HTTPError as e:
         if e.code in (401, 404, 429):
             return None
