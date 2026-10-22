@@ -281,8 +281,14 @@ def _lan_ip_for_admin() -> str | None:
 def _nl_status():
     cid_path = Path.home() / '.local/share/screentra-client/client-id'
     srv_path = Path.home() / '.local/share/screentra-client/server'
-    client_id = cid_path.read_text().strip() if cid_path.exists() else None
-    server_url = srv_path.read_text().strip() if srv_path.exists() else 'unknown'
+    try:
+        client_id = _read_real_file(cid_path, 4096).decode('utf-8').strip() if cid_path.exists() else None
+    except Exception:
+        client_id = None
+    try:
+        server_url = _read_real_file(srv_path, 4096).decode('utf-8').strip() if srv_path.exists() else 'unknown'
+    except Exception:
+        server_url = 'unknown'
     last_path = Handler.cache_dir / 'last-heartbeat.json'
     last_seen = connection = last_layout = None
     if last_path.exists():
@@ -600,24 +606,29 @@ def _ca_file() -> Path:
 
 def _sha256_file(path: Path) -> str | None:
     try:
-        h = hashlib.sha256()
-        with path.open('rb') as f:
-            for chunk in iter(lambda: f.read(65536), b''): h.update(chunk)
-        return h.hexdigest()
+        return hashlib.sha256(_read_real_file(path, maximum=256 * 1024)).hexdigest()
     except Exception:
         return None
 
 def _cert_info() -> dict:
     srv_path = Path.home() / '.local/share/screentra-client/server'
-    server_url = srv_path.read_text().strip().rstrip('/') if srv_path.exists() else ''
-    ca = _ca_file(); ca_exists = ca.exists() and ca.stat().st_size > 0
+    try:
+        server_url = _read_real_file(srv_path, 4096).decode('utf-8').strip().rstrip('/')
+    except Exception:
+        server_url = ''
+    ca = _ca_file()
+    try:
+        ca_data = _read_real_file(ca, maximum=256 * 1024)
+    except Exception:
+        ca_data = b''
+    ca_exists = bool(ca_data)
     verify = {'ok': False, 'error': 'server or CA missing'}
     parsed = urllib.parse.urlparse(server_url) if server_url else None
     if parsed and parsed.hostname and ca_exists:
         port = parsed.port or (443 if parsed.scheme == 'https' else 80)
         try:
             if parsed.scheme == 'https':
-                ctx = ssl.create_default_context(cafile=str(ca))
+                ctx = ssl.create_default_context(cadata=ca_data.decode('utf-8'))
                 with socket.create_connection((parsed.hostname, port), timeout=5) as sock:
                     with ctx.wrap_socket(sock, server_hostname=parsed.hostname) as ssock:
                         cert = ssock.getpeercert()
@@ -626,24 +637,28 @@ def _cert_info() -> dict:
                 verify = {'ok': True, 'warning': 'server URL is not HTTPS'}
         except Exception as e:
             verify = {'ok': False, 'error': str(e), 'host': parsed.hostname, 'port': port}
-    return {'server_url': server_url, 'ca_path': str(ca), 'ca_exists': ca_exists, 'ca_size': ca.stat().st_size if ca.exists() else 0, 'ca_sha256': _sha256_file(ca), 'verify': verify, 'published_ca_url': (server_url + '/install/screentra-cast-signage-ca.crt') if server_url else ''}
+    return {'server_url': server_url, 'ca_path': str(ca), 'ca_exists': ca_exists, 'ca_size': len(ca_data), 'ca_sha256': _sha256_file(ca), 'verify': verify, 'published_ca_url': (server_url + '/install/screentra-cast-signage-ca.crt') if server_url else ''}
 
 def _refresh_ca_from_server() -> dict:
     srv_path = Path.home() / '.local/share/screentra-client/server'
-    if not srv_path.exists(): return {'ok': False, 'error': 'server file missing'}
-    server_url = srv_path.read_text().strip().rstrip('/')
+    try:
+        server_url = _read_real_file(srv_path, 4096).decode('utf-8').strip().rstrip('/')
+    except Exception:
+        return {'ok': False, 'error': 'server file missing'}
     if not server_url: return {'ok': False, 'error': 'server URL empty'}
     url = server_url + '/install/screentra-cast-signage-ca.crt'; out = _ca_file()
     try:
         ca_path = _ca_file()
-        if not ca_path.exists():
-            return {'ok': False, 'error': 'existing CA certificate is required to refresh trust', 'url': url}
-        ctx = _ssl.create_default_context(cafile=str(ca_path))
-        data = _ur.urlopen(url, context=ctx, timeout=10).read()
+        ca_data = _read_real_file(ca_path, maximum=256 * 1024)
+        ctx = _ssl.create_default_context(cadata=ca_data.decode('utf-8'))
+        with _ur.urlopen(url, context=ctx, timeout=10) as response:
+            data = response.read(256 * 1024 + 1)
+        if len(data) > 256 * 1024:
+            return {'ok': False, 'error': 'downloaded CA exceeds the client limit', 'url': url}
         if len(data) < 200 or b'BEGIN CERTIFICATE' not in data:
             return {'ok': False, 'error': f'downloaded CA did not look like a certificate ({len(data)} bytes)', 'url': url}
         out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_suffix(out.suffix + '.tmp'); tmp.write_bytes(data); os.chmod(tmp, 0o644); tmp.replace(out)
+        _atomic_write_text(out, data.decode('utf-8'), mode=0o644)
         verify = _cert_info().get('verify')
         restart = _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service', 'screentra-client-actor.service'], timeout=8)
         return {'ok': True, 'url': url, 'ca_path': str(out), 'bytes': len(data), 'sha256': _sha256_file(out), 'verify': verify, 'restart': restart}
