@@ -139,6 +139,8 @@ class ClientStatusReportAdmissionTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             heartbeat._parse_command_response('[]')
+        with self.assertRaises(ValueError):
+            heartbeat._parse_command_response('x' * (heartbeat.MAX_COMMAND_RESPONSE_BYTES + 1))
         self.assertIsNone(heartbeat._parse_command_response('null'))
 
     def test_heartbeat_writes_only_admitted_reports(self):

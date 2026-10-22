@@ -41,6 +41,7 @@ validate_status_report = _status_report_mod.validate_status_report
 from pathlib import Path
 
 MAX_JSON_FILE_BYTES = 1 << 20
+MAX_COMMAND_RESPONSE_BYTES = 64 * 1024
 
 
 def client_pairing_code(client_id):
@@ -934,6 +935,8 @@ def _parse_server_json(text):
 
 
 def _parse_command_response(text):
+    if not isinstance(text, str) or len(text.encode('utf-8')) > MAX_COMMAND_RESPONSE_BYTES:
+        raise ValueError('server command response exceeds its bound')
     result = _parse_server_json(text)
     if result is not None and not isinstance(result, dict):
         raise ValueError('server command response must be an object or null')
@@ -945,7 +948,7 @@ def poll_command(server, client_id, client_token):
     try:
         req = urllib.request.Request(url, headers=client_auth_headers(client_token))
         with urlopen_ripley(req, timeout=5) as r:
-            data = r.read().decode()
+            data = r.read(MAX_COMMAND_RESPONSE_BYTES + 1).decode()
             return _parse_command_response(data)
     except urllib.error.HTTPError as e:
         if e.code in (401, 404, 429):
