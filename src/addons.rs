@@ -112,6 +112,7 @@ pub struct TrustedServerServiceSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AddonDataContract {
     pub api_version: String,
     #[serde(default)]
@@ -121,6 +122,7 @@ pub struct AddonDataContract {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AddonDataEndpoint {
     pub path: String,
     pub method: String,
@@ -144,6 +146,7 @@ pub struct ClientServiceSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddonManifest {
     pub schema_version: u32,
     pub id: String,
@@ -189,6 +192,7 @@ pub struct AddonManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddonWidgetType {
     pub id: String,
     pub name: String,
@@ -3175,6 +3179,32 @@ mod tests {
         let encoded = serde_json::to_value(parsed).expect("widget type should serialize");
         assert_eq!(encoded["host_renderer"], "weather");
         assert!(encoded.get("renderer_type").is_none());
+    }
+
+    #[test]
+    fn addon_manifest_wire_schemas_reject_unknown_fields() {
+        let mut manifest_value = serde_json::to_value(manifest()).unwrap();
+        manifest_value["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<AddonManifest>(manifest_value).is_err());
+
+        let mut widget_value = serde_json::to_value(&manifest().widget_types[0]).unwrap();
+        widget_value["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<AddonWidgetType>(widget_value).is_err());
+
+        let mut contract_value = serde_json::json!({
+            "api_version": "1",
+            "region_scope": ["US"],
+            "endpoints": [{"path": "/api/weather", "method": "GET"}],
+            "unexpected": true
+        });
+        assert!(serde_json::from_value::<AddonDataContract>(contract_value.take()).is_err());
+
+        let mut endpoint_value = serde_json::json!({
+            "path": "/api/weather",
+            "method": "GET",
+            "unexpected": true
+        });
+        assert!(serde_json::from_value::<AddonDataEndpoint>(endpoint_value.take()).is_err());
     }
 
     fn launch_profile() -> TrustedServiceLaunchProfile {
