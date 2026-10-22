@@ -47,11 +47,7 @@ closeout section below; it did not activate any runtime, deployment, or hardware
   `activate` calls the runtime only after `can_start` is true
   (`src/trusted_service_runtime.rs:1337-1350`). Therefore the production activation
   path is blocked before the runtime adapter is reached.
-- The real process adapter does contain a deferred `Command::new(...).spawn()` at
-  `src/trusted_service_runtime.rs:966-1016`, but its first branch is the disabled gate
-  at `:970-974`. The focused test
-  `rootless_oci_runtime_never_spawns_while_execution_is_disabled` passed and asserted
-  the running set remained empty (`src/trusted_service_runtime.rs:2791-2823`).
+- The contract-only runtime adapter has no process-spawn implementation. `RootlessOciRuntime::start` returns a blocked error, and the focused test `rootless_oci_runtime_never_spawns_while_execution_is_disabled` passed with no runtime state created.
 
 ### OCI image pull/transport and process boundary
 
@@ -62,8 +58,8 @@ closeout section below; it did not activate any runtime, deployment, or hardware
   disabled (`src/trusted_service_oci.rs:232-266`).
 - The fixed argv builder is contract/dry-run construction only
   (`src/trusted_service_oci.rs:276-306`). It includes `--pull=never`, `--network=none`,
-  read-only/rootless restrictions, and a digest-pinned image reference; it does not
-  pull an image. The actual `Command::spawn` remains behind the runtime gate above.
+  read-only/rootless restrictions, and a digest-pinned image reference; no code in the
+  runtime adapter pulls an image or spawns a process.
 - The OCI tests passed for fixed argv, explicit runtime-path construction without
   execution, and disabled approved-record binding. These tests are source/contract
   evidence, not runtime or registry evidence.
@@ -242,8 +238,8 @@ All checks were run in `/home/tech/screentra-cast` with the source unchanged:
   `:42-67` was not invoked; no deploy, SSH copy, service enable/start/restart, or
   `.56` mutation was introduced.
 - Deferred trusted-service boundaries remain fail-closed: OCI capability probing reports
-  `can_start: false` (`src/trusted_service_oci.rs:157-164`), process start returns before
-  spawn (`src/trusted_service_runtime.rs:966-974`), the gateway returns before
+  `can_start: false` (`src/trusted_service_oci.rs:157-164`), the contract-only runtime
+  adapter returns blocked without spawning, the gateway returns before
   `UnixListener::bind` (`src/trusted_service_gateway.rs:820-844`), the credential broker
   blocks issue/revoke (`src/trusted_service_credentials.rs:248-264`), and the database
   contract rejects raw SQL/core-table/migration/file-mount grants
@@ -292,7 +288,7 @@ listener, process, model, microphone, camera, or network probe was performed.
   registry transport, database role/schema activation, hardware, or deployment was
   verified. The review therefore makes no runtime-readiness or physical-verification
   claim.
-- The OCI process adapter and Unix gateway are present as deferred code paths. Their
-  existence is not activation evidence; both were verified to return before spawning
-  or binding while disabled.
+- The OCI runtime contract and Unix gateway are present as inert validation/admission
+  code. Their existence is not activation evidence; neither starts a process, pulls an
+  image, or binds a listener.
 - No credentials, tokens, connection strings, or secret values are recorded here.
