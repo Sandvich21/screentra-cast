@@ -213,6 +213,7 @@ pub struct AddonWidgetType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddonRecord {
     #[serde(flatten)]
     pub manifest: AddonManifest,
@@ -3216,6 +3217,20 @@ mod tests {
             "unexpected": true
         });
         assert!(serde_json::from_value::<AddonState>(state.take()).is_err());
+    }
+
+    #[test]
+    fn addon_record_wire_schema_rejects_unknown_fields() {
+        let record = AddonRecord {
+            manifest: manifest(),
+            enabled: true,
+            installed_at: "2026-10-21T12:00:00Z".to_string(),
+            rollback_available: false,
+            rollback_version: None,
+        };
+        let mut record_value = serde_json::to_value(record).unwrap();
+        record_value["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<AddonRecord>(record_value).is_err());
     }
 
     fn launch_profile() -> TrustedServiceLaunchProfile {
