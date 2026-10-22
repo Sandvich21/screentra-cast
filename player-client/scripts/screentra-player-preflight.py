@@ -140,13 +140,14 @@ def run(cmd: str) -> str:
     commands = {
         "systemctl --user status >/dev/null 2>&1 && echo ok":
             ['systemctl', '--user', 'status'],
+        'id -Gn': ['id', '-Gn'],
     }
     args = commands.get(cmd)
     if args is None:
         return ''
     try:
-        subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL)
-        return 'ok'
+        output = subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL)
+        return output.strip()
     except Exception:
         return ''
 
