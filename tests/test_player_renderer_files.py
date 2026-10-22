@@ -22,6 +22,18 @@ class PlayerRendererFileTests(unittest.TestCase):
             redirected.symlink_to(outside)
             self.assertEqual(renderer._read_json_file(redirected, {'safe': True}), {'safe': True})
 
+    def test_auth_secret_rejects_symlinked_auth_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / 'outside'
+            outside.mkdir()
+            cache = root / 'cache'
+            cache.mkdir()
+            (root / 'admin-auth').symlink_to(outside, target_is_directory=True)
+            renderer.Handler.cache_dir = cache
+            with self.assertRaises(ValueError):
+                renderer._auth_secret()
+
     def test_atomic_writer_rejects_symlinked_parents(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

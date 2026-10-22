@@ -901,16 +901,16 @@ def _admin_status() -> dict:
 
 def _auth_dir() -> Path:
     p = Handler.cache_dir.parent / 'admin-auth'
-    p.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(p, create=True)
     return p
 
 def _auth_secret() -> bytes:
     p = _auth_dir() / 'session-secret'
-    if not p.exists():
-        p.write_text(secrets.token_urlsafe(32))
-        try: os.chmod(p, 0o600)
-        except Exception: pass
-    return p.read_text().strip().encode()
+    try:
+        return _read_real_file(p, maximum=4096).strip()
+    except FileNotFoundError:
+        _atomic_write_text(p, secrets.token_urlsafe(32), mode=0o600)
+        return _read_real_file(p, maximum=4096).strip()
 
 def _password_hash(password: str, salt: str | None = None) -> str:
     salt = salt or secrets.token_hex(16)
