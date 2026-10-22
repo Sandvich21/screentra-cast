@@ -467,6 +467,9 @@ class HeartbeatAddonCacheTests(unittest.TestCase):
                 'client_sha256': old_digest,
                 'entrypoint': 'client/index.js',
             })
+    def test_heartbeat_command_runner_has_no_shell_fallback(self):
+        self.assertEqual(heartbeat.run('echo attacker-controlled'), '')
+
     def test_json_cache_reader_rejects_symlinked_files(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

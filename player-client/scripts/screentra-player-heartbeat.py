@@ -151,10 +151,18 @@ def _touch_binding():
 
 
 def run(cmd):
+    commands = {
+        "hostname -I | awk '{print $1}'": ['hostname', '-I'],
+        'cat /etc/machine-id': ['cat', '/etc/machine-id'],
+    }
+    args = commands.get(cmd)
+    if args is None:
+        return ''
     try:
-        return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+        output = subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL)
+        return output.strip().split()[0] if output.strip() else ''
     except Exception:
-        return ""
+        return ''
 
 
 def read_mem():
