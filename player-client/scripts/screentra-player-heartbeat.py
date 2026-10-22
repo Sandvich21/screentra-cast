@@ -933,13 +933,20 @@ def _parse_server_json(text):
         raise ValueError('server response is not valid JSON') from exc
 
 
+def _parse_command_response(text):
+    result = _parse_server_json(text)
+    if result is not None and not isinstance(result, dict):
+        raise ValueError('server command response must be an object or null')
+    return result
+
+
 def poll_command(server, client_id, client_token):
     url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/command'
     try:
         req = urllib.request.Request(url, headers=client_auth_headers(client_token))
         with urlopen_ripley(req, timeout=5) as r:
             data = r.read().decode()
-            return _parse_server_json(data)
+            return _parse_command_response(data)
     except urllib.error.HTTPError as e:
         if e.code in (401, 404, 429):
             return None

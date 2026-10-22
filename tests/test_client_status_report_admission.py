@@ -132,6 +132,15 @@ class ClientStatusReportAdmissionTests(unittest.TestCase):
                 '"action":"restart_client"}'
             )
 
+    def test_heartbeat_command_response_requires_object_or_null(self):
+        heartbeat = load_module(
+            ROOT / 'player-client/scripts/screentra-player-heartbeat.py',
+            'screentra_player_heartbeat_command_shape_test',
+        )
+        with self.assertRaises(ValueError):
+            heartbeat._parse_command_response('[]')
+        self.assertIsNone(heartbeat._parse_command_response('null'))
+
     def test_heartbeat_writes_only_admitted_reports(self):
         heartbeat = load_module(
             ROOT / 'player-client/scripts/screentra-player-heartbeat.py',
