@@ -467,6 +467,14 @@ class HeartbeatAddonCacheTests(unittest.TestCase):
                 'client_sha256': old_digest,
                 'entrypoint': 'client/index.js',
             })
+    def test_json_cache_reader_rejects_symlinked_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / 'outside.json'
+            outside.write_text('{"unsafe":true}', encoding='utf-8')
+            redirected = root / 'cache.json'
+            redirected.symlink_to(outside)
+            self.assertEqual(heartbeat._read_json_file(redirected, {'safe': True}), {'safe': True})
 
 
 if __name__ == '__main__':

@@ -62,9 +62,10 @@ def client_pairing_code(client_id):
 
 def _read_json_file(path: Path, default):
     try:
-        if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
+        raw = _read_real_file(path)
+        if len(raw) > MAX_JSON_FILE_BYTES:
             return default
-        return json.loads(path.read_text(encoding='utf-8'))
+        return json.loads(raw.decode('utf-8'))
     except Exception:
         return default
 
