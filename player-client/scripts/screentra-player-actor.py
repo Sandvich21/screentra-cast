@@ -364,8 +364,18 @@ def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_lay
     return False, msg_or_tag
 
 
+_CEC_COMMAND_RE = re.compile(r'^(?:pow|is) [0-9A-Fa-f]$')
+
+
+def _validate_cec_command(cec_cmd: str) -> str:
+    if not isinstance(cec_cmd, str) or len(cec_cmd.encode('utf-8')) > 32 or _CEC_COMMAND_RE.fullmatch(cec_cmd) is None:
+        raise ValueError('CEC command is not allowlisted')
+    return cec_cmd
+
+
 def apply_cec_command(cec_cmd: str) -> tuple[bool, str]:
-    """Send a CEC command via cec-client. Returns (ok, message)."""
+    """Send a bounded allowlisted CEC command via cec-client."""
+    cec_cmd = _validate_cec_command(cec_cmd)
     rc, out, err = _run_list(
         ['sudo', '-n', 'cec-client', '-d', '1', '-s'],
         input_data=f'{cec_cmd}\n',

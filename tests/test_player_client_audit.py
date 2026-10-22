@@ -20,6 +20,13 @@ actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 's
 
 
 class PlayerClientAuditTests(unittest.TestCase):
+    def test_cec_command_is_bounded_and_allowlisted(self):
+        self.assertEqual(actor._validate_cec_command('pow 0'), 'pow 0')
+        with self.assertRaises(ValueError):
+            actor._validate_cec_command('tx 0F:44:6D:00')
+        with self.assertRaises(ValueError):
+            actor._validate_cec_command('x' * 128)
+
     def test_actor_requests_root_verified_update_and_rejects_insecure_remote_http(self):
         self.assertEqual(actor._server_origin('https://managed.example:3000/base/'), 'https://managed.example:3000/base')
         self.assertEqual(actor._server_origin('http://127.0.0.1:3000'), 'http://127.0.0.1:3000')
