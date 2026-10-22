@@ -577,8 +577,7 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
     cfg['installer_detected_max_displays'] = installer
     cfg['max_displays'] = override
     cfg.setdefault('last_detected_displays', [])
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = config_path.with_suffix('.json.tmp')
+    _ensure_real_directory(config_path.parent, create=True)
     _atomic_write_text(config_path, json.dumps(cfg, indent=2))
 
     details = {'config_path': str(config_path), 'installer_detected_max_displays': installer, 'max_displays': override, 'active_max_displays': active, 'steps': []}
@@ -708,11 +707,10 @@ def apply_touch_binding(cache_dir: Path, payload: dict) -> tuple[bool, str, dict
         'updated_by': payload.get('requested_by') or 'actor',
     }
     cfg['touch_binding'] = binding
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = config_path.with_suffix('.json.tmp')
+    _ensure_real_directory(config_path.parent, create=True)
     _atomic_write_text(config_path, json.dumps(cfg, indent=2))
     if dev_path:
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_real_directory(cache_dir, create=True)
         _atomic_write_text(Path(cache_dir, 'touch-device.json'), json.dumps({'path': dev_path, 'name': dev_name}, indent=2))
     details = {'config_path': str(config_path), 'touch_binding': binding, 'steps': []}
     # Restart labwc so rc.xml <touch> mapping is reloaded, then let browser services return.
@@ -922,7 +920,7 @@ def _preview_process_alive(pid_path: Path) -> bool:
 
 def start_display_preview(ctx: dict, display_index: int, payload: dict) -> tuple[bool, str, dict]:
     cache_dir = Path(ctx['cache_dir'])
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(cache_dir, create=True)
     if shutil.which('grim') is None:
         message = 'grim is not installed on this client'
         _write_preview_state(cache_dir, display_index, {'status': 'unavailable', 'message': message})
@@ -1004,7 +1002,7 @@ def fetch_config(server: str, client_id: str, cache_dir: Path, display_index: in
                 data['theme'] = previous['theme']
         except Exception:
             pass
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_real_directory(cache_dir, create=True)
         # Keep the complete response for heartbeat acknowledgement. Secondary
         # displays retain their own metadata; their layout cache remains layout-only
         # for the local renderer.
@@ -1393,7 +1391,7 @@ def main() -> int:
 
     pending_path = Path(args.pending_file)
     result_path = Path(args.result_file) if args.result_file else pending_path.with_name('command-result.json')
-    result_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(result_path.parent, create=True)
 
     ctx = {
         'server': args.server,
