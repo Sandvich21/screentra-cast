@@ -639,7 +639,106 @@ pub struct ServerExecutionPlan {
     pub network_allow_rules: Vec<NetworkAllowRule>,
 }
 
+fn validate_execution_plan_fields(
+    target: ExecutionTarget,
+    addon_id: &str,
+    activation_instance: &str,
+    addon_version: &str,
+    artifact_digest: &str,
+    image: &str,
+    image_digest: &str,
+    memory_bytes: u64,
+    cpu_millis: u32,
+    pids: u32,
+    writable_bytes: u64,
+    capabilities: &[AddonCapabilityRequest],
+    host_api_scopes: &[String],
+    network_allow_rules: &[NetworkAllowRule],
+) -> Result<(), ApprovalError> {
+    validate_approval_identity(addon_id, addon_version, artifact_digest)?;
+    addons::validate_addon_storage_namespace(activation_instance)
+        .map_err(|_| ApprovalError::InvalidActivationInstance)?;
+    addons::validate_trusted_service_image_reference(image).map_err(|_| {
+        ApprovalError::InvalidRequest(CapabilityContractError::InvalidContainerSpec(
+            "image".to_string(),
+        ))
+    })?;
+    addons::validate_trusted_service_image_digest(image_digest).map_err(|_| {
+        ApprovalError::InvalidRequest(CapabilityContractError::InvalidContainerSpec(
+            "image_digest".to_string(),
+        ))
+    })?;
+    if memory_bytes == 0 || cpu_millis == 0 || pids == 0 || writable_bytes == 0 {
+        return Err(ApprovalError::InvalidRequest(
+            CapabilityContractError::InvalidContainerSpec("resources".to_string()),
+        ));
+    }
+    let request = AddonExecutionRequest {
+        targets: vec![target],
+        server: (target == ExecutionTarget::Server).then(|| AddonContainerSpec {
+            image: image.to_string(),
+            image_digest: image_digest.to_string(),
+            memory_bytes,
+            cpu_millis,
+            pids,
+            writable_bytes,
+        }),
+        client: (target == ExecutionTarget::Client).then(|| AddonContainerSpec {
+            image: image.to_string(),
+            image_digest: image_digest.to_string(),
+            memory_bytes,
+            cpu_millis,
+            pids,
+            writable_bytes,
+        }),
+        capabilities: capabilities.to_vec(),
+    };
+    request.validate().map_err(ApprovalError::InvalidRequest)?;
+    let expected_host_api_scopes = capabilities
+        .iter()
+        .filter_map(|capability| {
+            (capability.kind == CapabilityKind::HostApiRead)
+                .then(|| capability.scope.clone())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    if expected_host_api_scopes != host_api_scopes {
+        return Err(ApprovalError::InvalidRequest(
+            CapabilityContractError::InvalidHostApiScope,
+        ));
+    }
+    let expected_network_rules = capabilities
+        .iter()
+        .filter_map(|capability| capability.network.clone())
+        .collect::<Vec<_>>();
+    if expected_network_rules != network_allow_rules {
+        return Err(ApprovalError::InvalidRequest(
+            CapabilityContractError::InvalidNetworkRule,
+        ));
+    }
+    Ok(())
+}
+
 impl ServerExecutionPlan {
+    pub fn validate(&self) -> Result<(), ApprovalError> {
+        validate_execution_plan_fields(
+            ExecutionTarget::Server,
+            &self.addon_id,
+            &self.activation_instance,
+            &self.addon_version,
+            &self.artifact_digest,
+            &self.image,
+            &self.image_digest,
+            self.memory_bytes,
+            self.cpu_millis,
+            self.pids,
+            self.writable_bytes,
+            &self.capabilities,
+            &self.host_api_scopes,
+            &self.network_allow_rules,
+        )
+    }
+
     pub fn from_approved(
         record: &AddonApprovalRecord,
         activation_instance: &str,
@@ -677,7 +776,7 @@ impl ServerExecutionPlan {
             .iter()
             .filter_map(|capability| capability.network.clone())
             .collect::<Vec<_>>();
-        Ok(Self {
+        let plan = Self {
             addon_id: record.addon_id.clone(),
             activation_instance: activation_instance.to_string(),
             addon_version: record.addon_version.clone(),
@@ -691,7 +790,9 @@ impl ServerExecutionPlan {
             capabilities,
             host_api_scopes,
             network_allow_rules,
-        })
+        };
+        plan.validate()?;
+        Ok(plan)
     }
 }
 
@@ -715,6 +816,25 @@ pub struct ClientExecutionPlan {
 }
 
 impl ClientExecutionPlan {
+    pub fn validate(&self) -> Result<(), ApprovalError> {
+        validate_execution_plan_fields(
+            ExecutionTarget::Client,
+            &self.addon_id,
+            &self.activation_instance,
+            &self.addon_version,
+            &self.artifact_digest,
+            &self.image,
+            &self.image_digest,
+            self.memory_bytes,
+            self.cpu_millis,
+            self.pids,
+            self.writable_bytes,
+            &self.capabilities,
+            &self.host_api_scopes,
+            &self.network_allow_rules,
+        )
+    }
+
     pub fn from_approved(
         record: &AddonApprovalRecord,
         activation_instance: &str,
@@ -752,7 +872,7 @@ impl ClientExecutionPlan {
             .iter()
             .filter_map(|capability| capability.network.clone())
             .collect::<Vec<_>>();
-        Ok(Self {
+        let plan = Self {
             addon_id: record.addon_id.clone(),
             activation_instance: activation_instance.to_string(),
             addon_version: record.addon_version.clone(),
@@ -766,7 +886,9 @@ impl ClientExecutionPlan {
             capabilities,
             host_api_scopes,
             network_allow_rules,
-        })
+        };
+        plan.validate()?;
+        Ok(plan)
     }
 }
 
@@ -2707,6 +2829,57 @@ mod tests {
             request.validate(),
             Err(CapabilityContractError::DuplicateCapability)
         );
+    }
+
+    #[test]
+    fn execution_plans_reject_tampered_scoped_fields() {
+        let server = ServerExecutionPlan {
+            addon_id: "example.server-plan".to_string(),
+            activation_instance: "activation-1".to_string(),
+            addon_version: "1.0.0".to_string(),
+            artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            image: "registry.example/server".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            memory_bytes: 512 * 1024 * 1024,
+            cpu_millis: 1_000,
+            pids: 128,
+            writable_bytes: 128 * 1024 * 1024,
+            capabilities: vec![AddonCapabilityRequest::host_api_read(
+                ExecutionTarget::Server,
+                "clients",
+            )],
+            host_api_scopes: vec!["clients".to_string()],
+            network_allow_rules: Vec::new(),
+        };
+        assert_eq!(server.validate(), Ok(()));
+        let mut server_tampered = server.clone();
+        server_tampered.host_api_scopes.clear();
+        assert_eq!(
+            server_tampered.validate(),
+            Err(ApprovalError::InvalidRequest(
+                CapabilityContractError::InvalidHostApiScope
+            ))
+        );
+
+        let client = ClientExecutionPlan {
+            addon_id: "example.client-plan".to_string(),
+            activation_instance: "activation-1".to_string(),
+            addon_version: "1.0.0".to_string(),
+            artifact_digest: format!("sha256:{}", "a".repeat(64)),
+            image: "registry.example/client".to_string(),
+            image_digest: format!("sha256:{}", "b".repeat(64)),
+            memory_bytes: 512 * 1024 * 1024,
+            cpu_millis: 1_000,
+            pids: 128,
+            writable_bytes: 128 * 1024 * 1024,
+            capabilities: vec![AddonCapabilityRequest::camera(ExecutionTarget::Client)],
+            host_api_scopes: Vec::new(),
+            network_allow_rules: Vec::new(),
+        };
+        assert_eq!(client.validate(), Ok(()));
+        let mut client_tampered = client.clone();
+        client_tampered.capabilities[0].target = ExecutionTarget::Server;
+        assert!(client_tampered.validate().is_err());
     }
 
     #[test]
