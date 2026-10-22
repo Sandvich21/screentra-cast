@@ -93,6 +93,11 @@ ALLOWED_CLIENT_COMMAND_ACTIONS = (
     'ir_send', 'client_service_status', 'client_service_rollback_request',
     'client_service_transcribe_request',
 )
+_ALLOWED_PENDING_COMMAND_FIELDS = frozenset({
+    'client_id', 'action', 'payload', 'requested_at', 'requested_by',
+})
+MAX_REQUESTED_AT_BYTES = 64
+MAX_REQUESTED_BY_BYTES = 128
 
 
 def _validate_client_service_identifier(value, field):
@@ -140,11 +145,26 @@ def validate_client_service_payload(action, payload):
 def validate_pending_command(spec, expected_client_id):
     if not isinstance(spec, dict):
         raise ValueError('pending command must be a JSON object')
+    if set(spec) - _ALLOWED_PENDING_COMMAND_FIELDS:
+        raise ValueError('pending command contains unsupported fields')
     if (not isinstance(expected_client_id, str) or not expected_client_id or
             len(expected_client_id.encode('utf-8')) > MAX_CLIENT_ID_BYTES):
         raise ValueError('client identity is invalid')
     if spec.get('client_id') != expected_client_id:
         raise ValueError('pending command client identity mismatch')
+    if 'requested_at' in spec:
+        requested_at = spec['requested_at']
+        if (not isinstance(requested_at, str) or not requested_at or
+                len(requested_at.encode('utf-8')) > MAX_REQUESTED_AT_BYTES or
+                any(ord(char) < 32 or ord(char) == 127 for char in requested_at)):
+            raise ValueError('pending command requested_at is invalid')
+    if 'requested_by' in spec:
+        requested_by = spec['requested_by']
+        if requested_by is not None and (
+                not isinstance(requested_by, str) or not requested_by or
+                len(requested_by.encode('utf-8')) > MAX_REQUESTED_BY_BYTES or
+                any(ord(char) < 32 or ord(char) == 127 for char in requested_by)):
+            raise ValueError('pending command requested_by is invalid')
     action = spec.get('action')
     if action not in ALLOWED_CLIENT_COMMAND_ACTIONS:
         raise ValueError(f'unsupported client command action: {action}')

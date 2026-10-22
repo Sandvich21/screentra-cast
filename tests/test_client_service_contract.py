@@ -92,6 +92,21 @@ class ClientServiceContractTests(unittest.TestCase):
                 },
                 'client-a',
             )
+        with self.assertRaises(ValueError):
+            actor.validate_pending_command(
+                {**valid, 'unexpected': True},
+                'client-a',
+            )
+        with self.assertRaises(ValueError):
+            actor.validate_pending_command(
+                {**valid, 'requested_at': {'not': 'text'}},
+                'client-a',
+            )
+        with self.assertRaises(ValueError):
+            actor.validate_pending_command(
+                {**valid, 'requested_by': {'not': 'text'}},
+                'client-a',
+            )
 
     def test_transcribe_request_payload_is_strictly_bounded(self):
         valid = {
