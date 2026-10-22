@@ -2239,6 +2239,7 @@ async fn get_addon_execution_approval(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateAddonExecutionApproval {
     addon_id: String,
     addon_version: String,
@@ -2247,6 +2248,7 @@ struct CreateAddonExecutionApproval {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CapabilityApprovalUpdate {
     approved: Vec<bool>,
 }
@@ -10061,6 +10063,13 @@ fn reverse_name(ip: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn addon_execution_approval_payloads_reject_unknown_fields() {
+        let update: Result<CapabilityApprovalUpdate, _> = serde_json::from_str(
+            r#"{"approved":[],"unexpected":true}"#,
+        );
+        assert!(update.is_err());
+    }
     #[tokio::test]
     async fn addon_execution_approval_list_requires_admin() {
         let result = list_addon_execution_approvals(Extension(crate::middleware::AuthenticatedPrincipal {
