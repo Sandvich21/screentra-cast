@@ -1022,7 +1022,7 @@ def ack_command(server, client_id):
 
 def write_pending_command(command, cache_dir):
     pending_path = Path(cache_dir) / 'pending-command.json'
-    pending_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(pending_path.parent, create=True)
     _atomic_write_text(pending_path, json.dumps(command, indent=2))
     print(f'pending command written: {command.get("action")}', flush=True)
     try:
@@ -1063,7 +1063,7 @@ def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='
                 data['theme'] = prev['theme']
         except Exception:
             pass
-        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        _ensure_real_directory(Path(cache_dir), create=True)
         if display_index == 0:
             _atomic_write_text(Path(cache_dir, 'client-config.json'), json.dumps(data, indent=2))
         else:
@@ -1105,7 +1105,7 @@ def fetch_admin_users(server, client_id, cache_dir):
         users = data.get('users') or []
         if users:
             target = Path(cache_dir).parent / 'admin-users.json'
-            target.parent.mkdir(parents=True, exist_ok=True)
+            _ensure_real_directory(target.parent, create=True)
             _atomic_write_text(target, json.dumps(data, indent=2))
             print(f'admin users synced: {len(users)}', flush=True)
             return data
@@ -1190,7 +1190,7 @@ def main():
                     except Exception:
                         cached = {}
                     cached['theme'] = server_theme
-                    theme_path.parent.mkdir(parents=True, exist_ok=True)
+                    _ensure_real_directory(theme_path.parent, create=True)
                     _atomic_write_text(theme_path, json.dumps(cached, indent=2))
             except Exception:
                 pass
@@ -1283,7 +1283,7 @@ def main():
                 'assigned_layout_id': assigned,
                 'pairing_code': client_pairing_code(data['client_id']),
             }
-            Path(args.cache_dir).mkdir(parents=True, exist_ok=True)
+            _ensure_real_directory(Path(args.cache_dir), create=True)
             _atomic_write_text(
                 Path(args.cache_dir) / 'last-heartbeat.json',
                 __import__('json').dumps(status_payload),
