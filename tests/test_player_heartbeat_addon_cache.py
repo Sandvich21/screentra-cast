@@ -57,6 +57,14 @@ class HeartbeatAddonCacheTests(unittest.TestCase):
         with mock.patch.object(heartbeat, 'urlopen_ripley', return_value=InventoryResponse(inventory)):
             return heartbeat.sync_client_addons('https://server.example', 'client-a', cache_dir)
 
+    def test_inventory_response_body_is_bounded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = self.sync(
+                temp,
+                {'addons': [], 'padding': 'x' * heartbeat.MAX_JSON_FILE_BYTES},
+            )
+            self.assertEqual(result.get('error'), heartbeat.GENERIC_INVENTORY_ERROR)
+
     def package_manifest(self, capabilities=None, service=None, payload=b'console.log("inert");\\n'):
         return {
             'schema_version': 1,

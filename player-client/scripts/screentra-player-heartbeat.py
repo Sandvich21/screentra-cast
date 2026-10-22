@@ -784,7 +784,9 @@ def sync_client_addons(server, client_id, cache_dir):
         url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/addons'
         req = urllib.request.Request(url, headers=client_auth_headers())
         with urlopen_ripley(req, timeout=10) as response:
-            inventory = json.loads(response.read().decode('utf-8'))
+            inventory = _parse_server_json(
+                _read_bounded_response(response, MAX_JSON_FILE_BYTES)
+            )
         addons = inventory.get('addons') if isinstance(inventory, dict) else None
         if not isinstance(addons, list):
             raise ValueError('server returned an invalid addon inventory')
