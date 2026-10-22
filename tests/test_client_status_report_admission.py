@@ -190,6 +190,18 @@ class ClientStatusReportAdmissionTests(unittest.TestCase):
             '    validate_status_report(status)\n',
             heartbeat_source,
         )
+    def test_heartbeat_server_response_body_is_bounded(self):
+        heartbeat = load_module(
+            ROOT / 'player-client/scripts/screentra-player-heartbeat.py',
+            'screentra_player_heartbeat_response_bound_test',
+        )
+
+        class Response:
+            def read(self, limit):
+                return b'x' * (limit + 1)
+
+        with self.assertRaises(ValueError):
+            heartbeat._read_bounded_response(Response(), 32)
 
 
 if __name__ == '__main__':

@@ -42,6 +42,16 @@ from pathlib import Path
 
 MAX_JSON_FILE_BYTES = 1 << 20
 MAX_COMMAND_RESPONSE_BYTES = 64 * 1024
+MAX_TEXT_RESPONSE_BYTES = 64 * 1024
+
+
+def _read_bounded_response(response, maximum):
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+        raise ValueError('response bound is invalid')
+    data = response.read(maximum + 1)
+    if not isinstance(data, (bytes, bytearray)) or len(data) > maximum:
+        raise ValueError('server response exceeds its bound')
+    return bytes(data).decode('utf-8')
 
 
 def client_pairing_code(client_id):
@@ -948,7 +958,7 @@ def poll_command(server, client_id, client_token):
     try:
         req = urllib.request.Request(url, headers=client_auth_headers(client_token))
         with urlopen_ripley(req, timeout=5) as r:
-            data = r.read(MAX_COMMAND_RESPONSE_BYTES + 1).decode()
+            data = _read_bounded_response(r, MAX_COMMAND_RESPONSE_BYTES)
             return _parse_command_response(data)
     except urllib.error.HTTPError as e:
         if e.code in (401, 404, 429):
@@ -963,7 +973,7 @@ def ack_command(server, client_id):
     try:
         req = urllib.request.Request(url, headers=client_auth_headers(), method='POST')
         with urlopen_ripley(req, timeout=5) as r:
-            return r.read().decode()
+            return _read_bounded_response(r, MAX_TEXT_RESPONSE_BYTES)
     except Exception as e:
         print(f'ack failed: {e}', flush=True)
         return None
@@ -1002,7 +1012,7 @@ def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='
     try:
         req = urllib.request.Request(url, headers=client_auth_headers())
         with urlopen_ripley(req, timeout=10) as r:
-            data = json.loads(r.read().decode())
+            data = _parse_server_json(_read_bounded_response(r, MAX_JSON_FILE_BYTES))
         # Preserve theme (set by heartbeat from local config, sent to server)
         # so it survives across config sync cycles.
         prev_path = Path(cache_dir, 'client-config.json')
@@ -1050,7 +1060,7 @@ def fetch_admin_users(server, client_id, cache_dir):
     try:
         req = urllib.request.Request(url, headers=client_auth_headers())
         with urlopen_ripley(req, timeout=10) as r:
-            data = json.loads(r.read().decode())
+            data = _parse_server_json(_read_bounded_response(r, MAX_JSON_FILE_BYTES))
         users = data.get('users') or []
         if users:
             target = Path(cache_dir).parent / 'admin-users.json'
@@ -1076,7 +1086,7 @@ def post(server, data):
         method='POST',
     )
     with urlopen_ripley(req, timeout=10) as r:
-        return r.status, r.read().decode()
+        return r.status, _read_bounded_response(r, MAX_TEXT_RESPONSE_BYTES)
 
 
 def main():
