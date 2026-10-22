@@ -62,6 +62,7 @@ impl From<AddonError> for RuntimeError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ActivationGate {
     pub name: String,
     pub passed: bool,
@@ -69,6 +70,7 @@ pub struct ActivationGate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct TrustedServiceRuntimeRecord {
     pub record_version: u32,
     pub addon_id: String,
@@ -3131,6 +3133,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn runtime_records_reject_unknown_fields() {
+        let mut value = serde_json::to_value(test_record()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".to_string(), serde_json::Value::Bool(true));
+        let decoded = serde_json::from_value::<TrustedServiceRuntimeRecord>(value);
+        assert!(decoded.is_err());
+    }
     #[test]
     fn supervisor_rejects_unbound_capabilities_before_runtime_start() {
         let mut harness = DisposableRuntimeHarness::new();
