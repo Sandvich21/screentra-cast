@@ -18,6 +18,7 @@ import re
 import signal
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1007,6 +1008,32 @@ def fetch_all_display_configs(server: str, client_id: str, cache_dir: Path) -> b
         return False
 
 
+def _write_update_request_marker(path: Path, marker: dict) -> None:
+    parent = path.parent
+    metadata = os.lstat(parent)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError('update request parent is not a real directory')
+    raw = json.dumps(marker, separators=(',', ':'), allow_nan=False).encode('utf-8')
+    if len(raw) > 4096:
+        raise ValueError('client update refused: request marker is too large')
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f'.{path.name}.', suffix='.tmp', dir=str(parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(raw)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | None) -> tuple[bool, str, dict]:
     """Request the root-owned verifier; never download or execute as the player."""
     payload = payload or {}
@@ -1022,23 +1049,12 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
         'client_id': client_id or '',
         'reason': 'server-command',
     }
-    temporary = request_path.with_name('.request.tmp')
     try:
-        raw = json.dumps(marker, separators=(',', ':')).encode('utf-8')
-        if len(raw) > 4096:
-            return False, 'client update refused: request marker is too large', details
-        temporary.write_bytes(raw)
-        temporary.chmod(0o600)
-        os.replace(temporary, request_path)
+        _write_update_request_marker(request_path, marker)
         return True, 'verified root client updater requested', details
     except Exception as e:
         details['error'] = str(e)
         return False, f'client update request failed: {e}', details
-    finally:
-        try:
-            temporary.unlink()
-        except Exception:
-            pass
 
 
 def execute(action: str, payload: dict | None, ctx: dict) -> dict:

@@ -36,6 +36,18 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertEqual(details['request_path'], '/var/lib/screentra-cast/update/request')
         self.assertNotIn('attacker.example', message)
 
+    def test_update_request_marker_uses_private_atomic_publication(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'request'
+            actor._write_update_request_marker(
+                path,
+                {'client_id': 'client-id', 'reason': 'server-command'},
+            )
+            self.assertEqual(path.read_text(encoding='utf-8'),
+                             '{"client_id":"client-id","reason":"server-command"}')
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(list(Path(temp).iterdir()), [path])
+
     def test_pending_json_reader_is_bounded(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'pending-command.json'
