@@ -738,7 +738,8 @@ def tls_context(cache_dir: Path | None = None):
     for cafile in candidates:
         if cafile.exists():
             try:
-                return ssl.create_default_context(cafile=str(cafile))
+                ca_data = _read_bounded_text(cafile, 256 * 1024)
+                return ssl.create_default_context(cadata=ca_data)
             except Exception as e:
                 print(f'warning: failed to load Screentra Cast CA {cafile}: {e}', flush=True)
     raise RuntimeError('Screentra Cast CA certificate is unavailable or invalid')
