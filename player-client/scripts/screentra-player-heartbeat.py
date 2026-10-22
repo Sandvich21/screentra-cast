@@ -578,7 +578,9 @@ def _verify_addon_manifest_signature(manifest_path, signature_path):
     """Verify detached manifest bytes with the configured addon public key."""
     _read_real_file(signature_path, MAX_ADDON_SIGNATURE_BYTES)
     public_key = addon_public_key_path()
-    if not public_key.is_file():
+    try:
+        _read_real_file(public_key, 64 * 1024)
+    except (OSError, ValueError):
         raise ValueError('addon signing public key is unavailable')
     result = subprocess.run(
         ['openssl', 'pkeyutl', '-verify', '-rawin', '-pubin', '-inkey', str(public_key),

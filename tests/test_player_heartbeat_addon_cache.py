@@ -57,6 +57,21 @@ class HeartbeatAddonCacheTests(unittest.TestCase):
         with mock.patch.object(heartbeat, 'urlopen_ripley', return_value=InventoryResponse(inventory)):
             return heartbeat.sync_client_addons('https://server.example', 'client-a', cache_dir)
 
+    def test_addon_signature_rejects_symlinked_public_key(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / 'outside.pub'
+            outside.write_text('test key', encoding='utf-8')
+            public_key = root / 'addon-signing.pub'
+            public_key.symlink_to(outside)
+            signature = root / 'manifest.sig'
+            signature.write_bytes(b'signature')
+            with mock.patch.object(heartbeat, 'addon_public_key_path', return_value=public_key), \
+                    mock.patch.object(heartbeat.subprocess, 'run') as verify:
+                with self.assertRaises(ValueError):
+                    heartbeat._verify_addon_manifest_signature(root / 'manifest.json', signature)
+            verify.assert_not_called()
+
     def test_addon_manifest_rejects_duplicate_json_keys(self):
         with self.assertRaises(ValueError):
             heartbeat._parse_addon_manifest(b'{"id":"demo.addon","id":"attacker"}')
