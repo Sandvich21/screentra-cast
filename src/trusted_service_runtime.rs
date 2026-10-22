@@ -11,8 +11,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -949,20 +947,13 @@ pub trait TrustedServiceRuntime {
     }
 }
 
-/// Rootless OCI process adapter. The activation gate is checked before any
-/// process boundary, so constructing this adapter is safe while execution is
-/// disabled. Image pulls remain disabled in the generated argv.
+/// Rootless OCI runtime contract adapter. It validates runtime metadata and
+/// records administrative intent only; process execution is intentionally not
+/// implemented while the execution backend remains disabled.
 pub struct RootlessOciRuntime {
-    runtime_path: PathBuf,
-    runtime_identity: crate::trusted_service_oci::OciRuntimeIdentity,
-    registry_policy: crate::trusted_service_oci::OciRegistryPolicy,
-    running: BTreeMap<String, RootlessOciProcess>,
+    running: BTreeSet<String>,
     known: BTreeMap<String, RuntimeHandle>,
     terminal: BTreeMap<String, (RuntimeHandle, RuntimeStatus)>,
-}
-
-struct RootlessOciProcess {
-    child: Mutex<Child>,
 }
 
 impl RootlessOciRuntime {
@@ -983,15 +974,12 @@ impl RootlessOciRuntime {
         }
         crate::trusted_service_oci::validate_oci_registry_policy(&registry_policy)
             .map_err(RuntimeError::Invalid)?;
-        let runtime_identity = crate::trusted_service_oci::runtime_path_identity(&runtime_path)
+        let _runtime_identity = crate::trusted_service_oci::runtime_path_identity(&runtime_path)
             .ok_or_else(|| {
                 RuntimeError::Invalid("OCI runtime identity is unavailable".to_string())
             })?;
         Ok(Self {
-            runtime_path,
-            runtime_identity,
-            registry_policy,
-            running: BTreeMap::new(),
+            running: BTreeSet::new(),
             known: BTreeMap::new(),
             terminal: BTreeMap::new(),
         })
@@ -999,69 +987,11 @@ impl RootlessOciRuntime {
 
     fn start_process(
         &mut self,
-        request: &RuntimeLaunchRequest,
+        _request: &RuntimeLaunchRequest,
     ) -> Result<RuntimeHandle, RuntimeError> {
-        if !EXECUTION_ENABLED {
-            return Err(RuntimeError::Blocked(
-                "Trusted service execution is disabled".to_string(),
-            ));
-        }
-        let runtime_probe = crate::trusted_service_oci::probe_oci_runtime(&self.runtime_path);
-        if !runtime_probe.can_start {
-            return Err(RuntimeError::Blocked(
-                "OCI runtime capability probe is not enabled".to_string(),
-            ));
-        }
-        let current_identity = crate::trusted_service_oci::runtime_path_identity(&self.runtime_path)
-            .ok_or_else(|| RuntimeError::Blocked("OCI runtime identity is unavailable".to_string()))?;
-        if current_identity != self.runtime_identity {
-            return Err(RuntimeError::Blocked(
-                "OCI runtime path identity changed".to_string(),
-            ));
-        }
-        if self.known.contains_key(&request.activation_instance) {
-            return Err(RuntimeError::Conflict(
-                "Rootless OCI activation identity has already been used".to_string(),
-            ));
-        }
-        let spec = request.to_oci_launch_spec();
-        crate::trusted_service_oci::validate_oci_image_registry(
-            &spec.image,
-            &self.registry_policy,
-        )
-        .map_err(RuntimeError::Invalid)?;
-        let argv = crate::trusted_service_oci::build_rootless_argv_for_path(
-            &self.runtime_path,
-            &spec,
-        )
-        .map_err(RuntimeError::Invalid)?;
-        let program = argv
-            .first()
-            .ok_or_else(|| RuntimeError::Invalid("OCI argv is empty".to_string()))?;
-        let mut command = Command::new(program);
-        command
-            .args(argv.iter().skip(1))
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let child = command
-            .spawn()
-            .map_err(|error| RuntimeError::Io(error.to_string()))?;
-        let handle = RuntimeHandle {
-            addon_id: request.addon_id.clone(),
-            activation_instance: request.activation_instance.clone(),
-        };
-        self.known
-            .insert(handle.activation_instance.clone(), handle.clone());
-        self.terminal.remove(&handle.activation_instance);
-        self.running.insert(
-            handle.activation_instance.clone(),
-            RootlessOciProcess {
-                child: Mutex::new(child),
-            },
-        );
-        Ok(handle)
+        Err(RuntimeError::Blocked(
+            "Trusted service execution backend is not implemented".to_string(),
+        ))
     }
 
     fn stop_process_with_status(
@@ -1080,39 +1010,8 @@ impl RootlessOciRuntime {
                 "Runtime handle is not bound to the known addon".to_string(),
             ));
         }
-        let exited = {
-            let Some(process) = self.running.get(&handle.activation_instance) else {
-                return Err(RuntimeError::NotFound);
-            };
-            let mut child = process
-                .child
-                .lock()
-                .map_err(|_| RuntimeError::Conflict("OCI child state is poisoned".to_string()))?;
-            if child
-                .try_wait()
-                .map_err(|error| RuntimeError::Io(error.to_string()))?
-                .is_some()
-            {
-                true
-            } else {
-                child
-                    .kill()
-                    .map_err(|error| RuntimeError::Io(error.to_string()))?;
-                child
-                    .wait()
-                    .map_err(|error| RuntimeError::Io(error.to_string()))?;
-                false
-            }
-        };
-        self.running.remove(&handle.activation_instance);
-        if exited {
-            self.terminal.insert(
-                handle.activation_instance.clone(),
-                (handle.clone(), RuntimeStatus::Crashed),
-            );
-            return Err(RuntimeError::Conflict(
-                "Rootless OCI process exited before stop".to_string(),
-            ));
+        if !self.running.remove(&handle.activation_instance) {
+            return Err(RuntimeError::NotFound);
         }
         self.terminal.insert(
             handle.activation_instance.clone(),
@@ -1122,29 +1021,6 @@ impl RootlessOciRuntime {
     }
 
     fn supervise(&mut self) -> Result<(), RuntimeError> {
-        let mut exited = Vec::new();
-        for (activation_instance, process) in &self.running {
-            let mut child = process
-                .child
-                .lock()
-                .map_err(|_| RuntimeError::Conflict("OCI child state is poisoned".to_string()))?;
-            if child
-                .try_wait()
-                .map_err(|error| RuntimeError::Io(error.to_string()))?
-                .is_some()
-            {
-                exited.push(activation_instance.clone());
-            }
-        }
-        for activation_instance in exited {
-            if let Some(process) = self.running.remove(&activation_instance) {
-                drop(process);
-                if let Some(handle) = self.known.get(&activation_instance).cloned() {
-                    self.terminal
-                        .insert(activation_instance, (handle, RuntimeStatus::Crashed));
-                }
-            }
-        }
         Ok(())
     }
 
@@ -1167,20 +1043,8 @@ impl RootlessOciRuntime {
                 ));
             }
         }
-        if let Some(process) = self.running.get(&handle.activation_instance) {
-            let mut child = process
-                .child
-                .lock()
-                .map_err(|_| RuntimeError::Conflict("OCI child state is poisoned".to_string()))?;
-            return Ok(if child
-                .try_wait()
-                .map_err(|error| RuntimeError::Io(error.to_string()))?
-                .is_some()
-            {
-                RuntimeStatus::Crashed
-            } else {
-                RuntimeStatus::Running
-            });
+        if self.running.contains(&handle.activation_instance) {
+            return Ok(RuntimeStatus::Running);
         }
         if let Some((terminal_handle, status)) = self.terminal.get(&handle.activation_instance) {
             if terminal_handle.addon_id != handle.addon_id {
@@ -1225,17 +1089,6 @@ impl TrustedServiceRuntime for RootlessOciRuntime {
 
     fn supervise(&mut self) -> Result<(), RuntimeError> {
         RootlessOciRuntime::supervise(self)
-    }
-}
-
-impl Drop for RootlessOciRuntime {
-    fn drop(&mut self) {
-        for process in self.running.values() {
-            if let Ok(mut child) = process.child.lock() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
     }
 }
 
