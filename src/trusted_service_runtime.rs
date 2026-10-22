@@ -3148,6 +3148,39 @@ mod tests {
         let nested_decoded = serde_json::from_value::<TrustedServiceRuntimeRecord>(nested);
         assert!(nested_decoded.is_err());
     }
+
+    #[test]
+    fn service_specs_reject_unknown_fields() {
+        let service = addons::TrustedServerServiceSpec {
+            image: "registry.example/service".to_string(),
+            image_digest: format!("sha256:{}", "a".repeat(64)),
+            capabilities: vec!["storage".to_string()],
+            storage_namespace: "example.service".to_string(),
+            api_namespace: "example.service".to_string(),
+            launch_profile: test_launch_profile(),
+            client_extension_id: None,
+        };
+        let mut server = serde_json::to_value(service).unwrap();
+        server["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<addons::TrustedServerServiceSpec>(server).is_err());
+
+        let client = addons::ClientServiceSpec {
+            id: "example.client".to_string(),
+            image: "registry.example/client".to_string(),
+            image_digest: format!("sha256:{}", "b".repeat(64)),
+            socket_name: "speech.sock".to_string(),
+            cpu_millis: 500,
+            memory_bytes: 256 * 1024 * 1024,
+            pids: 64,
+            writable_bytes: 16 * 1024 * 1024,
+            model_id: None,
+            model_sha256: None,
+        };
+        let mut client = serde_json::to_value(client).unwrap();
+        client["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<addons::ClientServiceSpec>(client).is_err());
+    }
+
     #[test]
     fn supervisor_rejects_unbound_capabilities_before_runtime_start() {
         let mut harness = DisposableRuntimeHarness::new();

@@ -98,6 +98,7 @@ pub struct TrustedServiceLaunchProfile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TrustedServerServiceSpec {
     pub image: String,
     pub image_digest: String,
@@ -126,6 +127,7 @@ pub struct AddonDataEndpoint {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClientServiceSpec {
     pub id: String,
     pub image: String,
