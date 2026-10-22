@@ -241,6 +241,7 @@ pub enum DatabaseAuditOutcome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DatabaseAuditEvent {
     pub addon_id: String,
     pub activation_instance: String,
@@ -801,6 +802,20 @@ mod tests {
         let mut value = serde_json::to_value(sqlite_contract()).expect("serialize database contract");
         value["unexpected"] = serde_json::Value::Bool(true);
         assert!(serde_json::from_value::<TrustedServiceDatabaseContract>(value).is_err());
+    }
+
+    #[test]
+    fn database_audit_event_wire_schema_rejects_unknown_fields() {
+        let event = DatabaseAuditEvent {
+            addon_id: "example.service".to_string(),
+            activation_instance: "activation-1".to_string(),
+            operation: DatabaseOperationKind::Get,
+            outcome: DatabaseAuditOutcome::Succeeded,
+            occurred_at: "2026-10-15T00:00:00Z".to_string(),
+        };
+        let mut value = serde_json::to_value(event).expect("serialize database audit event");
+        value["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<DatabaseAuditEvent>(value).is_err());
     }
 
     #[test]
