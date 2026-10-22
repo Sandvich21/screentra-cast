@@ -109,25 +109,65 @@ def _validate_service_metadata(value: Any) -> dict[str, Any]:
     if len(encoded) > MAX_SERVICE_METADATA_BYTES:
         raise _fail('service_metadata exceeds its bound')
 
-    required = {'id', 'socket_name', 'model_id', 'model_sha256'}
+    required = {
+        'id', 'image', 'image_digest', 'socket_name',
+        'cpu_millis', 'memory_bytes', 'pids', 'writable_bytes',
+        'model_id', 'model_sha256',
+    }
     if not required.issubset(value):
         raise _fail('service_metadata is incomplete')
     metadata = dict(value)
     if not isinstance(metadata['id'], str):
         raise _fail('service metadata id is invalid')
+    image = metadata['image']
+    if (
+        not isinstance(image, str)
+        or not image
+        or len(image) > 255
+        or '..' in image
+        or '://' in image
+        or ':' in image
+        or '@' in image
+        or '//' in image
+        or image.startswith('/')
+        or image.endswith('/')
+        or any(
+            not (character.isascii() and (character.isalnum() or character in '._-/'))
+            for character in image
+        )
+        or any(
+            not component
+            or component in ('.', '..')
+            or not component[0].isascii()
+            or not component[0].isalnum()
+            or not component[-1].isascii()
+            or not component[-1].isalnum()
+            for component in image.split('/')
+        )
+    ):
+        raise _fail('service image reference is invalid')
+    if not isinstance(metadata['image_digest'], str) or _IMAGE_DIGEST_RE.fullmatch(
+        metadata['image_digest']
+    ) is None:
+        raise _fail('service image_digest is invalid')
     socket_name = _bounded_socket_name(metadata['socket_name'])
     metadata['socket_name'] = socket_name
 
-    if 'image_digest' in metadata:
-        if not isinstance(metadata['image_digest'], str) or _IMAGE_DIGEST_RE.fullmatch(
-            metadata['image_digest']
-        ) is None:
-            raise _fail('service image_digest is invalid')
-    for field in ('cpu_millis', 'memory_bytes', 'pids', 'writable_bytes'):
-        if field in metadata and (
-            isinstance(metadata[field], bool) or not isinstance(metadata[field], int)
+    resource_bounds = {
+        'cpu_millis': (1, 4000),
+        'memory_bytes': (64 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+        'pids': (1, 256),
+        'writable_bytes': (0, 512 * 1024 * 1024),
+    }
+    for field, (minimum, maximum) in resource_bounds.items():
+        resource = metadata[field]
+        if (
+            isinstance(resource, bool)
+            or not isinstance(resource, int)
+            or not minimum <= resource <= maximum
         ):
-            raise _fail(f'service metadata {field} is invalid')
+            raise _fail(f'service metadata {field} is outside its bounded range')
+
     return metadata
 
 

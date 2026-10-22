@@ -125,7 +125,29 @@ class ClientServiceSupervisorPlanTests(unittest.TestCase):
         self.assertNotIn('mounts', plan)
         self.assertNotIn('ports', plan)
 
-    def test_identity_digest_intent_and_runtime_fields_are_rejected(self):
+    def test_service_metadata_requires_valid_image_and_resource_policy(self):
+        module = self.require_module()
+        base = deepcopy(manifest['client_service'])
+        cases = [
+            ({key: value for key, value in base.items() if key != 'image'},),
+            ({key: value for key, value in base.items() if key != 'image_digest'},),
+            ({**base, 'image': '/tmp/host-image'},),
+            ({**base, 'image_digest': 'sha256:' + ('A' * 64)},),
+            ({**base, 'cpu_millis': 0},),
+            ({**base, 'memory_bytes': 1},),
+            ({**base, 'pids': 0},),
+            ({**base, 'writable_bytes': -1},),
+            ({**base, 'cpu_millis': 4001},),
+            ({**base, 'memory_bytes': 2 * 1024 * 1024 * 1024 + 1},),
+            ({**base, 'pids': 257},),
+            ({**base, 'writable_bytes': 512 * 1024 * 1024 + 1},),
+        ]
+        for (service,) in cases:
+            with self.subTest(service=service), self.assertRaises(module.SupervisorPlanError):
+                module.build_supervisor_activation_plan(
+                    valid_request(service_metadata={**service, 'service_version': manifest['version']})
+                )
+
         module = self.require_module()
         cases = [
             valid_request(service_id='other-service'),
