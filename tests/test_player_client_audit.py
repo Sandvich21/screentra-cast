@@ -59,6 +59,15 @@ class PlayerClientAuditTests(unittest.TestCase):
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(list(Path(temp).iterdir()), [path])
 
+    def test_actor_json_reader_rejects_symlinked_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / 'outside.json'
+            outside.write_text('{"unsafe":true}', encoding='utf-8')
+            redirected = root / 'cache.json'
+            redirected.symlink_to(outside)
+            self.assertEqual(actor._read_json_file(redirected, {'safe': True}), {'safe': True})
+
     def test_pending_json_reader_is_bounded(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'pending-command.json'

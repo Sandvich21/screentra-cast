@@ -232,9 +232,24 @@ def _parse_pending_command(text):
 
 def _read_json_file(path: Path, default):
     try:
-        if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
+        absolute = Path(os.path.abspath(os.fspath(path)))
+        current = Path(absolute.anchor)
+        for part in absolute.parts[1:]:
+            current /= part
+            metadata = os.lstat(current)
+            if stat.S_ISLNK(metadata.st_mode):
+                return default
+        descriptor = os.open(absolute, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_JSON_FILE_BYTES:
+                return default
+            raw = os.read(descriptor, MAX_JSON_FILE_BYTES + 1)
+        finally:
+            os.close(descriptor)
+        if len(raw) > MAX_JSON_FILE_BYTES:
             return default
-        return json.loads(path.read_text(encoding='utf-8'))
+        return json.loads(raw.decode('utf-8'))
     except Exception:
         return default
 
