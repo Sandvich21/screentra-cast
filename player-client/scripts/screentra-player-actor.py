@@ -248,13 +248,42 @@ def _server_origin(server: str) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip('/'), '', ''))
 
 
+def _ensure_real_directory(path: Path, create: bool = False) -> bool:
+    current = Path(os.path.abspath(os.fspath(path)).split(os.sep)[0] + os.sep)
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            if not create:
+                return False
+            current.mkdir()
+            metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError('client cache directory is not a real directory')
+    return True
+
+
 def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
-    """Replace a cache JSON file atomically and keep it owner-readable."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
-    temporary.write_text(text)
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
+    """Replace a cache JSON file atomically without following symlinks."""
+    _ensure_real_directory(path.parent, create=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f'.{path.name}.', suffix='.tmp', dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _run_list(args: list[str], timeout: int = 20, input_data: str | None = None, env: dict[str, str] | None = None) -> tuple[int, str, str]:

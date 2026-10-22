@@ -36,6 +36,17 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertEqual(details['request_path'], '/var/lib/screentra-cast/update/request')
         self.assertNotIn('attacker.example', message)
 
+    def test_actor_atomic_cache_writes_reject_symlinked_parents(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / 'outside'
+            outside.mkdir()
+            redirected = root / 'cache'
+            redirected.symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                actor._atomic_write_text(redirected / 'status.json', '{"safe":true}')
+            self.assertFalse((outside / 'status.json').exists())
+
     def test_update_request_marker_uses_private_atomic_publication(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'request'
