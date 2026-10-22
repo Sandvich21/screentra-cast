@@ -18,6 +18,7 @@ pub enum ExecutionTarget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AddonContainerSpec {
     pub image: String,
     pub image_digest: String,
@@ -36,6 +37,7 @@ pub enum NetworkProtocol {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkAllowRule {
     pub name: String,
     pub ip: String,
@@ -58,6 +60,7 @@ pub enum CapabilityKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AddonCapabilityRequest {
     pub target: ExecutionTarget,
     pub kind: CapabilityKind,
@@ -122,6 +125,7 @@ impl AddonCapabilityRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AddonExecutionRequest {
     pub targets: Vec<ExecutionTarget>,
     #[serde(default)]
@@ -2754,6 +2758,37 @@ fn validate_existing_approval_file(path: &Path) -> Result<fs::Metadata, String> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn execution_wire_schemas_reject_unknown_fields() {
+        let root_unknown: Result<AddonExecutionRequest, _> = serde_json::from_str(
+            r#"{
+                "targets":["server"],
+                "server":null,
+                "client":null,
+                "capabilities":[],
+                "unexpected":true
+            }"#,
+        );
+        assert!(root_unknown.is_err());
+
+        let nested_unknown: Result<AddonExecutionRequest, _> = serde_json::from_str(
+            r#"{
+                "targets":["server"],
+                "server":{
+                    "image":"registry.example/server",
+                    "image_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "memory_bytes":536870912,
+                    "cpu_millis":1000,
+                    "pids":128,
+                    "writable_bytes":134217728,
+                    "unexpected":true
+                },
+                "client":null,
+                "capabilities":[]
+            }"#,
+        );
+        assert!(nested_unknown.is_err());
+    }
     #[test]
     fn execution_request_accepts_server_client_and_dual_targets_with_scoped_access() {
         let request = AddonExecutionRequest {
