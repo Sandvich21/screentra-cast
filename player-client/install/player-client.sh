@@ -5685,7 +5685,7 @@ def _resolve_touch_name(device_path: str | None, device_name: str | None = None)
     if not device_path:
         return None
     try:
-        blocks = Path('/proc/bus/input/devices').read_text().split('\n\n')
+        blocks = _read_bounded_path(Path('/proc/bus/input/devices'), 256 * 1024).split('\n\n')
         target = Path(device_path).name
         for block in blocks:
             if target not in block:
@@ -6199,7 +6199,11 @@ if command -v curl >/dev/null 2>&1; then
 else
   python3 - <<PY 2>/dev/null || echo "  renderer not reachable"
 import urllib.request
-print(urllib.request.urlopen("$RENDERER_URL/health", timeout=4).read().decode())
+with urllib.request.urlopen("$RENDERER_URL/health", timeout=4) as response:
+    data = response.read(65537)
+if len(data) > 65536:
+    raise ValueError('renderer health response too large')
+print(data.decode())
 PY
 fi
 echo
@@ -6793,8 +6797,14 @@ if command -v systemctl >/dev/null 2>&1; then
   #  startup hook; display 1+ are user browser services on wayland-0.
   DISPLAY_COUNT="$(python3 - "$INSTALL_DIR/config.json" <<'PY_DETECT'
 import json, sys
+from pathlib import Path
 try:
-    cfg=json.loads(open(sys.argv[1]).read())
+    path = Path(sys.argv[1])
+    with path.open('rb') as stream:
+        raw = stream.read((1 << 20) + 1)
+    if len(raw) > (1 << 20):
+        raise ValueError('config too large')
+    cfg=json.loads(raw.decode('utf-8'))
 except Exception:
     cfg={}
 installer=max(int(cfg.get('installer_detected_max_displays') or 1),1)
