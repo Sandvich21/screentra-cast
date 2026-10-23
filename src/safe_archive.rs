@@ -6,10 +6,51 @@
 
 use flate2::read::GzDecoder;
 use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use tar::{Archive, EntryType};
 
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
+const MAX_ARCHIVE_COMPRESSED_BYTES: u64 = 1 << 30;
+const MAX_ARCHIVE_UNCOMPRESSED_BYTES: u64 = 1 << 30;
+
+struct LimitedReader<R> {
+    inner: R,
+    remaining: u64,
+}
+
+impl<R: Read> Read for LimitedReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.remaining == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "archive decompressed size limit exceeded",
+            ));
+        }
+        let maximum = buffer.len().min(self.remaining as usize);
+        let read = self.inner.read(&mut buffer[..maximum])?;
+        self.remaining -= read as u64;
+        Ok(read)
+    }
+}
+
+fn open_archive(path: &Path) -> Result<Archive<LimitedReader<GzDecoder<File>>>, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| format!("inspect archive: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("archive is not a regular file".to_string());
+    }
+    if metadata.len() > MAX_ARCHIVE_COMPRESSED_BYTES {
+        return Err(format!(
+            "archive exceeds compressed size limit of {MAX_ARCHIVE_COMPRESSED_BYTES} bytes"
+        ));
+    }
+    let file = File::open(path).map_err(|error| format!("open archive: {error}"))?;
+    let decoder = GzDecoder::new(file);
+    Ok(Archive::new(LimitedReader {
+        inner: decoder,
+        remaining: MAX_ARCHIVE_UNCOMPRESSED_BYTES + 1,
+    }))
+}
 
 fn normalized_components(path: &Path) -> Result<Vec<std::ffi::OsString>, String> {
     let mut components = Vec::new();
@@ -77,9 +118,7 @@ fn inspect_entries<R: std::io::Read>(archive: &mut Archive<R>) -> Result<Vec<Str
 
 /// Validate a gzip-compressed tar archive and return its top-level names.
 pub fn inspect_tar_gz(path: &Path) -> Result<Vec<String>, String> {
-    let file = File::open(path).map_err(|error| format!("open archive: {error}"))?;
-    let decoder = GzDecoder::new(file);
-    let mut archive = Archive::new(decoder);
+    let mut archive = open_archive(path)?;
     inspect_entries(&mut archive)
 }
 
@@ -89,9 +128,7 @@ fn archive_contains_path_matching(
     prefix: bool,
 ) -> Result<bool, String> {
     let wanted = normalized_components(wanted_path)?;
-    let file = File::open(path).map_err(|error| format!("open archive: {error}"))?;
-    let decoder = GzDecoder::new(file);
-    let mut archive = Archive::new(decoder);
+    let mut archive = open_archive(path)?;
     let mut found = false;
     for (index, entry) in archive
         .entries()
@@ -187,9 +224,7 @@ pub fn extract_tar_gz(
         return Err("extraction root is not a real directory".to_string());
     }
 
-    let file = File::open(path).map_err(|error| format!("open archive: {error}"))?;
-    let decoder = GzDecoder::new(file);
-    let mut archive = Archive::new(decoder);
+    let mut archive = open_archive(path)?;
     for (index, entry) in archive
         .entries()
         .map_err(|error| format!("read archive entries: {error}"))?
@@ -277,6 +312,16 @@ mod tests {
             "screentra-safe-archive-{label}-{}",
             uuid::Uuid::new_v4()
         ))
+    }
+
+    #[test]
+    fn rejects_oversized_compressed_archives() {
+        let path = archive_path("oversized");
+        let file = File::create(&path).unwrap();
+        file.set_len(MAX_ARCHIVE_COMPRESSED_BYTES + 1).unwrap();
+        let error = inspect_tar_gz(&path).unwrap_err();
+        assert!(error.contains("compressed size limit"));
+        let _ = fs::remove_file(path);
     }
 
     fn make_archive<F>(label: &str, build: F) -> PathBuf
