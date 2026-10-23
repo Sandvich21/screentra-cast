@@ -6369,7 +6369,7 @@ echo
 
 echo "Renderer health:"
 if command -v curl >/dev/null 2>&1; then
-  curl -fsS --max-time 4 "$RENDERER_URL/health" || echo "  renderer not reachable"
+  curl -fsS --max-time 4 --max-filesize 65536 "$RENDERER_URL/health" || echo "  renderer not reachable"
 else
   python3 - <<PY 2>/dev/null || echo "  renderer not reachable"
 import urllib.request

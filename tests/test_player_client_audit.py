@@ -75,6 +75,7 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn('head -c 1048577', kiosk)
         self.assertIn('head -c 65537', kiosk)
         self.assertIn('head -c 2049 "$CLIENT_DIR/server"', kiosk)
+        self.assertIn('--max-filesize 65536 "$RENDERER_URL/health"', installer)
         self.assertIn('head -c 257 "$CLIENT_DIR/client-id"', kiosk)
         self.assertNotIn('python3 -c \'import sys; raise SystemExit(0 if "Screentra Cast Live Player" in sys.stdin.read()', installer)
         self.assertIn('head -c 65537', installer)
