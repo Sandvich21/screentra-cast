@@ -751,6 +751,17 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
     return ok, f'active display count set to {active}', details
 
 
+_TOUCH_DEVICE_RE = re.compile(r'^/dev/[A-Za-z0-9._:+@/-]{1,240}$')
+
+
+def _validate_touch_device_path(value: str | None) -> str | None:
+    if value is None or value == '':
+        return None
+    if not isinstance(value, str) or '..' in value or _TOUCH_DEVICE_RE.fullmatch(value) is None:
+        raise ValueError('touch device path is not allowlisted')
+    return value
+
+
 def _resolve_touch_name(device_path: str | None, device_name: str | None = None) -> str | None:
     if device_name:
         return str(device_name)
@@ -806,7 +817,7 @@ def apply_touch_binding(cache_dir: Path, payload: dict) -> tuple[bool, str, dict
         cfg = _read_json_file(config_path, {})
     except Exception:
         cfg = {}
-    dev_path = payload.get('device_path') or payload.get('path')
+    dev_path = _validate_touch_device_path(payload.get('device_path') or payload.get('path'))
     dev_name = _resolve_touch_name(dev_path, payload.get('device_name'))
     allow_joined = bool(payload.get('allow_joined_displays'))
     raw_indexes = payload.get('target_display_indexes') or payload.get('display_indexes') or payload.get('display_index') or [0]
@@ -1424,7 +1435,10 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'details': details, 'started_at': started}
 
     if action == 'set_touch_binding':
-        ok, msg, details = apply_touch_binding(Path(ctx['cache_dir']), payload)
+        try:
+            ok, msg, details = apply_touch_binding(Path(ctx['cache_dir']), payload)
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'details': details, 'started_at': started}
 
     if action == 'bluetooth_scan':
