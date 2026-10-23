@@ -24,11 +24,41 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 fn signage_data_dir() -> String {
     std::env::var("SIGNAGE_DATA_DIR").unwrap_or_else(|_| "/home/board/data".to_string())
+}
+
+fn bounded_command_status(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to spawn command: {error}"))?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("command exceeded its timeout".to_string());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("wait command: {error}"));
+            }
+        }
+    }
 }
 
 fn bounded_command_stdout(
@@ -268,10 +298,8 @@ pub fn restart_configured_service() -> Result<(), String> {
         command.arg("-n").arg("systemctl");
         command
     };
-    let status = command
-        .arg("restart")
-        .arg(&service)
-        .status()
+    command.arg("restart").arg(&service);
+    let status = bounded_command_status(command, Duration::from_secs(30))
         .map_err(|error| format!("restart {service}: {error}"))?;
     if status.success() {
         Ok(())
@@ -402,13 +430,14 @@ pub fn export_state_bundle(dest: &Path) -> Result<(), String> {
         .map_err(|e| format!("write manifest: {}", e))?;
 
     // 5. Tar it all up
-    let tar_status = Command::new("tar")
+    let mut tar_command = Command::new("tar");
+    tar_command
         .arg("-czf")
         .arg(dest)
         .arg("-C")
         .arg(stage.parent().unwrap_or(Path::new("/tmp")))
-        .arg(stage.file_name().unwrap())
-        .status();
+        .arg(stage.file_name().unwrap());
+    let tar_status = bounded_command_status(tar_command, Duration::from_secs(10 * 60));
     match tar_status {
         Ok(s) if s.success() => {
             // Best-effort cleanup
@@ -691,14 +720,15 @@ fn sign_update_manifest(manifest: &Path, signature: &Path) -> Result<(), String>
             key.display()
         ));
     }
-    let status = Command::new("openssl")
+    let mut command = Command::new("openssl");
+    command
         .args(["pkeyutl", "-sign", "-rawin", "-inkey"])
         .arg(&key)
         .args(["-in"])
         .arg(manifest)
         .args(["-out"])
-        .arg(signature)
-        .status()
+        .arg(signature);
+    let status = bounded_command_status(command, Duration::from_secs(30))
         .map_err(|e| format!("run update signing verifier: {e}"))?;
     if !status.success() {
         return Err("openssl could not sign update manifest".to_string());
@@ -720,14 +750,15 @@ fn verify_update_manifest_signature(
             public_key.display()
         ));
     }
-    let status = Command::new("openssl")
+    let mut command = Command::new("openssl");
+    command
         .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
         .arg(public_key)
         .args(["-sigfile"])
         .arg(signature)
         .args(["-in"])
-        .arg(manifest)
-        .status()
+        .arg(manifest);
+    let status = bounded_command_status(command, Duration::from_secs(30))
         .map_err(|e| format!("run update signature verification: {e}"))?;
     if !status.success() {
         return Err("manifest signature verification failed".to_string());
@@ -811,13 +842,14 @@ pub fn export_update_bundle(dest: &Path) -> Result<UpdateManifest, String> {
     }
 
     // 5. Tar it up
-    let tar_status = Command::new("tar")
+    let mut tar_command = Command::new("tar");
+    tar_command
         .arg("-czf")
         .arg(dest)
         .arg("-C")
         .arg(stage.parent().unwrap_or(Path::new("/tmp")))
-        .arg(stage.file_name().unwrap())
-        .status();
+        .arg(stage.file_name().unwrap());
+    let tar_status = bounded_command_status(tar_command, Duration::from_secs(10 * 60));
     match tar_status {
         Ok(s) if s.success() => {
             let _ = fs::remove_dir_all(&stage);
@@ -1415,6 +1447,15 @@ mod update_swap_tests {
         oversized.arg("x");
         let error = bounded_command_stdout(oversized, 1024).expect_err("oversized output should fail");
         assert!(error.contains("exceeded 1024 bytes"));
+    }
+
+    #[test]
+    fn bounded_command_status_terminates_timed_out_process() {
+        let mut command = Command::new("python3");
+        command.args(["-c", "import time; time.sleep(5)"]);
+        let error = bounded_command_status(command, Duration::from_millis(50))
+            .expect_err("timed-out command should be terminated");
+        assert!(error.contains("command exceeded its timeout"));
     }
 
     #[test]
