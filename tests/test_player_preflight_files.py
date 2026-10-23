@@ -18,6 +18,16 @@ class PlayerPreflightFileTests(unittest.TestCase):
     def test_command_runner_has_no_shell_fallback(self):
         self.assertEqual(preflight.run('echo attacker-controlled'), '')
 
+    def test_directory_check_rejects_symlinked_install_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            outside = root / 'outside'
+            outside.mkdir()
+            redirected = root / 'install'
+            redirected.symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                preflight._ensure_real_directory(redirected, create=True)
+
     def test_tls_context_rejects_symlinked_ca(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

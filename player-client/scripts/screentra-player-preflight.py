@@ -80,6 +80,23 @@ def has_display_session(retries: int = 6, retry_delay: float = 1.0) -> tuple[boo
             time.sleep(retry_delay)
     return False, "no Wayland/X11 display session detected (system-level screentra-cast-kiosk@.service is not active; install or start it from a TTY)"
 
+def _ensure_real_directory(path: Path, create: bool = False) -> bool:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            if not create:
+                return False
+            current.mkdir()
+            metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError('install directory is not a real directory')
+    return True
+
+
 def _read_real_file(path: Path, maximum: int = 256 * 1024) -> bytes:
     absolute = Path(os.path.abspath(os.fspath(path)))
     current = Path(absolute.anchor)
@@ -227,8 +244,12 @@ def main() -> int:
     install_dir = Path(os.environ.get("RIPLEY_CLIENT_DIR") or Path.home() / ".local/share/screentra-client")
     bin_dir = Path.home() / ".local/bin"
     systemd_user = Path.home() / ".config/systemd/user"
-    install_dir.mkdir(parents=True, exist_ok=True)
-    add("install dir", os.access(install_dir, os.W_OK), str(install_dir))
+    try:
+        _ensure_real_directory(install_dir, create=True)
+        install_writable = os.access(install_dir, os.W_OK)
+    except (OSError, ValueError):
+        install_writable = False
+    add("install dir", install_writable, str(install_dir))
     add("bin dir", os.access(bin_dir, os.W_OK) or os.access(bin_dir.parent, os.W_OK), str(bin_dir))
     add("systemd user dir", True, str(systemd_user))
 
