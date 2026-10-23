@@ -2123,9 +2123,9 @@ fn verify_trusted_service_manifest_signature(
         .arg(manifest_path)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .status()
         .map_err(io_error)?;
-    if !result.status.success() {
+    if !result.success() {
         return Err(AddonError::Invalid(
             "Trusted service manifest signature verification failed".to_string(),
         ));
@@ -2159,7 +2159,7 @@ fn verify_trusted_service_image_signature(
         digest_file
             .write_all(image_digest.as_bytes())
             .map_err(io_error)?;
-        let output = Command::new(trusted_service_signature_verifier_executable())
+        let status = Command::new(trusted_service_signature_verifier_executable())
             .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
             .arg(&public_key)
             .args(["-sigfile"])
@@ -2168,9 +2168,9 @@ fn verify_trusted_service_image_signature(
             .arg(&digest_path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .output()
+            .status()
             .map_err(io_error)?;
-        if !output.status.success() {
+        if !status.success() {
             return Err(AddonError::Invalid(
                 "Trusted service image signature verification failed".to_string(),
             ));
@@ -2642,9 +2642,9 @@ fn verify_manifest_signature(manifest: &Path, signature: &Path) -> Result<(), Ad
         .arg(manifest)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .status()
         .map_err(io_error)?;
-    if !result.status.success() {
+    if !result.success() {
         return Err(AddonError::Invalid(
             "Addon manifest signature verification failed".to_string(),
         ));
