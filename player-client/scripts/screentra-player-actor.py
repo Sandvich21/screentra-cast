@@ -707,7 +707,7 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
         env = os.environ.copy()
         env.setdefault('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
         env.setdefault('WAYLAND_DISPLAY', 'wayland-0')
-        out = subprocess.check_output(['wlr-randr', '--json'], text=True, stderr=subprocess.DEVNULL, timeout=3, env=env)
+        out = _require_bounded_text(subprocess.check_output(['wlr-randr', '--json'], text=True, stderr=subprocess.DEVNULL, timeout=3, env=env), MAX_WLR_JSON_BYTES)
         data = json.loads(out)
         outputs = [o for o in data if o.get('name')]
         outputs.sort(key=lambda o: o.get('name',''))
@@ -973,6 +973,13 @@ def _upload_preview_frame(server: str, client_id: str, display_index: int, frame
 
 
 MAX_PREVIEW_FRAME_BYTES = 16 * 1024 * 1024
+MAX_WLR_JSON_BYTES = 1 << 20
+
+
+def _require_bounded_text(value: str, maximum: int) -> str:
+    if not isinstance(value, str) or len(value.encode('utf-8')) > maximum:
+        raise ValueError('process text exceeds its bound')
+    return value
 
 
 def _validate_preview_frame(frame: bytes) -> bytes:

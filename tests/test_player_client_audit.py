@@ -26,6 +26,8 @@ class PlayerClientAuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             actor._validate_preview_frame(frame)
         self.assertEqual(actor._validate_preview_frame(b'png'), b'png')
+        with self.assertRaises(ValueError):
+            actor._require_bounded_text('x' * (actor.MAX_WLR_JSON_BYTES + 1), actor.MAX_WLR_JSON_BYTES)
 
     def test_display_preview_rejects_boolean_timing(self):
         with mock.patch.object(actor.shutil, 'which', return_value='/usr/bin/grim'), mock.patch.object(actor, '_preview_connector', return_value='HDMI-A-1'):
