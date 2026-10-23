@@ -11,9 +11,14 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 
+MAX_SYSFS_VALUE_BYTES = 4096
+MAX_DISPLAYS = 8
+
+
 def _read(path: Path) -> str:
     try:
-        return path.read_text().strip()
+        with path.open('rb') as handle:
+            return handle.read(MAX_SYSFS_VALUE_BYTES).decode('utf-8', errors='replace').strip()
     except Exception:
         return ""
 
@@ -41,6 +46,10 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
     """
     drm_root = Path('/sys/class/drm')
     displays: List[Dict[str, Any]] = []
+    try:
+        display_limit = max(0, min(int(max_displays), MAX_DISPLAYS))
+    except (TypeError, ValueError):
+        display_limit = MAX_DISPLAYS
 
     if drm_root.exists():
         connectors = []
@@ -58,7 +67,7 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
         connectors.sort(key=lambda c: (0 if (c['status'] == 'connected' and c['enabled']) else 1, c['name']))
 
         for idx, conn in enumerate(connectors):
-            if idx >= max_displays:
+            if idx >= display_limit:
                 break
             entry = conn['entry']
             connector = conn['name'].split('-', 1)[1] if '-' in conn['name'] else conn['name']
