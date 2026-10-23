@@ -29,6 +29,13 @@ class PlayerClientAuditTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'exceeds 32 bytes'):
                 builder.read_bounded_text(path, 32)
 
+    def test_installer_output_drift_is_detectable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / 'player-client.sh'
+            output.write_bytes(b'rendered')
+            self.assertTrue(builder.output_matches('rendered', output))
+            self.assertFalse(builder.output_matches('changed', output))
+
     def test_preview_frame_is_bounded(self):
         frame = b'x' * (actor.MAX_PREVIEW_FRAME_BYTES + 1)
         with self.assertRaises(ValueError):

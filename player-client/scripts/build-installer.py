@@ -52,11 +52,7 @@ def replace_section(text: str, marker: str, src: Path) -> str:
     return text[:start] + "\n" + content + text[end:]
 
 
-def main():
-    deploy_server = None
-    if len(sys.argv) > 1 and sys.argv[1] == "--deploy-server":
-        deploy_server = Path(sys.argv[2])
-
+def render_installer() -> str:
     template = read_bounded_text(TEMPLATE, MAX_TEMPLATE_BYTES)
     for marker, src_path in SECTIONS.items():
         src = Path(src_path)
@@ -70,7 +66,42 @@ def main():
             print(f"  {marker} <- {src_path}")
         except ValueError as e:
             print(f"ERROR: marker '{marker}' not found in template: {e}")
-            sys.exit(1)
+            raise
+    return template
+
+
+def output_matches(rendered: str, output: Path) -> bool:
+    if not output.is_file():
+        return False
+    with output.open('rb') as existing:
+        return existing.read(len(rendered.encode()) + 1) == rendered.encode()
+
+
+def main():
+    deploy_server = None
+    check_only = '--check' in sys.argv[1:]
+    if '--deploy-server' in sys.argv[1:]:
+        index = sys.argv.index('--deploy-server')
+        if index + 1 >= len(sys.argv):
+            print('ERROR: --deploy-server requires a destination')
+            return 2
+        deploy_server = Path(sys.argv[index + 1])
+    if check_only and deploy_server:
+        print('ERROR: --check cannot be combined with --deploy-server')
+        return 2
+
+    try:
+        template = render_installer()
+    except (OSError, UnicodeError, ValueError) as error:
+        print(f"ERROR: {error}")
+        return 1
+
+    if check_only:
+        if output_matches(template, OUTPUT):
+            print(f"Verified {OUTPUT} is current")
+            return 0
+        print(f"ERROR: generated installer is stale: {OUTPUT}")
+        return 1
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(template)
@@ -80,7 +111,8 @@ def main():
         dest = deploy_server / "static/install/player-client.sh"
         dest.write_text(template)
         print(f"Deployed to {dest}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
