@@ -28,6 +28,16 @@ ADMIN_SERVICE="$SYSTEMD_USER_DIR/screentra-client-admin.service"
 KIOSK_SERVICE="$SYSTEMD_USER_DIR/screentra-kiosk-browser@.service"
 SYSTEMD_KIOSK_UNIT="/etc/systemd/system/screentra-cast-kiosk@.service"
 INSTALLER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+MAX_SERVER_URL_BYTES=2048
+
+read_saved_server_url() {
+    local value
+    value="$(head -c "$((MAX_SERVER_URL_BYTES + 1))" "$1" 2>/dev/null || true)"
+    if [ "${#value}" -gt "$MAX_SERVER_URL_BYTES" ]; then
+        return 1
+    fi
+    printf '%s' "$value"
+}
 
 discover_server() {
     local result
@@ -84,7 +94,7 @@ if printf '%s' "$VERSION" | grep -qE '[^A-Za-z0-9._-]'; then
 fi
 printf "%s\n" "$VERSION" > "$INSTALL_DIR/VERSION"
 if [ -z "$SERVER_URL" ] && [ -f "$INSTALL_DIR/server" ]; then
-    SERVER_URL="$(cat "$INSTALL_DIR/server" 2>/dev/null || true)"
+    SERVER_URL="$(read_saved_server_url "$INSTALL_DIR/server" 2>/dev/null || true)"
 fi
 if [ -z "$SERVER_URL" ]; then
     if discover_server; then

@@ -36,6 +36,11 @@ class PlayerClientAuditTests(unittest.TestCase):
             self.assertTrue(builder.output_matches('rendered', output))
             self.assertFalse(builder.output_matches('changed', output))
 
+    def test_canonical_installer_bounds_saved_server_reads(self):
+        canonical = (ROOT / 'player-client/install/player-client.sh').read_text()
+        self.assertIn('MAX_SERVER_URL_BYTES=2048', canonical)
+        self.assertIn('read_saved_server_url', canonical)
+
     def test_preview_frame_is_bounded(self):
         frame = b'x' * (actor.MAX_PREVIEW_FRAME_BYTES + 1)
         with self.assertRaises(ValueError):
