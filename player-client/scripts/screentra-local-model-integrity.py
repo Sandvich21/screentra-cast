@@ -19,6 +19,7 @@ from typing import Final
 MAX_MODEL_ID_BYTES: Final = 64
 SHA256_HEX_BYTES: Final = 64
 MAX_MODEL_BYTES: Final = 512 * 1024 * 1024
+MAX_PATH_BYTES: Final = 4096
 HASH_CHUNK_BYTES: Final = 1024 * 1024
 _MODEL_ID_RE: Final = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 _SHA256_RE: Final = re.compile(r'^[0-9a-f]{64}$')
@@ -43,7 +44,9 @@ def _path(value: object, field: str) -> Path:
         raise ModelIntegrityError(f'{field} is invalid')
     try:
         path = Path(value)
-    except (TypeError, ValueError, OSError) as exc:
+        if len(os.fspath(path).encode('utf-8')) > MAX_PATH_BYTES:
+            raise ModelIntegrityError(f'{field} is too long')
+    except (TypeError, ValueError, OSError, UnicodeEncodeError) as exc:
         raise ModelIntegrityError(f'{field} is invalid') from exc
     if not path.parts or any(part == '\x00' for part in path.parts):
         raise ModelIntegrityError(f'{field} is invalid')

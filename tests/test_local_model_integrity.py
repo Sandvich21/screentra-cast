@@ -59,6 +59,12 @@ class LocalModelIntegrityTests(unittest.TestCase):
             with self.subTest(model_id=repr(model_id)), self.assertRaises(integrity.ModelIntegrityError):
                 self.verify(model_id=model_id)
 
+    def test_model_paths_are_bounded(self):
+        with self.assertRaises(integrity.ModelIntegrityError):
+            self.verify(model_path='x' * (integrity.MAX_PATH_BYTES + 1))
+        with self.assertRaises(integrity.ModelIntegrityError):
+            self.verify(approved_model_root='/' + ('x' * integrity.MAX_PATH_BYTES))
+
     def test_digest_must_be_exact_lowercase_sha256(self):
         for digest in (
             self.digest.upper(),
