@@ -1035,6 +1035,8 @@ def _preview_process_alive(pid_path: Path) -> bool:
 
 
 def start_display_preview(ctx: dict, display_index: int, payload: dict) -> tuple[bool, str, dict]:
+    if not isinstance(payload, dict):
+        return False, 'preview payload must be an object', {}
     cache_dir = Path(ctx['cache_dir'])
     _ensure_real_directory(cache_dir, create=True)
     if shutil.which('grim') is None:
@@ -1049,9 +1051,13 @@ def start_display_preview(ctx: dict, display_index: int, payload: dict) -> tuple
     if _preview_process_alive(pid_path):
         return True, 'display preview is already running', {'display_index': display_index}
     try:
-        interval = max(1, min(int(payload.get('interval_seconds') or 5), 30))
-        duration = max(10, min(int(payload.get('duration_seconds') or 120), 300))
-    except (TypeError, ValueError):
+        raw_interval = payload.get('interval_seconds', 5)
+        raw_duration = payload.get('duration_seconds', 120)
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in (raw_interval, raw_duration)):
+            raise ValueError
+        interval = max(1, min(raw_interval, 30))
+        duration = max(10, min(raw_duration, 300))
+    except (TypeError, ValueError, OverflowError):
         return False, 'preview interval and duration must be numeric', {}
     command = [
         sys.executable, str(Path(__file__).resolve()), '--preview-loop',
