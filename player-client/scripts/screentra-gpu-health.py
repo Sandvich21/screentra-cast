@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -64,10 +66,38 @@ def _bound_gpu_name(value: str) -> str:
 
 
 def _run(args: list[str], timeout: float = 2.0) -> tuple[int, str, str]:
+    process = None
     try:
-        p = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
-        return p.returncode, _bound_subprocess_output(p.stdout or '').strip(), _bound_subprocess_output(p.stderr or '').strip()
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        selector = selectors.DefaultSelector()
+        stdout = bytearray()
+        stderr = bytearray()
+        for stream, buffer in ((process.stdout, stdout), (process.stderr, stderr)):
+            selector.register(stream, selectors.EVENT_READ, buffer)
+        deadline = time.monotonic() + timeout
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('subprocess timed out')
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fileobj.fileno(), 8192)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                        continue
+                    buffer = key.data
+                    if len(buffer) + len(chunk) > MAX_SUBPROCESS_OUTPUT_BYTES:
+                        raise ValueError('subprocess output exceeded its limit')
+                    buffer.extend(chunk)
+        finally:
+            selector.close()
+        returncode = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+        return returncode, _bound_subprocess_output(stdout.decode('utf-8', errors='replace')).strip(), _bound_subprocess_output(stderr.decode('utf-8', errors='replace')).strip()
     except Exception as e:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
         return 127, '', _bound_subprocess_output(str(e))
 
 

@@ -430,8 +430,8 @@ def _nl_status():
 
 # === local admin / easy-setup page ===========================================
 
-def _bounded_run(args, timeout=5, stdout_max=12000, stderr_max=4000):
-    process = _sp.Popen(args, stdout=_sp.PIPE, stderr=_sp.PIPE)
+def _bounded_run(args, timeout=5, stdout_max=12000, stderr_max=4000, env=None):
+    process = _sp.Popen(args, stdout=_sp.PIPE, stderr=_sp.PIPE, env=env)
     selector = selectors.DefaultSelector()
     assert process.stdout is not None and process.stderr is not None
     selector.register(process.stdout, selectors.EVENT_READ, ('stdout', stdout_max))
@@ -476,9 +476,9 @@ def _bounded_run(args, timeout=5, stdout_max=12000, stderr_max=4000):
                     pass
 
 
-def _safe_run(args, timeout=5):
+def _safe_run(args, timeout=5, env=None):
     try:
-        code, output = _bounded_run(args, timeout=timeout)
+        code, output = _bounded_run(args, timeout=timeout, env=env)
         return {'ok': code == 0, 'code': code, 'stdout': output['stdout'], 'stderr': output['stderr']}
     except Exception as e:
         return {'ok': False, 'code': None, 'stdout': '', 'stderr': _bound_text(str(e), MAX_ERROR_BYTES)}
@@ -687,9 +687,11 @@ def _sysfs_outputs() -> list[dict]:
 def _wlr_outputs() -> list[dict]:
     env = {**os.environ, 'XDG_RUNTIME_DIR': os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'), 'WAYLAND_DISPLAY': os.environ.get('WAYLAND_DISPLAY', 'wayland-0')}
     try:
-        completed = _sp.run(['wlr-randr', '--json'], stdout=_sp.PIPE, stderr=_sp.DEVNULL, text=True, timeout=3, env=env, check=False)
+        completed = _safe_run(['wlr-randr', '--json'], timeout=3, env=env)
+        if completed.get('code') != 0:
+            raise ValueError('wlr-randr failed')
         data = json.loads(
-            _bound_text(completed.stdout or '', MAX_JSON_FILE_BYTES),
+            _bound_text(completed.get('stdout') or '', MAX_JSON_FILE_BYTES),
             parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
         )
         if not isinstance(data, list):

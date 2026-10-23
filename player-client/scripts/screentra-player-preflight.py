@@ -14,6 +14,7 @@ from __future__ import annotations
 
 
 import os
+import selectors
 import shutil
 import time
 import ssl
@@ -163,6 +164,38 @@ def _bound_local_probe_output(value: str) -> str:
     return encoded[:MAX_LOCAL_PROBE_OUTPUT_BYTES].decode('utf-8', errors='ignore')
 
 
+def _run_bounded_probe(args, maximum=MAX_LOCAL_PROBE_OUTPUT_BYTES, timeout=3):
+    process = None
+    try:
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        selector = selectors.DefaultSelector()
+        output = bytearray()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('probe timed out')
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fileobj.fileno(), 8192)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                        continue
+                    if len(output) + len(chunk) > maximum:
+                        raise ValueError('probe output exceeded its limit')
+                    output.extend(chunk)
+        finally:
+            selector.close()
+        return process.wait(timeout=max(0.1, deadline - time.monotonic())), bytes(output)
+    except Exception:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        return None, b''
+
+
 def _bound_error(value: str) -> str:
     encoded = str(value).encode('utf-8', errors='replace')
     return encoded[:MAX_ERROR_BYTES].decode('utf-8', errors='ignore')
@@ -178,8 +211,10 @@ def run(cmd: str) -> str:
     if args is None:
         return ''
     try:
-        completed = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3, check=False)
-        output = _bound_local_probe_output(completed.stdout or '')
+        returncode, raw = _run_bounded_probe(args)
+        if returncode != 0:
+            return ''
+        output = _bound_local_probe_output(raw.decode('utf-8', errors='replace'))
         return output.strip()
     except Exception:
         return ''
