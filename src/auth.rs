@@ -28,6 +28,9 @@ use url::Url;
 
 type HmacSha256 = Hmac<Sha256>;
 
+const MAX_SIGNED_TOKEN_BYTES: usize = 16 * 1024;
+const MAX_SIGNED_PAYLOAD_BYTES: usize = 8 * 1024;
+
 #[derive(Clone)]
 pub struct AuthState {
     key: Vec<u8>,
@@ -394,8 +397,17 @@ impl AuthState {
     }
 
     fn decode_signed_payload(&self, token: &str) -> Option<serde_json::Value> {
+        if token.len() > MAX_SIGNED_TOKEN_BYTES {
+            return None;
+        }
         let (body, sig) = token.rsplit_once('.')?;
+        if body.len() > MAX_SIGNED_PAYLOAD_BYTES * 2 || sig.len() > 256 {
+            return None;
+        }
         let payload_bytes: Vec<u8> = URL_SAFE_NO_PAD.decode(body.as_bytes()).ok()?;
+        if payload_bytes.len() > MAX_SIGNED_PAYLOAD_BYTES {
+            return None;
+        }
         let sig_bytes: Vec<u8> = URL_SAFE_NO_PAD.decode(sig.as_bytes()).ok()?;
         let mut mac = HmacSha256::new_from_slice(&self.key).ok()?;
         mac.update(&payload_bytes);
@@ -790,7 +802,13 @@ fn sign_google_state(mode: &str, username: Option<&str>) -> Option<String> {
     Some(format!("{}.{}", body64, sig))
 }
 fn verify_google_state(state: &str) -> Option<serde_json::Value> {
+    if state.len() > MAX_SIGNED_TOKEN_BYTES {
+        return None;
+    }
     let (body64, sig) = state.rsplit_once('.')?;
+    if body64.len() > MAX_SIGNED_PAYLOAD_BYTES * 2 || sig.len() > 256 {
+        return None;
+    }
     let mut mac = HmacSha256::new_from_slice(&state_key()?).ok()?;
     mac.update(body64.as_bytes());
     let expected = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
@@ -798,6 +816,9 @@ fn verify_google_state(state: &str) -> Option<serde_json::Value> {
         return None;
     }
     let body = URL_SAFE_NO_PAD.decode(body64.as_bytes()).ok()?;
+    if body.len() > MAX_SIGNED_PAYLOAD_BYTES {
+        return None;
+    }
     let value: serde_json::Value = serde_json::from_slice(&body).ok()?;
     let issued_at = value.get("iat")?.as_u64()?;
     let nonce = value.get("nonce")?.as_str()?;
@@ -1696,6 +1717,14 @@ mod tests {
         let new_body: String = chars.into_iter().collect();
         let tampered = format!("{}.{}", new_body, parts[1]);
         assert!(!s.verify(&tampered));
+    }
+
+    #[test]
+    fn oversized_signed_tokens_are_rejected_before_decode() {
+        let state = test_state();
+        assert!(state
+            .decode_signed_payload(&"x".repeat(MAX_SIGNED_TOKEN_BYTES + 1))
+            .is_none());
     }
 
     #[test]
