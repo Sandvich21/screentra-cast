@@ -330,22 +330,19 @@ pub async fn create_backup(
             .arg(format!("./{filename}"));
     }
 
-    let output = cmd
+    let status = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .output()
+        .status()
         .await;
     if let Some(path) = &postgres_dump_path {
         let _ = fs::remove_file(path);
     }
-    let output = output
+    let status = status
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if !stderr.is_empty() {
-            log::error!("backup tar creation failed: {stderr}");
-        }
+    if !status.success() {
+        log::error!("backup tar creation failed");
         let _ = fs::remove_file(&full_path);
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()));
     }

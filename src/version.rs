@@ -248,10 +248,12 @@ pub fn static_dir_path() -> PathBuf {
 
 pub fn uptime_seconds() -> u64 {
     // Read /proc/uptime — Linux-specific, but the kiosk is Linux.
-    if let Ok(s) = fs::read_to_string("/proc/uptime") {
-        if let Some(first) = s.split_whitespace().next() {
-            if let Ok(f) = first.parse::<f64>() {
-                return f as u64;
+    if let Ok(bytes) = read_bounded_file(Path::new("/proc/uptime"), 4096) {
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            if let Some(first) = s.split_whitespace().next() {
+                if let Ok(f) = first.parse::<f64>() {
+                    return f as u64;
+                }
             }
         }
     }
