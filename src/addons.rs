@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 const MANIFEST_FILE: &str = "manifest.json";
 const STATE_FILE: &str = "state.json";
+const MAX_ADDON_METADATA_BYTES: usize = 512 * 1024;
 const ROLLBACK_DIR: &str = ".rollback";
 const SUPPORTED_CLIENT_API_VERSION: &str = "1";
 const MAX_ID_LEN: usize = 64;
@@ -1267,7 +1268,8 @@ fn migrate_legacy_standard_renderer_fields() -> Result<Vec<AddonRecord>, AddonEr
 
         let manifest_path = dir.join(MANIFEST_FILE);
         checked_addon_file(&manifest_path, "standard addon manifest")?;
-        let manifest_text = fs::read_to_string(&manifest_path).map_err(io_error)?;
+        let manifest_text =
+            read_addon_metadata_text(&manifest_path, "standard addon manifest")?;
         let raw: serde_json::Value = serde_json::from_str(&manifest_text).map_err(io_error)?;
         let has_legacy_renderer = raw
             .get("widget_types")
@@ -1500,6 +1502,51 @@ fn io_error(error: impl std::fmt::Display) -> AddonError {
     AddonError::Io(error.to_string())
 }
 
+fn read_addon_metadata_text(path: &Path, description: &str) -> Result<String, AddonError> {
+    let metadata = fs::symlink_metadata(path).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AddonError::Invalid(format!("Invalid {description}")));
+    }
+    if metadata.len() > MAX_ADDON_METADATA_BYTES as u64 {
+        return Err(AddonError::Invalid(format!(
+            "{description} exceeds the {} byte limit",
+            MAX_ADDON_METADATA_BYTES
+        )));
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).map_err(io_error)?;
+    let opened_metadata = file.metadata().map_err(io_error)?;
+    if opened_metadata.file_type().is_symlink() || !opened_metadata.is_file() {
+        return Err(AddonError::Invalid(format!("Invalid {description}")));
+    }
+    if opened_metadata.len() > MAX_ADDON_METADATA_BYTES as u64 {
+        return Err(AddonError::Invalid(format!(
+            "{description} exceeds the {} byte limit",
+            MAX_ADDON_METADATA_BYTES
+        )));
+    }
+
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    file.take((MAX_ADDON_METADATA_BYTES as u64) + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
+    if bytes.len() > MAX_ADDON_METADATA_BYTES {
+        return Err(AddonError::Invalid(format!(
+            "{description} exceeds the {} byte limit",
+            MAX_ADDON_METADATA_BYTES
+        )));
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| AddonError::Invalid(format!("Invalid UTF-8 in {description}")))
+}
+
 fn checked_addon_file(path: &Path, description: &str) -> Result<(), AddonError> {
     let metadata = fs::symlink_metadata(path).map_err(io_error)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -1593,7 +1640,7 @@ fn read_record_without_rollback(dir: &Path) -> Result<AddonRecord, AddonError> {
     let state_path = dir.join(STATE_FILE);
     validate_private_addon_metadata_file(&manifest_path, "addon manifest")?;
     validate_private_addon_metadata_file(&state_path, "addon state")?;
-    let manifest_text = fs::read_to_string(&manifest_path).map_err(io_error)?;
+    let manifest_text = read_addon_metadata_text(&manifest_path, "addon manifest")?;
     let manifest: AddonManifest = serde_json::from_str(&manifest_text).map_err(io_error)?;
     if manifest.kind == "client_extension" {
         validate_client_extension_manifest(&manifest)?;
@@ -1617,7 +1664,7 @@ fn read_record_without_rollback(dir: &Path) -> Result<AddonRecord, AddonError> {
     } else {
         validate_manifest(&manifest)?;
     }
-    let state_text = fs::read_to_string(&state_path).map_err(io_error)?;
+    let state_text = read_addon_metadata_text(&state_path, "addon state")?;
     let state: AddonState = serde_json::from_str(&state_text).map_err(io_error)?;
     Ok(AddonRecord {
         manifest,
@@ -3045,6 +3092,30 @@ mod tests {
         let root = PathBuf::from("/tmp/screentra-trusted-service-root");
         let path = trusted_service_dir(&root, "trusted-addon").expect("valid addon id");
         assert_eq!(path, root.join("trusted-addon"));
+    }
+
+    #[test]
+    fn addon_metadata_reader_rejects_oversized_files() {
+        let path = std::env::temp_dir().join(format!(
+            "screentra-addon-metadata-limit-{}",
+            Uuid::new_v4()
+        ));
+        fs::write(&path, vec![b'x'; MAX_ADDON_METADATA_BYTES + 1]).unwrap();
+        let result = read_addon_metadata_text(&path, "addon metadata");
+        let _ = fs::remove_file(&path);
+        assert!(matches!(result, Err(AddonError::Invalid(message)) if message.contains("byte limit")));
+    }
+
+    #[test]
+    fn addon_metadata_reader_accepts_bounded_utf8_files() {
+        let path = std::env::temp_dir().join(format!(
+            "screentra-addon-metadata-valid-{}",
+            Uuid::new_v4()
+        ));
+        fs::write(&path, b"{\"enabled\":true}").unwrap();
+        let result = read_addon_metadata_text(&path, "addon metadata");
+        let _ = fs::remove_file(&path);
+        assert_eq!(result.unwrap(), "{\"enabled\":true}");
     }
 
     #[test]
