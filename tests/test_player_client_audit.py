@@ -64,6 +64,16 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn('head -c 2049 "$CLIENT_DIR/server"', kiosk)
         self.assertIn('head -c 257 "$CLIENT_DIR/client-id"', kiosk)
 
+    def test_embedded_heartbeat_reads_are_bounded(self):
+        installer = (ROOT / 'player-client/install/player-client.sh').read_text()
+        start = installer.index("cat > \"$HEARTBEAT\" <<'PY'\n") + len("cat > \"$HEARTBEAT\" <<'PY'\n")
+        end = installer.index('\nPY\nchmod +x "$HEARTBEAT"', start)
+        body = installer[start:end]
+        compile(body, 'embedded-heartbeat.py', 'exec')
+        self.assertIn('_read_bounded_response', body)
+        self.assertNotIn('r.read().decode()', body)
+        self.assertNotIn('Path(path).read_text()', body)
+
     def test_preview_frame_is_bounded(self):
         frame = b'x' * (actor.MAX_PREVIEW_FRAME_BYTES + 1)
         with self.assertRaises(ValueError):

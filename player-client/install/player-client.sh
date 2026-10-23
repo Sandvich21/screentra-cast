@@ -1182,6 +1182,22 @@ detect_displays = _mod.detect_displays
 from pathlib import Path
 
 MAX_JSON_FILE_BYTES = 1 << 20
+MAX_TEXT_RESPONSE_BYTES = 256 * 1024
+
+
+def _read_bounded_response(response, maximum):
+    data = response.read(maximum + 1)
+    if len(data) > maximum:
+        raise ValueError('server response exceeds its bound')
+    return data.decode('utf-8')
+
+
+def _read_bounded_path(path: Path, maximum):
+    with path.open('rb') as stream:
+        data = stream.read(maximum + 1)
+    if len(data) > maximum:
+        raise ValueError('local file exceeds its bound')
+    return data.decode('utf-8')
 
 
 def _read_json_file(path: Path, default):
@@ -1433,8 +1449,8 @@ def client_auth_token():
         str(Path.home() / '.local/share/screentra-client/client-auth-token'),
     )
     try:
-        return Path(path).read_text().strip()
-    except OSError:
+        return _read_bounded_path(Path(path), 512).strip()
+    except (OSError, ValueError):
         return ''
 
 
@@ -1448,7 +1464,7 @@ def poll_command(server, client_id):
     try:
         req = urllib.request.Request(url, headers=client_auth_headers())
         with urlopen_ripley(req, timeout=5) as r:
-            data = r.read().decode()
+            data = _read_bounded_response(r, MAX_TEXT_RESPONSE_BYTES)
             return json.loads(data)
     except urllib.error.HTTPError as e:
         if e.code in (401, 404, 429):
@@ -1463,7 +1479,7 @@ def ack_command(server, client_id):
     try:
         req = urllib.request.Request(url, headers=client_auth_headers(), method='DELETE')
         with urlopen_ripley(req, timeout=5) as r:
-            return r.read().decode()
+            return _read_bounded_response(r, MAX_TEXT_RESPONSE_BYTES)
     except Exception as e:
         print(f'ack failed: {e}', flush=True)
         return None
@@ -1502,7 +1518,7 @@ def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='
     try:
         req = urllib.request.Request(url, headers=client_auth_headers())
         with urlopen_ripley(req, timeout=10) as r:
-            data = json.loads(r.read().decode())
+            data = json.loads(_read_bounded_response(r, MAX_JSON_FILE_BYTES))
         # Preserve theme (set by heartbeat from local config, sent to server)
         # so it survives across config sync cycles.
         prev_path = Path(cache_dir, 'client-config.json')
@@ -1550,7 +1566,7 @@ def fetch_admin_users(server, client_id, cache_dir):
     try:
         req = urllib.request.Request(url, headers=client_auth_headers())
         with urlopen_ripley(req, timeout=10) as r:
-            data = json.loads(r.read().decode())
+            data = json.loads(_read_bounded_response(r, MAX_JSON_FILE_BYTES))
         users = data.get('users') or []
         if users:
             target = Path(cache_dir).parent / 'admin-users.json'
@@ -1576,7 +1592,7 @@ def post(server, data):
         method='POST',
     )
     with urlopen_ripley(req, timeout=10) as r:
-        return r.status, r.read().decode()
+        return r.status, _read_bounded_response(r, MAX_TEXT_RESPONSE_BYTES)
 
 
 def main():
@@ -1588,7 +1604,7 @@ def main():
         srv = Path.home() / '.local/share/screentra-client/server'
         if srv.exists():
             try:
-                v = srv.read_text().strip()
+                v = _read_bounded_path(srv, 4096).strip()
                 if v:
                     return v
             except Exception:
@@ -1656,7 +1672,7 @@ def main():
         # Track previous layout assignment to detect changes.
         prev_layout_path = Path(args.cache_dir) / 'previous-layout-id.txt'
         try:
-            previous_layout_id = prev_layout_path.read_text().strip() or None
+            previous_layout_id = _read_bounded_path(prev_layout_path, 4096).strip() or None
         except Exception:
             previous_layout_id = None
         cfg = fetch_config(args.server, data['client_id'], args.cache_dir, display_index=0, config_pattern=args.display_config_pattern)
