@@ -74,6 +74,15 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('r.read().decode()', body)
         self.assertNotIn('Path(path).read_text()', body)
 
+    def test_embedded_renderer_file_reads_are_bounded(self):
+        installer = (ROOT / 'player-client/install/player-client.sh').read_text()
+        start = installer.index("cat > \"$RENDERER\" <<'PY_RENDERER'\n") + len("cat > \"$RENDERER\" <<'PY_RENDERER'\n")
+        end = installer.index('\nPY_RENDERER\nchmod +x "$RENDERER"', start)
+        body = installer[start:end]
+        compile(body, 'embedded-renderer.py', 'exec')
+        self.assertIn('_read_bounded_path', body)
+        self.assertNotIn('.read_text()', body)
+
     def test_preview_frame_is_bounded(self):
         frame = b'x' * (actor.MAX_PREVIEW_FRAME_BYTES + 1)
         with self.assertRaises(ValueError):

@@ -1202,9 +1202,7 @@ def _read_bounded_path(path: Path, maximum):
 
 def _read_json_file(path: Path, default):
     try:
-        if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
-            return default
-        return json.loads(path.read_text(encoding='utf-8'))
+        return json.loads(_read_bounded_path(path, MAX_JSON_FILE_BYTES))
     except Exception:
         return default
 
@@ -2979,6 +2977,15 @@ from pathlib import Path
 
 MAX_REQUEST_BODY_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
+MAX_TEXT_FILE_BYTES = 256 * 1024
+
+
+def _read_bounded_path(path: Path, maximum: int, encoding: str = 'utf-8') -> str:
+    with path.open('rb') as stream:
+        data = stream.read(maximum + 1)
+    if len(data) > maximum:
+        raise ValueError('local file exceeds its bound')
+    return data.decode(encoding)
 
 
 def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
@@ -2991,9 +2998,7 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
 
 def _read_json_file(path: Path, default):
     try:
-        if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
-            return default
-        return json.loads(path.read_text(encoding='utf-8'))
+        return json.loads(_read_bounded_path(path, MAX_JSON_FILE_BYTES))
     except Exception:
         return default
 
@@ -3104,7 +3109,7 @@ def _nl_detect_touch_devices():
     if not p.exists():
         return devs
     cur = {}
-    for line in p.read_text().splitlines():
+    for line in _read_bounded_path(p, MAX_TEXT_FILE_BYTES).splitlines():
         if not line.strip():
             if cur:
                 devs.append(cur); cur = {}
@@ -3180,8 +3185,8 @@ def _lan_ip_for_admin() -> str | None:
 def _nl_status():
     cid_path = Path.home() / '.local/share/screentra-client/client-id'
     srv_path = Path.home() / '.local/share/screentra-client/server'
-    client_id = cid_path.read_text().strip() if cid_path.exists() else None
-    server_url = srv_path.read_text().strip() if srv_path.exists() else 'unknown'
+    client_id = _read_bounded_path(cid_path, 4096).strip() if cid_path.exists() else None
+    server_url = _read_bounded_path(srv_path, 4096).strip() if srv_path.exists() else 'unknown'
     last_path = Handler.cache_dir / 'last-heartbeat.json'
     last_seen = connection = last_layout = pairing_code = None
     if last_path.exists():
@@ -3431,14 +3436,14 @@ def _sysfs_outputs() -> list[dict]:
             status = d / 'status'
             if not status.exists():
                 continue
-            state = status.read_text().strip()
+            state = _read_bounded_path(status, 128).strip()
             if state != 'connected':
                 continue
             name = d.name.split('-', 1)[1]
             mode = None
             modes = d / 'modes'
             if modes.exists():
-                first = (modes.read_text().splitlines() or [''])[0]
+                first = (_read_bounded_path(modes, 4096).splitlines() or [''])[0]
                 if 'x' in first:
                     try:
                         w, h = first.split('x', 1)[0], first.split('x', 1)[1].split()[0]
@@ -3510,7 +3515,7 @@ def _sha256_file(path: Path) -> str | None:
 
 def _cert_info() -> dict:
     srv_path = Path.home() / '.local/share/screentra-client/server'
-    server_url = srv_path.read_text().strip().rstrip('/') if srv_path.exists() else ''
+    server_url = _read_bounded_path(srv_path, 4096).strip().rstrip('/') if srv_path.exists() else ''
     ca = _ca_file(); ca_exists = ca.exists() and ca.stat().st_size > 0
     verify = {'ok': False, 'error': 'server or CA missing'}
     parsed = urllib.parse.urlparse(server_url) if server_url else None
@@ -3532,7 +3537,7 @@ def _cert_info() -> dict:
 def _refresh_ca_from_server() -> dict:
     srv_path = Path.home() / '.local/share/screentra-client/server'
     if not srv_path.exists(): return {'ok': False, 'error': 'server file missing'}
-    server_url = srv_path.read_text().strip().rstrip('/')
+    server_url = _read_bounded_path(srv_path, 4096).strip().rstrip('/')
     if not server_url: return {'ok': False, 'error': 'server URL empty'}
     url = server_url + '/install/screentra-cast-signage-ca.crt'; out = _ca_file()
     try:
@@ -3555,7 +3560,7 @@ def _refresh_ca_from_server() -> dict:
 
 def _read_proc_stat_cpu() -> tuple[int, int] | None:
     try:
-        parts = Path('/proc/stat').read_text().splitlines()[0].split()[1:]
+        parts = _read_bounded_path(Path('/proc/stat'), 64 * 1024).splitlines()[0].split()[1:]
         vals = [int(x) for x in parts]
         idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
         total = sum(vals)
@@ -3581,7 +3586,7 @@ def _cpu_temp_c() -> float | None:
     candidates = []
     try:
         for z in Path('/sys/class/thermal').glob('thermal_zone*/temp'):
-            typ = z.parent.joinpath('type').read_text().strip().lower() if z.parent.joinpath('type').exists() else ''
+            typ = _read_bounded_path(z.parent.joinpath('type'), 256).strip().lower() if z.parent.joinpath('type').exists() else ''
             score = 0 if any(k in typ for k in ('cpu', 'x86_pkg_temp', 'k10temp', 'tctl', 'soc')) else 1
             candidates.append((score, z))
     except Exception:
@@ -3591,14 +3596,14 @@ def _cpu_temp_c() -> float | None:
             label = ''
             label_path = z.with_name(z.name.replace('_input', '_label'))
             if label_path.exists():
-                label = label_path.read_text().strip().lower()
+                label = _read_bounded_path(label_path, 256).strip().lower()
             score = 0 if any(k in label for k in ('cpu', 'tctl', 'tdie', 'package', 'soc')) else 2
             candidates.append((score, z))
     except Exception:
         pass
     for _, path in sorted(candidates, key=lambda x: x[0]):
         try:
-            raw = int(path.read_text().strip())
+            raw = int(_read_bounded_path(path, 128).strip())
             c = raw / 1000.0 if raw > 1000 else float(raw)
             if -20.0 < c < 130.0:
                 return round(c, 1)
@@ -3609,7 +3614,7 @@ def _cpu_temp_c() -> float | None:
 def _ram_usage() -> dict:
     info = {}
     try:
-        for line in Path('/proc/meminfo').read_text().splitlines():
+        for line in _read_bounded_path(Path('/proc/meminfo'), 64 * 1024).splitlines():
             k, v = line.split(':', 1)
             info[k] = int(v.strip().split()[0]) * 1024
         total = info.get('MemTotal') or 0
@@ -3638,7 +3643,7 @@ def _gpu_usage() -> dict:
     out = {'percent': None, 'device': None, 'source': None, 'available': False, 'health': 'unknown', 'health_notes': ['GPU helper not installed yet']}
     try:
         for busy in sorted(Path('/sys/class/drm').glob('card*/device/gpu_busy_percent')):
-            raw = busy.read_text().strip()
+            raw = _read_bounded_path(busy, 128).strip()
             out.update({'percent': float(raw), 'device': busy.parent.parent.name, 'source': str(busy), 'available': True, 'method': 'drm-gpu_busy_percent', 'health': 'ok'})
             return out
     except Exception as e:
@@ -3796,7 +3801,7 @@ def _auth_secret() -> bytes:
         p.write_text(secrets.token_urlsafe(32))
         try: os.chmod(p, 0o600)
         except Exception: pass
-    return p.read_text().strip().encode()
+    return _read_bounded_path(p, 512).strip().encode()
 
 def _password_hash(password: str, salt: str | None = None) -> str:
     salt = salt or secrets.token_hex(16)
@@ -4024,7 +4029,7 @@ def _live_player_url() -> str | None:
         try:
             server_path = Path.home() / '.local/share/screentra-client/server'
             if server_path.exists():
-                server = server_path.read_text().strip()
+                server = _read_bounded_path(server_path, 4096).strip()
         except Exception:
             pass
     server = server.rstrip('/')
@@ -4042,7 +4047,7 @@ def _client_id_from_cache() -> str | None:
     try:
         cid_path = Path.home() / '.local/share/screentra-client/client-id'
         if cid_path.exists():
-            v = cid_path.read_text().strip()
+            v = _read_bounded_path(cid_path, 4096).strip()
             return v or None
     except Exception:
         pass
@@ -4078,7 +4083,7 @@ def _connector_for_display_index(display_index: int) -> str | None:
                     status_path = d / 'status'
                     if not status_path.exists():
                         continue
-                    if status_path.read_text().strip() != 'connected':
+                    if _read_bounded_path(status_path, 128).strip() != 'connected':
                         continue
                     mode_path = d / 'modes'
                     if mode_path.exists():
@@ -4525,7 +4530,7 @@ from pathlib import Path
 
 def _read(path: Path) -> str | None:
     try:
-        return path.read_text(errors='replace').strip()
+        return _read_bounded_path(path, 256 * 1024, 'utf-8').strip()
     except Exception:
         return None
 
@@ -4788,7 +4793,7 @@ from typing import List, Dict, Any, Optional
 
 def _read(path: Path) -> str:
     try:
-        return path.read_text().strip()
+        return _read_bounded_path(path, 4096).strip()
     except Exception:
         return ""
 
@@ -4937,7 +4942,7 @@ def load_config(config_path: Path) -> Dict[str, Any]:
     if not config_path.exists():
         return dict(CONFIG_DEFAULTS)
     try:
-        cfg = json.loads(config_path.read_text())
+        cfg = json.loads(_read_bounded_path(config_path, MAX_JSON_FILE_BYTES))
     except Exception:
         # Corrupt config.json → return defaults but don't clobber; caller decides.
         return dict(CONFIG_DEFAULTS)
