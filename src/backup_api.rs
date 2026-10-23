@@ -12,7 +12,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path as StdPath, PathBuf};
 use std::process::Stdio;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -537,16 +537,36 @@ fn cleanup_postgres_rollback_dump(path: Option<&StdPath>) {
 }
 
 async fn sha256_file(path: &str) -> Result<String, String> {
-    let output = Command::new("sha256sum")
+    const MAX_HASH_COMMAND_OUTPUT_BYTES: usize = 4096;
+    let mut child = Command::new("sha256sum")
         .arg(path)
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
-        .await
+        .spawn()
         .map_err(|e| format!("sha256sum: {}", e))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "sha256sum stdout unavailable".to_string())?;
+    let mut bytes = Vec::new();
+    stdout
+        .take((MAX_HASH_COMMAND_OUTPUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| format!("sha256sum output: {}", e))?;
+    if bytes.len() > MAX_HASH_COMMAND_OUTPUT_BYTES {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        return Err("sha256sum output exceeds its bound".to_string());
     }
-    let s = String::from_utf8_lossy(&output.stdout);
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("sha256sum wait: {}", e))?;
+    if !status.success() {
+        return Err("sha256sum failed".to_string());
+    }
+    let s = String::from_utf8_lossy(&bytes);
     Ok(s.split_whitespace().next().unwrap_or("").to_string())
 }
 
