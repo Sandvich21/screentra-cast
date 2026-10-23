@@ -21,6 +21,12 @@ actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 's
 
 
 class PlayerClientAuditTests(unittest.TestCase):
+    def test_preview_frame_is_bounded(self):
+        frame = b'x' * (actor.MAX_PREVIEW_FRAME_BYTES + 1)
+        with self.assertRaises(ValueError):
+            actor._validate_preview_frame(frame)
+        self.assertEqual(actor._validate_preview_frame(b'png'), b'png')
+
     def test_display_preview_rejects_boolean_timing(self):
         with mock.patch.object(actor.shutil, 'which', return_value='/usr/bin/grim'), mock.patch.object(actor, '_preview_connector', return_value='HDMI-A-1'):
             ok, message, details = actor.start_display_preview({'cache_dir': '/tmp/cache', 'server': 'https://example.test', 'client_id': 'client-1'}, 0, {'interval_seconds': True, 'duration_seconds': 120})

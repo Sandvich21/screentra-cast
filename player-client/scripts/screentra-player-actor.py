@@ -972,6 +972,15 @@ def _upload_preview_frame(server: str, client_id: str, display_index: int, frame
         return False, f'upload failed: {exc}'
 
 
+MAX_PREVIEW_FRAME_BYTES = 16 * 1024 * 1024
+
+
+def _validate_preview_frame(frame: bytes) -> bytes:
+    if not isinstance(frame, bytes) or not frame or len(frame) > MAX_PREVIEW_FRAME_BYTES:
+        raise ValueError('preview frame is not bounded')
+    return frame
+
+
 def run_preview_loop(server: str, client_id: str, cache_dir: Path, display_index: int, interval: int, duration: int) -> int:
     """Capture one physical Wayland display until stopped or the session expires."""
     pid_path = _preview_pid_path(cache_dir, display_index)
@@ -997,15 +1006,21 @@ def run_preview_loop(server: str, client_id: str, cache_dir: Path, display_index
                 _write_preview_state(cache_dir, display_index, {'status': 'error', 'connector': connector, 'message': f'capture failed: {exc}'})
                 time.sleep(interval)
                 continue
-            if capture.returncode != 0 or not capture.stdout:
+            try:
+                frame = _validate_preview_frame(capture.stdout)
+            except ValueError:
+                _write_preview_state(cache_dir, display_index, {'status': 'unavailable', 'connector': connector, 'message': 'grim capture exceeded the preview frame bound'})
+                time.sleep(interval)
+                continue
+            if capture.returncode != 0:
                 _write_preview_state(cache_dir, display_index, {'status': 'unavailable', 'connector': connector, 'message': 'grim could not capture the display'})
                 time.sleep(interval)
                 continue
-            ok, message = _upload_preview_frame(server, client_id, display_index, capture.stdout, cache_dir)
+            ok, message = _upload_preview_frame(server, client_id, display_index, frame, cache_dir)
             if ok:
                 _write_preview_state(cache_dir, display_index, {
                     'status': 'streaming', 'connector': connector, 'started_at': started,
-                    'last_frame_at': time.time(), 'bytes': len(capture.stdout),
+                    'last_frame_at': time.time(), 'bytes': len(frame),
                 })
             else:
                 _write_preview_state(cache_dir, display_index, {'status': 'error', 'connector': connector, 'message': message})
