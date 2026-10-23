@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 MAX_PSQL_OUTPUT_BYTES = 64 * 1024
 MAX_PSQL_INPUT_BYTES = 16 * 1024 * 1024
@@ -27,9 +28,34 @@ MAX_SQL_VALUE_BYTES = 8 * 1024 * 1024
 PSQL_TIMEOUT_SECONDS = 600
 
 
+def _sanitize_psql_args(args: list[str]) -> tuple[list[str], dict[str, str] | None]:
+    """Remove URL credentials from argv and pass them through libpq env vars."""
+    if len(args) < 2 or args[0] != 'psql' or '://' not in args[1]:
+        return args, None
+    parsed = urlsplit(args[1])
+    if not parsed.username and not parsed.password:
+        return args, None
+    if not parsed.hostname:
+        raise RuntimeError('PostgreSQL DSN has invalid host information')
+    host = parsed.hostname
+    if ':' in host and not host.startswith('['):
+        host = f'[{host}]'
+    netloc = host
+    if parsed.port is not None:
+        netloc += f':{parsed.port}'
+    safe_dsn = urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+    environment = os.environ.copy()
+    if parsed.username:
+        environment['PGUSER'] = unquote(parsed.username)
+    if parsed.password:
+        environment['PGPASSWORD'] = unquote(parsed.password)
+    return [args[0], safe_dsn, *args[2:]], environment
+
+
 def _run_psql(args: list[str], stdin: str | None = None) -> tuple[int, str, str]:
     input_file = None
     process = None
+    command_args, environment = _sanitize_psql_args(args)
     try:
         if stdin is not None:
             if len(stdin.encode('utf-8')) > MAX_PSQL_INPUT_BYTES:
@@ -39,10 +65,11 @@ def _run_psql(args: list[str], stdin: str | None = None) -> tuple[int, str, str]
             input_file.flush()
             input_file.seek(0)
         process = subprocess.Popen(
-            args,
+            command_args,
             stdin=input_file if input_file is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=environment,
         )
         selector = selectors.DefaultSelector()
         stdout = bytearray()
