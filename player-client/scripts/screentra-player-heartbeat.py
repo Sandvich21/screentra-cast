@@ -402,6 +402,7 @@ def client_auth_headers(token=None):
 
 ADDON_API_VERSION = '1'
 MAX_ADDON_PACKAGE_BYTES = 8 * 1024 * 1024
+MAX_ADDON_EXTRACTED_BYTES = 8 * 1024 * 1024
 MAX_ADDON_MEMBER_BYTES = 4 * 1024 * 1024
 MAX_ADDON_MANIFEST_BYTES = 256 * 1024
 MAX_ADDON_SIGNATURE_BYTES = 16 * 1024
@@ -748,6 +749,7 @@ def _extract_verified_addon_package(package_bytes, expected, staging_parent=None
     try:
         with tarfile.open(fileobj=io.BytesIO(package_bytes), mode='r:gz') as archive:
             seen = set()
+            extracted_bytes = 0
             for index, member in enumerate(archive):
                 if index >= 64:
                     raise ValueError('addon package contains too many members')
@@ -764,9 +766,13 @@ def _extract_verified_addon_package(package_bytes, expected, staging_parent=None
                     raise ValueError('addon package member cannot be read')
                 target = staging / name
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(source.read(member.size + 1))
-                if target.stat().st_size != member.size:
+                member_bytes = source.read(member.size + 1)
+                if len(member_bytes) != member.size:
                     raise ValueError('addon package member size changed while reading')
+                extracted_bytes += len(member_bytes)
+                if extracted_bytes > MAX_ADDON_EXTRACTED_BYTES:
+                    raise ValueError('addon package extracted data exceeds the client limit')
+                target.write_bytes(member_bytes)
         manifest_path = staging / 'manifest.json'
         signature_path = staging / 'manifest.sig'
         try:

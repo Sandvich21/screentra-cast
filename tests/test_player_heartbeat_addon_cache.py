@@ -160,6 +160,20 @@ class HeartbeatAddonCacheTests(unittest.TestCase):
                     output.getvalue(), {}, staging_parent=Path(temp)
                 )
 
+    def test_addon_package_extracted_member_limit_is_enforced(self):
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode='w:gz') as archive:
+            payload = b'x' * (4 * 1024 * 1024)
+            for index in range(3):
+                name = f'client/large-{index}.js'
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, 'extracted data'):
+                heartbeat._extract_verified_addon_package(
+                    output.getvalue(), {}, staging_parent=Path(temp)
+                )
     def write_cached_addon(self, temp, manifest=None, active=None, payload=b'console.log("inert");\\n'):
         manifest = manifest or self.package_manifest(payload=payload)
         addon_root = Path(temp) / 'addons'
