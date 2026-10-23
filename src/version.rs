@@ -20,9 +20,12 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 #[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 fn signage_data_dir() -> String {
     std::env::var("SIGNAGE_DATA_DIR").unwrap_or_else(|_| "/home/board/data".to_string())
@@ -37,27 +40,109 @@ fn bounded_command_stdout(
         .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|error| format!("spawn command: {error}"))?;
-    let mut output = Vec::new();
-    let read_result = child
+    let mut stdout = child
         .stdout
         .take()
-        .ok_or_else(|| "command stdout was not piped".to_string())?
-        .take((maximum as u64).saturating_add(1))
-        .read_to_end(&mut output);
-    if let Err(error) = read_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(format!("read command output: {error}"));
+        .ok_or_else(|| "command stdout was not piped".to_string())?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut output = Vec::new();
+    #[cfg(unix)]
+    {
+        let fd = stdout.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("configure command output pipe: failed to set nonblocking mode".to_string());
+        }
+        let mut eof = false;
+        loop {
+            if let Some(status) = child.try_wait().map_err(|error| format!("wait command: {error}"))? {
+                if !eof {
+                    let mut chunk = [0u8; 8192];
+                    loop {
+                        match stdout.read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(count) => {
+                                output.extend_from_slice(&chunk[..count]);
+                                if output.len() > maximum {
+                                    return Err(format!("command output exceeded {maximum} bytes"));
+                                }
+                            }
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(error) => return Err(format!("read command output: {error}")),
+                        }
+                    }
+                }
+                return Ok((status, output));
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("command exceeded 30 second timeout".to_string());
+            }
+            if !eof {
+                let mut poll_fd = libc::pollfd {
+                    fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
+                let poll_result = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+                if poll_result < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("poll command output: {error}"));
+                }
+                if poll_result == 0 {
+                    continue;
+                }
+                if poll_fd.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+                    let mut chunk = [0u8; 8192];
+                    match stdout.read(&mut chunk) {
+                        Ok(0) => eof = true,
+                        Ok(count) => {
+                            output.extend_from_slice(&chunk[..count]);
+                            if output.len() > maximum {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                return Err(format!("command output exceeded {maximum} bytes"));
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(error) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(format!("read command output: {error}"));
+                        }
+                    }
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
     }
-    if output.len() > maximum {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(format!("command output exceeded {maximum} bytes"));
+    #[cfg(not(unix))]
+    {
+        stdout
+            .take((maximum as u64).saturating_add(1))
+            .read_to_end(&mut output)
+            .map_err(|error| format!("read command output: {error}"))?;
+        if output.len() > maximum {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("command output exceeded {maximum} bytes"));
+        }
+        child
+            .wait()
+            .map(|status| (status, output))
+            .map_err(|error| format!("wait command: {error}"))
     }
-    child
-        .wait()
-        .map(|status| (status, output))
-        .map_err(|error| format!("wait command: {error}"))
 }
 
 const MAX_UPDATE_MANIFEST_BYTES: usize = 64 * 1024;
