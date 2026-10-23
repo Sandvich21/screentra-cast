@@ -1473,7 +1473,7 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
             if ok and (after_orientation != before_orientation or (requested_orientation is not None and after_orientation == requested_orientation)):
                 rc, out, err = _run_list(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'])
                 restarted = rc == 0
-                restart_message = out or err
+                restart_message = _bound_hardware_message(out or err)
             return {'action': action, 'display_index': display_index, 'all_displays': True, 'ok': ok and (restarted or (after_orientation == before_orientation and requested_orientation is None)), 'orientation_changed': after_orientation != before_orientation or requested_orientation is not None, 'kiosk_restarted': restarted, 'message': 'all display configs re-fetched' + ('; kiosk restarted for orientation change' if restarted else (': ' + restart_message if restart_message else '')), 'started_at': started}
         ok = fetch_config(ctx['server'], ctx['client_id'], Path(ctx['cache_dir']), display_index=display_index)
         after_orientation = before_orientation
@@ -1487,7 +1487,7 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
             restart_index = display_index if display_index is not None else 0
             rc, out, err = _run_list(['sudo', '-n', 'systemctl', 'restart', f'screentra-cast-kiosk@{restart_index}.service'])
             restarted = rc == 0
-            restart_message = out or err
+            restart_message = _bound_hardware_message(out or err)
         return {'action': action, 'display_index': display_index, 'ok': ok and (restarted or (after_orientation == before_orientation and requested_orientation is None)), 'orientation_changed': after_orientation != before_orientation or requested_orientation is not None, 'kiosk_restarted': restarted, 'message': 'config re-fetched' + ('; kiosk restarted for orientation change' if restarted else (': ' + restart_message if restart_message else '')), 'started_at': started}
 
     if action == 'refresh_cache':
@@ -1581,10 +1581,12 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         # optional: { "has_layout": true }        retry detect if display not found
         try:
             vcp = payload.get('vcp', '')
-            value = payload.get('value', 0)
+            value = _bounded_integer_input(payload.get('value', 0), 0, 65535, 'DDC value')
             bus = payload.get('bus')
             has_layout = payload.get('has_layout', False)
-            ok, msg = apply_ddc_control(str(vcp), int(value), bus=bus, has_layout=has_layout)
+            if not isinstance(vcp, str) or (bus is not None and not isinstance(bus, str)) or not isinstance(has_layout, bool):
+                raise ValueError('invalid DDC payload')
+            ok, msg = apply_ddc_control(vcp, value, bus=bus, has_layout=has_layout)
         except (TypeError, ValueError, OverflowError) as exc:
             return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
