@@ -6,9 +6,48 @@
 
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
+use futures_util::StreamExt;
+use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
+
+const MAX_TRAFFIC_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+async fn read_traffic_response_bytes(
+    response: reqwest::Response,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > (MAX_TRAFFIC_RESPONSE_BYTES + 1) as u64)
+    {
+        return Err(format!("{label} exceeds response size limit"));
+    }
+    let content_length = response.content_length();
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::with_capacity(
+        content_length
+            .unwrap_or(0)
+            .min(MAX_TRAFFIC_RESPONSE_BYTES as u64) as usize,
+    );
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("{label}: {error}"))?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_TRAFFIC_RESPONSE_BYTES {
+            return Err(format!("{label} exceeds response size limit"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+async fn read_traffic_response_json<T: DeserializeOwned>(
+    response: reqwest::Response,
+    label: &str,
+) -> Result<T, String> {
+    let bytes = read_traffic_response_bytes(response, label).await?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("{label}: {error}"))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrafficProvider {
@@ -1978,7 +2017,8 @@ async fn fetch_public_511_events(client: &reqwest::Client, query: &TrafficQuery)
         let layer = event.get("layer").and_then(|v| v.as_str()).unwrap_or("");
         let id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let url = format!("https://www.511pa.com/tooltip/{layer}/{id}?lang=en");
-        let html = client.get(url).send().await.ok()?.text().await.ok()?;
+        let response = client.get(url).send().await.ok()?;
+        let html = String::from_utf8(read_traffic_response_bytes(response, "Pennsylvania tooltip").await.ok()?).ok()?;
         let description = traffic_public_html_section(&html, "descSection")
             .map(traffic_public_html_text).unwrap_or_default();
         let title = html.find("<h4").and_then(|start| html[start..].find('>').map(|offset| start + offset + 1))
@@ -2029,10 +2069,7 @@ async fn fetch_maryland_events(
             upstream.status()
         ));
     }
-    let body: Value = upstream
-        .json()
-        .await
-        .map_err(|e| format!("Invalid Maryland CHART traffic response: {e}"))?;
+    let body: Value = read_traffic_response_json(upstream, "Invalid Maryland CHART traffic response").await?;
     Ok(normalize_maryland_events(&body, query))
 }
 
@@ -2148,10 +2185,7 @@ async fn fetch_new_york_events(
             upstream.status()
         ));
     }
-    let body: Value = upstream
-        .json()
-        .await
-        .map_err(|e| format!("Invalid New York 511 traffic response: {e}"))?;
+    let body: Value = read_traffic_response_json(upstream, "Invalid New York 511 traffic response").await?;
     Ok(normalize_new_york_events(&body, query))
 }
 
@@ -2325,10 +2359,7 @@ async fn fetch_saskatchewan_events(
             list_response.status()
         ));
     }
-    let list_body: Value = list_response
-        .json()
-        .await
-        .map_err(|e| format!("Invalid Saskatchewan 511 traffic response: {e}"))?;
+    let list_body: Value = read_traffic_response_json(list_response, "Invalid Saskatchewan 511 traffic response").await?;
     let mut coordinates = HashMap::new();
     for layer in ["Incidents", "Closures", "Construction"] {
         let url = format!("{SASKATCHEWAN_511_BASE}/map/mapIcons/{layer}");
@@ -2344,10 +2375,7 @@ async fn fetch_saskatchewan_events(
             ));
         }
         let body = decode_saskatchewan_json(
-            &response
-                .bytes()
-                .await
-                .map_err(|e| format!("Invalid Saskatchewan 511 map response bytes: {e}"))?,
+            &read_traffic_response_bytes(response, "Invalid Saskatchewan 511 map response").await?,
         )?;
         if let Some(items) = body.get("item2").and_then(Value::as_array) {
             for item in items {
@@ -2491,10 +2519,7 @@ async fn fetch_ibi511_events(
             list_response.status()
         ));
     }
-    let list_body: Value = list_response
-        .json()
-        .await
-        .map_err(|e| format!("Invalid IBI 511 traffic response: {e}"))?;
+    let list_body: Value = read_traffic_response_json(list_response, "Invalid IBI 511 traffic response").await?;
     let mut coordinates = HashMap::new();
     for layer in ["Incidents", "Closures", "Construction"] {
         let response = client
@@ -2506,10 +2531,7 @@ async fn fetch_ibi511_events(
             return Err(format!("IBI 511 map feed returned {}", response.status()));
         }
         let body = decode_saskatchewan_json(
-            &response
-                .bytes()
-                .await
-                .map_err(|e| format!("Invalid IBI 511 map response bytes: {e}"))?,
+            &read_traffic_response_bytes(response, "Invalid IBI 511 map response").await?,
         )?;
         if let Some(items) = body.get("item2").and_then(Value::as_array) {
             for item in items {
@@ -2541,27 +2563,23 @@ async fn fetch_nwt_events(
     client: &reqwest::Client,
     query: &TrafficQuery,
 ) -> Result<Vec<Value>, String> {
-    let path_body: Value = client
+    let path_response = client
         .get("https://drivenwt.ca/Home/GetJsonDataPath?installationIndex=0")
         .send()
         .await
-        .map_err(|e| format!("DriveNWT data path unavailable: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("Invalid DriveNWT data path response: {e}"))?;
+        .map_err(|e| format!("DriveNWT data path unavailable: {e}"))?;
+    let path_body: Value = read_traffic_response_json(path_response, "Invalid DriveNWT data path response").await?;
     let path = path_body
         .get("filePath")
         .and_then(Value::as_str)
         .ok_or_else(|| "DriveNWT did not provide a data path".to_string())?;
     let path = path.replace("/../", "/");
-    let data: Value = client
+    let data_response = client
         .get(format!("https://drivenwt.ca{path}"))
         .send()
         .await
-        .map_err(|e| format!("DriveNWT data feed unavailable: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("Invalid DriveNWT data response: {e}"))?;
+        .map_err(|e| format!("DriveNWT data feed unavailable: {e}"))?;
+    let data: Value = read_traffic_response_json(data_response, "Invalid DriveNWT data response").await?;
     let encoded = data
         .get("CoordsEncoded")
         .and_then(Value::as_str)
@@ -2742,10 +2760,7 @@ async fn fetch_manitoba_events(
                 upstream.status()
             ));
         }
-        let body: Value = upstream
-            .json()
-            .await
-            .map_err(|e| format!("Invalid Manitoba 511 traffic response: {e}"))?;
+        let body: Value = read_traffic_response_json(upstream, "Invalid Manitoba 511 traffic response").await?;
         if let Some(layer_features) = body.get("features").and_then(Value::as_array) {
             features.extend(layer_features.iter().cloned());
         }
@@ -2778,10 +2793,7 @@ async fn fetch_tennessee_waze_events(
             upstream.status()
         ));
     }
-    let body: Value = upstream
-        .json()
-        .await
-        .map_err(|e| format!("Invalid Tennessee Smartway traffic response: {e}"))?;
+    let body: Value = read_traffic_response_json(upstream, "Invalid Tennessee Smartway traffic response").await?;
     if let Some(error) = body.get("error") {
         return Err(format!("Tennessee Smartway traffic feed error: {error}"));
     }
@@ -3007,10 +3019,7 @@ async fn fetch_iteris_events(
                 upstream.status()
             ));
         }
-        let body: Value = upstream
-            .json()
-            .await
-            .map_err(|e| format!("Invalid {provider_name} traffic response: {e}"))?;
+        let body: Value = read_traffic_response_json(upstream, &format!("Invalid {provider_name} traffic response")).await?;
         if let Some(feed_features) = body.get("features").and_then(Value::as_array) {
             features.extend(feed_features.iter().cloned());
         }
@@ -3115,10 +3124,7 @@ async fn fetch_alabama_events(
         if !response.status().is_success() {
             return Err(format!("ALGO Traffic feed returned {}", response.status()));
         }
-        let body: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("Invalid ALGO Traffic response: {e}"))?;
+        let body: Value = read_traffic_response_json(response, "Invalid ALGO Traffic response").await?;
         if let Some(items) = body.as_array() {
             events.extend(items.iter().cloned());
         }
@@ -3204,10 +3210,7 @@ async fn fetch_arkansas_events(
     if !response.status().is_success() {
         return Err(format!("IDrive Arkansas traffic feed returned {}", response.status()));
     }
-    let body: Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Invalid IDrive Arkansas traffic response: {e}"))?;
+    let body: Value = read_traffic_response_json(response, "Invalid IDrive Arkansas traffic response").await?;
     Ok(normalize_arkansas_events(
         body.get("features").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]),
         query,
@@ -3264,10 +3267,7 @@ async fn fetch_nebraska_events(
     if !response.status().is_success() {
         return Err(format!("Nebraska 511 feed returned {}", response.status()));
     }
-    let body: Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Invalid Nebraska 511 response: {e}"))?;
+    let body: Value = read_traffic_response_json(response, "Invalid Nebraska 511 response").await?;
     if let Some(error) = body.get("error") {
         return Err(format!("Nebraska 511 query error: {error}"));
     }
@@ -3339,7 +3339,10 @@ async fn fetch_west_virginia_events(
     if !response.status().is_success() {
         return Err(format!("WV511 feed returned {}", response.status()));
     }
-    let body = response.text().await.map_err(|e| format!("Invalid WV511 response: {e}"))?;
+    let body = String::from_utf8(
+        read_traffic_response_bytes(response, "Invalid WV511 response").await?,
+    )
+    .map_err(|error| format!("Invalid WV511 response: {error}"))?;
     Ok(normalize_west_virginia_events(&body, query))
 }
 
@@ -3411,10 +3414,7 @@ async fn fetch_connecticut_events(
     if !response.status().is_success() {
         return Err(format!("CTroads traffic feed returned {}", response.status()));
     }
-    let body: Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Invalid CTroads traffic response: {e}"))?;
+    let body: Value = read_traffic_response_json(response, "Invalid CTroads traffic response").await?;
     let rows = body
         .get("data")
         .and_then(Value::as_array)
@@ -3431,10 +3431,7 @@ async fn fetch_connecticut_events(
         if !icons.status().is_success() {
             continue;
         }
-        let body: Value = icons
-            .json()
-            .await
-            .map_err(|e| format!("Invalid CTroads {layer} map response: {e}"))?;
+        let body: Value = read_traffic_response_json(icons, &format!("Invalid CTroads {layer} map response")).await?;
         if let Some(items) = body.get("item2").and_then(Value::as_array) {
             for item in items {
                 let Some(id) = item.get("itemId").map(ctroads_value_string) else {
@@ -3547,10 +3544,7 @@ async fn fetch_open511_bc_events(
             upstream.status()
         ));
     }
-    let body: Value = upstream
-        .json()
-        .await
-        .map_err(|e| format!("Invalid Open511 BC traffic response: {e}"))?;
+    let body: Value = read_traffic_response_json(upstream, "Invalid Open511 BC traffic response").await?;
     Ok(normalize_open511_bc_events(&body, query))
 }
 
@@ -3653,10 +3647,7 @@ async fn fetch_wzdx_events(
     if !upstream.status().is_success() {
         return Err(format!("WZDx traffic feed returned {}", upstream.status()));
     }
-    let mut body: Value = upstream
-        .json()
-        .await
-        .map_err(|e| format!("Invalid WZDx traffic response: {e}"))?;
+    let mut body: Value = read_traffic_response_json(upstream, "Invalid WZDx traffic response").await?;
     // Some public feeds incorrectly advertise a JSON document as a JSON string.
     if let Some(encoded) = body.as_str() {
         body = serde_json::from_str(encoded)
@@ -3804,10 +3795,7 @@ async fn fetch_penndot_events(
             upstream.status()
         ));
     }
-    let body: Value = upstream
-        .json()
-        .await
-        .map_err(|e| format!("Invalid PennDOT traffic response: {e}"))?;
+    let body: Value = read_traffic_response_json(upstream, "Invalid PennDOT traffic response").await?;
     Ok(normalize_penndot_events(&body, query))
 }
 
