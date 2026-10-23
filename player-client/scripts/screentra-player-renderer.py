@@ -32,6 +32,8 @@ MAX_INPUT_DEVICE_FILE_BYTES = 256 * 1024
 MAX_TOUCH_DEVICES = 128
 MAX_DISPLAY_OUTPUTS = 32
 MAX_TOUCH_NAME_BYTES = 128
+MAX_SYSTEM_METRICS_BYTES = 64 * 1024
+MAX_GPU_HELPER_OUTPUT_BYTES = 64 * 1024
 
 
 def _bound_text(value: str | None, maximum: int) -> str:
@@ -39,6 +41,11 @@ def _bound_text(value: str | None, maximum: int) -> str:
         return ''
     encoded = str(value).encode('utf-8', errors='replace')
     return encoded[:maximum].decode('utf-8', errors='ignore')
+
+
+def _read_bounded_path(path: Path, maximum: int) -> str:
+    with path.open('rb') as handle:
+        return handle.read(maximum).decode('utf-8', errors='replace')
 
 
 def client_pairing_code(client_id):
@@ -737,7 +744,7 @@ def _refresh_ca_from_server() -> dict:
 
 def _read_proc_stat_cpu() -> tuple[int, int] | None:
     try:
-        parts = Path('/proc/stat').read_text().splitlines()[0].split()[1:]
+        parts = _read_bounded_path(Path('/proc/stat'), MAX_SYSTEM_METRICS_BYTES).splitlines()[0].split()[1:]
         vals = [int(x) for x in parts]
         idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
         total = sum(vals)
@@ -763,7 +770,7 @@ def _cpu_temp_c() -> float | None:
     candidates = []
     try:
         for z in Path('/sys/class/thermal').glob('thermal_zone*/temp'):
-            typ = z.parent.joinpath('type').read_text().strip().lower() if z.parent.joinpath('type').exists() else ''
+            typ = _read_bounded_path(z.parent.joinpath('type'), 256).strip().lower() if z.parent.joinpath('type').exists() else ''
             score = 0 if any(k in typ for k in ('cpu', 'x86_pkg_temp', 'k10temp', 'tctl', 'soc')) else 1
             candidates.append((score, z))
     except Exception:
@@ -773,14 +780,14 @@ def _cpu_temp_c() -> float | None:
             label = ''
             label_path = z.with_name(z.name.replace('_input', '_label'))
             if label_path.exists():
-                label = label_path.read_text().strip().lower()
+                label = _read_bounded_path(label_path, 256).strip().lower()
             score = 0 if any(k in label for k in ('cpu', 'tctl', 'tdie', 'package', 'soc')) else 2
             candidates.append((score, z))
     except Exception:
         pass
     for _, path in sorted(candidates, key=lambda x: x[0]):
         try:
-            raw = int(path.read_text().strip())
+            raw = int(_read_bounded_path(path, 128).strip())
             c = raw / 1000.0 if raw > 1000 else float(raw)
             if -20.0 < c < 130.0:
                 return round(c, 1)
@@ -791,7 +798,7 @@ def _cpu_temp_c() -> float | None:
 def _ram_usage() -> dict:
     info = {}
     try:
-        for line in Path('/proc/meminfo').read_text().splitlines():
+        for line in _read_bounded_path(Path('/proc/meminfo'), MAX_SYSTEM_METRICS_BYTES).splitlines():
             k, v = line.split(':', 1)
             info[k] = int(v.strip().split()[0]) * 1024
         total = info.get('MemTotal') or 0
@@ -807,20 +814,22 @@ def _gpu_usage() -> dict:
     if helper.exists():
         try:
             r = _sp.run([sys.executable, str(helper)], stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, timeout=4, check=False)
-            if r.stdout.strip():
-                data = json.loads(r.stdout.strip().splitlines()[-1])
-                if r.stderr.strip():
-                    data.setdefault('stderr', r.stderr.strip()[-500:])
+            helper_stdout = _bound_text(r.stdout or '', MAX_GPU_HELPER_OUTPUT_BYTES)
+            helper_stderr = _bound_text(r.stderr or '', MAX_GPU_HELPER_OUTPUT_BYTES)
+            if helper_stdout.strip():
+                data = json.loads(helper_stdout.strip().splitlines()[-1])
+                if helper_stderr.strip():
+                    data.setdefault('stderr', helper_stderr.strip()[-500:])
                 return data
-            if r.stderr.strip():
-                return {'percent': None, 'device': None, 'source': str(helper), 'error': r.stderr.strip()[-500:]}
+            if helper_stderr.strip():
+                return {'percent': None, 'device': None, 'source': str(helper), 'error': helper_stderr.strip()[-500:]}
         except Exception as e:
             return {'percent': None, 'device': None, 'source': str(helper), 'error': str(e)}
     # Fallback for partial/upgrading installs: generic DRM busy percent.
     out = {'percent': None, 'device': None, 'source': None, 'available': False, 'health': 'unknown', 'health_notes': ['GPU helper not installed yet']}
     try:
         for busy in sorted(Path('/sys/class/drm').glob('card*/device/gpu_busy_percent')):
-            raw = busy.read_text().strip()
+            raw = _read_bounded_path(busy, 128).strip()
             out.update({'percent': float(raw), 'device': busy.parent.parent.name, 'source': str(busy), 'available': True, 'method': 'drm-gpu_busy_percent', 'health': 'ok'})
             return out
     except Exception as e:
