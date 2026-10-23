@@ -663,12 +663,25 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
         cfg = _read_json_file(config_path, {})
     except Exception:
         cfg = {}
-    installer = max(int(cfg.get('installer_detected_max_displays') or 1), 1)
+    if not isinstance(cfg, dict):
+        cfg = {}
+    try:
+        raw_installer = cfg.get('installer_detected_max_displays', 1)
+        if isinstance(raw_installer, bool):
+            raise ValueError
+        installer = max(1, min(int(raw_installer), 4))
+    except (TypeError, ValueError, OverflowError):
+        installer = 1
     if max_displays is None:
         override = None
-        active = min(installer, 4)
+        active = installer
     else:
-        override = max(1, min(int(max_displays), installer, 4))
+        try:
+            if isinstance(max_displays, bool):
+                raise ValueError
+            override = max(1, min(int(max_displays), installer, 4))
+        except (TypeError, ValueError, OverflowError):
+            return False, 'display count must be numeric', {}
         active = override
     cfg['installer_detected_max_displays'] = installer
     cfg['max_displays'] = override

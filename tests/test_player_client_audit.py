@@ -29,6 +29,13 @@ class PlayerClientAuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             actor._require_bounded_text('x' * (actor.MAX_WLR_JSON_BYTES + 1), actor.MAX_WLR_JSON_BYTES)
 
+    def test_display_count_rejects_malformed_values(self):
+        with tempfile.TemporaryDirectory() as temp:
+            ok, message, details = actor.apply_display_count(Path(temp) / 'cache', 'not-a-number')
+        self.assertFalse(ok)
+        self.assertIn('numeric', message)
+        self.assertEqual(details, {})
+
     def test_display_preview_rejects_boolean_timing(self):
         with mock.patch.object(actor.shutil, 'which', return_value='/usr/bin/grim'), mock.patch.object(actor, '_preview_connector', return_value='HDMI-A-1'):
             ok, message, details = actor.start_display_preview({'cache_dir': '/tmp/cache', 'server': 'https://example.test', 'client_id': 'client-1'}, 0, {'interval_seconds': True, 'duration_seconds': 120})
