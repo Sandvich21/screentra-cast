@@ -1,6 +1,7 @@
 use crate::display::detect_displays;
 use crate::models::SystemStatus;
 use std::fs;
+use std::io::Read;
 use sysinfo::System;
 
 pub fn get_system_status() -> SystemStatus {
@@ -48,8 +49,20 @@ pub fn get_system_status() -> SystemStatus {
     }
 }
 
+fn read_bounded_text(path: &str, maximum_bytes: usize) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take((maximum_bytes + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > maximum_bytes {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
 fn read_os_release() -> (String, String) {
-    let content = fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let content = read_bounded_text("/etc/os-release", 64 * 1024).unwrap_or_default();
     let mut name = String::from("Unknown");
     let mut version = String::from("Unknown");
     for line in content.lines() {
@@ -75,7 +88,7 @@ fn get_disk_info() -> (u64, u64) {
     let path = CString::new("/").unwrap();
 
     // We'll read from /proc/mounts as a simpler approach
-    let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let mounts = read_bounded_text("/proc/mounts", 1024 * 1024).unwrap_or_default();
     for line in mounts.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 3 && parts[1] == "/" && parts[2] == "ext4" {
