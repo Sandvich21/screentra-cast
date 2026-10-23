@@ -28,6 +28,20 @@ ADMIN_SERVICE="$SYSTEMD_USER_DIR/screentra-client-admin.service"
 KIOSK_SERVICE="$SYSTEMD_USER_DIR/screentra-kiosk-browser@.service"
 SYSTEMD_KIOSK_UNIT="/etc/systemd/system/screentra-cast-kiosk@.service"
 INSTALLER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+MAX_SERVER_URL_BYTES=2048
+
+read_bounded_file() {
+    local path="$1" maximum="$2" value
+    value="$(head -c "$((maximum + 1))" "$path" 2>/dev/null || true)"
+    if [ "${#value}" -gt "$maximum" ]; then
+        return 1
+    fi
+    printf '%s' "$value"
+}
+
+read_saved_server_url() {
+    read_bounded_file "$1" "$MAX_SERVER_URL_BYTES"
+}
 
 discover_server() {
     local result
@@ -49,6 +63,10 @@ import urllib.parse
 DISCOVERY_PROTOCOL = "screentra-cast-discovery-v1"
 DISCOVERY_REQUEST = b"SCREENTRA_CAST_DISCOVER_V1"
 MAX_RESPONSE_BYTES = 64 * 1024
+MAX_DISCOVERY_RECORDS = 128
+_DISCOVERY_FIELDS = frozenset({
+    "protocol", "server_name", "url", "ca_pem_b64", "ca_sha256",
+})
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -56,17 +74,20 @@ def sha256_bytes(value: bytes) -> str:
 
 
 def validate_record(raw: object) -> dict[str, str] | None:
-    if not isinstance(raw, dict) or raw.get("protocol") != DISCOVERY_PROTOCOL:
+    if not isinstance(raw, dict) or set(raw) != _DISCOVERY_FIELDS or raw.get("protocol") != DISCOVERY_PROTOCOL:
         return None
     name = raw.get("server_name")
     url = raw.get("url")
     ca_b64 = raw.get("ca_pem_b64")
     ca_hash = raw.get("ca_sha256")
-    if not isinstance(name, str) or not name.strip() or len(name) > 128:
+    try:
+        if not isinstance(name, str) or not name.strip() or len(name.encode('utf-8')) > 128:
+            return None
+        if not isinstance(url, str) or len(url.encode('utf-8')) > 512:
+            return None
+    except UnicodeEncodeError:
         return None
-    if any(ord(char) < 32 for char in name):
-        return None
-    if not isinstance(url, str) or len(url) > 512:
+    if any(ord(char) < 32 or ord(char) == 127 for char in name):
         return None
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
@@ -97,6 +118,26 @@ def validate_record(raw: object) -> dict[str, str] | None:
     }
 
 
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("discovery JSON contains duplicate fields")
+        result[key] = value
+    return result
+
+
+def _parse_discovery_json(text):
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non-standard JSON constant")),
+        )
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ValueError("discovery response is not valid JSON") from exc
+
+
 def discover(port: int, timeout: float) -> list[dict[str, str]]:
     request = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     request.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -113,12 +154,14 @@ def discover(port: int, timeout: float) -> list[dict[str, str]]:
             except socket.timeout:
                 continue
             try:
-                raw = json.loads(data.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
+                raw = _parse_discovery_json(data.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
                 continue
             record = validate_record(raw)
             if record:
                 records[(record["url"], record["ca_sha256"])] = record
+                if len(records) >= MAX_DISCOVERY_RECORDS:
+                    break
         return sorted(records.values(), key=lambda value: (value["server_name"].lower(), value["url"]))
     finally:
         request.close()
@@ -233,7 +276,7 @@ if printf '%s' "$VERSION" | grep -qE '[^A-Za-z0-9._-]'; then
 fi
 printf "%s\n" "$VERSION" > "$INSTALL_DIR/VERSION"
 if [ -z "$SERVER_URL" ] && [ -f "$INSTALL_DIR/server" ]; then
-    SERVER_URL="$(cat "$INSTALL_DIR/server" 2>/dev/null || true)"
+    SERVER_URL="$(read_saved_server_url "$INSTALL_DIR/server" 2>/dev/null || true)"
 fi
 if [ -z "$SERVER_URL" ]; then
     if discover_server; then
@@ -444,6 +487,22 @@ def bounded_read(response, limit: int) -> bytes:
     return data
 
 
+def bounded_read_text(path: pathlib.Path, limit: int, encoding: str = 'utf-8') -> str:
+    with path.open('rb') as stream:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise RuntimeError('local update file exceeded its size limit')
+    return data.decode(encoding)
+
+
+def bounded_read_file(path: pathlib.Path, limit: int) -> bytes:
+    with path.open('rb') as stream:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise RuntimeError('local update file exceeded its size limit')
+    return data
+
+
 def write_result(result_file: pathlib.Path, result: dict) -> None:
     temporary = result_file.with_name('.result.tmp')
     temporary.write_text(json.dumps(result, separators=(',', ':'))[:8192] + '\n', encoding='utf-8')
@@ -467,13 +526,13 @@ def main() -> int:
         raise RuntimeError('trusted update material is missing')
     if not request_file.is_file():
         raise RuntimeError('update request marker is missing')
-    marker = json.loads(request_file.read_text(encoding='utf-8')[:4096])
+    marker = json.loads(bounded_read_text(request_file, 4096))
     if not isinstance(marker, dict) or set(marker) - {'requested_at', 'client_id', 'reason'}:
         raise RuntimeError('update request marker is invalid')
-    token = auth_token_file.read_text(encoding='utf-8').strip()
+    token = bounded_read_text(auth_token_file, 512).strip()
     if not token or len(token) > 512:
         raise RuntimeError('client token is invalid')
-    current = digest_file.read_text(encoding='ascii').strip() if digest_file.is_file() else ''
+    current = bounded_read_text(digest_file, 128, 'ascii').strip() if digest_file.is_file() else ''
     if current and (len(current) != 64 or any(c not in '0123456789abcdef' for c in current.lower())):
         current = ''
     check_url = server + '/api/clients/' + urllib.parse.quote(client_id, safe='') + '/update-check?current_sha256=' + urllib.parse.quote(current, safe='')
@@ -503,16 +562,16 @@ def main() -> int:
             installer.write_bytes(bounded_read(response, MAX_INSTALLER))
         with urllib.request.urlopen(urllib.request.Request(signature_url, headers=headers), context=context, timeout=30) as response:
             signature.write_bytes(bounded_read(response, MAX_SIGNATURE))
-        actual_sha = hashlib.sha256(installer.read_bytes()).hexdigest()
+        actual_sha = hashlib.sha256(bounded_read_file(installer, MAX_INSTALLER)).hexdigest()
         if actual_sha != expected_sha:
             raise RuntimeError('update digest verification failed')
-        verify = subprocess.run(["openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-inkey", str(public_key_file), "-sigfile", str(signature), "-in", str(installer)], capture_output=True, timeout=20)
+        verify = subprocess.run(["openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-inkey", str(public_key_file), "-sigfile", str(signature), "-in", str(installer)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
         if verify.returncode != 0:
             raise RuntimeError('update signature verification failed')
         installer.chmod(0o700)
         environment = os.environ.copy()
         environment.update({'SCREENTRA_SERVER_URL': server, 'RIPLEY_CLIENT_ID': client_id, 'SCREENTRA_CLIENT_DIR': str(install_dir)})
-        completed = subprocess.run(['/bin/bash', str(installer)], env=environment, capture_output=True, text=True, timeout=300)
+        completed = subprocess.run(['/bin/bash', str(installer)], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
         if completed.returncode != 0:
             raise RuntimeError('verified installer failed')
         digest_file.parent.mkdir(parents=True, exist_ok=True)
@@ -740,7 +799,7 @@ install_gpu_telemetry_dependencies() {
     # If pciutils/lspci is not installed yet, fall back to DRM PCI vendor IDs.
     for vf in /sys/class/drm/card*/device/vendor; do
         [ -r "$vf" ] || continue
-        case "$(cat "$vf" 2>/dev/null | tr '[:upper:]' '[:lower:]')" in
+        case "$(read_bounded_file "$vf" 128 2>/dev/null | tr '[:upper:]' '[:lower:]')" in
             0x10de) vendors="$vendors nvidia" ;;
             0x8086) vendors="$vendors intel" ;;
             0x1002|0x1022) vendors="$vendors amd" ;;
@@ -1028,10 +1087,12 @@ from __future__ import annotations
 
 
 import os
+import selectors
 import shutil
 import time
 import ssl
 import socket
+import stat
 import subprocess
 import sys
 import urllib.request
@@ -1048,7 +1109,9 @@ def _seat_service_running() -> bool:
         try:
             r = subprocess.run(
                 ["systemctl", "--quiet", "is-active", f"screentra-cast-kiosk@{idx}.service"],
-                capture_output=True, text=True, timeout=2,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
             )
             if r.returncode == 0:
                 return True
@@ -1093,11 +1156,51 @@ def has_display_session(retries: int = 6, retry_delay: float = 1.0) -> tuple[boo
             time.sleep(retry_delay)
     return False, "no Wayland/X11 display session detected (system-level screentra-cast-kiosk@.service is not active; install or start it from a TTY)"
 
+def _ensure_real_directory(path: Path, create: bool = False) -> bool:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            if not create:
+                return False
+            current.mkdir()
+            metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError('install directory is not a real directory')
+    return True
+
+
+def _read_real_file(path: Path, maximum: int = 256 * 1024) -> bytes:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError('CA path contains a symlink')
+    descriptor = os.open(absolute, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+            raise ValueError('CA file is not bounded')
+        data = os.read(descriptor, maximum + 1)
+    finally:
+        os.close(descriptor)
+    if len(data) > maximum:
+        raise ValueError('CA file exceeds its bound')
+    return data
+
+
 def tls_context():
     cafile = os.environ.get('SCREENTRA_CA_CERT') or os.environ.get('RIPLEY_CA_CERT') or str(Path.home() / '.local/share/screentra-client/screentra-cast-signage-ca.crt')
     if cafile and Path(cafile).exists():
         try:
-            return ssl.create_default_context(cafile=cafile)
+            return ssl.create_default_context(
+                cadata=_read_real_file(Path(cafile)).decode('utf-8')
+            )
         except Exception as e:
             return None
     return None
@@ -1126,11 +1229,72 @@ def add(name: str, ok: bool, detail: str = "", required: bool = True) -> None:
     CHECKS.append({"name": name, "ok": ok, "detail": detail, "required": required})
 
 
-def run(cmd: str) -> str:
+MAX_LOCAL_PROBE_OUTPUT_BYTES = 4096
+MAX_ERROR_BYTES = 512
+
+
+def _bound_local_probe_output(value: str) -> str:
+    encoded = str(value).encode('utf-8', errors='replace')
+    return encoded[:MAX_LOCAL_PROBE_OUTPUT_BYTES].decode('utf-8', errors='ignore')
+
+
+def _run_bounded_probe(args, maximum=MAX_LOCAL_PROBE_OUTPUT_BYTES, timeout=3):
+    process = None
     try:
-        return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        selector = selectors.DefaultSelector()
+        output = bytearray()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('probe timed out')
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fileobj.fileno(), 8192)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                        continue
+                    if len(output) + len(chunk) > maximum:
+                        raise ValueError('probe output exceeded its limit')
+                    output.extend(chunk)
+        finally:
+            selector.close()
+        return process.wait(timeout=max(0.1, deadline - time.monotonic())), bytes(output)
     except Exception:
-        return ""
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        return None, b''
+    finally:
+        if process is not None and process.stdout is not None:
+            process.stdout.close()
+
+
+def _bound_error(value: str) -> str:
+    encoded = str(value).encode('utf-8', errors='replace')
+    return encoded[:MAX_ERROR_BYTES].decode('utf-8', errors='ignore')
+
+
+def run(cmd: str) -> str:
+    commands = {
+        "systemctl --user status >/dev/null 2>&1 && echo ok":
+            ['systemctl', '--user', 'status'],
+        'id -Gn': ['id', '-Gn'],
+    }
+    args = commands.get(cmd)
+    if args is None:
+        return ''
+    try:
+        returncode, raw = _run_bounded_probe(args)
+        if returncode != 0:
+            return ''
+        output = _bound_local_probe_output(raw.decode('utf-8', errors='replace'))
+        return output.strip()
+    except Exception:
+        return ''
 
 
 def find_browser() -> str | None:
@@ -1208,8 +1372,12 @@ def main() -> int:
     install_dir = Path(os.environ.get("RIPLEY_CLIENT_DIR") or Path.home() / ".local/share/screentra-client")
     bin_dir = Path.home() / ".local/bin"
     systemd_user = Path.home() / ".config/systemd/user"
-    install_dir.mkdir(parents=True, exist_ok=True)
-    add("install dir", os.access(install_dir, os.W_OK), str(install_dir))
+    try:
+        _ensure_real_directory(install_dir, create=True)
+        install_writable = os.access(install_dir, os.W_OK)
+    except (OSError, ValueError):
+        install_writable = False
+    add("install dir", install_writable, str(install_dir))
     add("bin dir", os.access(bin_dir, os.W_OK) or os.access(bin_dir.parent, os.W_OK), str(bin_dir))
     add("systemd user dir", True, str(systemd_user))
 
@@ -1224,7 +1392,7 @@ def main() -> int:
                 ok = r.status == 200
                 detail = f"status {r.status}"
         except Exception as e:
-            ok, detail = False, str(e)
+            ok, detail = False, _bound_error(str(e))
         add("server reachable", ok, f"{server} ({detail})")
     else:
         add("server url configured", False, "RIPLEY_SERVER_URL not set (will be sourced from install args or server file)", required=False)
@@ -1267,12 +1435,21 @@ echo "$SERVER_URL" > "$INSTALL_DIR/server"
 
 if [ ! -f "$CLIENT_ID_FILE" ]; then
   if [ -r /etc/machine-id ]; then
-    printf 'ripley-%s\n' "$(cat /etc/machine-id)" > "$CLIENT_ID_FILE"
+    machine_id="$(read_bounded_file /etc/machine-id 256 2>/dev/null || true)"
+    if [ -n "$machine_id" ]; then
+      printf 'ripley-%s\n' "$machine_id" > "$CLIENT_ID_FILE"
+    else
+      printf 'ripley-%s-%s\n' "$(hostname)" "$(date +%s)" > "$CLIENT_ID_FILE"
+    fi
   else
     printf 'ripley-%s-%s\n' "$(hostname)" "$(date +%s)" > "$CLIENT_ID_FILE"
   fi
 fi
-CLIENT_ID="$(cat "$CLIENT_ID_FILE")"
+CLIENT_ID="$(read_bounded_file "$CLIENT_ID_FILE" 256 2>/dev/null || true)"
+if [[ ! "$CLIENT_ID" =~ ^[A-Za-z0-9._-]{1,256}$ ]]; then
+  echo "ERROR: persisted client ID is missing or invalid." >&2
+  exit 1
+fi
 CLIENT_AUTH_TOKEN_FILE="$INSTALL_DIR/client-auth-token"
 if [ ! -s "$CLIENT_AUTH_TOKEN_FILE" ]; then
   umask 077
@@ -1301,6 +1478,7 @@ import os
 import posixpath
 import re
 import shutil
+import selectors
 import ssl
 import socket
 import stat
@@ -1329,6 +1507,23 @@ validate_status_report = _status_report_mod.validate_status_report
 from pathlib import Path
 
 MAX_JSON_FILE_BYTES = 1 << 20
+MAX_COMMAND_RESPONSE_BYTES = 64 * 1024
+MAX_TEXT_RESPONSE_BYTES = 64 * 1024
+MAX_PROC_METRICS_BYTES = 64 * 1024
+
+
+def _read_bounded_local_text(path: str, maximum: int = MAX_PROC_METRICS_BYTES) -> str:
+    with open(path, 'rb') as handle:
+        return handle.read(maximum).decode('utf-8', errors='replace')
+
+
+def _read_bounded_response(response, maximum):
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+        raise ValueError('response bound is invalid')
+    data = response.read(maximum + 1)
+    if not isinstance(data, (bytes, bytearray)) or len(data) > maximum:
+        raise ValueError('server response exceeds its bound')
+    return bytes(data).decode('utf-8')
 
 
 def client_pairing_code(client_id):
@@ -1339,20 +1534,34 @@ def client_pairing_code(client_id):
 
 def _read_json_file(path: Path, default):
     try:
-        if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
+        raw = _read_real_file(path)
+        if len(raw) > MAX_JSON_FILE_BYTES:
             return default
-        return json.loads(path.read_text(encoding='utf-8'))
+        return _parse_server_json(raw.decode('utf-8'))
     except Exception:
         return default
 
 
 def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     """Replace a cache JSON file atomically and keep it owner-readable."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
-    temporary.write_text(text)
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
+    _ensure_real_directory(path.parent, create=True)
+    os.chmod(path.parent, 0o700)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f'.{path.name}.', suffix='.tmp', dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _write_status_report(path: Path, status):
@@ -1413,17 +1622,71 @@ def _touch_binding():
         return None
 
 
-def run(cmd):
+MAX_LOCAL_PROBE_OUTPUT_BYTES = 4096
+
+
+def _bound_local_probe_output(value: str) -> str:
+    encoded = str(value).encode('utf-8', errors='replace')
+    return encoded[:MAX_LOCAL_PROBE_OUTPUT_BYTES].decode('utf-8', errors='ignore')
+
+
+def _run_bounded_probe(args, maximum=MAX_LOCAL_PROBE_OUTPUT_BYTES, timeout=3):
+    process = None
     try:
-        return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        selector = selectors.DefaultSelector()
+        output = bytearray()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('probe timed out')
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fileobj.fileno(), 8192)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                        continue
+                    if len(output) + len(chunk) > maximum:
+                        raise ValueError('probe output exceeded its limit')
+                    output.extend(chunk)
+        finally:
+            selector.close()
+        return process.wait(timeout=max(0.1, deadline - time.monotonic())), bytes(output)
     except Exception:
-        return ""
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        return None, b''
+    finally:
+        if process is not None and process.stdout is not None:
+            process.stdout.close()
+
+
+def run(cmd):
+    commands = {
+        "hostname -I | awk '{print $1}'": ['hostname', '-I'],
+        'cat /etc/machine-id': ['cat', '/etc/machine-id'],
+    }
+    args = commands.get(cmd)
+    if args is None:
+        return ''
+    try:
+        returncode, raw = _run_bounded_probe(args)
+        if returncode != 0:
+            return ''
+        output = _bound_local_probe_output(raw.decode('utf-8', errors='replace'))
+        return output.strip().split()[0] if output.strip() else ''
+    except Exception:
+        return ''
 
 
 def read_mem():
     values = {}
     try:
-        for line in open('/proc/meminfo'):
+        for line in _read_bounded_local_text('/proc/meminfo').splitlines():
             k, v = line.split(':', 1)
             values[k] = int(v.strip().split()[0]) * 1024
     except Exception:
@@ -1446,14 +1709,14 @@ def read_disk(path='/'):
 
 def read_uptime():
     try:
-        return int(float(open('/proc/uptime').read().split()[0]))
+        return int(float(_read_bounded_local_text('/proc/uptime', 256).split()[0]))
     except Exception:
         return None
 
 
 def read_cpu_usage(interval=0.25):
     def sample():
-        fields = [int(x) for x in open('/proc/stat').readline().split()[1:]]
+        fields = [int(x) for x in _read_bounded_local_text('/proc/stat').splitlines()[0].split()[1:]]
         idle = fields[3] + fields[4]
         total = sum(fields)
         return idle, total
@@ -1558,7 +1821,9 @@ def tls_context():
     if not cafile or not Path(cafile).is_file():
         raise RuntimeError('Screentra Cast CA certificate is unavailable')
     try:
-        return ssl.create_default_context(cafile=cafile)
+        return ssl.create_default_context(
+            cadata=_read_real_file(Path(cafile), max_bytes=256 * 1024).decode('utf-8')
+        )
     except Exception as e:
         raise RuntimeError('Screentra Cast CA certificate is invalid') from e
 
@@ -1590,8 +1855,8 @@ def client_auth_token():
         str(Path.home() / '.local/share/screentra-client/client-auth-token'),
     )
     try:
-        return Path(path).read_text().strip()
-    except OSError:
+        return _read_real_file(Path(path), max_bytes=4096).decode('utf-8').strip()
+    except (OSError, UnicodeError, ValueError):
         return ''
 
 
@@ -1602,6 +1867,7 @@ def client_auth_headers(token=None):
 
 ADDON_API_VERSION = '1'
 MAX_ADDON_PACKAGE_BYTES = 8 * 1024 * 1024
+MAX_ADDON_EXTRACTED_BYTES = 8 * 1024 * 1024
 MAX_ADDON_MEMBER_BYTES = 4 * 1024 * 1024
 MAX_ADDON_MANIFEST_BYTES = 256 * 1024
 MAX_ADDON_SIGNATURE_BYTES = 16 * 1024
@@ -1698,7 +1964,7 @@ def _read_cache_json(path, default):
     if not _path_exists(path):
         return default
     try:
-        return json.loads(_read_real_file(path).decode('utf-8'))
+        return _parse_server_json(_read_real_file(path).decode('utf-8'))
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
         raise ValueError('addon cache metadata is invalid')
 
@@ -1831,16 +2097,31 @@ def _verify_addon_manifest_signature(manifest_path, signature_path):
     """Verify detached manifest bytes with the configured addon public key."""
     _read_real_file(signature_path, MAX_ADDON_SIGNATURE_BYTES)
     public_key = addon_public_key_path()
-    if not public_key.is_file():
+    try:
+        public_key_bytes = _read_real_file(public_key, 64 * 1024)
+    except (OSError, ValueError):
         raise ValueError('addon signing public key is unavailable')
-    result = subprocess.run(
-        ['openssl', 'pkeyutl', '-verify', '-rawin', '-pubin', '-inkey', str(public_key),
-         '-sigfile', str(signature_path), '-in', str(manifest_path)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=10,
-        check=False,
-    )
+    temporary_key = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(prefix='.addon-key-', suffix='.pub')
+        temporary_key = Path(temporary_name)
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(public_key_bytes)
+        os.chmod(temporary_key, 0o600)
+        result = subprocess.run(
+            ['openssl', 'pkeyutl', '-verify', '-rawin', '-pubin', '-inkey', str(temporary_key),
+             '-sigfile', str(signature_path), '-in', str(manifest_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    finally:
+        if temporary_key is not None:
+            try:
+                temporary_key.unlink()
+            except FileNotFoundError:
+                pass
     if result.returncode != 0:
         raise ValueError('addon manifest signature verification failed')
 
@@ -1853,7 +2134,7 @@ def _verify_cached_addon(target, active, expected):
     signature_path = target / 'manifest.sig'
     manifest_bytes = _read_real_file(manifest_path, MAX_ADDON_MANIFEST_BYTES)
     try:
-        manifest = json.loads(manifest_bytes.decode('utf-8'))
+        manifest = _parse_addon_manifest(manifest_bytes)
     except (UnicodeError, ValueError, json.JSONDecodeError):
         raise ValueError('addon cache manifest is invalid')
     entrypoint, digest = _validate_addon_manifest_metadata(manifest, expected)
@@ -1901,6 +2182,28 @@ def _safe_addon_member(name):
     return normalized
 
 
+def _parse_addon_manifest(manifest_bytes):
+    def reject_duplicate_fields(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('addon manifest contains duplicate JSON fields')
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(
+            manifest_bytes.decode('utf-8'),
+            object_pairs_hook=reject_duplicate_fields,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError('addon manifest is not valid JSON') from exc
+    if not isinstance(value, dict):
+        raise ValueError('addon manifest must be an object')
+    return value
+
+
 def _extract_verified_addon_package(package_bytes, expected, staging_parent=None):
     if len(package_bytes) > MAX_ADDON_PACKAGE_BYTES:
         raise ValueError('addon package exceeds the client limit')
@@ -1909,12 +2212,12 @@ def _extract_verified_addon_package(package_bytes, expected, staging_parent=None
         dir=os.fspath(staging_parent) if staging_parent is not None else None,
     ))
     try:
-        seen = set()
         with tarfile.open(fileobj=io.BytesIO(package_bytes), mode='r:gz') as archive:
-            members = archive.getmembers()
-            if len(members) > 64:
-                raise ValueError('addon package contains too many members')
-            for member in members:
+            seen = set()
+            extracted_bytes = 0
+            for index, member in enumerate(archive):
+                if index >= 64:
+                    raise ValueError('addon package contains too many members')
                 name = _safe_addon_member(member.name)
                 if name in seen:
                     raise ValueError('addon package contains duplicate members')
@@ -1928,20 +2231,28 @@ def _extract_verified_addon_package(package_bytes, expected, staging_parent=None
                     raise ValueError('addon package member cannot be read')
                 target = staging / name
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(source.read(member.size + 1))
-                if target.stat().st_size != member.size:
+                member_bytes = source.read(member.size + 1)
+                if len(member_bytes) != member.size:
                     raise ValueError('addon package member size changed while reading')
+                extracted_bytes += len(member_bytes)
+                if extracted_bytes > MAX_ADDON_EXTRACTED_BYTES:
+                    raise ValueError('addon package extracted data exceeds the client limit')
+                target.write_bytes(member_bytes)
         manifest_path = staging / 'manifest.json'
         signature_path = staging / 'manifest.sig'
-        if not manifest_path.is_file() or not signature_path.is_file():
-            raise ValueError('addon package is missing its manifest or signature')
-        manifest_bytes = manifest_path.read_bytes()
-        if len(manifest_bytes) > MAX_ADDON_MANIFEST_BYTES:
-            raise ValueError('addon manifest is too large')
-        manifest = json.loads(manifest_bytes.decode('utf-8'))
+        try:
+            manifest_bytes = _read_real_file(manifest_path, MAX_ADDON_MANIFEST_BYTES)
+            _read_real_file(signature_path, MAX_ADDON_SIGNATURE_BYTES)
+        except (OSError, ValueError) as exc:
+            raise ValueError('addon package is missing or redirects its metadata') from exc
+        manifest = _parse_addon_manifest(manifest_bytes)
         entrypoint, digest = _validate_addon_manifest_metadata(manifest, expected)
         client_path = staging / entrypoint
-        if not client_path.is_file() or hashlib.sha256(client_path.read_bytes()).hexdigest().lower() != digest.lower():
+        try:
+            client_bytes = _read_real_file(client_path, MAX_ADDON_MEMBER_BYTES)
+        except (OSError, ValueError) as exc:
+            raise ValueError('addon entrypoint is missing or redirects its content') from exc
+        if hashlib.sha256(client_bytes).hexdigest().lower() != digest.lower():
             raise ValueError('addon entrypoint SHA-256 verification failed')
         _verify_addon_manifest_signature(manifest_path, signature_path)
         return staging, manifest, entrypoint
@@ -2048,7 +2359,9 @@ def sync_client_addons(server, client_id, cache_dir):
         url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/addons'
         req = urllib.request.Request(url, headers=client_auth_headers())
         with urlopen_ripley(req, timeout=10) as response:
-            inventory = json.loads(response.read().decode('utf-8'))
+            inventory = _parse_server_json(
+                _read_bounded_response(response, MAX_JSON_FILE_BYTES)
+            )
         addons = inventory.get('addons') if isinstance(inventory, dict) else None
         if not isinstance(addons, list):
             raise ValueError('server returned an invalid addon inventory')
@@ -2175,6 +2488,7 @@ def sync_client_addons(server, client_id, cache_dir):
 
 
 def post_addon_status(server, client_id, status):
+    validate_status_report(status)
     url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/addons/status'
     request = urllib.request.Request(
         url,
@@ -2191,13 +2505,42 @@ def post_addon_status(server, client_id, status):
         raise
 
 
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('server JSON contains duplicate fields')
+        result[key] = value
+    return result
+
+
+def _parse_server_json(text):
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+        )
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ValueError('server response is not valid JSON') from exc
+
+
+def _parse_command_response(text):
+    if not isinstance(text, str) or len(text.encode('utf-8')) > MAX_COMMAND_RESPONSE_BYTES:
+        raise ValueError('server command response exceeds its bound')
+    result = _parse_server_json(text)
+    if result is not None and not isinstance(result, dict):
+        raise ValueError('server command response must be an object or null')
+    return result
+
+
 def poll_command(server, client_id, client_token):
     url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/command'
     try:
         req = urllib.request.Request(url, headers=client_auth_headers(client_token))
         with urlopen_ripley(req, timeout=5) as r:
-            data = r.read().decode()
-            return json.loads(data)
+            data = _read_bounded_response(r, MAX_COMMAND_RESPONSE_BYTES)
+            return _parse_command_response(data)
     except urllib.error.HTTPError as e:
         if e.code in (401, 404, 429):
             return None
@@ -2211,7 +2554,7 @@ def ack_command(server, client_id):
     try:
         req = urllib.request.Request(url, headers=client_auth_headers(), method='POST')
         with urlopen_ripley(req, timeout=5) as r:
-            return r.read().decode()
+            return _read_bounded_response(r, MAX_TEXT_RESPONSE_BYTES)
     except Exception as e:
         print(f'ack failed: {e}', flush=True)
         return None
@@ -2219,7 +2562,7 @@ def ack_command(server, client_id):
 
 def write_pending_command(command, cache_dir):
     pending_path = Path(cache_dir) / 'pending-command.json'
-    pending_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(pending_path.parent, create=True)
     _atomic_write_text(pending_path, json.dumps(command, indent=2))
     print(f'pending command written: {command.get("action")}', flush=True)
     try:
@@ -2250,7 +2593,7 @@ def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='
     try:
         req = urllib.request.Request(url, headers=client_auth_headers())
         with urlopen_ripley(req, timeout=10) as r:
-            data = json.loads(r.read().decode())
+            data = _parse_server_json(_read_bounded_response(r, MAX_JSON_FILE_BYTES))
         # Preserve theme (set by heartbeat from local config, sent to server)
         # so it survives across config sync cycles.
         prev_path = Path(cache_dir, 'client-config.json')
@@ -2260,7 +2603,7 @@ def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='
                 data['theme'] = prev['theme']
         except Exception:
             pass
-        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+        _ensure_real_directory(Path(cache_dir), create=True)
         if display_index == 0:
             _atomic_write_text(Path(cache_dir, 'client-config.json'), json.dumps(data, indent=2))
         else:
@@ -2298,11 +2641,11 @@ def fetch_admin_users(server, client_id, cache_dir):
     try:
         req = urllib.request.Request(url, headers=client_auth_headers())
         with urlopen_ripley(req, timeout=10) as r:
-            data = json.loads(r.read().decode())
+            data = _parse_server_json(_read_bounded_response(r, MAX_JSON_FILE_BYTES))
         users = data.get('users') or []
         if users:
             target = Path(cache_dir).parent / 'admin-users.json'
-            target.parent.mkdir(parents=True, exist_ok=True)
+            _ensure_real_directory(target.parent, create=True)
             _atomic_write_text(target, json.dumps(data, indent=2))
             print(f'admin users synced: {len(users)}', flush=True)
             return data
@@ -2324,7 +2667,7 @@ def post(server, data):
         method='POST',
     )
     with urlopen_ripley(req, timeout=10) as r:
-        return r.status, r.read().decode()
+        return r.status, _read_bounded_response(r, MAX_TEXT_RESPONSE_BYTES)
 
 
 def main():
@@ -2336,7 +2679,7 @@ def main():
         srv = Path.home() / '.local/share/screentra-client/server'
         if srv.exists():
             try:
-                v = srv.read_text().strip()
+                v = _read_real_file(srv, max_bytes=4096).decode('utf-8').strip()
                 if v:
                     return v
             except Exception:
@@ -2378,7 +2721,7 @@ def main():
         try:
             status, body = post(args.server, data)
             try:
-                response = json.loads(body)
+                response = _parse_server_json(body)
                 server_theme = response.get('theme')
                 if server_theme in ('midnight', 'light', 'classic'):
                     theme_path = Path(args.cache_dir) / 'client-config.json'
@@ -2387,7 +2730,7 @@ def main():
                     except Exception:
                         cached = {}
                     cached['theme'] = server_theme
-                    theme_path.parent.mkdir(parents=True, exist_ok=True)
+                    _ensure_real_directory(theme_path.parent, create=True)
                     _atomic_write_text(theme_path, json.dumps(cached, indent=2))
             except Exception:
                 pass
@@ -2410,7 +2753,7 @@ def main():
         # Track previous layout assignment to detect changes.
         prev_layout_path = Path(args.cache_dir) / 'previous-layout-id.txt'
         try:
-            previous_layout_id = prev_layout_path.read_text().strip() or None
+            previous_layout_id = _read_bounded_text(prev_layout_path, 4096).strip() or None
         except Exception:
             previous_layout_id = None
         cfg = fetch_config(args.server, data['client_id'], args.cache_dir, display_index=0, config_pattern=args.display_config_pattern)
@@ -2428,11 +2771,11 @@ def main():
             try:
                 subprocess.run(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'], check=True, timeout=15)
                 print(f'layout changed {previous_layout_id} -> {current_layout_id}; kiosk restarted', flush=True)
-                prev_layout_path.write_text(current_layout_id or '')
+                _atomic_write_text(prev_layout_path, current_layout_id or '')
             except Exception as e:
                 print(f'layout-change restart failed: {e}', flush=True)
         elif cfg and current_layout_id:
-            prev_layout_path.write_text(current_layout_id or '')
+            _atomic_write_text(prev_layout_path, current_layout_id or '')
         if cfg and current_orientation != previous_orientation:
             try:
                 subprocess.run(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'], check=True, timeout=15)
@@ -2463,7 +2806,10 @@ def main():
             for d in data.get('displays') or []:
                 idx = d.get('display_index')
                 if idx is None: continue
-                Path(args.cache_dir, f'display-{idx}.json').write_text(__import__('json').dumps(d))
+                _atomic_write_text(
+                    Path(args.cache_dir, f'display-{idx}.json'),
+                    __import__('json').dumps(d),
+                )
         except Exception:
             pass
 
@@ -2477,8 +2823,11 @@ def main():
                 'assigned_layout_id': assigned,
                 'pairing_code': client_pairing_code(data['client_id']),
             }
-            Path(args.cache_dir).mkdir(parents=True, exist_ok=True)
-            (Path(args.cache_dir) / 'last-heartbeat.json').write_text(__import__('json').dumps(status_payload))
+            _ensure_real_directory(Path(args.cache_dir), create=True)
+            _atomic_write_text(
+                Path(args.cache_dir) / 'last-heartbeat.json',
+                __import__('json').dumps(status_payload),
+            )
         except Exception:
             pass
         if args.once:
@@ -3721,18 +4070,43 @@ import sys
 import urllib.parse
 import socket
 import ssl
+import stat
+import tempfile
 import time
 import hashlib
 import hmac
 import secrets
 import base64
 import threading
+import selectors
 import tarfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 MAX_REQUEST_BODY_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
+MAX_BACKUP_DOWNLOAD_BYTES = 256 * 1024 * 1024
+MAX_CACHED_ASSET_BYTES = 16 * 1024 * 1024
+MAX_INPUT_DEVICE_FILE_BYTES = 256 * 1024
+MAX_TOUCH_DEVICES = 128
+MAX_DISPLAY_OUTPUTS = 32
+MAX_TOUCH_NAME_BYTES = 128
+MAX_SYSTEM_METRICS_BYTES = 64 * 1024
+MAX_GPU_HELPER_OUTPUT_BYTES = 64 * 1024
+MAX_ERROR_BYTES = 512
+MAX_STATIC_HTML_BYTES = 2 * 1024 * 1024
+
+
+def _bound_text(value: str | None, maximum: int) -> str:
+    if value is None:
+        return ''
+    encoded = str(value).encode('utf-8', errors='replace')
+    return encoded[:maximum].decode('utf-8', errors='ignore')
+
+
+def _read_bounded_path(path: Path, maximum: int) -> str:
+    with path.open('rb') as handle:
+        return handle.read(maximum).decode('utf-8', errors='replace')
 
 
 def client_pairing_code(client_id):
@@ -3741,21 +4115,105 @@ def client_pairing_code(client_id):
     return f'{int.from_bytes(digest[:4], "big") % 1_000_000:06d}'
 
 
+def _ensure_real_directory(path: Path, create: bool = False) -> bool:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            if not create:
+                return False
+            current.mkdir()
+            metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError('renderer cache directory is not a real directory')
+    return True
+
+
+def _read_real_file(path: Path, maximum: int = MAX_JSON_FILE_BYTES) -> bytes:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError('renderer cache path contains a symlink')
+    descriptor = os.open(absolute, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+            raise ValueError('renderer cache file is not bounded')
+        raw = os.read(descriptor, maximum + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > maximum:
+        raise ValueError('renderer cache file exceeds its bound')
+    return raw
+
+
 def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
-    temporary.write_text(text, encoding='utf-8')
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
+    _ensure_real_directory(path.parent, create=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f'.{path.name}.', suffix='.tmp', dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _read_json_file(path: Path, default):
     try:
-        if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
-            return default
-        return json.loads(path.read_text(encoding='utf-8'))
+        return _parse_request_json(_read_real_file(path).decode('utf-8'))
     except Exception:
         return default
+
+
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate JSON object key')
+        result[key] = value
+    return result
+
+
+def _parse_request_json(text: str) -> dict:
+    value = json.loads(
+        text,
+        object_pairs_hook=_reject_duplicate_json_keys,
+        parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+    )
+    if not isinstance(value, dict):
+        raise ValueError('request JSON must be an object')
+    return value
+
+
+def _require_request_fields(payload: dict, allowed: set[str]) -> None:
+    unknown = set(payload) - allowed
+    if unknown:
+        raise ValueError('request contains unsupported fields')
+
+
+def _validate_login_payload(payload: dict) -> tuple[str, str]:
+    username = payload.get('username')
+    password = payload.get('password')
+    if not isinstance(username, str) or not 1 <= len(username) <= 128:
+        raise ValueError('username must be a bounded string')
+    if not isinstance(password, str) or not 1 <= len(password) <= 256:
+        raise ValueError('password must be a bounded string')
+    return username, password
 
 
 def _request_body(handler) -> str:
@@ -3803,10 +4261,11 @@ def _udev_has_touchscreen_property(dev_path: str) -> bool:
     regardless of the device name.
     """
     try:
-        out = _sp.check_output(
+        completed = _sp.run(
             ['udevadm', 'info', '--query=property', '--name=' + dev_path],
-            stderr=_sp.DEVNULL, timeout=2, text=True,
+            stdout=_sp.PIPE, stderr=_sp.DEVNULL, timeout=2, text=True, check=False,
         )
+        out = _bound_text(completed.stdout or '', MAX_INPUT_DEVICE_FILE_BYTES)
         for line in out.splitlines():
             if line.startswith('ID_INPUT_TOUCHSCREEN=1'):
                 return True
@@ -3863,14 +4322,18 @@ def _nl_detect_touch_devices():
     p = Path('/proc/bus/input/devices')
     if not p.exists():
         return devs
+    try:
+        raw_devices = _read_real_file(p, MAX_INPUT_DEVICE_FILE_BYTES).decode('utf-8', errors='replace')
+    except Exception:
+        return devs
     cur = {}
-    for line in p.read_text().splitlines():
+    for line in raw_devices.splitlines():
         if not line.strip():
             if cur:
                 devs.append(cur); cur = {}
             continue
         if line.startswith('N:'):
-            cur['name'] = line.split('N:', 1)[1].strip().lstrip('Name=').strip('"')
+            cur['name'] = _bound_text(line.split('N:', 1)[1].strip().lstrip('Name=').strip('"'), MAX_TOUCH_NAME_BYTES)
         elif line.startswith('H:'):
             cur.setdefault('handlers', '')
             cur['handlers'] += ' ' + line.split('H:', 1)[1].strip()
@@ -3913,6 +4376,8 @@ def _nl_detect_touch_devices():
                 'recommended': recommended,
                 'reason': reason,
             })
+            if len(out) >= MAX_TOUCH_DEVICES:
+                return out
     out.sort(key=lambda x: (not x['recommended'], x['name']))
     return out
 
@@ -3929,7 +4394,8 @@ def _lan_ip_for_admin() -> str | None:
     except Exception:
         pass
     try:
-        out = _sp.check_output(['hostname', '-I'], text=True, timeout=2).split()
+        completed = _sp.run(['hostname', '-I'], stdout=_sp.PIPE, stderr=_sp.DEVNULL, text=True, timeout=2, check=False)
+        out = _bound_text(completed.stdout or '', 4096).split()
         for ip in out:
             if ip and not ip.startswith('127.') and ':' not in ip:
                 return ip
@@ -3940,8 +4406,14 @@ def _lan_ip_for_admin() -> str | None:
 def _nl_status():
     cid_path = Path.home() / '.local/share/screentra-client/client-id'
     srv_path = Path.home() / '.local/share/screentra-client/server'
-    client_id = cid_path.read_text().strip() if cid_path.exists() else None
-    server_url = srv_path.read_text().strip() if srv_path.exists() else 'unknown'
+    try:
+        client_id = _read_real_file(cid_path, 4096).decode('utf-8').strip() if cid_path.exists() else None
+    except Exception:
+        client_id = None
+    try:
+        server_url = _read_real_file(srv_path, 4096).decode('utf-8').strip() if srv_path.exists() else 'unknown'
+    except Exception:
+        server_url = 'unknown'
     last_path = Handler.cache_dir / 'last-heartbeat.json'
     last_seen = connection = last_layout = None
     if last_path.exists():
@@ -4016,12 +4488,58 @@ def _nl_status():
 
 # === local admin / easy-setup page ===========================================
 
-def _safe_run(args, timeout=5):
+def _bounded_run(args, timeout=5, stdout_max=12000, stderr_max=4000, env=None):
+    process = _sp.Popen(args, stdout=_sp.PIPE, stderr=_sp.PIPE, env=env)
+    selector = selectors.DefaultSelector()
+    assert process.stdout is not None and process.stderr is not None
+    selector.register(process.stdout, selectors.EVENT_READ, ('stdout', stdout_max))
+    selector.register(process.stderr, selectors.EVENT_READ, ('stderr', stderr_max))
+    buffers = {'stdout': bytearray(), 'stderr': bytearray()}
+    deadline = time.monotonic() + timeout
     try:
-        cp = _sp.run(args, text=True, capture_output=True, timeout=timeout)
-        return {'ok': cp.returncode == 0, 'code': cp.returncode, 'stdout': cp.stdout[-12000:], 'stderr': cp.stderr[-4000:]}
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _sp.TimeoutExpired(args, timeout)
+            for key, _ in selector.select(remaining):
+                stream_name, maximum = key.data
+                chunk = os.read(key.fileobj.fileno(), maximum + 1)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                buffers[stream_name].extend(chunk)
+                if len(buffers[stream_name]) > maximum:
+                    raise ValueError(f'{stream_name} exceeds its bound')
+        returncode = process.wait(timeout=max(deadline - time.monotonic(), 0.001))
+        return returncode, {
+            name: bytes(value).decode('utf-8', errors='replace')
+            for name, value in buffers.items()
+        }
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        try:
+            process.wait(timeout=1)
+        except Exception:
+            pass
+        raise
+    finally:
+        selector.close()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+
+def _safe_run(args, timeout=5, env=None):
+    try:
+        code, output = _bounded_run(args, timeout=timeout, env=env)
+        return {'ok': code == 0, 'code': code, 'stdout': output['stdout'], 'stderr': output['stderr']}
     except Exception as e:
-        return {'ok': False, 'code': None, 'stdout': '', 'stderr': str(e)}
+        return {'ok': False, 'code': None, 'stdout': '', 'stderr': _bound_text(str(e), MAX_ERROR_BYTES)}
 
 def _client_config_path() -> Path:
     return Handler.cache_dir.parent / 'config.json'
@@ -4035,7 +4553,7 @@ def _load_display_governance() -> dict:
             if isinstance(data, dict):
                 cfg.update({k: data.get(k) for k in cfg if k in data})
     except Exception as e:
-        cfg['error'] = str(e)
+        cfg['error'] = _bound_text(str(e), MAX_ERROR_BYTES)
     try:
         installer = max(int(cfg.get('installer_detected_max_displays') or 1), 1)
     except Exception:
@@ -4063,7 +4581,7 @@ def _load_client_config() -> dict:
 
 def _write_client_config(cfg: dict) -> None:
     path = _client_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(path.parent, create=True)
     _atomic_write_text(path, json.dumps(cfg, indent=2))
 
 def _write_display_count(max_displays) -> dict:
@@ -4075,7 +4593,7 @@ def _write_display_count(max_displays) -> dict:
     cfg.setdefault('last_detected_displays', [])
     _write_client_config(cfg)
     pending = Handler.cache_dir / 'pending-command.json'
-    pending.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(pending.parent, create=True)
     _atomic_write_text(pending, json.dumps({'action':'set_display_count','payload':{'max_displays': override},'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
     _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service'], timeout=6)
     actor = _safe_run(['systemctl', '--user', 'start', 'screentra-client-actor.service'], timeout=6)
@@ -4127,10 +4645,24 @@ def _current_touch_binding() -> dict:
             pass
     return binding or {'device_path': None, 'device_name': None, 'target_display_indexes': [0], 'target_connectors': _display_connectors_for_indexes([0]), 'allow_joined_displays': False}
 
+def _validate_touch_device_path(dev_path: str | None) -> None:
+    if dev_path is None:
+        return
+    if not isinstance(dev_path, str) or len(dev_path) > 256 or not dev_path.startswith('/dev/'):
+        raise ValueError('touch device path is invalid')
+    detected_paths = {
+        device.get('path') for device in _nl_detect_touch_devices()
+        if isinstance(device, dict) and isinstance(device.get('path'), str)
+    }
+    if dev_path not in detected_paths:
+        raise ValueError('touch device path is not a detected touchscreen')
+
+
 def _write_touch_binding(payload: dict) -> dict:
     cfg = _load_client_config()
     dev_path = payload.get('device_path') or payload.get('path')
-    dev_name = _resolve_touch_name(dev_path, payload.get('device_name'))
+    _validate_touch_device_path(dev_path)
+    dev_name = _resolve_touch_name(dev_path)
     allow_joined = bool(payload.get('allow_joined_displays'))
     raw_indexes = payload.get('target_display_indexes') or payload.get('display_indexes') or payload.get('display_index') or [0]
     if not isinstance(raw_indexes, list):
@@ -4163,7 +4695,7 @@ def _write_touch_binding(payload: dict) -> dict:
     if dev_path:
         _atomic_write_text(Handler.cache_dir / 'touch-device.json', json.dumps({'path': dev_path, 'name': dev_name}, indent=2))
     pending = Handler.cache_dir / 'pending-command.json'
-    pending.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(pending.parent, create=True)
     _atomic_write_text(pending, json.dumps({'action':'set_touch_binding','payload': binding,'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
     _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service'], timeout=6)
     actor = _safe_run(['systemctl', '--user', 'start', 'screentra-client-actor.service'], timeout=6)
@@ -4189,14 +4721,14 @@ def _sysfs_outputs() -> list[dict]:
             status = d / 'status'
             if not status.exists():
                 continue
-            state = status.read_text().strip()
+            state = _read_real_file(status, 64).decode('utf-8', errors='replace').strip()
             if state != 'connected':
                 continue
             name = d.name.split('-', 1)[1]
             mode = None
             modes = d / 'modes'
             if modes.exists():
-                first = (modes.read_text().splitlines() or [''])[0]
+                first = (_read_real_file(modes, 4096).decode('utf-8', errors='replace').splitlines() or [''])[0]
                 if 'x' in first:
                     try:
                         w, h = first.split('x', 1)[0], first.split('x', 1)[1].split()[0]
@@ -4204,6 +4736,8 @@ def _sysfs_outputs() -> list[dict]:
                     except Exception:
                         mode = {'label': first, 'source': 'sysfs'}
             out.append({'name': name, 'description': name, 'enabled': None, 'connected': True, 'position': {}, 'current_mode': mode, 'source': 'sysfs'})
+            if len(out) >= MAX_DISPLAY_OUTPUTS:
+                break
     except Exception:
         return []
     return out
@@ -4211,18 +4745,22 @@ def _sysfs_outputs() -> list[dict]:
 def _wlr_outputs() -> list[dict]:
     env = {**os.environ, 'XDG_RUNTIME_DIR': os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'), 'WAYLAND_DISPLAY': os.environ.get('WAYLAND_DISPLAY', 'wayland-0')}
     try:
-        out = _sp.check_output(['wlr-randr', '--json'], text=True, stderr=_sp.DEVNULL, timeout=3, env=env)
-        data = json.loads(out)
-        return [{'name': o.get('name'), 'description': o.get('description'), 'enabled': bool(o.get('enabled')), 'position': o.get('position') or {}, 'current_mode': next((m for m in o.get('modes', []) if m.get('current')), None)} for o in data]
+        completed = _safe_run(['wlr-randr', '--json'], timeout=3, env=env)
+        if completed.get('code') != 0:
+            raise ValueError('wlr-randr failed')
+        data = json.loads(
+            _bound_text(completed.get('stdout') or '', MAX_JSON_FILE_BYTES),
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+        )
+        if not isinstance(data, list):
+            raise ValueError('wlr-randr output is not a list')
+        return [{'name': _bound_text(o.get('name'), 128), 'description': _bound_text(o.get('description'), 256), 'enabled': bool(o.get('enabled')), 'position': o.get('position') or {}, 'current_mode': next((m for m in o.get('modes', []) if m.get('current')), None)} for o in data[:MAX_DISPLAY_OUTPUTS] if isinstance(o, dict)]
     except Exception:
         return _sysfs_outputs()
 
 def _read_tail(path: Path, max_bytes: int = 40000) -> str:
     try:
-        if not path.exists() or not path.is_file():
-            return ''
-        with path.open('rb') as f:
-            f.seek(0, os.SEEK_END); size = f.tell(); f.seek(max(0, size - max_bytes)); data = f.read()
+        data = _read_real_file(path, maximum=max(max_bytes, 4 * 1024 * 1024))
         return data.decode('utf-8', 'replace')[-max_bytes:]
     except Exception as e:
         return f'error reading {path}: {e}'
@@ -4259,24 +4797,29 @@ def _ca_file() -> Path:
 
 def _sha256_file(path: Path) -> str | None:
     try:
-        h = hashlib.sha256()
-        with path.open('rb') as f:
-            for chunk in iter(lambda: f.read(65536), b''): h.update(chunk)
-        return h.hexdigest()
+        return hashlib.sha256(_read_real_file(path, maximum=256 * 1024)).hexdigest()
     except Exception:
         return None
 
 def _cert_info() -> dict:
     srv_path = Path.home() / '.local/share/screentra-client/server'
-    server_url = srv_path.read_text().strip().rstrip('/') if srv_path.exists() else ''
-    ca = _ca_file(); ca_exists = ca.exists() and ca.stat().st_size > 0
+    try:
+        server_url = _read_real_file(srv_path, 4096).decode('utf-8').strip().rstrip('/')
+    except Exception:
+        server_url = ''
+    ca = _ca_file()
+    try:
+        ca_data = _read_real_file(ca, maximum=256 * 1024)
+    except Exception:
+        ca_data = b''
+    ca_exists = bool(ca_data)
     verify = {'ok': False, 'error': 'server or CA missing'}
     parsed = urllib.parse.urlparse(server_url) if server_url else None
     if parsed and parsed.hostname and ca_exists:
         port = parsed.port or (443 if parsed.scheme == 'https' else 80)
         try:
             if parsed.scheme == 'https':
-                ctx = ssl.create_default_context(cafile=str(ca))
+                ctx = ssl.create_default_context(cadata=ca_data.decode('utf-8'))
                 with socket.create_connection((parsed.hostname, port), timeout=5) as sock:
                     with ctx.wrap_socket(sock, server_hostname=parsed.hostname) as ssock:
                         cert = ssock.getpeercert()
@@ -4284,36 +4827,40 @@ def _cert_info() -> dict:
             else:
                 verify = {'ok': True, 'warning': 'server URL is not HTTPS'}
         except Exception as e:
-            verify = {'ok': False, 'error': str(e), 'host': parsed.hostname, 'port': port}
-    return {'server_url': server_url, 'ca_path': str(ca), 'ca_exists': ca_exists, 'ca_size': ca.stat().st_size if ca.exists() else 0, 'ca_sha256': _sha256_file(ca), 'verify': verify, 'published_ca_url': (server_url + '/install/screentra-cast-signage-ca.crt') if server_url else ''}
+            verify = {'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES), 'host': parsed.hostname, 'port': port}
+    return {'server_url': server_url, 'ca_path': str(ca), 'ca_exists': ca_exists, 'ca_size': len(ca_data), 'ca_sha256': _sha256_file(ca), 'verify': verify, 'published_ca_url': (server_url + '/install/screentra-cast-signage-ca.crt') if server_url else ''}
 
 def _refresh_ca_from_server() -> dict:
     srv_path = Path.home() / '.local/share/screentra-client/server'
-    if not srv_path.exists(): return {'ok': False, 'error': 'server file missing'}
-    server_url = srv_path.read_text().strip().rstrip('/')
+    try:
+        server_url = _read_real_file(srv_path, 4096).decode('utf-8').strip().rstrip('/')
+    except Exception:
+        return {'ok': False, 'error': 'server file missing'}
     if not server_url: return {'ok': False, 'error': 'server URL empty'}
     url = server_url + '/install/screentra-cast-signage-ca.crt'; out = _ca_file()
     try:
         ca_path = _ca_file()
-        if not ca_path.exists():
-            return {'ok': False, 'error': 'existing CA certificate is required to refresh trust', 'url': url}
-        ctx = _ssl.create_default_context(cafile=str(ca_path))
-        data = _ur.urlopen(url, context=ctx, timeout=10).read()
+        ca_data = _read_real_file(ca_path, maximum=256 * 1024)
+        ctx = _ssl.create_default_context(cadata=ca_data.decode('utf-8'))
+        with _ur.urlopen(url, context=ctx, timeout=10) as response:
+            data = response.read(256 * 1024 + 1)
+        if len(data) > 256 * 1024:
+            return {'ok': False, 'error': 'downloaded CA exceeds the client limit', 'url': url}
         if len(data) < 200 or b'BEGIN CERTIFICATE' not in data:
             return {'ok': False, 'error': f'downloaded CA did not look like a certificate ({len(data)} bytes)', 'url': url}
-        out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_suffix(out.suffix + '.tmp'); tmp.write_bytes(data); os.chmod(tmp, 0o644); tmp.replace(out)
+        _ensure_real_directory(out.parent, create=True)
+        _atomic_write_text(out, data.decode('utf-8'), mode=0o644)
         verify = _cert_info().get('verify')
         restart = _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service', 'screentra-client-actor.service'], timeout=8)
         return {'ok': True, 'url': url, 'ca_path': str(out), 'bytes': len(data), 'sha256': _sha256_file(out), 'verify': verify, 'restart': restart}
     except Exception as e:
-        return {'ok': False, 'error': str(e), 'url': url}
+        return {'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES), 'url': url}
 
 
 
 def _read_proc_stat_cpu() -> tuple[int, int] | None:
     try:
-        parts = Path('/proc/stat').read_text().splitlines()[0].split()[1:]
+        parts = _read_bounded_path(Path('/proc/stat'), MAX_SYSTEM_METRICS_BYTES).splitlines()[0].split()[1:]
         vals = [int(x) for x in parts]
         idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
         total = sum(vals)
@@ -4339,7 +4886,7 @@ def _cpu_temp_c() -> float | None:
     candidates = []
     try:
         for z in Path('/sys/class/thermal').glob('thermal_zone*/temp'):
-            typ = z.parent.joinpath('type').read_text().strip().lower() if z.parent.joinpath('type').exists() else ''
+            typ = _read_bounded_path(z.parent.joinpath('type'), 256).strip().lower() if z.parent.joinpath('type').exists() else ''
             score = 0 if any(k in typ for k in ('cpu', 'x86_pkg_temp', 'k10temp', 'tctl', 'soc')) else 1
             candidates.append((score, z))
     except Exception:
@@ -4349,14 +4896,14 @@ def _cpu_temp_c() -> float | None:
             label = ''
             label_path = z.with_name(z.name.replace('_input', '_label'))
             if label_path.exists():
-                label = label_path.read_text().strip().lower()
+                label = _read_bounded_path(label_path, 256).strip().lower()
             score = 0 if any(k in label for k in ('cpu', 'tctl', 'tdie', 'package', 'soc')) else 2
             candidates.append((score, z))
     except Exception:
         pass
     for _, path in sorted(candidates, key=lambda x: x[0]):
         try:
-            raw = int(path.read_text().strip())
+            raw = int(_read_bounded_path(path, 128).strip())
             c = raw / 1000.0 if raw > 1000 else float(raw)
             if -20.0 < c < 130.0:
                 return round(c, 1)
@@ -4367,7 +4914,7 @@ def _cpu_temp_c() -> float | None:
 def _ram_usage() -> dict:
     info = {}
     try:
-        for line in Path('/proc/meminfo').read_text().splitlines():
+        for line in _read_bounded_path(Path('/proc/meminfo'), MAX_SYSTEM_METRICS_BYTES).splitlines():
             k, v = line.split(':', 1)
             info[k] = int(v.strip().split()[0]) * 1024
         total = info.get('MemTotal') or 0
@@ -4376,31 +4923,36 @@ def _ram_usage() -> dict:
         pct = round((used / total) * 100.0, 1) if total else None
         return {'total_bytes': total, 'used_bytes': used, 'available_bytes': avail, 'percent': pct}
     except Exception as e:
-        return {'error': str(e)}
+        return {'error': _bound_text(str(e), MAX_ERROR_BYTES)}
 
 def _gpu_usage() -> dict:
     helper = Path.home() / '.local/share/screentra-client/ripley-gpu-health.py'
     if helper.exists():
         try:
             r = _sp.run([sys.executable, str(helper)], stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, timeout=4, check=False)
-            if r.stdout.strip():
-                data = json.loads(r.stdout.strip().splitlines()[-1])
-                if r.stderr.strip():
-                    data.setdefault('stderr', r.stderr.strip()[-500:])
+            helper_stdout = _bound_text(r.stdout or '', MAX_GPU_HELPER_OUTPUT_BYTES)
+            helper_stderr = _bound_text(r.stderr or '', MAX_GPU_HELPER_OUTPUT_BYTES)
+            if helper_stdout.strip():
+                data = json.loads(
+                    helper_stdout.strip().splitlines()[-1],
+                    parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+                )
+                if helper_stderr.strip():
+                    data.setdefault('stderr', helper_stderr.strip()[-500:])
                 return data
-            if r.stderr.strip():
-                return {'percent': None, 'device': None, 'source': str(helper), 'error': r.stderr.strip()[-500:]}
+            if helper_stderr.strip():
+                return {'percent': None, 'device': None, 'source': str(helper), 'error': helper_stderr.strip()[-500:]}
         except Exception as e:
-            return {'percent': None, 'device': None, 'source': str(helper), 'error': str(e)}
+            return {'percent': None, 'device': None, 'source': str(helper), 'error': _bound_text(str(e), MAX_ERROR_BYTES)}
     # Fallback for partial/upgrading installs: generic DRM busy percent.
     out = {'percent': None, 'device': None, 'source': None, 'available': False, 'health': 'unknown', 'health_notes': ['GPU helper not installed yet']}
     try:
         for busy in sorted(Path('/sys/class/drm').glob('card*/device/gpu_busy_percent')):
-            raw = busy.read_text().strip()
+            raw = _read_bounded_path(busy, 128).strip()
             out.update({'percent': float(raw), 'device': busy.parent.parent.name, 'source': str(busy), 'available': True, 'method': 'drm-gpu_busy_percent', 'health': 'ok'})
             return out
     except Exception as e:
-        out['error'] = str(e)
+        out['error'] = _bound_text(str(e), MAX_ERROR_BYTES)
     return out
 
 def _system_metrics() -> dict:
@@ -4417,7 +4969,7 @@ def _system_metrics() -> dict:
 
 def _client_backup_root() -> Path:
     p = Handler.cache_dir.parent / 'backups'
-    p.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(p, create=True)
     return p
 
 def _safe_tar_add(tar, path: Path, arcname: str, *, exclude_state: bool = True) -> int:
@@ -4497,7 +5049,7 @@ def _create_client_software_backup() -> dict:
             if out.exists(): out.unlink()
         except Exception:
             pass
-        return {'ok': False, 'error': str(e)}
+        return {'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}
 
 def _reboot_device(confirm: bool = False) -> dict:
     """Schedule a device reboot after the HTTP response is sent.
@@ -4545,16 +5097,16 @@ def _admin_status() -> dict:
 
 def _auth_dir() -> Path:
     p = Handler.cache_dir.parent / 'admin-auth'
-    p.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(p, create=True)
     return p
 
 def _auth_secret() -> bytes:
     p = _auth_dir() / 'session-secret'
-    if not p.exists():
-        p.write_text(secrets.token_urlsafe(32))
-        try: os.chmod(p, 0o600)
-        except Exception: pass
-    return p.read_text().strip().encode()
+    try:
+        return _read_real_file(p, maximum=4096).strip()
+    except FileNotFoundError:
+        _atomic_write_text(p, secrets.token_urlsafe(32), mode=0o600)
+        return _read_real_file(p, maximum=4096).strip()
 
 def _password_hash(password: str, salt: str | None = None) -> str:
     salt = salt or secrets.token_hex(16)
@@ -4788,7 +5340,7 @@ def _live_player_url() -> str | None:
         try:
             server_path = Path.home() / '.local/share/screentra-client/server'
             if server_path.exists():
-                server = server_path.read_text().strip()
+                server = _read_real_file(server_path, 4096).decode('utf-8').strip()
         except Exception:
             pass
     server = server.rstrip('/')
@@ -4806,7 +5358,7 @@ def _client_id_from_cache() -> str | None:
     try:
         cid_path = Path.home() / '.local/share/screentra-client/client-id'
         if cid_path.exists():
-            v = cid_path.read_text().strip()
+            v = _read_real_file(cid_path, 4096).decode('utf-8').strip()
             return v or None
     except Exception:
         pass
@@ -4842,7 +5394,7 @@ def _connector_for_display_index(display_index: int) -> str | None:
                     status_path = d / 'status'
                     if not status_path.exists():
                         continue
-                    if status_path.read_text().strip() != 'connected':
+                    if _read_bounded_path(status_path, 64).strip() != 'connected':
                         continue
                     mode_path = d / 'modes'
                     if mode_path.exists():
@@ -4936,9 +5488,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(401, json.dumps({'error': 'auth required', **_auth_source()}), 'application/json')
         if path == '/api/admin/auth/login':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
-                username = str(payload.get('username') or '')
-                password = str(payload.get('password') or '')
+                payload = _parse_request_json(body) if body and body.strip() else {}
+                _require_request_fields(payload, {'username', 'password'})
+                username, password = _validate_login_payload(payload)
                 ok, info = _check_login(username, password)
                 if not ok:
                     return self.send_text(401, json.dumps({'ok': False, **info}), 'application/json')
@@ -4951,7 +5503,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Set-Cookie', 'ripley_admin_session=' + token + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200')
                 self.end_headers(); self.wfile.write(data); return
             except Exception as e:
-                return self.send_text(400, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
+                return self.send_text(400, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/admin/auth/logout':
             data = json.dumps({'ok': True}).encode()
             self.send_response(200)
@@ -4964,9 +5516,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(401, json.dumps({'error': 'auth required', **_auth_source()}), 'application/json')
         if path == '/api/touchscreen/select':
             try:
-                payload = json.loads(body)
+                payload = _parse_request_json(body)
+                _require_request_fields(payload, {'path'})
                 selected = payload.get('path')
-                Handler.cache_dir.mkdir(parents=True, exist_ok=True)
+                _validate_touch_device_path(selected)
+                _ensure_real_directory(Handler.cache_dir, create=True)
                 _atomic_write_text(Handler.cache_dir / 'touch-device.json', json.dumps({'path': selected}))
                 # Tell the actor to restart the kiosk so the choice takes effect
                 try:
@@ -4980,17 +5534,17 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 return self.send_text(200, json.dumps({'saved': True, 'path': selected}), 'application/json')
             except Exception as e:
-                return self.send_text(500, json.dumps({'error': str(e)}), 'application/json')
+                return self.send_text(500, json.dumps({'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/touch-calibration.json':
             try:
-                data = json.loads(body) if body and body.strip() else {}
+                data = _parse_request_json(body) if body and body.strip() else {}
                 data.setdefault('received_at', _iso_now())
                 # Tag per-display calibration results so the heartbeat
                 # can attribute intermittent failures to a specific
                 # screen when there are multiple on the same box.
                 data.setdefault('display_index', int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0')))
                 calib_path = Handler.cache_dir / 'touch-calibration.json'
-                calib_path.parent.mkdir(parents=True, exist_ok=True)
+                _ensure_real_directory(calib_path.parent, create=True)
                 history = []
                 if calib_path.exists():
                     try:
@@ -5004,31 +5558,37 @@ class Handler(BaseHTTPRequestHandler):
                 _atomic_write_text(calib_path, json.dumps(history, indent=2))
                 return self.send_text(200, json.dumps({'ok': True, 'history_size': len(history)}), 'application/json')
             except Exception as e:
-                return self.send_text(400, json.dumps({'error': str(e)}), 'application/json')
+                return self.send_text(400, json.dumps({'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/admin/ca/refresh':
             return self.send_text(200, json.dumps(_refresh_ca_from_server()), 'application/json')
         if path == '/api/admin/device/reboot':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
-            except Exception:
-                payload = {}
-            result = _reboot_device(bool(payload.get('confirm')))
+                payload = _parse_request_json(body) if body and body.strip() else {}
+                _require_request_fields(payload, {'confirm'})
+                result = _reboot_device(bool(payload.get('confirm')))
+            except Exception as e:
+                return self.send_text(400, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
             return self.send_text(200 if result.get('ok') else 400, json.dumps(result), 'application/json')
         if path == '/api/admin/display-count':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
+                payload = _parse_request_json(body) if body and body.strip() else {}
+                _require_request_fields(payload, {'max_displays'})
                 value = payload.get('max_displays')
                 result = _write_display_count(None if value in (None, '', 'auto') else int(value))
                 return self.send_text(200, json.dumps(result), 'application/json')
             except Exception as e:
-                return self.send_text(400, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
+                return self.send_text(400, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/admin/touch-binding':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
+                payload = _parse_request_json(body) if body and body.strip() else {}
+                _require_request_fields(payload, {
+                    'device_path', 'path', 'device_name', 'target_display_indexes',
+                    'display_indexes', 'display_index', 'allow_joined_displays', 'requested_by',
+                })
                 result = _write_touch_binding(payload)
                 return self.send_text(200, json.dumps(result), 'application/json')
             except Exception as e:
-                return self.send_text(400, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
+                return self.send_text(400, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/admin/client-backup':
             result = _create_client_software_backup()
             return self.send_text(200 if result.get('ok') else 500, json.dumps(result), 'application/json')
@@ -5047,7 +5607,7 @@ class Handler(BaseHTTPRequestHandler):
         # Heartbeat reads this on next cycle and sends it to the server.
         if method == 'POST' and path == '/api/client-config.json':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
+                payload = _parse_request_json(body) if body and body.strip() else {}
             except Exception:
                 return self.send_text(400, json.dumps({'ok': False, 'error': 'invalid json'}), 'application/json')
             cfg_path = Handler.cache_dir / 'client-config.json'
@@ -5059,11 +5619,11 @@ class Handler(BaseHTTPRequestHandler):
                 for k in ['theme']:
                     if k in payload:
                         data[k] = payload[k]
-                cfg_path.parent.mkdir(parents=True, exist_ok=True)
+                _ensure_real_directory(cfg_path.parent, create=True)
                 _atomic_write_text(cfg_path, json.dumps(data, indent=2))
                 return self.send_text(200, json.dumps({'ok': True}), 'application/json')
             except Exception as e:
-                return self.send_text(500, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
+                return self.send_text(500, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         return self.send_text(404, json.dumps({'error': 'not found'}), 'application/json')
     def log_message(self, fmt, *args):
         pass
@@ -5110,9 +5670,10 @@ class Handler(BaseHTTPRequestHandler):
             # the touchscreen + pick a layout right from the screen.
             if not layout_target.exists():
                 try:
-                    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'no-layout.html'), 'r') as _f:
-                        html = _f.read().replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
-                        return self.send_text(200, html, 'text/html; charset=utf-8')
+                    no_layout_path = Path(__file__).with_name('no-layout.html')
+                    html = _read_real_file(no_layout_path, MAX_STATIC_HTML_BYTES).decode('utf-8')
+                    html = html.replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
+                    return self.send_text(200, html, 'text/html; charset=utf-8')
                 except Exception:
                     pass
 
@@ -5144,14 +5705,22 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             fname = (query.get('file') or [''])[0]
             safe_name = Path(fname).name
-            target = (_client_backup_root() / safe_name).resolve()
+            root = _client_backup_root()
+            candidate = root / safe_name
+            metadata = os.lstat(candidate) if candidate.exists() or candidate.is_symlink() else None
+            if metadata is None or stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                return self.send_text(404, 'backup not found')
+            target = candidate.resolve()
             try:
-                target.relative_to(_client_backup_root().resolve())
+                target.relative_to(root.resolve())
             except Exception:
                 return self.send_text(403, 'forbidden')
-            if not target.exists() or not target.is_file():
-                return self.send_text(404, 'backup not found')
-            data = target.read_bytes()
+            try:
+                data = _read_real_file(candidate, maximum=MAX_BACKUP_DOWNLOAD_BYTES)
+            except ValueError as error:
+                if 'exceeds' in str(error) or 'bounded' in str(error):
+                    return self.send_text(413, 'backup too large')
+                return self.send_text(403, 'forbidden')
             self.send_response(200)
             self.send_header('Content-Type', 'application/gzip')
             self.send_header('Content-Length', str(len(data)))
@@ -5164,16 +5733,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(200, json.dumps(_admin_logs(target)), 'application/json')
         if path == '/no-layout.html':
             display_index = int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0'))
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'no-layout.html'), 'r') as _f:
-                html = _f.read().replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
-                return self.send_text(200, html, 'text/html; charset=utf-8')
+            no_layout_path = Path(__file__).with_name('no-layout.html')
+            html = _read_real_file(no_layout_path, MAX_STATIC_HTML_BYTES).decode('utf-8')
+            html = html.replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
+            return self.send_text(200, html, 'text/html; charset=utf-8')
         if path == '/touch-calibration.html':
             # Serve the touchscreen calibration test page. Lives next to
             # the renderer script and reads RIPLEY_DISPLAY_INDEX for the
             # results so per-display calibration is recorded separately.
             try:
-                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'touch-calibration.html'), 'r') as _f:
-                    return self.send_text(200, _f.read(), 'text/html; charset=utf-8')
+                calibration_path = Path(__file__).with_name('touch-calibration.html')
+                html = _read_real_file(calibration_path, MAX_STATIC_HTML_BYTES).decode('utf-8')
+                return self.send_text(200, html, 'text/html; charset=utf-8')
             except FileNotFoundError:
                 return self.send_text(404, 'calibration page not installed', 'text/plain')
         if path == '/api/status.json':
@@ -5245,17 +5816,28 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(200, json.dumps(_read_json_file(target, {})), 'application/json')
         # Optional cached asset serving under cache/assets
         safe = Path(path.lstrip('/'))
-        target = (self.cache_dir / safe).resolve()
+        candidate = self.cache_dir / safe
+        try:
+            candidate_metadata = os.lstat(candidate)
+        except FileNotFoundError:
+            return self.send_text(404, 'not found')
+        if stat.S_ISLNK(candidate_metadata.st_mode) or not stat.S_ISREG(candidate_metadata.st_mode):
+            return self.send_text(403, 'forbidden')
+        target = candidate.resolve()
         try:
             target.relative_to(self.cache_dir.resolve())
         except Exception:
             return self.send_text(403, 'forbidden')
-        if target.exists() and target.is_file():
-            data = target.read_bytes()
-            self.send_response(200)
-            self.send_header('Content-Type', mimetypes.guess_type(str(target))[0] or 'application/octet-stream')
-            self.send_header('Content-Length', str(len(data)))
-            self.end_headers(); self.wfile.write(data); return
+        try:
+            data = _read_real_file(candidate, maximum=MAX_CACHED_ASSET_BYTES)
+        except ValueError as error:
+            if 'exceeds' in str(error) or 'bounded' in str(error):
+                return self.send_text(413, 'asset too large')
+            return self.send_text(403, 'forbidden')
+        self.send_response(200)
+        self.send_header('Content-Type', mimetypes.guess_type(str(target))[0] or 'application/octet-stream')
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers(); self.wfile.write(data); return
         return self.send_text(404, 'not found')
 
 def main():
@@ -5267,7 +5849,7 @@ def main():
     if args.port is None:
         args.port = int(os.environ.get('RIPLEY_RENDER_PORT', str(int(os.environ.get('RIPLEY_RENDER_BASE_PORT','3900')) + int(os.environ.get('RIPLEY_DISPLAY_INDEX','0')))))
     Handler.cache_dir=Path(args.cache_dir)
-    Handler.cache_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(Handler.cache_dir, create=True)
     print(f'Screentra Cast cached player renderer listening on http://{args.host}:{args.port}/ using {Handler.cache_dir}', flush=True)
     ThreadingHTTPServer((args.host,args.port), Handler).serve_forever()
 if __name__=='__main__': main()
@@ -5281,15 +5863,25 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+
+MAX_FILE_READ_BYTES = 4096
+MAX_SUBPROCESS_OUTPUT_BYTES = 64 * 1024
+MAX_GPU_RECORDS = 16
+MAX_GPU_NAME_BYTES = 256
 
 
 def _read(path: Path) -> str | None:
     try:
-        return path.read_text(errors='replace').strip()
+        with path.open('rb') as handle:
+            raw = handle.read(MAX_FILE_READ_BYTES)
+        return raw.decode(errors='replace').strip()
     except Exception:
         return None
 
@@ -5321,12 +5913,57 @@ def _mhz_value(raw: str | None) -> float | None:
     return round(mhz, 0) if mhz > 0 else None
 
 
+
+
+def _bound_subprocess_output(value: str) -> str:
+    encoded = str(value).encode('utf-8', errors='replace')
+    return encoded[:MAX_SUBPROCESS_OUTPUT_BYTES].decode('utf-8', errors='ignore')
+
+
+def _bound_gpu_name(value: str) -> str:
+    encoded = str(value).encode('utf-8', errors='replace')
+    return encoded[:MAX_GPU_NAME_BYTES].decode('utf-8', errors='ignore').strip()
+
+
 def _run(args: list[str], timeout: float = 2.0) -> tuple[int, str, str]:
+    process = None
     try:
-        p = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
-        return p.returncode, p.stdout.strip(), p.stderr.strip()
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        selector = selectors.DefaultSelector()
+        stdout = bytearray()
+        stderr = bytearray()
+        for stream, buffer in ((process.stdout, stdout), (process.stderr, stderr)):
+            selector.register(stream, selectors.EVENT_READ, buffer)
+        deadline = time.monotonic() + timeout
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('subprocess timed out')
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fileobj.fileno(), 8192)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                        continue
+                    buffer = key.data
+                    if len(buffer) + len(chunk) > MAX_SUBPROCESS_OUTPUT_BYTES:
+                        raise ValueError('subprocess output exceeded its limit')
+                    buffer.extend(chunk)
+        finally:
+            selector.close()
+        returncode = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+        return returncode, _bound_subprocess_output(stdout.decode('utf-8', errors='replace')).strip(), _bound_subprocess_output(stderr.decode('utf-8', errors='replace')).strip()
     except Exception as e:
-        return 127, '', str(e)
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        return 127, '', _bound_subprocess_output(str(e))
+    finally:
+        if process is not None:
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
 
 
 def pci_gpus() -> list[dict]:
@@ -5345,7 +5982,9 @@ def pci_gpus() -> list[dict]:
                         vendor = 'intel'
                     elif 'amd' in low or 'ati' in low or 'advanced micro devices' in low:
                         vendor = 'amd'
-                    gpus.append({'vendor': vendor, 'name': line, 'source': 'lspci'})
+                    gpus.append({'vendor': vendor, 'name': _bound_gpu_name(line), 'source': 'lspci'})
+                    if len(gpus) >= MAX_GPU_RECORDS:
+                        break
             if gpus:
                 return gpus
     # Sysfs fallback without pciutils.
@@ -5354,7 +5993,9 @@ def pci_gpus() -> list[dict]:
         device_id = _read(dev / 'device') or ''
         vendor = {'0x10de': 'nvidia', '0x8086': 'intel', '0x1002': 'amd', '0x1022': 'amd'}.get(vendor_id.lower(), 'unknown')
         if vendor != 'unknown' or device_id:
-            gpus.append({'vendor': vendor, 'name': f'{vendor} GPU {vendor_id} {device_id}'.strip(), 'source': str(dev)})
+            gpus.append({'vendor': vendor, 'name': _bound_gpu_name(f'{vendor} GPU {vendor_id} {device_id}'.strip()), 'source': str(dev)})
+            if len(gpus) >= MAX_GPU_RECORDS:
+                break
     return gpus
 
 
@@ -5550,9 +6191,14 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 
+MAX_SYSFS_VALUE_BYTES = 4096
+MAX_DISPLAYS = 8
+
+
 def _read(path: Path) -> str:
     try:
-        return path.read_text().strip()
+        with path.open('rb') as handle:
+            return handle.read(MAX_SYSFS_VALUE_BYTES).decode('utf-8', errors='replace').strip()
     except Exception:
         return ""
 
@@ -5580,6 +6226,10 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
     """
     drm_root = Path('/sys/class/drm')
     displays: List[Dict[str, Any]] = []
+    try:
+        display_limit = max(0, min(int(max_displays), MAX_DISPLAYS))
+    except (TypeError, ValueError):
+        display_limit = MAX_DISPLAYS
 
     if drm_root.exists():
         connectors = []
@@ -5597,7 +6247,7 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
         connectors.sort(key=lambda c: (0 if (c['status'] == 'connected' and c['enabled']) else 1, c['name']))
 
         for idx, conn in enumerate(connectors):
-            if idx >= max_displays:
+            if idx >= display_limit:
                 break
             entry = conn['entry']
             connector = conn['name'].split('-', 1)[1] if '-' in conn['name'] else conn['name']
@@ -5646,6 +6296,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -5696,12 +6347,63 @@ def detect_full(max_scan: int = 16) -> List[Dict[str, Any]]:
     return _det.detect_displays(max_displays=max_scan)
 
 
+def _ensure_real_directory(path: Path, create: bool = False) -> bool:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            if not create:
+                return False
+            current.mkdir()
+            metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError('display governance directory is not a real directory')
+    return True
+
+
+def _read_real_file(path: Path, maximum: int = 1 << 20) -> bytes:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError('display governance path contains a symlink')
+    descriptor = os.open(absolute, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+            raise ValueError('display governance file is not bounded')
+        raw = os.read(descriptor, maximum + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > maximum:
+        raise ValueError('display governance file exceeds its bound')
+    return raw
+
+
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate JSON object key')
+        result[key] = value
+    return result
+
+
 def load_config(config_path: Path) -> Dict[str, Any]:
     """Load config.json (or return defaults) without writing."""
     if not config_path.exists():
         return dict(CONFIG_DEFAULTS)
     try:
-        cfg = json.loads(config_path.read_text())
+        cfg = json.loads(
+            _read_real_file(config_path).decode('utf-8'),
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+        )
     except Exception:
         # Corrupt config.json → return defaults but don't clobber; caller decides.
         return dict(CONFIG_DEFAULTS)
@@ -5724,7 +6426,7 @@ def write_config(config_path: Path, *, installer_detected_max_displays: int,
         "max_displays": max_displays,
         "last_detected_displays": last_detected_displays,
     })
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(config_path.parent, create=True)
     with tempfile.NamedTemporaryFile(
         mode="w",
         dir=config_path.parent,
@@ -6271,6 +6973,7 @@ cat > "$STATUS_REPORT_ADMISSION" <<'PY_STATUS_REPORT_ADMISSION'
 import json
 import re
 from collections.abc import Mapping
+from datetime import datetime
 
 MAX_REPORT_BYTES = 256 * 1024
 MAX_CAPABILITIES = 8
@@ -6287,6 +6990,10 @@ _ALLOWED_CAPABILITIES = frozenset({
     'client_service',
 })
 _ALLOWED_STATES = frozenset({'available', 'unavailable', 'disabled'})
+_ADDON_STATES = frozenset({'verified', 'verified_cached', 'failed'})
+_ADDON_FIELDS = frozenset({'id', 'version', 'state', 'entrypoint', 'error'})
+_ADDON_ID_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}$')
+_ADDON_VERSION_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}$')
 _TIMESTAMP_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
 _FORBIDDEN_DETAIL_MARKERS = ('password', 'credential', 'secret', 'token', '://', '/')
 
@@ -6324,6 +7031,46 @@ def _validate_capabilities(value):
         seen.add(identifier)
 
 
+def _validate_addons(value):
+    if not isinstance(value, list) or len(value) > MAX_ADDONS:
+        raise StatusReportError('invalid status report addons')
+    seen = set()
+    for addon in value:
+        if not isinstance(addon, Mapping) or set(addon) - _ADDON_FIELDS:
+            raise StatusReportError('invalid status report addon shape')
+        identifier = addon.get('id')
+        state = addon.get('state')
+        if not isinstance(identifier, str) or not _ADDON_ID_RE.fullmatch(identifier):
+            raise StatusReportError('invalid status report addon id')
+        if identifier in seen:
+            raise StatusReportError('duplicate status report addon')
+        if state not in _ADDON_STATES:
+            raise StatusReportError('invalid status report addon state')
+        version = addon.get('version')
+        if version is not None and (
+                not isinstance(version, str) or not _ADDON_VERSION_RE.fullmatch(version)):
+            raise StatusReportError('invalid status report addon version')
+        entrypoint = addon.get('entrypoint')
+        if entrypoint is not None:
+            if (not isinstance(entrypoint, str) or entrypoint == 'client/' or
+                    not entrypoint.startswith('client/') or '\\' in entrypoint or
+                    '..' in entrypoint.split('/') or
+                    any(ord(character) < 0x20 or ord(character) == 0x7F for character in entrypoint) or
+                    len(entrypoint.encode('utf-8')) > MAX_DETAIL_BYTES):
+                raise StatusReportError('invalid status report addon entrypoint')
+        error = addon.get('error')
+        if error is not None:
+            _validate_safe_text(error, MAX_ERROR_BYTES, 'addon error')
+        seen.add(identifier)
+
+
+def _validate_safe_text(value, maximum, field):
+    _bounded_text(value, maximum, field)
+    lowered = value.lower()
+    if any(marker in lowered for marker in _FORBIDDEN_DETAIL_MARKERS):
+        raise StatusReportError(f'unsafe status report {field}')
+
+
 def validate_status_report(report):
     """Validate a report without probing devices or changing client state."""
     if not isinstance(report, Mapping) or set(report) - _ALLOWED_FIELDS:
@@ -6331,9 +7078,11 @@ def validate_status_report(report):
     timestamp = report.get('at')
     if not isinstance(timestamp, str) or not _TIMESTAMP_RE.fullmatch(timestamp):
         raise StatusReportError('invalid status report timestamp')
-    addons = report.get('addons')
-    if not isinstance(addons, list) or len(addons) > MAX_ADDONS:
-        raise StatusReportError('invalid status report addons')
+    try:
+        datetime.strptime(timestamp, '%Y-%m-%dT%H:%M:%SZ')
+    except ValueError as exc:
+        raise StatusReportError('invalid status report timestamp') from exc
+    _validate_addons(report.get('addons'))
     _validate_capabilities(report.get('capabilities'))
     # Runtime execution is disabled. No service observation may be represented
     # as running, healthy, queued, or otherwise active by this report path.
@@ -6341,7 +7090,7 @@ def validate_status_report(report):
         raise StatusReportError('client service status reporting is disabled')
     error = report.get('error')
     if error is not None:
-        _bounded_text(error, MAX_ERROR_BYTES, 'error')
+        _validate_safe_text(error, MAX_ERROR_BYTES, 'error')
     try:
         encoded = json.dumps(report, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
     except (TypeError, ValueError, UnicodeError) as exc:
@@ -6370,9 +7119,12 @@ import importlib.util
 import json
 import os
 import re
+import select
+import selectors
 import signal
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -6431,7 +7183,10 @@ _STATUS_REQUEST_ADMISSION = _load_status_request_admission()
 
 MAX_PENDING_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
+MAX_SERVER_RESPONSE_BYTES = 1 << 20
 MAX_COMMAND_PAYLOAD_BYTES = 64 * 1024
+MAX_BLUETOOTH_DEVICES = 128
+MAX_AUDIO_SINKS = 128
 MAX_CLIENT_ID_BYTES = 200
 CLIENT_SERVICE_IDENTIFIER_MAX_BYTES = 128
 CLIENT_SERVICE_REQUEST_ID_MAX_BYTES = 128
@@ -6448,6 +7203,11 @@ ALLOWED_CLIENT_COMMAND_ACTIONS = (
     'ir_send', 'client_service_status', 'client_service_rollback_request',
     'client_service_transcribe_request',
 )
+_ALLOWED_PENDING_COMMAND_FIELDS = frozenset({
+    'client_id', 'action', 'payload', 'requested_at', 'requested_by',
+})
+MAX_REQUESTED_AT_BYTES = 64
+MAX_REQUESTED_BY_BYTES = 128
 
 
 def _validate_client_service_identifier(value, field):
@@ -6495,11 +7255,26 @@ def validate_client_service_payload(action, payload):
 def validate_pending_command(spec, expected_client_id):
     if not isinstance(spec, dict):
         raise ValueError('pending command must be a JSON object')
+    if set(spec) - _ALLOWED_PENDING_COMMAND_FIELDS:
+        raise ValueError('pending command contains unsupported fields')
     if (not isinstance(expected_client_id, str) or not expected_client_id or
             len(expected_client_id.encode('utf-8')) > MAX_CLIENT_ID_BYTES):
         raise ValueError('client identity is invalid')
     if spec.get('client_id') != expected_client_id:
         raise ValueError('pending command client identity mismatch')
+    if 'requested_at' in spec:
+        requested_at = spec['requested_at']
+        if (not isinstance(requested_at, str) or not requested_at or
+                len(requested_at.encode('utf-8')) > MAX_REQUESTED_AT_BYTES or
+                any(ord(char) < 32 or ord(char) == 127 for char in requested_at)):
+            raise ValueError('pending command requested_at is invalid')
+    if 'requested_by' in spec:
+        requested_by = spec['requested_by']
+        if requested_by is not None and (
+                not isinstance(requested_by, str) or not requested_by or
+                len(requested_by.encode('utf-8')) > MAX_REQUESTED_BY_BYTES or
+                any(ord(char) < 32 or ord(char) == 127 for char in requested_by)):
+            raise ValueError('pending command requested_by is invalid')
     action = spec.get('action')
     if action not in ALLOWED_CLIENT_COMMAND_ACTIONS:
         raise ValueError(f'unsupported client command action: {action}')
@@ -6507,7 +7282,14 @@ def validate_pending_command(spec, expected_client_id):
     if payload is not None and not isinstance(payload, dict):
         raise ValueError('client command payload must be a JSON object')
     if payload is not None:
-        encoded = json.dumps(payload, separators=(',', ':')).encode('utf-8')
+        try:
+            encoded = json.dumps(
+                payload,
+                allow_nan=False,
+                separators=(',', ':'),
+            ).encode('utf-8')
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ValueError('client command payload is not bounded JSON') from exc
         if len(encoded) > MAX_COMMAND_PAYLOAD_BYTES:
             raise ValueError(f'client command payload exceeds {MAX_COMMAND_PAYLOAD_BYTES} bytes')
         if 'client_id' in payload:
@@ -6531,11 +7313,65 @@ def validate_pending_command(spec, expected_client_id):
     return spec
 
 
+def _read_bounded_response(response, maximum):
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+        raise ValueError('response bound is invalid')
+    data = response.read(maximum + 1)
+    if not isinstance(data, (bytes, bytearray)) or len(data) > maximum:
+        raise ValueError('server response exceeds its bound')
+    return bytes(data).decode('utf-8')
+
+
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('pending command contains duplicate JSON fields')
+        result[key] = value
+    return result
+
+
+def _parse_pending_command(text):
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+        )
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ValueError('pending command JSON is invalid') from exc
+
+
+def _read_bounded_text(path: Path, maximum: int) -> str:
+    if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
+        raise ValueError('file bound is invalid')
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError('file path contains a symlink')
+    descriptor = os.open(absolute, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+            raise ValueError('file is not a bounded regular file')
+        raw = os.read(descriptor, maximum + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > maximum:
+        raise ValueError('file exceeds its bound')
+    return raw.decode('utf-8')
+
+
 def _read_json_file(path: Path, default):
     try:
-        if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
-            return default
-        return json.loads(path.read_text(encoding='utf-8'))
+        return json.loads(
+            _read_bounded_text(path, MAX_JSON_FILE_BYTES),
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+        )
     except Exception:
         return default
 
@@ -6549,38 +7385,168 @@ def _server_origin(server: str) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip('/'), '', ''))
 
 
+def _ensure_real_directory(path: Path, create: bool = False) -> bool:
+    current = Path(os.path.abspath(os.fspath(path)).split(os.sep)[0] + os.sep)
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            if not create:
+                return False
+            current.mkdir()
+            metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError('client cache directory is not a real directory')
+    return True
+
+
 def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
-    """Replace a cache JSON file atomically and keep it owner-readable."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
-    temporary.write_text(text)
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
-
-
-def _run_list(args: list[str], timeout: int = 20, input_data: str | None = None) -> tuple[int, str, str]:
+    """Replace a cache JSON file atomically without following symlinks."""
+    _ensure_real_directory(path.parent, create=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f'.{path.name}.', suffix='.tmp', dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, input=input_data)
-        return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+MAX_SUBPROCESS_OUTPUT_BYTES = 64 * 1024
+MAX_HARDWARE_MESSAGE_BYTES = 512
+
+
+def _bound_subprocess_output(value: str) -> str:
+    encoded = value.encode('utf-8', errors='replace')
+    if len(encoded) <= MAX_SUBPROCESS_OUTPUT_BYTES:
+        return value
+    return encoded[:MAX_SUBPROCESS_OUTPUT_BYTES].decode('utf-8', errors='ignore')
+
+
+def _bound_hardware_message(value: str) -> str:
+    encoded = str(value).encode('utf-8', errors='replace')
+    if len(encoded) <= MAX_HARDWARE_MESSAGE_BYTES:
+        return str(value)
+    return encoded[:MAX_HARDWARE_MESSAGE_BYTES].decode('utf-8', errors='ignore')
+
+
+def _run_list(args: list[str], timeout: int = 20, input_data: str | None = None, env: dict[str, str] | None = None) -> tuple[int, str, str]:
+    process = None
+    selector = None
+    try:
+        process = subprocess.Popen(
+            args,
+            stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            env=env,
+        )
+        if process.stdin is not None:
+            process.stdin.write((input_data or '').encode('utf-8'))
+            process.stdin.close()
+        assert process.stdout is not None and process.stderr is not None
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
+        selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
+        buffers = {'stdout': bytearray(), 'stderr': bytearray()}
+        deadline = time.monotonic() + timeout
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(args, timeout)
+            for key, _ in selector.select(remaining):
+                chunk = os.read(key.fileobj.fileno(), MAX_SUBPROCESS_OUTPUT_BYTES + 1)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                buffer = buffers[key.data]
+                buffer.extend(chunk)
+                if len(buffer) > MAX_SUBPROCESS_OUTPUT_BYTES:
+                    raise ValueError('subprocess output exceeds its bound')
+        returncode = process.wait(timeout=max(deadline - time.monotonic(), 0.001))
+        return (
+            returncode,
+            bytes(buffers['stdout']).decode('utf-8', errors='replace').strip(),
+            bytes(buffers['stderr']).decode('utf-8', errors='replace').strip(),
+        )
     except Exception as e:
-        return 1, "", str(e)
+        if process is not None and process.poll() is None:
+            process.kill()
+        if process is not None:
+            try:
+                process.wait(timeout=1)
+            except Exception:
+                pass
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+        if selector is not None:
+            selector.close()
+        return 1, '', _bound_hardware_message(str(e))
+    finally:
+        if selector is not None:
+            selector.close()
 
 
 def ddcutil_detect(bus: str | None = None) -> tuple[bool, str]:
     """Run ddcutil detect to refresh display cache. Returns (ok, message)."""
+    bus = _validate_ddc_bus(bus)
     args = ['sudo', '-n', 'ddcutil', 'detect']
     if bus:
         args.extend(['--bus', bus])
     rc, out, err = _run_list(args)
     if rc == 0:
-        return True, out.strip()
-    return False, err.strip() or out.strip()
+        return True, _bound_hardware_message(out.strip())
+    return False, _bound_hardware_message(err.strip() or out.strip())
+
+
+_DDC_VCP_RE = re.compile(r'^[0-9A-Fa-f]{1,2}$')
+_DDC_BUS_RE = re.compile(r'^[1-9][0-9]{0,2}$')
+
+
+def _validate_ddc_vcp(value: str) -> str:
+    if not isinstance(value, str) or _DDC_VCP_RE.fullmatch(value) is None:
+        raise ValueError('DDC VCP code is not allowlisted')
+    return value
+
+
+def _validate_ddc_value(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 65535:
+        raise ValueError('DDC value is outside its bound')
+    return value
+
+
+def _validate_ddc_bus(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or _DDC_BUS_RE.fullmatch(value) is None or int(value) > 255:
+        raise ValueError('DDC bus is not allowlisted')
+    return value
 
 
 def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_layout: bool = False) -> tuple[bool, str]:
-    """Set a DDC/CI VCP value via ddcutil. Returns (ok, message).
-    If has_layout=True and the display is not initially detected (ddcutil_no_bus),
-    runs ddcutil detect once and retries before returning failure."""
+    """Set a bounded DDC/CI VCP value via ddcutil."""
+    vcp_code = _validate_ddc_vcp(vcp_code)
+    value = _validate_ddc_value(value)
+    bus = _validate_ddc_bus(bus)
+    if not isinstance(has_layout, bool):
+        raise ValueError('DDC layout flag is invalid')
     args = ['sudo', '-n', 'ddcutil', 'setvcp']
     if bus:
         args.extend(['--bus', bus])
@@ -6589,15 +7555,15 @@ def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_lay
     def _do_set():
         rc, out, err = _run_list(args)
         if rc == 0:
-            return True, f'DDC: {vcp_code}={value}' + (f' ({out.strip()})' if out.strip() else '')
+            return True, f'DDC: {vcp_code}={value}' + (f' ({_bound_hardware_message(out.strip())})' if out.strip() else '')
         err_msg = err.strip() or out.strip()
         if 'not found' in err_msg.lower() or 'no such file' in err_msg.lower():
-            return False, f'ddcutil_not_installed: {err_msg}'
+            return False, f'ddcutil_not_installed: {_bound_hardware_message(err_msg)}'
         if 'unable to open' in err_msg.lower() or 'i2c' in err_msg.lower() or 'no bus' in err_msg.lower():
             return False, 'ddcutil_no_bus', err_msg
         if 'communication' in err_msg.lower() or 'timeout' in err_msg.lower():
-            return False, f'ddcutil_no_support: {err_msg}'
-        return False, f'DDC failed (rc={rc}): {err_msg}'
+            return False, f'ddcutil_no_support: {_bound_hardware_message(err_msg)}'
+        return False, f'DDC failed (rc={rc}): {_bound_hardware_message(err_msg)}'
 
     ok, msg_or_tag, *extra = _do_set()
     if ok:
@@ -6610,20 +7576,30 @@ def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_lay
         ok2, msg2 = _do_set()
         if ok2:
             return True, f'{msg2} (re-detected)'
-        return False, f'{msg_or_tag}: {err_msg} — retry after re-detection failed: {msg2}'
+        return False, f'{msg_or_tag}: {_bound_hardware_message(err_msg)} — retry after re-detection failed: {_bound_hardware_message(msg2)}'
 
     return False, msg_or_tag
 
 
+_CEC_COMMAND_RE = re.compile(r'^(?:pow|is) [0-9A-Fa-f]$')
+
+
+def _validate_cec_command(cec_cmd: str) -> str:
+    if not isinstance(cec_cmd, str) or len(cec_cmd.encode('utf-8')) > 32 or _CEC_COMMAND_RE.fullmatch(cec_cmd) is None:
+        raise ValueError('CEC command is not allowlisted')
+    return cec_cmd
+
+
 def apply_cec_command(cec_cmd: str) -> tuple[bool, str]:
-    """Send a CEC command via cec-client. Returns (ok, message)."""
+    """Send a bounded allowlisted CEC command via cec-client."""
+    cec_cmd = _validate_cec_command(cec_cmd)
     rc, out, err = _run_list(
         ['sudo', '-n', 'cec-client', '-d', '1', '-s'],
         input_data=f'{cec_cmd}\n',
     )
     if rc == 0:
-        return True, f'CEC: {cec_cmd}' + (f' — {out.strip()}' if out.strip() else '')
-    return False, f'CEC failed (rc={rc}): {err.strip() or out.strip()}'
+        return True, f'CEC: {cec_cmd}' + (f' — {_bound_hardware_message(out.strip())}' if out.strip() else '')
+    return False, f'CEC failed (rc={rc}): {_bound_hardware_message(err.strip() or out.strip())}'
 
 
 def _bluetoothctl_devices(text: str) -> list[dict]:
@@ -6637,13 +7613,62 @@ def _bluetoothctl_devices(text: str) -> list[dict]:
         if address in seen:
             continue
         seen.add(address)
-        devices.append({'address': address, 'name': match.group(2).strip() or address})
+        try:
+            name = _validate_bluetooth_name(match.group(2).strip())
+        except ValueError:
+            name = address
+        devices.append({'address': address, 'name': name or address})
+        if len(devices) >= MAX_BLUETOOTH_DEVICES:
+            break
     return devices
+
+
+def _validate_bluetooth_name(value: str) -> str:
+    if not isinstance(value, str) or not value or len(value.encode('utf-8')) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError('Bluetooth device name is invalid')
+    return value.strip()
+
+
+def _bounded_integer_input(value, minimum: int, maximum: int, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f'{label} must be an integer')
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r'[0-9]+', value):
+        parsed = int(value)
+    else:
+        raise ValueError(f'{label} must be an integer')
+    return max(minimum, min(parsed, maximum))
+
+
+def _validate_display_index(value) -> int:
+    if isinstance(value, bool):
+        raise ValueError('display index is invalid')
+    if isinstance(value, int):
+        index = value
+    elif isinstance(value, str) and re.fullmatch(r'[0-9]+', value):
+        index = int(value)
+    else:
+        raise ValueError('display index is invalid')
+    if not 0 <= index <= 3:
+        raise ValueError('display index is outside the supported range')
+    return index
+
+
+def _validate_optional_bool(value, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f'{label} must be boolean')
+    return value
 
 
 def bluetooth_scan(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
-    duration = max(5, min(int(payload.get('duration_seconds') or 10), 30))
+    if not isinstance(payload, dict):
+        return False, 'Bluetooth scan payload must be an object', {}
+    try:
+        duration = _bounded_integer_input(payload.get('duration_seconds', 10), 5, 30, 'duration')
+    except ValueError:
+        return False, 'Bluetooth scan duration must be a number from 5 to 30 seconds', {}
     if shutil.which('bluetoothctl') is None:
         return False, 'bluetoothctl is not installed on this client', {'devices': []}
     _run_list(['bluetoothctl', 'power', 'on'], timeout=10)
@@ -6651,7 +7676,7 @@ def bluetooth_scan(payload: dict | None) -> tuple[bool, str, dict]:
     _, listed, list_err = _run_list(['bluetoothctl', 'devices'], timeout=10)
     devices = _bluetoothctl_devices(listed or out)
     if not devices and rc != 0:
-        return False, f'Bluetooth scan failed: {err or out or list_err or "unknown error"}', {'devices': []}
+        return False, f'Bluetooth scan failed: {_bound_hardware_message(err or out or list_err or "unknown error")}', {'devices': []}
     return True, f'Bluetooth scan found {len(devices)} device(s)', {'devices': devices, 'duration_seconds': duration}
 
 
@@ -6675,8 +7700,18 @@ def _find_bluetooth_sink(address: str, name: str | None) -> str | None:
 
 def bluetooth_connect(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
-    address = str(payload.get('address') or '').strip().upper()
-    name = str(payload.get('name') or '').strip() or address
+    if not isinstance(payload, dict):
+        return False, 'Bluetooth connect payload must be an object', {}
+    raw_address = payload.get('address')
+    raw_name = payload.get('name')
+    if not isinstance(raw_address, str) or (raw_name is not None and not isinstance(raw_name, str)):
+        return False, 'Bluetooth address and name must be strings', {}
+    address = raw_address.strip().upper()
+    raw_name = raw_name.strip() if raw_name is not None else ''
+    try:
+        name = _validate_bluetooth_name(raw_name) if raw_name else address
+    except ValueError:
+        return False, 'Bluetooth device name is invalid', {}
     if not re.fullmatch(r'[0-9A-F]{2}(?::[0-9A-F]{2}){5}', address):
         return False, 'A valid Bluetooth device address is required', {}
     if shutil.which('bluetoothctl') is None:
@@ -6684,10 +7719,11 @@ def bluetooth_connect(payload: dict | None) -> tuple[bool, str, dict]:
     _run_list(['bluetoothctl', 'power', 'on'], timeout=10)
     rc, out, err = _run_list(['bluetoothctl', 'connect', address], timeout=30)
     text = '\n'.join(v for v in (out, err) if v)
+    message_text = _bound_hardware_message(text)
     connected = rc == 0 and not re.search(r'failed|not available|error', text, re.IGNORECASE)
-    details = {'address': address, 'name': name, 'connected': connected, 'bluetooth_output': text[-1200:]}
+    details = {'address': address, 'name': name, 'connected': connected, 'bluetooth_output': _bound_hardware_message(text[-1200:])}
     if not connected:
-        return False, f'Bluetooth connection failed: {text or f"exit code {rc}"}', details
+        return False, f'Bluetooth connection failed: {message_text or f"exit code {rc}"}', details
     time.sleep(1)
     sink_id = _find_bluetooth_sink(address, name)
     if sink_id and shutil.which('wpctl'):
@@ -6696,7 +7732,7 @@ def bluetooth_connect(payload: dict | None) -> tuple[bool, str, dict]:
         details['audio_device_selected'] = sink_rc == 0
         if sink_rc == 0:
             return True, f'Connected to {name}; Bluetooth audio output selected', details
-        details['audio_selection_error'] = sink_err or sink_out
+        details['audio_selection_error'] = _bound_hardware_message(sink_err or sink_out)
     else:
         details['audio_device_selected'] = False
         details['audio_selection_error'] = 'Bluetooth connected, but no PipeWire Bluetooth audio sink was found yet'
@@ -6719,11 +7755,22 @@ def _wpctl_sinks(text: str) -> list[dict]:
         if not match:
             continue
         sink_id = match.group(1)
+        if len(sink_id) > 8:
+            continue
         name = re.sub(r'^\*\s*', '', match.group(2)).strip()
         name = re.sub(r'\s+\[vol:.*?\]\s*$', '', name).strip()
+        name = _validate_audio_device_name(name)
         if not any(item['id'] == sink_id for item in sinks):
             sinks.append({'id': sink_id, 'name': name, 'default': '*' in line[:match.start(2)]})
+            if len(sinks) >= MAX_AUDIO_SINKS:
+                break
     return sinks
+
+
+def _validate_audio_device_name(value: str) -> str:
+    if not isinstance(value, str) or len(value.encode('utf-8')) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        return 'unnamed audio device'
+    return value.strip() or 'unnamed audio device'
 
 
 def audio_list() -> tuple[bool, str, dict]:
@@ -6732,28 +7779,50 @@ def audio_list() -> tuple[bool, str, dict]:
     rc, out, err = _run_list(['wpctl', 'status'], timeout=10)
     devices = _wpctl_sinks(out)
     if rc != 0:
-        return False, f'Audio device scan failed: {err or out or f"exit code {rc}"}', {'devices': devices}
+        return False, f'Audio device scan failed: {_bound_hardware_message(err or out or f"exit code {rc}")}', {'devices': devices}
     return True, f'Found {len(devices)} audio output device(s)', {'devices': devices}
+
+
+def _validate_audio_sink_id(value: str) -> str:
+    if not isinstance(value, str) or value == '@DEFAULT_AUDIO_SINK@':
+        if value == '@DEFAULT_AUDIO_SINK@':
+            return value
+        raise ValueError('audio sink identifier is invalid')
+    if not re.fullmatch(r'[0-9]{1,8}', value):
+        raise ValueError('audio sink identifier is invalid')
+    return value
 
 
 def audio_set_default(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
-    sink_id = str(payload.get('sink_id') or '').strip()
-    if not sink_id.isdigit():
+    if not isinstance(payload, dict):
+        return False, 'Audio payload must be an object', {}
+    raw_sink_id = payload.get('sink_id')
+    if not isinstance(raw_sink_id, str):
+        return False, 'A valid audio output device is required', {}
+    try:
+        sink_id = _validate_audio_sink_id(raw_sink_id.strip())
+    except ValueError:
         return False, 'A valid audio output device is required', {}
     if shutil.which('wpctl') is None:
         return False, 'wpctl is not installed on this client', {}
     rc, out, err = _run_list(['wpctl', 'set-default', sink_id], timeout=10)
     if rc == 0:
         return True, f'Audio output selected: {sink_id}', {'sink_id': sink_id}
-    return False, f'Audio output selection failed: {err or out or f"exit code {rc}"}', {'sink_id': sink_id}
+    return False, f'Audio output selection failed: {_bound_hardware_message(err or out or f"exit code {rc}")}', {'sink_id': sink_id}
 
 
 def audio_set_volume(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
-    sink_id = str(payload.get('sink_id') or '@DEFAULT_AUDIO_SINK@').strip()
+    if not isinstance(payload, dict):
+        return False, 'Audio payload must be an object', {}
+    raw_sink_id = payload.get('sink_id', '@DEFAULT_AUDIO_SINK@')
+    raw_value = payload.get('value')
+    if not isinstance(raw_sink_id, str):
+        return False, 'Volume must be a number from 0 to 100', {}
     try:
-        value = max(0, min(100, int(payload.get('value'))))
+        sink_id = _validate_audio_sink_id(raw_sink_id.strip())
+        value = _bounded_integer_input(raw_value, 0, 100, 'volume')
     except (TypeError, ValueError):
         return False, 'Volume must be a number from 0 to 100', {}
     if not sink_id.isdigit() and sink_id != '@DEFAULT_AUDIO_SINK@':
@@ -6763,7 +7832,7 @@ def audio_set_volume(payload: dict | None) -> tuple[bool, str, dict]:
     rc, out, err = _run_list(['wpctl', 'set-volume', sink_id, f'{value}%'], timeout=10)
     if rc == 0:
         return True, f'Client audio volume set to {value}%', {'sink_id': sink_id, 'volume': value}
-    return False, f'Client audio volume failed: {err or out or f"exit code {rc}"}', {'sink_id': sink_id, 'volume': value}
+    return False, f'Client audio volume failed: {_bound_hardware_message(err or out or f"exit code {rc}")}', {'sink_id': sink_id, 'volume': value}
 
 
 def restart_client() -> tuple[bool, str, dict]:
@@ -6772,7 +7841,7 @@ def restart_client() -> tuple[bool, str, dict]:
     rc, out, err = _run_list(['sudo', '-n', 'systemctl', 'reboot'], timeout=20)
     if rc == 0:
         return True, 'Client reboot requested', {'reboot_requested': True}
-    return False, f'Client reboot failed: {err or out or f"exit code {rc}"}', {'reboot_requested': False}
+    return False, f'Client reboot failed: {_bound_hardware_message(err or out or f"exit code {rc}")}', {'reboot_requested': False}
 
 
 def has_systemctl_user() -> bool:
@@ -6785,7 +7854,7 @@ def has_systemctl_user() -> bool:
 def systemctl_user(action: str, unit: str) -> tuple[bool, str]:
     rc, out, err = _run_list(["systemctl", "--user", action, unit])
     ok = rc == 0
-    return ok, (out or err or f"{action} {unit} rc={rc}").strip()
+    return ok, _bound_hardware_message((out or err or f"{action} {unit} rc={rc}").strip())
 
 
 def restart_system_kiosk() -> tuple[bool, str]:
@@ -6801,7 +7870,7 @@ def restart_system_kiosk() -> tuple[bool, str]:
         ['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'],
         timeout=30,
     )
-    return rc == 0, (out or err or f'restart screentra-cast-kiosk@0.service rc={rc}').strip()
+    return rc == 0, _bound_hardware_message((out or err or f'restart screentra-cast-kiosk@0.service rc={rc}').strip())
 
 
 def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]:
@@ -6818,18 +7887,26 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
         cfg = _read_json_file(config_path, {})
     except Exception:
         cfg = {}
-    installer = max(int(cfg.get('installer_detected_max_displays') or 1), 1)
+    if not isinstance(cfg, dict):
+        cfg = {}
+    try:
+        raw_installer = cfg.get('installer_detected_max_displays', 1)
+        installer = _bounded_integer_input(raw_installer, 1, 4, 'display count')
+    except ValueError:
+        installer = 1
     if max_displays is None:
         override = None
-        active = min(installer, 4)
+        active = installer
     else:
-        override = max(1, min(int(max_displays), installer, 4))
+        try:
+            override = _bounded_integer_input(max_displays, 1, min(installer, 4), 'display count')
+        except ValueError:
+            return False, 'display count must be numeric', {}
         active = override
     cfg['installer_detected_max_displays'] = installer
     cfg['max_displays'] = override
     cfg.setdefault('last_detected_displays', [])
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = config_path.with_suffix('.json.tmp')
+    _ensure_real_directory(config_path.parent, create=True)
     _atomic_write_text(config_path, json.dumps(cfg, indent=2))
 
     details = {'config_path': str(config_path), 'installer_detected_max_displays': installer, 'max_displays': override, 'active_max_displays': active, 'steps': []}
@@ -6863,50 +7940,103 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
         env = os.environ.copy()
         env.setdefault('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
         env.setdefault('WAYLAND_DISPLAY', 'wayland-0')
-        out = subprocess.check_output(['wlr-randr', '--json'], text=True, stderr=subprocess.DEVNULL, timeout=3, env=env)
-        data = json.loads(out)
-        outputs = [o for o in data if o.get('name')]
+        out = _bounded_check_output(['wlr-randr', '--json'], MAX_WLR_JSON_BYTES, 3, env=env)
+        data = json.loads(
+            out,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+        )
+        if not isinstance(data, list):
+            raise ValueError('wlr-randr output is not a list')
+        outputs = [o for o in data[:MAX_WLR_OUTPUTS] if isinstance(o, dict) and o.get('name')]
         outputs.sort(key=lambda o: o.get('name',''))
         x = 0
         for idx, o in enumerate(outputs):
             name = o.get('name')
+            try:
+                name = _validate_display_connector(name)
+            except ValueError:
+                continue
             cur = next((m for m in o.get('modes', []) if m.get('current')), None)
             pref = next((m for m in o.get('modes', []) if m.get('preferred')), None)
             mode = cur or pref or {}
             width = int(mode.get('width') or 0)
             if idx < active:
-                cp = subprocess.run(['wlr-randr', '--output', name, '--on', '--pos', f'{x},0'], text=True, capture_output=True, timeout=5, env=env)
-                details['steps'].append({'output': name, 'action': 'on', 'x': x, 'code': cp.returncode, 'stderr': (cp.stderr or '')[-500:]})
+                rc, _, err = _run_list(
+                    ['wlr-randr', '--output', name, '--on', '--pos', f'{x},0'],
+                    timeout=5,
+                    env=env,
+                )
+                details['steps'].append({'output': name, 'action': 'on', 'x': x, 'code': rc, 'stderr': _bound_hardware_message(err)})
                 x += width
             elif o.get('enabled'):
-                cp = subprocess.run(['wlr-randr', '--output', name, '--off'], text=True, capture_output=True, timeout=5, env=env)
-                details['steps'].append({'output': name, 'action': 'off', 'code': cp.returncode, 'stderr': (cp.stderr or '')[-500:]})
+                rc, _, err = _run_list(
+                    ['wlr-randr', '--output', name, '--off'],
+                    timeout=5,
+                    env=env,
+                )
+                details['steps'].append({'output': name, 'action': 'off', 'code': rc, 'stderr': _bound_hardware_message(err)})
     except Exception as e:
-        details['steps'].append({'output_policy': 'skipped', 'error': str(e)})
+        details['steps'].append({'output_policy': 'skipped', 'error': _bound_hardware_message(str(e))})
         rc,out,err = _run_list(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'])
-        details['steps'].append({'unit': 'screentra-cast-kiosk@0.service', 'restart_code': rc, 'message': out or err})
+        details['steps'].append({'unit': 'screentra-cast-kiosk@0.service', 'restart_code': rc, 'message': _bound_hardware_message(out or err)})
 
     ok = has_systemctl_user()
     return ok, f'active display count set to {active}', details
 
 
+_TOUCH_DEVICE_RE = re.compile(r'^/dev/[A-Za-z0-9._:+@/-]{1,240}$')
+
+
+def _validate_touch_device_path(value: str | None) -> str | None:
+    if value is None or value == '':
+        return None
+    if not isinstance(value, str) or '..' in value or _TOUCH_DEVICE_RE.fullmatch(value) is None:
+        raise ValueError('touch device path is not allowlisted')
+    return value
+
+
+def _validate_touch_device_name(value: str | None) -> str | None:
+    if value is None or value == '':
+        return None
+    if not isinstance(value, str) or len(value.encode('utf-8')) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError('touch device name is not bounded')
+    return value.strip() or None
+
+
+def _validate_actor_label(value: str | None, field: str) -> str | None:
+    if value is None or value == '':
+        return None
+    if not isinstance(value, str) or len(value.encode('utf-8')) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError(f'{field} is not bounded')
+    return value.strip() or None
+
+
 def _resolve_touch_name(device_path: str | None, device_name: str | None = None) -> str | None:
     if device_name:
-        return str(device_name)
+        return _validate_touch_device_name(device_name)
     if not device_path:
         return None
     try:
-        blocks = Path('/proc/bus/input/devices').read_text().split('\n\n')
+        blocks = _read_bounded_text(Path('/proc/bus/input/devices'), 256 * 1024).split('\n\n')
         target = Path(device_path).name
         for block in blocks:
             if target not in block:
                 continue
             for line in block.splitlines():
                 if line.startswith('N:') and 'Name=' in line:
-                    return line.split('Name=', 1)[1].strip().strip('"')
+                    return _validate_touch_device_name(line.split('Name=', 1)[1].strip().strip('"'))
     except Exception:
         pass
     return None
+
+
+_DISPLAY_CONNECTOR_RE = re.compile(r'^[A-Za-z0-9_.:-]{1,128}$')
+
+
+def _validate_display_connector(value: str) -> str:
+    if not isinstance(value, str) or len(value.encode('utf-8')) > 128 or _DISPLAY_CONNECTOR_RE.fullmatch(value) is None:
+        raise ValueError('display connector is not allowlisted')
+    return value
 
 
 def _display_connectors_for_indexes(config: dict, indexes: list[int]) -> list[str]:
@@ -6917,8 +8047,12 @@ def _display_connectors_for_indexes(config: dict, indexes: list[int]) -> list[st
             try:
                 if int(d.get('display_index', -1)) == int(idx):
                     c = d.get('connector') or d.get('label')
-                    if c and c not in out:
-                        out.append(str(c))
+                    try:
+                        c = _validate_display_connector(c)
+                    except ValueError:
+                        continue
+                    if c not in out:
+                        out.append(c)
                     break
             except Exception:
                 continue
@@ -6932,15 +8066,22 @@ def apply_touch_binding(cache_dir: Path, payload: dict) -> tuple[bool, str, dict
         cfg = _read_json_file(config_path, {})
     except Exception:
         cfg = {}
-    dev_path = payload.get('device_path') or payload.get('path')
+    if not isinstance(cfg, dict):
+        cfg = {}
+    dev_path = _validate_touch_device_path(payload.get('device_path') or payload.get('path'))
     dev_name = _resolve_touch_name(dev_path, payload.get('device_name'))
-    allow_joined = bool(payload.get('allow_joined_displays'))
+    requested_by = _validate_actor_label(payload.get('requested_by'), 'touch binding requester')
+    allow_joined = payload.get('allow_joined_displays', False)
+    if not isinstance(allow_joined, bool):
+        raise ValueError('joined display flag is invalid')
     raw_indexes = payload.get('target_display_indexes') or payload.get('display_indexes') or payload.get('display_index') or [0]
     if not isinstance(raw_indexes, list):
         raw_indexes = [raw_indexes]
     indexes = []
     for v in raw_indexes:
         try:
+            if isinstance(v, bool):
+                raise ValueError
             i = max(0, min(int(v), 3))
             if i not in indexes:
                 indexes.append(i)
@@ -6956,19 +8097,18 @@ def apply_touch_binding(cache_dir: Path, payload: dict) -> tuple[bool, str, dict
         'target_connectors': _display_connectors_for_indexes(cfg, indexes),
         'allow_joined_displays': allow_joined,
         'updated_at': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z',
-        'updated_by': payload.get('requested_by') or 'actor',
+        'updated_by': requested_by or 'actor',
     }
     cfg['touch_binding'] = binding
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = config_path.with_suffix('.json.tmp')
+    _ensure_real_directory(config_path.parent, create=True)
     _atomic_write_text(config_path, json.dumps(cfg, indent=2))
     if dev_path:
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_real_directory(cache_dir, create=True)
         _atomic_write_text(Path(cache_dir, 'touch-device.json'), json.dumps({'path': dev_path, 'name': dev_name}, indent=2))
     details = {'config_path': str(config_path), 'touch_binding': binding, 'steps': []}
     # Restart labwc so rc.xml <touch> mapping is reloaded, then let browser services return.
     rc, out, err = _run_list(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'])
-    details['steps'].append({'unit': 'screentra-cast-kiosk@0.service', 'restart_code': rc, 'message': out or err})
+    details['steps'].append({'unit': 'screentra-cast-kiosk@0.service', 'restart_code': rc, 'message': _bound_hardware_message(out or err)})
     if has_systemctl_user():
         systemctl_user('restart', 'screentra-client-heartbeat.service')
         for i in range(4):
@@ -6989,7 +8129,8 @@ def tls_context(cache_dir: Path | None = None):
     for cafile in candidates:
         if cafile.exists():
             try:
-                return ssl.create_default_context(cafile=str(cafile))
+                ca_data = _read_bounded_text(cafile, 256 * 1024)
+                return ssl.create_default_context(cadata=ca_data)
             except Exception as e:
                 print(f'warning: failed to load Screentra Cast CA {cafile}: {e}', flush=True)
     raise RuntimeError('Screentra Cast CA certificate is unavailable or invalid')
@@ -7023,7 +8164,7 @@ def _preview_state_path(cache_dir: Path, display_index: int) -> Path:
 def _preview_token(cache_dir: Path) -> str:
     token_path = cache_dir.parent / 'client-auth-token'
     try:
-        token = token_path.read_text(encoding='utf-8').strip()
+        token = _read_bounded_text(token_path, 4096).strip()
     except Exception:
         return ''
     return token
@@ -7035,8 +8176,11 @@ def _write_preview_state(cache_dir: Path, display_index: int, state: dict) -> No
 
 def _preview_connector(cache_dir: Path, display_index: int) -> str | None:
     data = _read_json_file(cache_dir / f'display-{display_index}.json', {})
-    connector = str(data.get('connector') or '').strip()
-    return connector or None
+    connector = data.get('connector')
+    try:
+        return _validate_display_connector(connector) if connector else None
+    except ValueError:
+        return None
 
 
 def _preview_wayland_env() -> dict[str, str]:
@@ -7057,6 +8201,31 @@ def _preview_wayland_env() -> dict[str, str]:
         if sockets:
             env['WAYLAND_DISPLAY'] = sockets[0].name
     return env
+
+
+def apply_display_power(cache_dir: Path, display_index: int | None, state: str) -> tuple[bool, str, dict]:
+    """Apply Linux DPMS/KMS power state to one validated Wayland output."""
+    if display_index is None or display_index < 0 or display_index > 3:
+        return False, 'a display index from 0 to 3 is required', {}
+    if not isinstance(state, str) or state not in {'on', 'off'}:
+        return False, 'display power state must be on or off', {}
+    connector = _preview_connector(cache_dir, display_index)
+    if not connector:
+        return False, f'no connector is recorded for display {display_index}', {'display_index': display_index}
+    env = _preview_wayland_env()
+    requested = '--on' if state == 'on' else '--off'
+    rc, out, err = _run_list(
+        ['wlr-randr', '--output', connector, requested],
+        timeout=10,
+        env=env,
+    )
+    message = _bound_hardware_message(out or err or ('display enabled' if state == 'on' else 'display disabled'))
+    return rc == 0, message, {
+        'display_index': display_index,
+        'connector': connector,
+        'state': state,
+        'return_code': rc,
+    }
 
 
 def _upload_preview_frame(server: str, client_id: str, display_index: int, frame: bytes, cache_dir: Path) -> tuple[bool, str]:
@@ -7083,6 +8252,107 @@ def _upload_preview_frame(server: str, client_id: str, display_index: int, frame
         return False, f'upload failed: {exc}'
 
 
+MAX_PREVIEW_FRAME_BYTES = 16 * 1024 * 1024
+MAX_WLR_JSON_BYTES = 1 << 20
+MAX_WLR_OUTPUTS = 32
+
+
+def _require_bounded_text(value: str, maximum: int) -> str:
+    if not isinstance(value, str) or len(value.encode('utf-8')) > maximum:
+        raise ValueError('process text exceeds its bound')
+    return value
+
+
+def _bounded_check_output(args: list[str], maximum: int, timeout: float, env: dict[str, str] | None = None) -> str:
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    assert process.stdout is not None
+    chunks: list[bytes] = []
+    total = 0
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(args, timeout)
+            ready, _, _ = select.select([process.stdout], [], [], remaining)
+            if not ready:
+                raise subprocess.TimeoutExpired(args, timeout)
+            chunk = os.read(process.stdout.fileno(), min(65536, maximum + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum:
+                raise ValueError('process output exceeds its bound')
+            chunks.append(chunk)
+        remaining = deadline - time.monotonic()
+        returncode = process.wait(timeout=max(remaining, 0.001))
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, args)
+        return b''.join(chunks).decode('utf-8')
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        try:
+            process.wait(timeout=1)
+        except Exception:
+            pass
+        raise
+    finally:
+        process.stdout.close()
+
+
+def _bounded_capture_stdout(args: list[str], maximum: int, timeout: float, env: dict[str, str] | None = None) -> tuple[int, bytes]:
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    assert process.stdout is not None
+    chunks: list[bytes] = []
+    total = 0
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(args, timeout)
+            ready, _, _ = select.select([process.stdout], [], [], remaining)
+            if not ready:
+                raise subprocess.TimeoutExpired(args, timeout)
+            chunk = os.read(process.stdout.fileno(), min(65536, maximum + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum:
+                raise ValueError('process output exceeds its bound')
+            chunks.append(chunk)
+        remaining = deadline - time.monotonic()
+        returncode = process.wait(timeout=max(remaining, 0.001))
+        return returncode, b''.join(chunks)
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        try:
+            process.wait(timeout=1)
+        except Exception:
+            pass
+        raise
+    finally:
+        process.stdout.close()
+
+
+def _validate_preview_frame(frame: bytes) -> bytes:
+    if not isinstance(frame, bytes) or not frame or len(frame) > MAX_PREVIEW_FRAME_BYTES:
+        raise ValueError('preview frame is not bounded')
+    return frame
+
+
 def run_preview_loop(server: str, client_id: str, cache_dir: Path, display_index: int, interval: int, duration: int) -> int:
     """Capture one physical Wayland display until stopped or the session expires."""
     pid_path = _preview_pid_path(cache_dir, display_index)
@@ -7100,30 +8370,39 @@ def run_preview_loop(server: str, client_id: str, cache_dir: Path, display_index
         while time.time() - started < duration:
             command = ['grim', '-o', connector, '-']
             try:
-                capture = subprocess.run(
-                    command, capture_output=True, timeout=20, check=False,
-                    env=_preview_wayland_env(),
+                returncode, frame = _bounded_capture_stdout(
+                    command, MAX_PREVIEW_FRAME_BYTES, 20, env=_preview_wayland_env()
                 )
-            except Exception as exc:
-                _write_preview_state(cache_dir, display_index, {'status': 'error', 'connector': connector, 'message': f'capture failed: {exc}'})
+            except ValueError:
+                _write_preview_state(cache_dir, display_index, {'status': 'unavailable', 'connector': connector, 'message': 'grim capture exceeded the preview frame bound'})
                 time.sleep(interval)
                 continue
-            if capture.returncode != 0 or not capture.stdout:
+            except Exception as exc:
+                _write_preview_state(cache_dir, display_index, {'status': 'error', 'connector': connector, 'message': f'capture failed: {_bound_hardware_message(str(exc))}'})
+                time.sleep(interval)
+                continue
+            try:
+                frame = _validate_preview_frame(frame)
+            except ValueError:
+                _write_preview_state(cache_dir, display_index, {'status': 'unavailable', 'connector': connector, 'message': 'grim capture exceeded the preview frame bound'})
+                time.sleep(interval)
+                continue
+            if returncode != 0:
                 _write_preview_state(cache_dir, display_index, {'status': 'unavailable', 'connector': connector, 'message': 'grim could not capture the display'})
                 time.sleep(interval)
                 continue
-            ok, message = _upload_preview_frame(server, client_id, display_index, capture.stdout, cache_dir)
+            ok, message = _upload_preview_frame(server, client_id, display_index, frame, cache_dir)
             if ok:
                 _write_preview_state(cache_dir, display_index, {
                     'status': 'streaming', 'connector': connector, 'started_at': started,
-                    'last_frame_at': time.time(), 'bytes': len(capture.stdout),
+                    'last_frame_at': time.time(), 'bytes': len(frame),
                 })
             else:
                 _write_preview_state(cache_dir, display_index, {'status': 'error', 'connector': connector, 'message': message})
             time.sleep(interval)
     finally:
         try:
-            if pid_path.read_text(encoding='utf-8').strip() == str(os.getpid()):
+            if _read_bounded_text(pid_path, 64).strip() == str(os.getpid()):
                 pid_path.unlink()
         except Exception:
             pass
@@ -7136,9 +8415,18 @@ def run_preview_loop(server: str, client_id: str, cache_dir: Path, display_index
     return 0
 
 
+def _validate_preview_pid(value: str) -> int:
+    if not isinstance(value, str) or re.fullmatch(r'[1-9][0-9]{0,6}', value) is None:
+        raise ValueError('preview process id is invalid')
+    pid = int(value)
+    if pid > 4_194_304:
+        raise ValueError('preview process id is outside the supported range')
+    return pid
+
+
 def _preview_process_alive(pid_path: Path) -> bool:
     try:
-        pid = int(pid_path.read_text(encoding='utf-8').strip())
+        pid = _validate_preview_pid(_read_bounded_text(pid_path, 64).strip())
         os.kill(pid, 0)
         return True
     except Exception:
@@ -7146,8 +8434,10 @@ def _preview_process_alive(pid_path: Path) -> bool:
 
 
 def start_display_preview(ctx: dict, display_index: int, payload: dict) -> tuple[bool, str, dict]:
+    if not isinstance(payload, dict):
+        return False, 'preview payload must be an object', {}
     cache_dir = Path(ctx['cache_dir'])
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(cache_dir, create=True)
     if shutil.which('grim') is None:
         message = 'grim is not installed on this client'
         _write_preview_state(cache_dir, display_index, {'status': 'unavailable', 'message': message})
@@ -7160,9 +8450,13 @@ def start_display_preview(ctx: dict, display_index: int, payload: dict) -> tuple
     if _preview_process_alive(pid_path):
         return True, 'display preview is already running', {'display_index': display_index}
     try:
-        interval = max(1, min(int(payload.get('interval_seconds') or 5), 30))
-        duration = max(10, min(int(payload.get('duration_seconds') or 120), 300))
-    except (TypeError, ValueError):
+        raw_interval = payload.get('interval_seconds', 5)
+        raw_duration = payload.get('duration_seconds', 120)
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in (raw_interval, raw_duration)):
+            raise ValueError
+        interval = max(1, min(raw_interval, 30))
+        duration = max(10, min(raw_duration, 300))
+    except (TypeError, ValueError, OverflowError):
         return False, 'preview interval and duration must be numeric', {}
     command = [
         sys.executable, str(Path(__file__).resolve()), '--preview-loop',
@@ -7186,14 +8480,14 @@ def start_display_preview(ctx: dict, display_index: int, payload: dict) -> tuple
             return False, state.get('message') or 'display preview process exited immediately', state
         return True, 'display preview started', {'display_index': display_index, 'interval_seconds': interval, 'duration_seconds': duration}
     except Exception as exc:
-        return False, f'display preview could not start: {exc}', {}
+        return False, f'display preview could not start: {_bound_hardware_message(str(exc))}', {}
 
 
 def stop_display_preview(ctx: dict, display_index: int) -> tuple[bool, str, dict]:
     cache_dir = Path(ctx['cache_dir'])
     pid_path = _preview_pid_path(cache_dir, display_index)
     try:
-        pid = int(pid_path.read_text(encoding='utf-8').strip())
+        pid = _validate_preview_pid(_read_bounded_text(pid_path, 64).strip())
     except Exception:
         pid = None
     if pid is not None:
@@ -7202,7 +8496,7 @@ def stop_display_preview(ctx: dict, display_index: int) -> tuple[bool, str, dict
         except ProcessLookupError:
             pass
         except Exception as exc:
-            return False, f'display preview could not stop: {exc}', {}
+            return False, f'display preview could not stop: {_bound_hardware_message(str(exc))}', {}
     try:
         pid_path.unlink()
     except FileNotFoundError:
@@ -7221,7 +8515,7 @@ def fetch_config(server: str, client_id: str, cache_dir: Path, display_index: in
         target = f'assigned-layout-display-{display_index}.json'
     try:
         with urlopen_ripley(url, timeout=10, cache_dir=cache_dir) as r:
-            data = json.loads(r.read().decode())
+            data = json.loads(_read_bounded_response(r, MAX_SERVER_RESPONSE_BYTES))
         # The server display-config payload does not include local-admin theme.
         try:
             previous = _read_json_file(cache_dir / 'client-config.json', {})
@@ -7229,7 +8523,7 @@ def fetch_config(server: str, client_id: str, cache_dir: Path, display_index: in
                 data['theme'] = previous['theme']
         except Exception:
             pass
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_real_directory(cache_dir, create=True)
         # Keep the complete response for heartbeat acknowledgement. Secondary
         # displays retain their own metadata; their layout cache remains layout-only
         # for the local renderer.
@@ -7262,7 +8556,7 @@ def fetch_all_display_configs(server: str, client_id: str, cache_dir: Path) -> b
     try:
         url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/displays'
         with urlopen_ripley(url, timeout=10, cache_dir=cache_dir) as r:
-            displays = json.loads(r.read().decode())
+            displays = json.loads(_read_bounded_response(r, MAX_SERVER_RESPONSE_BYTES))
         ok = True
         seen = set()
         for d in displays:
@@ -7284,9 +8578,37 @@ def fetch_all_display_configs(server: str, client_id: str, cache_dir: Path) -> b
         return False
 
 
+def _write_update_request_marker(path: Path, marker: dict) -> None:
+    parent = path.parent
+    metadata = os.lstat(parent)
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError('update request parent is not a real directory')
+    raw = json.dumps(marker, separators=(',', ':'), allow_nan=False).encode('utf-8')
+    if len(raw) > 4096:
+        raise ValueError('client update refused: request marker is too large')
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f'.{path.name}.', suffix='.tmp', dir=str(parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, 'wb') as handle:
+            handle.write(raw)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | None) -> tuple[bool, str, dict]:
     """Request the root-owned verifier; never download or execute as the player."""
     payload = payload or {}
+    if not isinstance(payload, dict):
+        return False, 'Client update payload must be an object', {}
     request_path = Path('/var/lib/screentra-cast/update/request')
     details = {'request_path': str(request_path), 'client_id': client_id or None}
     if payload.get('dry_run'):
@@ -7299,23 +8621,12 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
         'client_id': client_id or '',
         'reason': 'server-command',
     }
-    temporary = request_path.with_name('.request.tmp')
     try:
-        raw = json.dumps(marker, separators=(',', ':')).encode('utf-8')
-        if len(raw) > 4096:
-            return False, 'client update refused: request marker is too large', details
-        temporary.write_bytes(raw)
-        temporary.chmod(0o600)
-        os.replace(temporary, request_path)
+        _write_update_request_marker(request_path, marker)
         return True, 'verified root client updater requested', details
     except Exception as e:
-        details['error'] = str(e)
-        return False, f'client update request failed: {e}', details
-    finally:
-        try:
-            temporary.unlink()
-        except Exception:
-            pass
+        details['error'] = _bound_hardware_message(str(e))
+        return False, f'client update request failed: {_bound_hardware_message(str(e))}', details
 
 
 def execute(action: str, payload: dict | None, ctx: dict) -> dict:
@@ -7372,19 +8683,24 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
             'details': details,
             'started_at': started,
         }
-    payload = payload or {}
+    payload = {} if payload is None else payload
+    if not isinstance(payload, dict):
+        return {'action': action, 'ok': False, 'code': 'invalid_payload', 'message': 'client command payload must be an object', 'started_at': started}
     if action not in ALLOWED_CLIENT_COMMAND_ACTIONS:
         return {
             'action': action, 'ok': False, 'code': 'unsupported_action',
             'execution_enabled': False, 'message': f'unknown action: {action}',
             'started_at': started,
         }
-    has_user = has_systemctl_user()
-    display_index = payload.get('display_index')
-    try:
-        display_index = int(display_index) if display_index is not None else None
-    except Exception:
+    raw_display_index = payload.get('display_index')
+    if raw_display_index is None:
         display_index = None
+    else:
+        try:
+            display_index = _validate_display_index(raw_display_index)
+        except ValueError as exc:
+            return {'action': action, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
+    has_user = has_systemctl_user()
 
     def unit(base: str) -> str:
         return f'{base}@{display_index}.service' if display_index is not None else f'{base}.service'
@@ -7424,13 +8740,19 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
     if action == 'reload_layout':
         cache_path = Path(ctx['cache_dir']) / 'client-config.json'
         requested_orientation = payload.get('orientation')
+        try:
+            if requested_orientation is not None and not isinstance(requested_orientation, str):
+                raise ValueError('orientation must be a string')
+            all_displays = _validate_optional_bool(payload.get('all_displays', False), 'all_displays')
+        except ValueError as exc:
+            return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
         if requested_orientation is not None and requested_orientation not in {'normal', 'flipped', 'rotated_left', 'rotated_right'}:
             return {'action': action, 'display_index': display_index, 'ok': False, 'message': 'invalid orientation', 'started_at': started}
         try:
             before_orientation = _read_json_file(cache_path, {}).get('orientation', 'normal')
         except Exception:
             before_orientation = 'normal'
-        if payload.get('all_displays') or display_index is None:
+        if all_displays or display_index is None:
             ok = fetch_all_display_configs(ctx['server'], ctx['client_id'], Path(ctx['cache_dir']))
             after_orientation = before_orientation
             try:
@@ -7442,7 +8764,7 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
             if ok and (after_orientation != before_orientation or (requested_orientation is not None and after_orientation == requested_orientation)):
                 rc, out, err = _run_list(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'])
                 restarted = rc == 0
-                restart_message = out or err
+                restart_message = _bound_hardware_message(out or err)
             return {'action': action, 'display_index': display_index, 'all_displays': True, 'ok': ok and (restarted or (after_orientation == before_orientation and requested_orientation is None)), 'orientation_changed': after_orientation != before_orientation or requested_orientation is not None, 'kiosk_restarted': restarted, 'message': 'all display configs re-fetched' + ('; kiosk restarted for orientation change' if restarted else (': ' + restart_message if restart_message else '')), 'started_at': started}
         ok = fetch_config(ctx['server'], ctx['client_id'], Path(ctx['cache_dir']), display_index=display_index)
         after_orientation = before_orientation
@@ -7456,11 +8778,15 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
             restart_index = display_index if display_index is not None else 0
             rc, out, err = _run_list(['sudo', '-n', 'systemctl', 'restart', f'screentra-cast-kiosk@{restart_index}.service'])
             restarted = rc == 0
-            restart_message = out or err
+            restart_message = _bound_hardware_message(out or err)
         return {'action': action, 'display_index': display_index, 'ok': ok and (restarted or (after_orientation == before_orientation and requested_orientation is None)), 'orientation_changed': after_orientation != before_orientation or requested_orientation is not None, 'kiosk_restarted': restarted, 'message': 'config re-fetched' + ('; kiosk restarted for orientation change' if restarted else (': ' + restart_message if restart_message else '')), 'started_at': started}
 
     if action == 'refresh_cache':
-        if payload.get('all_displays') or display_index is None:
+        try:
+            all_displays = _validate_optional_bool(payload.get('all_displays', False), 'all_displays')
+        except ValueError as exc:
+            return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
+        if all_displays or display_index is None:
             ok = fetch_all_display_configs(ctx['server'], ctx['client_id'], Path(ctx['cache_dir']))
             return {'action': action, 'display_index': display_index, 'all_displays': True, 'ok': ok, 'message': 'all display caches refreshed' if ok else 'one or more display cache refreshes failed', 'started_at': started}
         ok = fetch_config(ctx['server'], ctx['client_id'], Path(ctx['cache_dir']), display_index=display_index)
@@ -7475,7 +8801,10 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'details': details, 'started_at': started}
 
     if action == 'set_touch_binding':
-        ok, msg, details = apply_touch_binding(Path(ctx['cache_dir']), payload)
+        try:
+            ok, msg, details = apply_touch_binding(Path(ctx['cache_dir']), payload)
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'details': details, 'started_at': started}
 
     if action == 'bluetooth_scan':
@@ -7534,24 +8863,37 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
             'details': {'settings': results, **{result['setting']: result for result in results}}, 'started_at': started,
         }
 
+    if action == 'display_power':
+        state = payload.get('state')
+        ok, message, details = apply_display_power(Path(ctx['cache_dir']), display_index, state)
+        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': message, 'details': details, 'started_at': started}
+
     # ── Display control (DDC/CI + CEC) ────────────────────────────────────────
     if action == 'ddc_set':
         # payload: { "vcp": "10", "value": 50 }  brightness
-        # or { "vcp": "D6", "value": 1 }          power on
+        # or { "vcp": "D6", "value": 1 }          power on OSD addr 0
         # optional: { "bus": "1" }                specific display bus
         # optional: { "has_layout": true }        retry detect if display not found
-        vcp = payload.get('vcp', '')
-        value = payload.get('value', 0)
-        bus = payload.get('bus')
-        has_layout = payload.get('has_layout', False)
-        ok, msg = apply_ddc_control(str(vcp), int(value), bus=bus, has_layout=has_layout)
+        try:
+            vcp = payload.get('vcp', '')
+            value = _bounded_integer_input(payload.get('value', 0), 0, 65535, 'DDC value')
+            bus = payload.get('bus')
+            has_layout = payload.get('has_layout', False)
+            if not isinstance(vcp, str) or (bus is not None and not isinstance(bus, str)) or not isinstance(has_layout, bool):
+                raise ValueError('invalid DDC payload')
+            ok, msg = apply_ddc_control(vcp, value, bus=bus, has_layout=has_layout)
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
 
     if action == 'cec_send':
         # payload: { "cmd": "pow 0" }   power on OSD addr 0
         # or { "cmd": "is 1" }          input HDMI-2
-        cmd = payload.get('cmd', '')
-        ok, msg = apply_cec_command(cmd)
+        try:
+            cmd = payload.get('cmd', '')
+            ok, msg = apply_cec_command(cmd)
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
 
     if action == 'ir_send':
@@ -7598,7 +8940,7 @@ def main() -> int:
 
     pending_path = Path(args.pending_file)
     result_path = Path(args.result_file) if args.result_file else pending_path.with_name('command-result.json')
-    result_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(result_path.parent, create=True)
 
     ctx = {
         'server': args.server,
@@ -7610,9 +8952,9 @@ def main() -> int:
         if not pending_path.exists():
             return False
         try:
-            if pending_path.stat().st_size > MAX_PENDING_BYTES:
-                raise ValueError(f'pending command exceeds {MAX_PENDING_BYTES} bytes')
-            spec = json.loads(pending_path.read_text(encoding='utf-8'))
+            spec = _parse_pending_command(
+                _read_bounded_text(pending_path, MAX_PENDING_BYTES)
+            )
         except Exception as e:
             result = {'action': 'unknown', 'ok': False, 'message': f'bad pending file: {e}', 'started_at': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z'}
             _atomic_write_text(result_path, json.dumps(result, indent=2))
@@ -7669,7 +9011,7 @@ INSTALL_DIR="${RIPLEY_CLIENT_DIR:-$HOME/.local/share/screentra-client}"
 CACHE="$INSTALL_DIR/cache"
 CONFIG="$CACHE/client-config.json"
 RENDERER_URL="${RIPLEY_RENDERER_URL:-http://127.0.0.1:3900}"
-SERVER_URL="${RIPLEY_SERVER_URL:-$(cat "$INSTALL_DIR/server" 2>/dev/null || true)}"
+SERVER_URL="${RIPLEY_SERVER_URL:-$(head -c 4096 "$INSTALL_DIR/server" 2>/dev/null || true)}"
 
 echo "Screentra Cast Player Status"
 echo "===================="
@@ -7684,26 +9026,64 @@ echo
 
 echo "Renderer health:"
 if command -v curl >/dev/null 2>&1; then
-  curl -fsS --max-time 4 "$RENDERER_URL/health" || echo "  renderer not reachable"
+  curl -fsS --max-time 4 --max-filesize 65536 "$RENDERER_URL/health" || echo "  renderer not reachable"
 else
-  python3 - <<PY 2>/dev/null || echo "  renderer not reachable"
+  RENDERER_URL="$RENDERER_URL" python3 - <<'PY' 2>/dev/null || echo "  renderer not reachable"
+import os
 import urllib.request
-print(urllib.request.urlopen("$RENDERER_URL/health", timeout=4).read().decode())
+url = os.environ['RENDERER_URL'].rstrip('/') + '/health'
+with urllib.request.urlopen(url, timeout=4) as response:
+    data = response.read(65537)
+if len(data) > 65536:
+    raise ValueError('renderer health response exceeds its bound')
+print(data.decode('utf-8'))
 PY
 fi
 echo
 
 if [ -f "$CONFIG" ]; then
   echo "Assigned layout:"
-  python3 - <<PY
+  CONFIG_PATH="$CONFIG" python3 - <<'PY'
 import json
-d=json.load(open("$CONFIG"))
+import os
+import stat
+config_path = os.environ['CONFIG_PATH']
+
+def reject_duplicate_fields(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError('duplicate JSON field')
+        value[key] = item
+    return value
+
+flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+fd = os.open(config_path, flags)
+try:
+    metadata = os.fstat(fd)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > (1 << 20):
+        raise ValueError('client config is not a bounded regular file')
+    raw = os.read(fd, (1 << 20) + 1)
+finally:
+    os.close(fd)
+if len(raw) > (1 << 20):
+    raise ValueError('client config exceeds its bound')
+d = json.loads(
+    raw.decode('utf-8'),
+    object_pairs_hook=reject_duplicate_fields,
+    parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+)
+if not isinstance(d, dict):
+    raise ValueError('client config must be an object')
 print("  client_id:           ", d.get("client_id"))
 print("  assigned_layout_id:  ", d.get("assigned_layout_id"))
 print("  server_time:         ", d.get("server_time"))
 layout=d.get("layout") or {}
+if not isinstance(layout, dict):
+    layout = {}
+widgets = layout.get("widgets") or []
 print("  layout name:         ", layout.get("name"))
-print("  layout widgets:      ", len(layout.get("widgets") or []))
+print("  layout widgets:      ", min(len(widgets) if isinstance(widgets, list) else 0, 128))
 PY
 else
   echo "No cached client-config.json yet (heartbeat may not have run)."
@@ -7936,8 +9316,8 @@ while IFS='|' read -r idx connector port; do
     done
     BROWSER_URL="http://127.0.0.1:${port}/"
     if [ "$LIVE_READY" -eq 1 ]; then
-        SERVER_URL="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text().strip())' "$CLIENT_DIR/server" 2>/dev/null || true)"
-        CLIENT_ID="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text().strip())' "$CLIENT_DIR/client-id" 2>/dev/null || true)"
+        SERVER_URL="$(head -c 2049 "$CLIENT_DIR/server" 2>/dev/null || true)"
+        CLIENT_ID="$(head -c 257 "$CLIENT_DIR/client-id" 2>/dev/null || true)"
         if [ -n "$SERVER_URL" ] && [ -n "$CLIENT_ID" ]; then
             BROWSER_URL="${SERVER_URL%/}/player.html?display=${connector}&client_id=${CLIENT_ID}"
         fi
@@ -8277,8 +9657,14 @@ if command -v systemctl >/dev/null 2>&1; then
   #  startup hook; display 1+ are user browser services on wayland-0.
   DISPLAY_COUNT="$(python3 - "$INSTALL_DIR/config.json" <<'PY_DETECT'
 import json, sys
+from pathlib import Path
 try:
-    cfg=json.loads(open(sys.argv[1]).read())
+    path = Path(sys.argv[1])
+    with path.open('rb') as stream:
+        raw = stream.read((1 << 20) + 1)
+    if len(raw) > (1 << 20):
+        raise ValueError('config too large')
+    cfg=json.loads(raw.decode('utf-8'))
 except Exception:
     cfg={}
 installer=max(int(cfg.get('installer_detected_max_displays') or 1),1)
