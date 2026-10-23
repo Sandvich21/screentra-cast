@@ -19,7 +19,7 @@ use axum::{
 };
 use chrono::Utc;
 use futures_util::StreamExt;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use std::collections::HashMap;
@@ -3143,12 +3143,13 @@ async fn weather_location_lookup(
             continue;
         }
 
-        let body: serde_json::Value = res.json().await.map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Invalid lookup response: {}", e),
-            )
-        })?;
+        let body: serde_json::Value = read_response_json_limited(
+            res,
+            1024 * 1024,
+            "Invalid lookup response",
+        )
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
         let results = body
             .as_array()
             .cloned()
@@ -6593,6 +6594,29 @@ fn read_bounded_file(path: &StdPath, maximum_bytes: usize) -> Result<Vec<u8>, St
         return Err("file exceeds its bound".to_string());
     }
     Ok(bytes)
+}
+
+async fn read_response_json_limited<T: DeserializeOwned>(
+    response: reqwest::Response,
+    maximum_bytes: usize,
+    label: &str,
+) -> Result<T, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > maximum_bytes as u64)
+    {
+        return Err(format!("{label} exceeds response size limit"));
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("{label}: {error}"))?;
+        if bytes.len().saturating_add(chunk.len()) > maximum_bytes {
+            return Err(format!("{label} exceeds response size limit"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|error| format!("{label}: {error}"))
 }
 
 async fn read_bounded_async_file(path: &StdPath, maximum_bytes: u64) -> Result<Vec<u8>, String> {

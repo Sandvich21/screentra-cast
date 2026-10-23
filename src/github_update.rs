@@ -22,9 +22,31 @@ const DEFAULT_REPOSITORY: &str = "Sandvich21/screentra-cast";
 const DEFAULT_ASSET: &str = "screentra-cast-server-update.tar.gz";
 const MAX_DOWNLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_PERSISTED_JSON_BYTES: usize = 64 * 1024;
+const MAX_RELEASE_METADATA_BYTES: usize = 4 * 1024 * 1024;
 const CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 static UPDATE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+async fn read_release_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RELEASE_METADATA_BYTES as u64)
+    {
+        return Err("GitHub release response exceeds size limit".to_string());
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("read GitHub release response: {error}"))?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_RELEASE_METADATA_BYTES {
+            return Err("GitHub release response exceeds size limit".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|error| format!("parse GitHub release response: {error}"))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateSettings {
@@ -222,10 +244,7 @@ async fn fetch_latest_release() -> Result<(GithubRelease, GithubAsset), String> 
     if !status.is_success() {
         return Err(format!("GitHub release request returned HTTP {status}"));
     }
-    let release: GithubRelease = response
-        .json()
-        .await
-        .map_err(|e| format!("parse GitHub release response: {e}"))?;
+    let release: GithubRelease = read_release_json(response).await?;
     if release.draft || release.prerelease {
         return Err("GitHub latest release is not a stable published release".to_string());
     }

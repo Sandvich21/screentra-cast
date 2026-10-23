@@ -602,11 +602,11 @@ async fn systemctl_action(action: &str, service: &str, kind: &str) -> Result<(),
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
-    let output = cmd
-        .output()
+    let status = cmd
+        .status()
         .await
         .map_err(|e| format!("failed to spawn systemctl: {}", e))?;
-    if !output.status.success() {
+    if !status.success() {
         eprintln!("systemctl action failed: action={action} service={service}");
         return Err("service action failed".to_string());
     }
