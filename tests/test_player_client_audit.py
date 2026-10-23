@@ -29,6 +29,15 @@ class PlayerClientAuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             actor._require_bounded_text('x' * (actor.MAX_WLR_JSON_BYTES + 1), actor.MAX_WLR_JSON_BYTES)
 
+    def test_display_indexes_are_bounded(self):
+        self.assertEqual(actor._validate_display_index(3), 3)
+        with self.assertRaises(ValueError):
+            actor._validate_display_index(-1)
+        with self.assertRaises(ValueError):
+            actor._validate_display_index(4)
+        with self.assertRaises(ValueError):
+            actor._validate_display_index(True)
+
     def test_bluetooth_scan_results_are_bounded(self):
         text = '\n'.join(f'Device AA:BB:CC:DD:{index // 256:02X}:{index % 256:02X} Device {index}' for index in range(130))
         self.assertLessEqual(len(actor._bluetoothctl_devices(text)), actor.MAX_BLUETOOTH_DEVICES)

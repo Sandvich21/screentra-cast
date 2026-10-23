@@ -472,6 +472,20 @@ def _bounded_integer_input(value, minimum: int, maximum: int, label: str) -> int
     return max(minimum, min(parsed, maximum))
 
 
+def _validate_display_index(value) -> int:
+    if isinstance(value, bool):
+        raise ValueError('display index is invalid')
+    if isinstance(value, int):
+        index = value
+    elif isinstance(value, str) and re.fullmatch(r'[0-9]+', value):
+        index = int(value)
+    else:
+        raise ValueError('display index is invalid')
+    if not 0 <= index <= 3:
+        raise ValueError('display index is outside the supported range')
+    return index
+
+
 def bluetooth_scan(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
     if not isinstance(payload, dict):
@@ -1397,12 +1411,15 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
             'execution_enabled': False, 'message': f'unknown action: {action}',
             'started_at': started,
         }
-    has_user = has_systemctl_user()
-    display_index = payload.get('display_index')
-    try:
-        display_index = int(display_index) if display_index is not None else None
-    except Exception:
+    raw_display_index = payload.get('display_index')
+    if raw_display_index is None:
         display_index = None
+    else:
+        try:
+            display_index = _validate_display_index(raw_display_index)
+        except ValueError as exc:
+            return {'action': action, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
+    has_user = has_systemctl_user()
 
     def unit(base: str) -> str:
         return f'{base}@{display_index}.service' if display_index is not None else f'{base}.service'
