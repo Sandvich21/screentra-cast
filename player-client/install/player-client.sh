@@ -2978,6 +2978,7 @@ from pathlib import Path
 MAX_REQUEST_BODY_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
 MAX_TEXT_FILE_BYTES = 256 * 1024
+MAX_REMOTE_CA_BYTES = 256 * 1024
 
 
 def _read_bounded_path(path: Path, maximum: int, encoding: str = 'utf-8') -> str:
@@ -2986,6 +2987,13 @@ def _read_bounded_path(path: Path, maximum: int, encoding: str = 'utf-8') -> str
     if len(data) > maximum:
         raise ValueError('local file exceeds its bound')
     return data.decode(encoding)
+
+
+def _read_bounded_response(response, maximum: int) -> bytes:
+    data = response.read(maximum + 1)
+    if len(data) > maximum:
+        raise ValueError('server response exceeds its bound')
+    return data
 
 
 def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
@@ -3545,7 +3553,8 @@ def _refresh_ca_from_server() -> dict:
         if not ca_path.exists():
             return {'ok': False, 'error': 'existing CA certificate is required to refresh trust', 'url': url}
         ctx = _ssl.create_default_context(cafile=str(ca_path))
-        data = _ur.urlopen(url, context=ctx, timeout=10).read()
+        with _ur.urlopen(url, context=ctx, timeout=10) as response:
+            data = _read_bounded_response(response, MAX_REMOTE_CA_BYTES)
         if len(data) < 200 or b'BEGIN CERTIFICATE' not in data:
             return {'ok': False, 'error': f'downloaded CA did not look like a certificate ({len(data)} bytes)', 'url': url}
         out.parent.mkdir(parents=True, exist_ok=True)

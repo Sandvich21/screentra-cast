@@ -83,7 +83,9 @@ class PlayerClientAuditTests(unittest.TestCase):
         body = installer[start:end]
         compile(body, 'embedded-renderer.py', 'exec')
         self.assertIn('_read_bounded_path', body)
+        self.assertIn('_read_bounded_response', body)
         self.assertNotIn('.read_text()', body)
+        self.assertNotIn('_ur.urlopen(url, context=ctx, timeout=10).read()', body)
 
     def test_embedded_actor_responses_and_updates_are_bounded(self):
         installer = (ROOT / 'player-client/install/player-client.sh').read_text()
