@@ -267,6 +267,14 @@ class PlayerClientAuditTests(unittest.TestCase):
             path.write_bytes(b'{' + b'a' * actor.MAX_PENDING_BYTES + b'}')
             self.assertEqual(actor._read_json_file(path, {'safe': True}), {'safe': True})
 
+    def test_actor_json_rejects_nonstandard_values(self):
+        with self.assertRaises(ValueError):
+            actor._parse_pending_command('{"value":NaN}')
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'cache.json'
+            path.write_text('{"safe":NaN}', encoding='utf-8')
+            self.assertEqual(actor._read_json_file(path, {'fallback': True}), {'fallback': True})
+
     def test_installer_and_bundle_surfaces_are_hardened(self):
         canonical = (ROOT / 'player-client/install/player-client.sh').read_text()
         generated = (ROOT / 'player-client/static/install/player-client.sh').read_text()

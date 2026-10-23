@@ -227,7 +227,11 @@ def _reject_duplicate_json_keys(pairs):
 
 def _parse_pending_command(text):
     try:
-        return json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
+        return json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+        )
     except (TypeError, ValueError, UnicodeError) as exc:
         raise ValueError('pending command JSON is invalid') from exc
 
@@ -257,7 +261,11 @@ def _read_bounded_text(path: Path, maximum: int) -> str:
 
 def _read_json_file(path: Path, default):
     try:
-        return json.loads(_read_bounded_text(path, MAX_JSON_FILE_BYTES))
+        return json.loads(
+            _read_bounded_text(path, MAX_JSON_FILE_BYTES),
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+        )
     except Exception:
         return default
 
