@@ -500,8 +500,12 @@ def bluetooth_connect(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
     if not isinstance(payload, dict):
         return False, 'Bluetooth connect payload must be an object', {}
-    address = str(payload.get('address') or '').strip().upper()
-    raw_name = str(payload.get('name') or '').strip()
+    raw_address = payload.get('address')
+    raw_name = payload.get('name')
+    if not isinstance(raw_address, str) or (raw_name is not None and not isinstance(raw_name, str)):
+        return False, 'Bluetooth address and name must be strings', {}
+    address = raw_address.strip().upper()
+    raw_name = raw_name.strip() if raw_name is not None else ''
     try:
         name = _validate_bluetooth_name(raw_name) if raw_name else address
     except ValueError:
@@ -580,8 +584,11 @@ def audio_set_default(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
     if not isinstance(payload, dict):
         return False, 'Audio payload must be an object', {}
+    raw_sink_id = payload.get('sink_id')
+    if not isinstance(raw_sink_id, str):
+        return False, 'A valid audio output device is required', {}
     try:
-        sink_id = _validate_audio_sink_id(str(payload.get('sink_id') or '').strip())
+        sink_id = _validate_audio_sink_id(raw_sink_id.strip())
     except ValueError:
         return False, 'A valid audio output device is required', {}
     if shutil.which('wpctl') is None:
@@ -596,9 +603,13 @@ def audio_set_volume(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
     if not isinstance(payload, dict):
         return False, 'Audio payload must be an object', {}
+    raw_sink_id = payload.get('sink_id', '@DEFAULT_AUDIO_SINK@')
+    raw_value = payload.get('value')
+    if not isinstance(raw_sink_id, str) or isinstance(raw_value, bool):
+        return False, 'Volume must be a number from 0 to 100', {}
     try:
-        sink_id = _validate_audio_sink_id(str(payload.get('sink_id') or '@DEFAULT_AUDIO_SINK@').strip())
-        value = max(0, min(100, int(payload.get('value'))))
+        sink_id = _validate_audio_sink_id(raw_sink_id.strip())
+        value = max(0, min(100, int(raw_value)))
     except (TypeError, ValueError):
         return False, 'Volume must be a number from 0 to 100', {}
     if not sink_id.isdigit() and sink_id != '@DEFAULT_AUDIO_SINK@':
