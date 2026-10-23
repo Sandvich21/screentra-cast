@@ -1,11 +1,15 @@
 use crate::models::{DisplayInfo, DisplayMode};
 use std::fs;
+use std::io::Read;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// Cache: (result, timestamp). Refreshes if older than 5 seconds.
 static DISPLAY_CACHE: OnceLock<(Vec<DisplayInfo>, Instant)> = OnceLock::new();
 const CACHE_TTL: Duration = Duration::from_secs(5);
+const MAX_SYSFS_VALUE_BYTES: usize = 4096;
+const MAX_DISPLAY_RECORDS: usize = 32;
+const MAX_DISPLAY_MODES: usize = 128;
 
 /// Detect connected displays by reading /sys/class/drm entries.
 /// Results are cached for 5 seconds to avoid hammering sysfs.
@@ -67,6 +71,9 @@ fn detect_displays_uncached() -> Vec<DisplayInfo> {
             };
 
             displays.push(display);
+            if displays.len() >= MAX_DISPLAY_RECORDS {
+                break;
+            }
         }
     }
 
@@ -76,10 +83,21 @@ fn detect_displays_uncached() -> Vec<DisplayInfo> {
 }
 
 fn read_sysfs(path: &str) -> String {
-    fs::read_to_string(path)
-        .unwrap_or_default()
-        .trim()
-        .to_string()
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return String::new(),
+    };
+    let mut raw = Vec::new();
+    if file
+        .by_ref()
+        .take((MAX_SYSFS_VALUE_BYTES + 1) as u64)
+        .read_to_end(&mut raw)
+        .is_err()
+        || raw.len() > MAX_SYSFS_VALUE_BYTES
+    {
+        return String::new();
+    }
+    String::from_utf8_lossy(&raw).trim().to_string()
 }
 
 fn read_mm(base: &str) -> (u32, u32) {
@@ -89,26 +107,43 @@ fn read_mm(base: &str) -> (u32, u32) {
 }
 
 fn read_sysfs_property(base: &str, prop: &str) -> u32 {
-    fs::read_to_string(format!("{}/{}", base, prop))
-        .unwrap_or_default()
-        .trim()
+    read_sysfs(&format!("{}/{}", base, prop))
         .parse()
         .unwrap_or(0)
 }
 
 fn read_modes(path: &str) -> Vec<DisplayMode> {
+    read_bounded_text(path)
+        .map(|content| read_modes_from_content(&content))
+        .unwrap_or_default()
+}
+
+fn read_bounded_text(path: &str) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let mut raw = Vec::new();
+    file.take((MAX_SYSFS_VALUE_BYTES + 1) as u64)
+        .read_to_end(&mut raw)
+        .ok()?;
+    if raw.len() > MAX_SYSFS_VALUE_BYTES {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&raw).into_owned())
+}
+
+fn read_modes_from_content(content: &str) -> Vec<DisplayMode> {
     let mut seen = std::collections::HashSet::new();
     let mut modes = Vec::new();
-    if let Ok(content) = fs::read_to_string(path) {
-        for line in content.lines() {
-            if let Some((w, h)) = parse_mode_line(line) {
-                let key = (w, h);
-                if seen.insert(key) {
-                    modes.push(DisplayMode {
-                        width: w,
-                        height: h,
-                        refresh_rate: 60.0,
-                    });
+    for line in content.lines() {
+        if let Some((w, h)) = parse_mode_line(line) {
+            let key = (w, h);
+            if seen.insert(key) {
+                modes.push(DisplayMode {
+                    width: w,
+                    height: h,
+                    refresh_rate: 60.0,
+                });
+                if modes.len() >= MAX_DISPLAY_MODES {
+                    break;
                 }
             }
         }
@@ -162,4 +197,23 @@ fn generate_label(connector: &str, status: &str, modes: &[DisplayMode]) -> Strin
     };
 
     format!("{} {} ({})", display_type, connector, resolution)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_mode_records_are_bounded() {
+        let content = (0..(MAX_DISPLAY_MODES + 8))
+            .map(|index| format!("{}x{}", 640 + index, 480 + index))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(read_modes_from_content(&content).len(), MAX_DISPLAY_MODES);
+    }
+
+    #[test]
+    fn display_records_are_bounded() {
+        assert_eq!(MAX_DISPLAY_RECORDS, 32);
+    }
 }
