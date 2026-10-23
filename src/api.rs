@@ -7902,8 +7902,24 @@ async fn get_client_update_check(
 
     let static_dir = crate::version::static_dir_path();
     let installer = static_dir.join("install/player-client.sh");
-    let bytes = fs::read(&installer)
-        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "client update artifact is unavailable".to_string()))?;
+    let installer_size = tokio::fs::metadata(&installer).await.map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "client update artifact is unavailable".to_string(),
+        )
+    })?.len();
+    if installer_size > MAX_STATE_BUNDLE_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "client update artifact is too large".to_string(),
+        ));
+    }
+    let bytes = tokio::fs::read(&installer).await.map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "client update artifact is unavailable".to_string(),
+        )
+    })?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     let digest = format!("{:x}", hasher.finalize());
