@@ -387,13 +387,13 @@ def main() -> int:
         actual_sha = hashlib.sha256(bounded_read_file(installer, MAX_INSTALLER)).hexdigest()
         if actual_sha != expected_sha:
             raise RuntimeError('update digest verification failed')
-        verify = subprocess.run(["openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-inkey", str(public_key_file), "-sigfile", str(signature), "-in", str(installer)], capture_output=True, timeout=20)
+        verify = subprocess.run(["openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-inkey", str(public_key_file), "-sigfile", str(signature), "-in", str(installer)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
         if verify.returncode != 0:
             raise RuntimeError('update signature verification failed')
         installer.chmod(0o700)
         environment = os.environ.copy()
         environment.update({'SCREENTRA_SERVER_URL': server, 'RIPLEY_CLIENT_ID': client_id, 'SCREENTRA_CLIENT_DIR': str(install_dir)})
-        completed = subprocess.run(['/bin/bash', str(installer)], env=environment, capture_output=True, text=True, timeout=300)
+        completed = subprocess.run(['/bin/bash', str(installer)], env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
         if completed.returncode != 0:
             raise RuntimeError('verified installer failed')
         digest_file.parent.mkdir(parents=True, exist_ok=True)
@@ -928,7 +928,7 @@ def _seat_service_running() -> bool:
         try:
             r = subprocess.run(
                 ["systemctl", "--quiet", "is-active", f"screentra-cast-kiosk@{idx}.service"],
-                capture_output=True, text=True, timeout=2,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2,
             )
             if r.returncode == 0:
                 return True

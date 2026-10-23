@@ -49,7 +49,9 @@ class PlayerClientAuditTests(unittest.TestCase):
         start = canonical.index("<<'PY_UPDATER'\n") + len("<<'PY_UPDATER'\n")
         end = canonical.index('\nPY_UPDATER\n', start)
         namespace = {'__name__': 'embedded_updater_test'}
-        exec(compile(canonical[start:end], 'embedded-updater.py', 'exec'), namespace)
+        body = canonical[start:end]
+        self.assertNotIn('capture_output=True', body)
+        exec(compile(body, 'embedded-updater.py', 'exec'), namespace)
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'oversized'
             path.write_bytes(b'x' * 17)
