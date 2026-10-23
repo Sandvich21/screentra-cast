@@ -9947,29 +9947,33 @@ fn request_peer_ip() -> Option<String> {
 }
 
 fn local_ip() -> Option<String> {
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg("hostname -I | awk '{print $1}'")
-        .output()
-        .ok()?;
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
+    let mut command = Command::new("hostname");
+    command.arg("-I");
+    let (status, bytes) = bounded_command_output(command, 4096).ok()?;
+    if !status.success() {
+        return None;
     }
+    String::from_utf8_lossy(&bytes)
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
 }
 
 fn discover_neighbor_ips() -> Vec<String> {
     let mut ips = Vec::new();
-    if let Ok(out) = Command::new("sh")
-        .arg("-c")
-        .arg("ip -4 neigh show | awk '$1 ~ /^[0-9.]+$/ && $NF != \"FAILED\" {print $1}'")
-        .output()
-    {
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let ip = line.trim();
-            if !ip.is_empty() && !ips.iter().any(|x| x == ip) {
+    let mut command = Command::new("ip");
+    command.args(["-4", "neigh", "show"]);
+    if let Ok((status, bytes)) = bounded_command_output(command, 64 * 1024) {
+        if !status.success() {
+            return ips;
+        }
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let Some(ip) = line.split_whitespace().next() else {
+                continue;
+            };
+            if ip.parse::<std::net::Ipv4Addr>().is_ok()
+                && !ips.iter().any(|candidate| candidate == ip)
+            {
                 ips.push(ip.to_string());
             }
         }
