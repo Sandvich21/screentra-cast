@@ -1025,11 +1025,11 @@ pub fn import_update_bundle(src: &Path, force_skip_rollback: bool) -> Result<Upd
     }
 
     // 6. Validate the new binary runs usefully
-    let test = Command::new(&new_binary)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    let test = {
+        let mut command = Command::new(&new_binary);
+        command.arg("--version");
+        bounded_command_status(command, Duration::from_secs(30))
+    };
     match test {
         Ok(status) => {
             if !status.success() {
