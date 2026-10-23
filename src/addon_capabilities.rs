@@ -2614,11 +2614,15 @@ impl AddonApprovalStore {
         if metadata.len() > MAX_APPROVAL_BYTES {
             return Err("Approval record is too large".to_string());
         }
-        let mut file = fs::File::open(&path)
+        let file = fs::File::open(&path)
             .map_err(|error| format!("Failed to read approval record: {error}"))?;
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.read_to_end(&mut bytes)
+        file.take(MAX_APPROVAL_BYTES + 1)
+            .read_to_end(&mut bytes)
             .map_err(|error| format!("Failed to read approval record: {error}"))?;
+        if bytes.len() > MAX_APPROVAL_BYTES as usize {
+            return Err("Approval record is too large".to_string());
+        }
         let record: AddonApprovalRecord =
             serde_json::from_slice(&bytes).map_err(|_| "Invalid approval record".to_string())?;
         record

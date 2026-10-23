@@ -2379,11 +2379,15 @@ async fn fetch_saskatchewan_events(
 
 fn decode_saskatchewan_json(bytes: &[u8]) -> Result<Value, String> {
     let decoded = if bytes.starts_with(&[0x1f, 0x8b]) {
-        let mut decoder = GzDecoder::new(Cursor::new(bytes));
+        let decoder = GzDecoder::new(Cursor::new(bytes));
         let mut output = Vec::new();
         decoder
+            .take((16 * 1024 * 1024 + 1) as u64)
             .read_to_end(&mut output)
             .map_err(|e| format!("Invalid Saskatchewan 511 gzip response: {e}"))?;
+        if output.len() > 16 * 1024 * 1024 {
+            return Err("Saskatchewan 511 gzip response exceeds decompressed size limit".to_string());
+        }
         output
     } else {
         bytes.to_vec()
