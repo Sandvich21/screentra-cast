@@ -29,6 +29,13 @@ class PlayerClientAuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             actor._require_bounded_text('x' * (actor.MAX_WLR_JSON_BYTES + 1), actor.MAX_WLR_JSON_BYTES)
 
+    def test_touch_device_names_are_bounded(self):
+        self.assertEqual(actor._validate_touch_device_name('Panel Touch'), 'Panel Touch')
+        with self.assertRaises(ValueError):
+            actor._validate_touch_device_name('x' * 129)
+        with self.assertRaises(ValueError):
+            actor._validate_touch_device_name('touch\nname')
+
     def test_touch_device_paths_are_bounded(self):
         self.assertEqual(actor._validate_touch_device_path('/dev/input/event0'), '/dev/input/event0')
         with self.assertRaises(ValueError):

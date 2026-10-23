@@ -762,9 +762,17 @@ def _validate_touch_device_path(value: str | None) -> str | None:
     return value
 
 
+def _validate_touch_device_name(value: str | None) -> str | None:
+    if value is None or value == '':
+        return None
+    if not isinstance(value, str) or len(value.encode('utf-8')) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError('touch device name is not bounded')
+    return value.strip() or None
+
+
 def _resolve_touch_name(device_path: str | None, device_name: str | None = None) -> str | None:
     if device_name:
-        return str(device_name)
+        return _validate_touch_device_name(device_name)
     if not device_path:
         return None
     try:
@@ -775,7 +783,7 @@ def _resolve_touch_name(device_path: str | None, device_name: str | None = None)
                 continue
             for line in block.splitlines():
                 if line.startswith('N:') and 'Name=' in line:
-                    return line.split('Name=', 1)[1].strip().strip('"')
+                    return _validate_touch_device_name(line.split('Name=', 1)[1].strip().strip('"'))
     except Exception:
         pass
     return None
