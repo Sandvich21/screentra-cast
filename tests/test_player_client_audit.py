@@ -21,6 +21,11 @@ actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 's
 
 
 class PlayerClientAuditTests(unittest.TestCase):
+    def test_display_power_rejects_non_string_state(self):
+        result = actor.execute('display_power', {'display_index': 0, 'state': ['on']}, {'cache_dir': '/tmp/cache', 'client_id': 'client-1', 'server': 'https://example.test'})
+        self.assertFalse(result['ok'])
+        self.assertIn('state', result['message'].lower())
+
     def test_execute_rejects_malformed_hardware_payloads(self):
         context = {'cache_dir': '/tmp/cache', 'client_id': 'client-1', 'server': 'https://example.test'}
         ddc = actor.execute('ddc_set', {'vcp': '--bad', 'value': 'not-an-int'}, context)

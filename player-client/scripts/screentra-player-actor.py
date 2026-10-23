@@ -907,7 +907,7 @@ def apply_display_power(cache_dir: Path, display_index: int | None, state: str) 
     """Apply Linux DPMS/KMS power state to one validated Wayland output."""
     if display_index is None or display_index < 0 or display_index > 3:
         return False, 'a display index from 0 to 3 is required', {}
-    if state not in {'on', 'off'}:
+    if not isinstance(state, str) or state not in {'on', 'off'}:
         return False, 'display power state must be on or off', {}
     connector = _preview_connector(cache_dir, display_index)
     if not connector:
