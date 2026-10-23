@@ -40,17 +40,35 @@ if [ -f "$CONFIG" ]; then
 import json
 import os
 config_path = os.environ['CONFIG_PATH']
+
+def reject_duplicate_fields(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError('duplicate JSON field')
+        value[key] = item
+    return value
+
 with open(config_path, 'rb') as handle:
     raw = handle.read((1 << 20) + 1)
 if len(raw) > (1 << 20):
     raise ValueError('client config exceeds its bound')
-d = json.loads(raw.decode('utf-8'))
+d = json.loads(
+    raw.decode('utf-8'),
+    object_pairs_hook=reject_duplicate_fields,
+    parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+)
+if not isinstance(d, dict):
+    raise ValueError('client config must be an object')
 print("  client_id:           ", d.get("client_id"))
 print("  assigned_layout_id:  ", d.get("assigned_layout_id"))
 print("  server_time:         ", d.get("server_time"))
 layout=d.get("layout") or {}
+if not isinstance(layout, dict):
+    layout = {}
+widgets = layout.get("widgets") or []
 print("  layout name:         ", layout.get("name"))
-print("  layout widgets:      ", min(len(layout.get("widgets") or []), 128))
+print("  layout widgets:      ", min(len(widgets) if isinstance(widgets, list) else 0, 128))
 PY
 else
   echo "No cached client-config.json yet (heartbeat may not have run)."
