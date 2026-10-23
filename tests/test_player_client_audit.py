@@ -69,6 +69,8 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('cfg = json.loads(path.read_text())', kiosk)
         self.assertNotIn('raw = path.read_bytes()', kiosk)
         self.assertNotIn('json.load(open(sys.argv[1]))', kiosk)
+        self.assertNotIn('d=json.load(open("$CONFIG"))', installer)
+        self.assertNotIn('json.load(open(sys.argv[1]))', installer)
         self.assertNotIn('python3 -c \'import sys; raise SystemExit(0 if "Screentra Cast Display" in sys.stdin.read()', kiosk)
         self.assertIn('head -c 1048577', kiosk)
         self.assertIn('head -c 65537', kiosk)
