@@ -317,6 +317,14 @@ def bounded_read_text(path: pathlib.Path, limit: int, encoding: str = 'utf-8') -
     return data.decode(encoding)
 
 
+def bounded_read_file(path: pathlib.Path, limit: int) -> bytes:
+    with path.open('rb') as stream:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise RuntimeError('local update file exceeded its size limit')
+    return data
+
+
 def write_result(result_file: pathlib.Path, result: dict) -> None:
     temporary = result_file.with_name('.result.tmp')
     temporary.write_text(json.dumps(result, separators=(',', ':'))[:8192] + '\n', encoding='utf-8')
@@ -376,7 +384,7 @@ def main() -> int:
             installer.write_bytes(bounded_read(response, MAX_INSTALLER))
         with urllib.request.urlopen(urllib.request.Request(signature_url, headers=headers), context=context, timeout=30) as response:
             signature.write_bytes(bounded_read(response, MAX_SIGNATURE))
-        actual_sha = hashlib.sha256(installer.read_bytes()).hexdigest()
+        actual_sha = hashlib.sha256(bounded_read_file(installer, MAX_INSTALLER)).hexdigest()
         if actual_sha != expected_sha:
             raise RuntimeError('update digest verification failed')
         verify = subprocess.run(["openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-inkey", str(public_key_file), "-sigfile", str(signature), "-in", str(installer)], capture_output=True, timeout=20)

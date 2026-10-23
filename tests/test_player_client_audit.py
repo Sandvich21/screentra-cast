@@ -54,6 +54,8 @@ class PlayerClientAuditTests(unittest.TestCase):
             path.write_bytes(b'x' * 17)
             with self.assertRaisesRegex(RuntimeError, 'local update file'):
                 namespace['bounded_read_text'](path, 16)
+            with self.assertRaisesRegex(RuntimeError, 'local update file'):
+                namespace['bounded_read_file'](path, 16)
 
     def test_kiosk_and_status_server_reads_are_bounded(self):
         installer = (ROOT / 'player-client/install/player-client.sh').read_text()
