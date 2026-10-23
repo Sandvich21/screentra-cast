@@ -554,6 +554,9 @@ impl AuthState {
     }
 
     pub fn revoke(&self, token: &str) {
+        if token.len() > MAX_SIGNED_TOKEN_BYTES {
+            return;
+        }
         // In-memory
         if let Ok(mut set) = self.revoked.write() {
             set.insert(token.to_string());
@@ -578,10 +581,16 @@ impl AuthState {
         if let Ok(set) = self.revoked.read() {
             for tok in set.iter() {
                 if let Some((body, _)) = tok.rsplit_once('.') {
+                    if body.len() > MAX_SIGNED_PAYLOAD_BYTES * 2 {
+                        continue;
+                    }
                     let payload_bytes: Vec<u8> = match URL_SAFE_NO_PAD.decode(body.as_bytes()) {
                         Ok(b) => b,
                         Err(_) => continue,
                     };
+                    if payload_bytes.len() > MAX_SIGNED_PAYLOAD_BYTES {
+                        continue;
+                    }
                     let payload_str = match std::str::from_utf8(&payload_bytes) {
                         Ok(s) => s,
                         Err(_) => continue,
@@ -1748,6 +1757,13 @@ mod tests {
         assert!(state
             .decode_signed_payload(&"x".repeat(MAX_SIGNED_TOKEN_BYTES + 1))
             .is_none());
+    }
+
+    #[test]
+    fn oversized_revocations_are_not_retained() {
+        let state = test_state();
+        state.revoke(&"x".repeat(MAX_SIGNED_TOKEN_BYTES + 1));
+        assert!(state.revoked.read().unwrap().is_empty());
     }
 
     #[test]
