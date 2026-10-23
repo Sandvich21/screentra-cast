@@ -153,6 +153,14 @@ def add(name: str, ok: bool, detail: str = "", required: bool = True) -> None:
     CHECKS.append({"name": name, "ok": ok, "detail": detail, "required": required})
 
 
+MAX_LOCAL_PROBE_OUTPUT_BYTES = 4096
+
+
+def _bound_local_probe_output(value: str) -> str:
+    encoded = str(value).encode('utf-8', errors='replace')
+    return encoded[:MAX_LOCAL_PROBE_OUTPUT_BYTES].decode('utf-8', errors='ignore')
+
+
 def run(cmd: str) -> str:
     commands = {
         "systemctl --user status >/dev/null 2>&1 && echo ok":
@@ -163,7 +171,8 @@ def run(cmd: str) -> str:
     if args is None:
         return ''
     try:
-        output = subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=3)
+        completed = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3, check=False)
+        output = _bound_local_probe_output(completed.stdout or '')
         return output.strip()
     except Exception:
         return ''

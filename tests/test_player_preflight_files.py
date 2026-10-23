@@ -18,6 +18,12 @@ class PlayerPreflightFileTests(unittest.TestCase):
     def test_command_runner_has_no_shell_fallback(self):
         self.assertEqual(preflight.run('echo attacker-controlled'), '')
 
+    def test_command_runner_bounds_probe_output(self):
+        completed = mock.Mock(stdout='x' * (preflight.MAX_LOCAL_PROBE_OUTPUT_BYTES + 100), returncode=0)
+        with mock.patch.object(preflight.subprocess, 'run', return_value=completed):
+            result = preflight.run('id -Gn')
+        self.assertLessEqual(len(result.encode('utf-8')), preflight.MAX_LOCAL_PROBE_OUTPUT_BYTES)
+
     def test_directory_check_rejects_symlinked_install_path(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
