@@ -29,6 +29,11 @@ class PlayerClientAuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             actor._require_bounded_text('x' * (actor.MAX_WLR_JSON_BYTES + 1), actor.MAX_WLR_JSON_BYTES)
 
+    def test_actor_labels_are_bounded(self):
+        self.assertEqual(actor._validate_actor_label('server-command', 'requester'), 'server-command')
+        with self.assertRaises(ValueError):
+            actor._validate_actor_label('x' * 129, 'requester')
+
     def test_touch_binding_rejects_non_boolean_joined_flag(self):
         with tempfile.TemporaryDirectory() as temp:
             with self.assertRaises(ValueError):

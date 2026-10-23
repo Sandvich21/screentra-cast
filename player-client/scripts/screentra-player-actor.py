@@ -770,6 +770,14 @@ def _validate_touch_device_name(value: str | None) -> str | None:
     return value.strip() or None
 
 
+def _validate_actor_label(value: str | None, field: str) -> str | None:
+    if value is None or value == '':
+        return None
+    if not isinstance(value, str) or len(value.encode('utf-8')) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError(f'{field} is not bounded')
+    return value.strip() or None
+
+
 def _resolve_touch_name(device_path: str | None, device_name: str | None = None) -> str | None:
     if device_name:
         return _validate_touch_device_name(device_name)
@@ -829,6 +837,7 @@ def apply_touch_binding(cache_dir: Path, payload: dict) -> tuple[bool, str, dict
         cfg = {}
     dev_path = _validate_touch_device_path(payload.get('device_path') or payload.get('path'))
     dev_name = _resolve_touch_name(dev_path, payload.get('device_name'))
+    requested_by = _validate_actor_label(payload.get('requested_by'), 'touch binding requester')
     allow_joined = payload.get('allow_joined_displays', False)
     if not isinstance(allow_joined, bool):
         raise ValueError('joined display flag is invalid')
@@ -855,7 +864,7 @@ def apply_touch_binding(cache_dir: Path, payload: dict) -> tuple[bool, str, dict
         'target_connectors': _display_connectors_for_indexes(cfg, indexes),
         'allow_joined_displays': allow_joined,
         'updated_at': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z',
-        'updated_by': payload.get('requested_by') or 'actor',
+        'updated_by': requested_by or 'actor',
     }
     cfg['touch_binding'] = binding
     _ensure_real_directory(config_path.parent, create=True)
