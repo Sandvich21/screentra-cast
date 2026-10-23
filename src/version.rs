@@ -70,10 +70,14 @@ fn bounded_command_stdout(
         .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|error| format!("spawn command: {error}"))?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "command stdout was not piped".to_string())?;
+    let mut stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("command stdout was not piped".to_string());
+        }
+    };
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut output = Vec::new();
     #[cfg(unix)]
@@ -87,7 +91,15 @@ fn bounded_command_stdout(
         }
         let mut eof = false;
         loop {
-            if let Some(status) = child.try_wait().map_err(|error| format!("wait command: {error}"))? {
+            let process_status = match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("wait command: {error}"));
+                }
+            };
+            if let Some(status) = process_status {
                 if !eof {
                     let mut chunk = [0u8; 8192];
                     loop {
@@ -162,16 +174,24 @@ fn bounded_command_stdout(
         stdout
             .take((maximum as u64).saturating_add(1))
             .read_to_end(&mut output)
-            .map_err(|error| format!("read command output: {error}"))?;
+            .map_err(|error| {
+                let _ = child.kill();
+                let _ = child.wait();
+                format!("read command output: {error}")
+            })?;
         if output.len() > maximum {
             let _ = child.kill();
             let _ = child.wait();
             return Err(format!("command output exceeded {maximum} bytes"));
         }
-        child
-            .wait()
-            .map(|status| (status, output))
-            .map_err(|error| format!("wait command: {error}"))
+        match child.wait() {
+            Ok(status) => Ok((status, output)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(format!("wait command: {error}"))
+            }
+        }
     }
 }
 
