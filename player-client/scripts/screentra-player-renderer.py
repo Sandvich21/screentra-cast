@@ -36,6 +36,7 @@ MAX_TOUCH_NAME_BYTES = 128
 MAX_SYSTEM_METRICS_BYTES = 64 * 1024
 MAX_GPU_HELPER_OUTPUT_BYTES = 64 * 1024
 MAX_ERROR_BYTES = 512
+MAX_STATIC_HTML_BYTES = 2 * 1024 * 1024
 
 
 def _bound_text(value: str | None, maximum: int) -> str:
@@ -1609,9 +1610,10 @@ class Handler(BaseHTTPRequestHandler):
             # the touchscreen + pick a layout right from the screen.
             if not layout_target.exists():
                 try:
-                    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'no-layout.html'), 'r') as _f:
-                        html = _f.read().replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
-                        return self.send_text(200, html, 'text/html; charset=utf-8')
+                    no_layout_path = Path(__file__).with_name('no-layout.html')
+                    html = _read_real_file(no_layout_path, MAX_STATIC_HTML_BYTES).decode('utf-8')
+                    html = html.replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
+                    return self.send_text(200, html, 'text/html; charset=utf-8')
                 except Exception:
                     pass
 
@@ -1671,16 +1673,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(200, json.dumps(_admin_logs(target)), 'application/json')
         if path == '/no-layout.html':
             display_index = int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0'))
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'no-layout.html'), 'r') as _f:
-                html = _f.read().replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
-                return self.send_text(200, html, 'text/html; charset=utf-8')
+            no_layout_path = Path(__file__).with_name('no-layout.html')
+            html = _read_real_file(no_layout_path, MAX_STATIC_HTML_BYTES).decode('utf-8')
+            html = html.replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
+            return self.send_text(200, html, 'text/html; charset=utf-8')
         if path == '/touch-calibration.html':
             # Serve the touchscreen calibration test page. Lives next to
             # the renderer script and reads RIPLEY_DISPLAY_INDEX for the
             # results so per-display calibration is recorded separately.
             try:
-                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'touch-calibration.html'), 'r') as _f:
-                    return self.send_text(200, _f.read(), 'text/html; charset=utf-8')
+                calibration_path = Path(__file__).with_name('touch-calibration.html')
+                html = _read_real_file(calibration_path, MAX_STATIC_HTML_BYTES).decode('utf-8')
+                return self.send_text(200, html, 'text/html; charset=utf-8')
             except FileNotFoundError:
                 return self.send_text(404, 'calibration page not installed', 'text/plain')
         if path == '/api/status.json':
