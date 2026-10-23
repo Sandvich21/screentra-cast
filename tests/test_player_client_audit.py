@@ -21,6 +21,12 @@ actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 's
 
 
 class PlayerClientAuditTests(unittest.TestCase):
+    def test_bluetooth_scan_duration_is_bounded(self):
+        ok, message, details = actor.bluetooth_scan({'duration_seconds': 'invalid'})
+        self.assertFalse(ok)
+        self.assertIn('duration', message.lower())
+        self.assertEqual(details, {})
+
     def test_bluetooth_name_is_bounded(self):
         self.assertEqual(actor._validate_bluetooth_name('Living Room'), 'Living Room')
         with self.assertRaises(ValueError):

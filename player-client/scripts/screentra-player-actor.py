@@ -450,7 +450,15 @@ def _validate_bluetooth_name(value: str) -> str:
 
 def bluetooth_scan(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
-    duration = max(5, min(int(payload.get('duration_seconds') or 10), 30))
+    if not isinstance(payload, dict):
+        return False, 'Bluetooth scan payload must be an object', {}
+    try:
+        raw_duration = payload.get('duration_seconds', 10)
+        if isinstance(raw_duration, bool):
+            raise ValueError
+        duration = max(5, min(int(raw_duration), 30))
+    except (TypeError, ValueError, OverflowError):
+        return False, 'Bluetooth scan duration must be a number from 5 to 30 seconds', {}
     if shutil.which('bluetoothctl') is None:
         return False, 'bluetoothctl is not installed on this client', {'devices': []}
     _run_list(['bluetoothctl', 'power', 'on'], timeout=10)
