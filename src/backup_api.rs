@@ -157,7 +157,11 @@ async fn run_bounded_status(
         .map_err(|error| format!("failed to start command: {error}"))?;
     match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => Ok(status),
-        Ok(Err(error)) => Err(format!("wait command: {error}")),
+        Ok(Err(error)) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err(format!("wait command: {error}"))
+        }
         Err(_) => {
             let _ = child.kill().await;
             let _ = child.wait().await;
@@ -551,14 +555,19 @@ async fn sha256_file(path: &str) -> Result<String, String> {
     const MAX_HASH_COMMAND_OUTPUT_BYTES: usize = 4096;
     let mut child = Command::new("sha256sum")
         .arg(path)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("sha256sum: {}", e))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "sha256sum stdout unavailable".to_string())?;
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err("sha256sum stdout unavailable".to_string());
+        }
+    };
     let mut bytes = Vec::new();
     let read_result = tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -569,7 +578,11 @@ async fn sha256_file(path: &str) -> Result<String, String> {
     .await;
     match read_result {
         Ok(Ok(_)) => {}
-        Ok(Err(error)) => return Err(format!("sha256sum output: {}", error)),
+        Ok(Err(error)) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(format!("sha256sum output: {}", error));
+        }
         Err(_) => {
             let _ = child.kill().await;
             let _ = child.wait().await;
@@ -581,10 +594,14 @@ async fn sha256_file(path: &str) -> Result<String, String> {
         let _ = child.wait().await;
         return Err("sha256sum output exceeds its bound".to_string());
     }
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| format!("sha256sum wait: {}", e))?;
+    let status = match child.wait().await {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(format!("sha256sum wait: {}", error));
+        }
+    };
     if !status.success() {
         return Err("sha256sum failed".to_string());
     }
