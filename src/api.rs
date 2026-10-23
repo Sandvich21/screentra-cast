@@ -6473,6 +6473,18 @@ async fn download_static_install_file(
     let path = crate::version::static_dir_path()
         .join("install")
         .join(filename);
+    let bundle_size = tokio::fs::metadata(&path).await.map_err(|error| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("download file not available: {} ({})", path.display(), error),
+        )
+    })?.len();
+    if bundle_size > MAX_STATE_BUNDLE_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "download file is too large".to_string(),
+        ));
+    }
     let bytes = tokio::fs::read(&path).await.map_err(|e| {
         (
             StatusCode::NOT_FOUND,
