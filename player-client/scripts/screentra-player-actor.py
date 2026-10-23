@@ -330,7 +330,7 @@ def _run_list(args: list[str], timeout: int = 20, input_data: str | None = None,
         p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, input=input_data, env=env)
         return p.returncode, _bound_subprocess_output(p.stdout or "").strip(), _bound_subprocess_output(p.stderr or "").strip()
     except Exception as e:
-        return 1, "", str(e)
+        return 1, "", _bound_hardware_message(str(e))
 
 
 def ddcutil_detect(bus: str | None = None) -> tuple[bool, str]:
@@ -341,8 +341,8 @@ def ddcutil_detect(bus: str | None = None) -> tuple[bool, str]:
         args.extend(['--bus', bus])
     rc, out, err = _run_list(args)
     if rc == 0:
-        return True, out.strip()
-    return False, err.strip() or out.strip()
+        return True, _bound_hardware_message(out.strip())
+    return False, _bound_hardware_message(err.strip() or out.strip())
 
 
 _DDC_VCP_RE = re.compile(r'^[0-9A-Fa-f]{1,2}$')
@@ -384,7 +384,7 @@ def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_lay
     def _do_set():
         rc, out, err = _run_list(args)
         if rc == 0:
-            return True, f'DDC: {vcp_code}={value}' + (f' ({out.strip()})' if out.strip() else '')
+            return True, f'DDC: {vcp_code}={value}' + (f' ({_bound_hardware_message(out.strip())})' if out.strip() else '')
         err_msg = err.strip() or out.strip()
         if 'not found' in err_msg.lower() or 'no such file' in err_msg.lower():
             return False, f'ddcutil_not_installed: {_bound_hardware_message(err_msg)}'
