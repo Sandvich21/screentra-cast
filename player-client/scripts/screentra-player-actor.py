@@ -784,7 +784,7 @@ def _resolve_touch_name(device_path: str | None, device_name: str | None = None)
     if not device_path:
         return None
     try:
-        blocks = Path('/proc/bus/input/devices').read_text().split('\n\n')
+        blocks = _read_bounded_text(Path('/proc/bus/input/devices'), 256 * 1024).split('\n\n')
         target = Path(device_path).name
         for block in blocks:
             if target not in block:
