@@ -21,6 +21,13 @@ actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 's
 
 
 class PlayerClientAuditTests(unittest.TestCase):
+    def test_display_connectors_are_bounded(self):
+        self.assertEqual(actor._validate_display_connector('HDMI-A-1'), 'HDMI-A-1')
+        with self.assertRaises(ValueError):
+            actor._validate_display_connector('../../etc/passwd')
+        with self.assertRaises(ValueError):
+            actor._validate_display_connector('x' * 129)
+
     def test_display_power_rejects_non_string_state(self):
         result = actor.execute('display_power', {'display_index': 0, 'state': ['on']}, {'cache_dir': '/tmp/cache', 'client_id': 'client-1', 'server': 'https://example.test'})
         self.assertFalse(result['ok'])

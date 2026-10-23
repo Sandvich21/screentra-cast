@@ -714,6 +714,10 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
         x = 0
         for idx, o in enumerate(outputs):
             name = o.get('name')
+            try:
+                name = _validate_display_connector(name)
+            except ValueError:
+                continue
             cur = next((m for m in o.get('modes', []) if m.get('current')), None)
             pref = next((m for m in o.get('modes', []) if m.get('preferred')), None)
             mode = cur or pref or {}
@@ -753,6 +757,15 @@ def _resolve_touch_name(device_path: str | None, device_name: str | None = None)
     return None
 
 
+_DISPLAY_CONNECTOR_RE = re.compile(r'^[A-Za-z0-9_.:-]{1,128}$')
+
+
+def _validate_display_connector(value: str) -> str:
+    if not isinstance(value, str) or len(value.encode('utf-8')) > 128 or _DISPLAY_CONNECTOR_RE.fullmatch(value) is None:
+        raise ValueError('display connector is not allowlisted')
+    return value
+
+
 def _display_connectors_for_indexes(config: dict, indexes: list[int]) -> list[str]:
     displays = config.get('last_detected_displays') or []
     out = []
@@ -761,8 +774,12 @@ def _display_connectors_for_indexes(config: dict, indexes: list[int]) -> list[st
             try:
                 if int(d.get('display_index', -1)) == int(idx):
                     c = d.get('connector') or d.get('label')
-                    if c and c not in out:
-                        out.append(str(c))
+                    try:
+                        c = _validate_display_connector(c)
+                    except ValueError:
+                        continue
+                    if c not in out:
+                        out.append(c)
                     break
             except Exception:
                 continue
@@ -879,8 +896,11 @@ def _write_preview_state(cache_dir: Path, display_index: int, state: dict) -> No
 
 def _preview_connector(cache_dir: Path, display_index: int) -> str | None:
     data = _read_json_file(cache_dir / f'display-{display_index}.json', {})
-    connector = str(data.get('connector') or '').strip()
-    return connector or None
+    connector = data.get('connector')
+    try:
+        return _validate_display_connector(connector) if connector else None
+    except ValueError:
+        return None
 
 
 def _preview_wayland_env() -> dict[str, str]:
