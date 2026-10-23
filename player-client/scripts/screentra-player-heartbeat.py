@@ -71,7 +71,7 @@ def _read_json_file(path: Path, default):
         raw = _read_real_file(path)
         if len(raw) > MAX_JSON_FILE_BYTES:
             return default
-        return json.loads(raw.decode('utf-8'))
+        return _parse_server_json(raw.decode('utf-8'))
     except Exception:
         return default
 
@@ -1008,7 +1008,11 @@ def _reject_duplicate_json_keys(pairs):
 
 def _parse_server_json(text):
     try:
-        return json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
+        return json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+        )
     except (TypeError, ValueError, UnicodeError) as exc:
         raise ValueError('server response is not valid JSON') from exc
 

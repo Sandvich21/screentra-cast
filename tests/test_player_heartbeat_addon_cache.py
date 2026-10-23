@@ -509,6 +509,14 @@ class HeartbeatAddonCacheTests(unittest.TestCase):
             redirected.symlink_to(outside)
             self.assertEqual(heartbeat._read_json_file(redirected, {'safe': True}), {'safe': True})
 
+    def test_json_cache_rejects_duplicate_keys_and_nonstandard_numbers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'cache.json'
+            path.write_text('{"safe":1,"safe":2}', encoding='utf-8')
+            self.assertEqual(heartbeat._read_json_file(path, {'fallback': True}), {'fallback': True})
+            path.write_text('{"safe":NaN}', encoding='utf-8')
+            self.assertEqual(heartbeat._read_json_file(path, {'fallback': True}), {'fallback': True})
+
     def test_client_auth_token_reader_rejects_symlinked_files(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
