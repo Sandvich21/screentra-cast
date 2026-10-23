@@ -29,6 +29,10 @@ class PlayerClientAuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             actor._require_bounded_text('x' * (actor.MAX_WLR_JSON_BYTES + 1), actor.MAX_WLR_JSON_BYTES)
 
+    def test_audio_sink_ids_are_bounded_in_status_parsing(self):
+        sinks = actor._wpctl_sinks('Audio Sinks:\n  ' + ('9' * 100) + '. Device')
+        self.assertEqual(sinks, [])
+
     def test_audio_sink_names_are_bounded(self):
         sinks = actor._wpctl_sinks('Audio Sinks:\n  1. ' + ('x' * 1000))
         self.assertEqual(len(sinks), 1)

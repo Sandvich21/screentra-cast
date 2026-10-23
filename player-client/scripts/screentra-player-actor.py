@@ -562,6 +562,8 @@ def _wpctl_sinks(text: str) -> list[dict]:
         if not match:
             continue
         sink_id = match.group(1)
+        if len(sink_id) > 8:
+            continue
         name = re.sub(r'^\*\s*', '', match.group(2)).strip()
         name = re.sub(r'\s+\[vol:.*?\]\s*$', '', name).strip()
         name = _validate_audio_device_name(name)
