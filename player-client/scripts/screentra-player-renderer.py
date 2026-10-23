@@ -28,6 +28,14 @@ MAX_REQUEST_BODY_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
 MAX_BACKUP_DOWNLOAD_BYTES = 256 * 1024 * 1024
 MAX_CACHED_ASSET_BYTES = 16 * 1024 * 1024
+MAX_INPUT_DEVICE_FILE_BYTES = 256 * 1024
+MAX_TOUCH_DEVICES = 128
+MAX_TOUCH_NAME_BYTES = 128
+
+
+def _bound_text(value: str, maximum: int) -> str:
+    encoded = str(value).encode('utf-8', errors='replace')
+    return encoded[:maximum].decode('utf-8', errors='ignore')
 
 
 def client_pairing_code(client_id):
@@ -178,10 +186,11 @@ def _udev_has_touchscreen_property(dev_path: str) -> bool:
     regardless of the device name.
     """
     try:
-        out = _sp.check_output(
+        completed = _sp.run(
             ['udevadm', 'info', '--query=property', '--name=' + dev_path],
-            stderr=_sp.DEVNULL, timeout=2, text=True,
+            stdout=_sp.PIPE, stderr=_sp.DEVNULL, timeout=2, text=True, check=False,
         )
+        out = _bound_text(completed.stdout or '', MAX_INPUT_DEVICE_FILE_BYTES)
         for line in out.splitlines():
             if line.startswith('ID_INPUT_TOUCHSCREEN=1'):
                 return True
@@ -238,14 +247,18 @@ def _nl_detect_touch_devices():
     p = Path('/proc/bus/input/devices')
     if not p.exists():
         return devs
+    try:
+        raw_devices = _read_real_file(p, MAX_INPUT_DEVICE_FILE_BYTES).decode('utf-8', errors='replace')
+    except Exception:
+        return devs
     cur = {}
-    for line in p.read_text().splitlines():
+    for line in raw_devices.splitlines():
         if not line.strip():
             if cur:
                 devs.append(cur); cur = {}
             continue
         if line.startswith('N:'):
-            cur['name'] = line.split('N:', 1)[1].strip().lstrip('Name=').strip('"')
+            cur['name'] = _bound_text(line.split('N:', 1)[1].strip().lstrip('Name=').strip('"'), MAX_TOUCH_NAME_BYTES)
         elif line.startswith('H:'):
             cur.setdefault('handlers', '')
             cur['handlers'] += ' ' + line.split('H:', 1)[1].strip()
@@ -288,6 +301,8 @@ def _nl_detect_touch_devices():
                 'recommended': recommended,
                 'reason': reason,
             })
+            if len(out) >= MAX_TOUCH_DEVICES:
+                return out
     out.sort(key=lambda x: (not x['recommended'], x['name']))
     return out
 
@@ -304,7 +319,8 @@ def _lan_ip_for_admin() -> str | None:
     except Exception:
         pass
     try:
-        out = _sp.check_output(['hostname', '-I'], text=True, timeout=2).split()
+        completed = _sp.run(['hostname', '-I'], stdout=_sp.PIPE, stderr=_sp.DEVNULL, text=True, timeout=2, check=False)
+        out = _bound_text(completed.stdout or '', 4096).split()
         for ip in out:
             if ip and not ip.startswith('127.') and ':' not in ip:
                 return ip
