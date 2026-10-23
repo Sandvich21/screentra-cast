@@ -4,7 +4,7 @@ INSTALL_DIR="${RIPLEY_CLIENT_DIR:-$HOME/.local/share/screentra-client}"
 CACHE="$INSTALL_DIR/cache"
 CONFIG="$CACHE/client-config.json"
 RENDERER_URL="${RIPLEY_RENDERER_URL:-http://127.0.0.1:3900}"
-SERVER_URL="${RIPLEY_SERVER_URL:-$(cat "$INSTALL_DIR/server" 2>/dev/null || true)}"
+SERVER_URL="${RIPLEY_SERVER_URL:-$(head -c 4096 "$INSTALL_DIR/server" 2>/dev/null || true)}"
 
 echo "Screentra Cast Player Status"
 echo "===================="
@@ -19,26 +19,38 @@ echo
 
 echo "Renderer health:"
 if command -v curl >/dev/null 2>&1; then
-  curl -fsS --max-time 4 "$RENDERER_URL/health" || echo "  renderer not reachable"
+  curl -fsS --max-time 4 --max-filesize 65536 "$RENDERER_URL/health" || echo "  renderer not reachable"
 else
-  python3 - <<PY 2>/dev/null || echo "  renderer not reachable"
+  RENDERER_URL="$RENDERER_URL" python3 - <<'PY' 2>/dev/null || echo "  renderer not reachable"
+import os
 import urllib.request
-print(urllib.request.urlopen("$RENDERER_URL/health", timeout=4).read().decode())
+url = os.environ['RENDERER_URL'].rstrip('/') + '/health'
+with urllib.request.urlopen(url, timeout=4) as response:
+    data = response.read(65537)
+if len(data) > 65536:
+    raise ValueError('renderer health response exceeds its bound')
+print(data.decode('utf-8'))
 PY
 fi
 echo
 
 if [ -f "$CONFIG" ]; then
   echo "Assigned layout:"
-  python3 - <<PY
+  CONFIG_PATH="$CONFIG" python3 - <<'PY'
 import json
-d=json.load(open("$CONFIG"))
+import os
+config_path = os.environ['CONFIG_PATH']
+with open(config_path, 'rb') as handle:
+    raw = handle.read((1 << 20) + 1)
+if len(raw) > (1 << 20):
+    raise ValueError('client config exceeds its bound')
+d = json.loads(raw.decode('utf-8'))
 print("  client_id:           ", d.get("client_id"))
 print("  assigned_layout_id:  ", d.get("assigned_layout_id"))
 print("  server_time:         ", d.get("server_time"))
 layout=d.get("layout") or {}
 print("  layout name:         ", layout.get("name"))
-print("  layout widgets:      ", len(layout.get("widgets") or []))
+print("  layout widgets:      ", min(len(layout.get("widgets") or []), 128))
 PY
 else
   echo "No cached client-config.json yet (heartbeat may not have run)."
