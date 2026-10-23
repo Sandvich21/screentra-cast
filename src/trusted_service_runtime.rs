@@ -10,6 +10,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -496,13 +497,37 @@ fn read_record(path: &Path) -> Result<TrustedServiceRuntimeRecord, RuntimeError>
             "Trusted service runtime record is too large".to_string(),
         ));
     }
-    let bytes = fs::read(path).map_err(|error| {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             RuntimeError::NotFound
         } else {
             RuntimeError::Io(error.to_string())
         }
     })?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| RuntimeError::Io(error.to_string()))?;
+    if !opened_metadata.is_file() || opened_metadata.len() > MAX_RUNTIME_RECORD_BYTES {
+        return Err(RuntimeError::Invalid(
+            "Trusted service runtime record is not a bounded regular file".to_string(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_RUNTIME_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| RuntimeError::Io(error.to_string()))?;
+    if bytes.len() > MAX_RUNTIME_RECORD_BYTES as usize {
+        return Err(RuntimeError::Invalid(
+            "Trusted service runtime record is too large".to_string(),
+        ));
+    }
     let record: TrustedServiceRuntimeRecord = serde_json::from_slice(&bytes).map_err(|_| {
         RuntimeError::Invalid("Trusted service runtime record is invalid".to_string())
     })?;
