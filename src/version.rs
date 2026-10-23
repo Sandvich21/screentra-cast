@@ -60,6 +60,25 @@ fn bounded_command_stdout(
         .map_err(|error| format!("wait command: {error}"))
 }
 
+const MAX_UPDATE_MANIFEST_BYTES: usize = 64 * 1024;
+const MAX_LAST_UPDATE_FAILED_BYTES: usize = 64 * 1024;
+
+fn read_bounded_file(path: &Path, maximum: usize) -> Result<Vec<u8>, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| format!("read metadata: {error}"))?;
+    if !metadata.is_file() || metadata.len() > maximum as u64 {
+        return Err(format!("file exceeds {maximum} bytes or is not regular"));
+    }
+    let file = fs::File::open(path).map_err(|error| format!("open file: {error}"))?;
+    let mut bytes = Vec::new();
+    file.take((maximum + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read file: {error}"))?;
+    if bytes.len() > maximum {
+        return Err(format!("file exceeds {maximum} bytes"));
+    }
+    Ok(bytes)
+}
+
 /// Build metadata injected at compile time. Override with:
 ///   SIGNAGE_VERSION=v1.2.3 cargo build --release
 ///   SIGNAGE_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) cargo build --release
@@ -817,7 +836,8 @@ pub fn import_update_bundle(src: &Path, force_skip_rollback: bool) -> Result<Upd
         let _ = fs::remove_dir_all(&stage);
         return Err("bundle missing manifest.json — not a valid update bundle".to_string());
     }
-    let manifest_bytes = fs::read(&manifest_path).map_err(|e| format!("read manifest: {}", e))?;
+    let manifest_bytes = read_bounded_file(&manifest_path, MAX_UPDATE_MANIFEST_BYTES)
+        .map_err(|e| format!("read manifest: {}", e))?;
     let manifest: UpdateManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| format!("parse manifest.json: {}", e))?;
 
@@ -1288,7 +1308,7 @@ pub fn clear_last_update_failed(install_dir: &str) {
 
 pub fn read_last_update_failed(install_dir: &str) -> Option<serde_json::Value> {
     let path = std::path::PathBuf::from(install_dir).join("LAST_UPDATE_FAILED.json");
-    let bytes = fs::read(&path).ok()?;
+    let bytes = read_bounded_file(&path, MAX_LAST_UPDATE_FAILED_BYTES).ok()?;
     serde_json::from_slice::<serde_json::Value>(&bytes).ok()
 }
 
@@ -1308,6 +1328,15 @@ mod update_swap_tests {
         oversized.arg("x");
         let error = bounded_command_stdout(oversized, 1024).expect_err("oversized output should fail");
         assert!(error.contains("exceeded 1024 bytes"));
+    }
+
+    #[test]
+    fn bounded_file_reader_rejects_oversized_files() {
+        let path = std::env::temp_dir().join(format!("screentra-version-bound-{}", Uuid::new_v4()));
+        fs::write(&path, vec![b'x'; 17]).unwrap();
+        assert!(read_bounded_file(&path, 16).is_err());
+        assert_eq!(read_bounded_file(&path, 17).unwrap().len(), 17);
+        let _ = fs::remove_file(path);
     }
 
     #[test]
