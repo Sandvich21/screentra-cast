@@ -1194,6 +1194,47 @@ def _bounded_check_output(args: list[str], maximum: int, timeout: float, env: di
         process.stdout.close()
 
 
+def _bounded_capture_stdout(args: list[str], maximum: int, timeout: float, env: dict[str, str] | None = None) -> tuple[int, bytes]:
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    assert process.stdout is not None
+    chunks: list[bytes] = []
+    total = 0
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(args, timeout)
+            ready, _, _ = select.select([process.stdout], [], [], remaining)
+            if not ready:
+                raise subprocess.TimeoutExpired(args, timeout)
+            chunk = os.read(process.stdout.fileno(), min(65536, maximum + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum:
+                raise ValueError('process output exceeds its bound')
+            chunks.append(chunk)
+        remaining = deadline - time.monotonic()
+        returncode = process.wait(timeout=max(remaining, 0.001))
+        return returncode, b''.join(chunks)
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        try:
+            process.wait(timeout=1)
+        except Exception:
+            pass
+        raise
+    finally:
+        process.stdout.close()
+
+
 def _validate_preview_frame(frame: bytes) -> bytes:
     if not isinstance(frame, bytes) or not frame or len(frame) > MAX_PREVIEW_FRAME_BYTES:
         raise ValueError('preview frame is not bounded')
@@ -1217,21 +1258,24 @@ def run_preview_loop(server: str, client_id: str, cache_dir: Path, display_index
         while time.time() - started < duration:
             command = ['grim', '-o', connector, '-']
             try:
-                capture = subprocess.run(
-                    command, capture_output=True, timeout=20, check=False,
-                    env=_preview_wayland_env(),
+                returncode, frame = _bounded_capture_stdout(
+                    command, MAX_PREVIEW_FRAME_BYTES, 20, env=_preview_wayland_env()
                 )
+            except ValueError:
+                _write_preview_state(cache_dir, display_index, {'status': 'unavailable', 'connector': connector, 'message': 'grim capture exceeded the preview frame bound'})
+                time.sleep(interval)
+                continue
             except Exception as exc:
                 _write_preview_state(cache_dir, display_index, {'status': 'error', 'connector': connector, 'message': f'capture failed: {_bound_hardware_message(str(exc))}'})
                 time.sleep(interval)
                 continue
             try:
-                frame = _validate_preview_frame(capture.stdout)
+                frame = _validate_preview_frame(frame)
             except ValueError:
                 _write_preview_state(cache_dir, display_index, {'status': 'unavailable', 'connector': connector, 'message': 'grim capture exceeded the preview frame bound'})
                 time.sleep(interval)
                 continue
-            if capture.returncode != 0:
+            if returncode != 0:
                 _write_preview_state(cache_dir, display_index, {'status': 'unavailable', 'connector': connector, 'message': 'grim could not capture the display'})
                 time.sleep(interval)
                 continue

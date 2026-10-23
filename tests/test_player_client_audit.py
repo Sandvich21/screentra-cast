@@ -47,6 +47,15 @@ class PlayerClientAuditTests(unittest.TestCase):
             'ok',
         )
 
+    def test_bounded_capture_stdout_limits_preview_output(self):
+        command = [actor.sys.executable, '-c', 'import sys; sys.stdout.buffer.write(b"x" * 100)']
+        with self.assertRaises(ValueError):
+            actor._bounded_capture_stdout(command, 32, 3)
+        code, output = actor._bounded_capture_stdout(
+            [actor.sys.executable, '-c', 'import sys; sys.stdout.buffer.write(b"ok")'], 32, 3
+        )
+        self.assertEqual((code, output), (0, b'ok'))
+
     def test_preview_pids_are_bounded(self):
         self.assertEqual(actor._validate_preview_pid('1234'), 1234)
         with self.assertRaises(ValueError):
