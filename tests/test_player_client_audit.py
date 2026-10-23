@@ -73,6 +73,8 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn('_read_bounded_response', body)
         self.assertNotIn('r.read().decode()', body)
         self.assertNotIn('Path(path).read_text()', body)
+        self.assertNotIn("open('/proc/uptime').read()", body)
+        self.assertNotIn("open('/proc/stat').readline()", body)
 
     def test_embedded_renderer_file_reads_are_bounded(self):
         installer = (ROOT / 'player-client/install/player-client.sh').read_text()
@@ -94,6 +96,7 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('data = r.read()', body)
         self.assertNotIn('signature = r.read()', body)
         self.assertNotIn('json.loads(r.read().decode())', body)
+        self.assertNotIn('pending_path.read_text', body)
 
     def test_preview_frame_is_bounded(self):
         frame = b'x' * (actor.MAX_PREVIEW_FRAME_BYTES + 1)

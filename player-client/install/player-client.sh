@@ -1314,14 +1314,14 @@ def read_disk(path='/'):
 
 def read_uptime():
     try:
-        return int(float(open('/proc/uptime').read().split()[0]))
+        return int(float(_read_bounded_path(Path('/proc/uptime'), 4096).split()[0]))
     except Exception:
         return None
 
 
 def read_cpu_usage(interval=0.25):
     def sample():
-        fields = [int(x) for x in open('/proc/stat').readline().split()[1:]]
+        fields = [int(x) for x in _read_bounded_path(Path('/proc/stat'), 64 * 1024).splitlines()[0].split()[1:]]
         idle = fields[3] + fields[4]
         total = sum(fields)
         return idle, total
@@ -6121,7 +6121,7 @@ def main() -> int:
         try:
             if pending_path.stat().st_size > MAX_PENDING_BYTES:
                 raise ValueError(f'pending command exceeds {MAX_PENDING_BYTES} bytes')
-            spec = json.loads(pending_path.read_text(encoding='utf-8'))
+            spec = json.loads(_read_bounded_path(pending_path, MAX_PENDING_BYTES))
         except Exception as e:
             result = {'action': 'unknown', 'ok': False, 'message': f'bad pending file: {e}', 'started_at': datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None).isoformat() + 'Z'}
             _atomic_write_text(result_path, json.dumps(result, indent=2))
