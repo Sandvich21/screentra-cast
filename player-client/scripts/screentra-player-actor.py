@@ -716,20 +716,16 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
         cfg = {}
     try:
         raw_installer = cfg.get('installer_detected_max_displays', 1)
-        if isinstance(raw_installer, bool):
-            raise ValueError
-        installer = max(1, min(int(raw_installer), 4))
-    except (TypeError, ValueError, OverflowError):
+        installer = _bounded_integer_input(raw_installer, 1, 4, 'display count')
+    except ValueError:
         installer = 1
     if max_displays is None:
         override = None
         active = installer
     else:
         try:
-            if isinstance(max_displays, bool):
-                raise ValueError
-            override = max(1, min(int(max_displays), installer, 4))
-        except (TypeError, ValueError, OverflowError):
+            override = _bounded_integer_input(max_displays, 1, min(installer, 4), 'display count')
+        except ValueError:
             return False, 'display count must be numeric', {}
         active = override
     cfg['installer_detected_max_displays'] = installer

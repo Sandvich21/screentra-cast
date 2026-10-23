@@ -93,6 +93,10 @@ class PlayerClientAuditTests(unittest.TestCase):
     def test_display_count_rejects_malformed_values(self):
         with tempfile.TemporaryDirectory() as temp:
             ok, message, details = actor.apply_display_count(Path(temp) / 'cache', 'not-a-number')
+            self.assertFalse(ok)
+            self.assertIn('numeric', message)
+            self.assertEqual(details, {})
+            ok, message, details = actor.apply_display_count(Path(temp) / 'cache', 1.5)
         self.assertFalse(ok)
         self.assertIn('numeric', message)
         self.assertEqual(details, {})
