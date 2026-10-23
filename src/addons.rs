@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use uuid::Uuid;
 
 const MANIFEST_FILE: &str = "manifest.json";
@@ -2073,6 +2073,8 @@ fn verify_trusted_service_manifest_signature(
         .arg(signature_path)
         .args(["-in"])
         .arg(manifest_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .output()
         .map_err(io_error)?;
     if !result.status.success() {
@@ -2116,6 +2118,8 @@ fn verify_trusted_service_image_signature(
             .arg(signature_path)
             .args(["-in"])
             .arg(&digest_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .output()
             .map_err(io_error)?;
         if !output.status.success() {
@@ -2582,6 +2586,8 @@ fn verify_manifest_signature(manifest: &Path, signature: &Path) -> Result<(), Ad
         .arg(signature)
         .args(["-in"])
         .arg(manifest)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .output()
         .map_err(io_error)?;
     if !result.status.success() {
