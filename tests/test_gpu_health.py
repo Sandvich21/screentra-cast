@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -19,6 +20,12 @@ class GpuHealthTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertLessEqual(len(stdout.encode('utf-8')), gpu.MAX_SUBPROCESS_OUTPUT_BYTES)
         self.assertEqual(stderr, '')
+
+    def test_sysfs_reads_are_bounded(self):
+        with tempfile.NamedTemporaryFile() as temp:
+            temp.write(b'x' * (gpu.MAX_FILE_READ_BYTES + 100))
+            temp.flush()
+            self.assertLessEqual(len(gpu._read(Path(temp.name)).encode('utf-8')), gpu.MAX_FILE_READ_BYTES)
 
 
 if __name__ == '__main__':

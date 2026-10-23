@@ -9,9 +9,15 @@ import sys
 from pathlib import Path
 
 
+MAX_FILE_READ_BYTES = 4096
+MAX_SUBPROCESS_OUTPUT_BYTES = 64 * 1024
+
+
 def _read(path: Path) -> str | None:
     try:
-        return path.read_text(errors='replace').strip()
+        with path.open('rb') as handle:
+            raw = handle.read(MAX_FILE_READ_BYTES)
+        return raw.decode(errors='replace').strip()
     except Exception:
         return None
 
@@ -43,7 +49,6 @@ def _mhz_value(raw: str | None) -> float | None:
     return round(mhz, 0) if mhz > 0 else None
 
 
-MAX_SUBPROCESS_OUTPUT_BYTES = 64 * 1024
 
 
 def _bound_subprocess_output(value: str) -> str:
