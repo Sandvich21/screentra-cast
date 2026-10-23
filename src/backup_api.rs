@@ -11,6 +11,7 @@ use chrono::Utc;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path as StdPath, PathBuf};
+use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use uuid::Uuid;
@@ -168,6 +169,8 @@ async fn create_postgres_dump(output_path: &StdPath) -> Result<(), String> {
         ])
         .arg(output_path)
         .envs(environment)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .output()
         .await
         .map_err(|_| "Failed to start pg_dump".to_string())?;
@@ -206,6 +209,8 @@ async fn restore_postgres_dump(input_path: &StdPath) -> Result<(), String> {
         ])
         .arg(input_path)
         .envs(environment)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .output()
         .await
         .map_err(|_| "Failed to start psql".to_string())?;
@@ -325,7 +330,11 @@ pub async fn create_backup(
             .arg(format!("./{filename}"));
     }
 
-    let output = cmd.output().await;
+    let output = cmd
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .await;
     if let Some(path) = &postgres_dump_path {
         let _ = fs::remove_file(path);
     }
@@ -530,6 +539,7 @@ fn cleanup_postgres_rollback_dump(path: Option<&StdPath>) {
 async fn sha256_file(path: &str) -> Result<String, String> {
     let output = Command::new("sha256sum")
         .arg(path)
+        .stderr(Stdio::null())
         .output()
         .await
         .map_err(|e| format!("sha256sum: {}", e))?;
@@ -570,6 +580,8 @@ async fn systemctl_action(action: &str, service: &str, kind: &str) -> Result<(),
         c
     };
     cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
     let output = cmd
         .output()
         .await
