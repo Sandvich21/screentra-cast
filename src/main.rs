@@ -30,7 +30,24 @@ use crate::api::{
     configured_repository_backend, router, ClientRepository, RepositoryBackend, RuntimeState,
 };
 use crate::db::Database;
+use std::io::Read;
 use std::sync::Arc;
+
+const MAX_HOSTNAME_BYTES: usize = 4096;
+
+fn read_bounded_hostname() -> Result<String, std::io::Error> {
+    let file = std::fs::File::open("/etc/hostname")?;
+    let mut bytes = Vec::new();
+    file.take((MAX_HOSTNAME_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_HOSTNAME_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "hostname exceeds the configured limit",
+        ));
+    }
+    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
+}
 
 #[cfg(test)]
 pub(crate) static PROCESS_ENV_TEST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
@@ -697,7 +714,7 @@ async fn main() {
     };
 
     let discovery_name = std::env::var("SCREENTRA_CAST_SERVER_NAME")
-        .or_else(|_| std::fs::read_to_string("/etc/hostname").map(|value| value.trim().to_string()))
+        .or_else(|_| read_bounded_hostname())
         .unwrap_or_else(|_| "Screentra Cast".to_string());
     let discovery_ca = crate::discovery::load_published_ca(tls_cert_path.as_deref());
     let discovery_port = addr.port();
