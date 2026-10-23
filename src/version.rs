@@ -28,6 +28,38 @@ fn signage_data_dir() -> String {
     std::env::var("SIGNAGE_DATA_DIR").unwrap_or_else(|_| "/home/board/data".to_string())
 }
 
+fn bounded_command_stdout(
+    mut command: Command,
+    maximum: usize,
+) -> Result<(std::process::ExitStatus, Vec<u8>), String> {
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("spawn command: {error}"))?;
+    let mut output = Vec::new();
+    let read_result = child
+        .stdout
+        .take()
+        .ok_or_else(|| "command stdout was not piped".to_string())?
+        .take((maximum as u64).saturating_add(1))
+        .read_to_end(&mut output);
+    if let Err(error) = read_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("read command output: {error}"));
+    }
+    if output.len() > maximum {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("command output exceeded {maximum} bytes"));
+    }
+    child
+        .wait()
+        .map(|status| (status, output))
+        .map_err(|error| format!("wait command: {error}"))
+}
+
 /// Build metadata injected at compile time. Override with:
 ///   SIGNAGE_VERSION=v1.2.3 cargo build --release
 ///   SIGNAGE_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) cargo build --release
@@ -433,8 +465,10 @@ pub fn detect_runtime_deps() -> RuntimeDeps {
 
     let mut shared_libs = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
-        if let Ok(out) = Command::new("ldd").arg(&exe).output() {
-            if let Ok(s) = String::from_utf8(out.stdout) {
+        let mut command = Command::new("ldd");
+        command.arg(&exe);
+        if let Ok((_, stdout)) = bounded_command_stdout(command, 64 * 1024) {
+            if let Ok(s) = String::from_utf8(stdout) {
                 for line in s.lines() {
                     // "libssl.so.3 => /usr/lib/..."
                     if let Some(name) = line.split_whitespace().next() {
@@ -832,15 +866,18 @@ pub fn import_update_bundle(src: &Path, force_skip_rollback: bool) -> Result<Upd
     }
 
     // 6. Validate the new binary runs usefully
-    let test = Command::new(&new_binary).arg("--version").output();
+    let test = Command::new(&new_binary)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
     match test {
-        Ok(out) => {
-            if !out.status.success() {
+        Ok(status) => {
+            if !status.success() {
                 let _ = fs::remove_dir_all(&stage);
-                let stderr = String::from_utf8_lossy(&out.stderr);
                 return Err(format!(
                     "new binary refused to run (--version failed): {}",
-                    stderr
+                    status
                 ));
             }
         }
