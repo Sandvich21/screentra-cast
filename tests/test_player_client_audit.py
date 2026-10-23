@@ -29,6 +29,11 @@ class PlayerClientAuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             actor._require_bounded_text('x' * (actor.MAX_WLR_JSON_BYTES + 1), actor.MAX_WLR_JSON_BYTES)
 
+    def test_touch_binding_rejects_non_boolean_joined_flag(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaises(ValueError):
+                actor.apply_touch_binding(Path(temp) / 'cache', {'allow_joined_displays': 'yes'})
+
     def test_touch_device_names_are_bounded(self):
         self.assertEqual(actor._validate_touch_device_name('Panel Touch'), 'Panel Touch')
         with self.assertRaises(ValueError):

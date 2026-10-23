@@ -825,15 +825,21 @@ def apply_touch_binding(cache_dir: Path, payload: dict) -> tuple[bool, str, dict
         cfg = _read_json_file(config_path, {})
     except Exception:
         cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
     dev_path = _validate_touch_device_path(payload.get('device_path') or payload.get('path'))
     dev_name = _resolve_touch_name(dev_path, payload.get('device_name'))
-    allow_joined = bool(payload.get('allow_joined_displays'))
+    allow_joined = payload.get('allow_joined_displays', False)
+    if not isinstance(allow_joined, bool):
+        raise ValueError('joined display flag is invalid')
     raw_indexes = payload.get('target_display_indexes') or payload.get('display_indexes') or payload.get('display_index') or [0]
     if not isinstance(raw_indexes, list):
         raw_indexes = [raw_indexes]
     indexes = []
     for v in raw_indexes:
         try:
+            if isinstance(v, bool):
+                raise ValueError
             i = max(0, min(int(v), 3))
             if i not in indexes:
                 indexes.append(i)
