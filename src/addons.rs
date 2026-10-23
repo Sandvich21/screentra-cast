@@ -2108,23 +2108,49 @@ fn trusted_service_signature_verifier_executable() -> &'static str {
     "/usr/bin/openssl"
 }
 
+fn bounded_signature_command(
+    mut command: Command,
+    timeout: std::time::Duration,
+) -> Result<std::process::ExitStatus, AddonError> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().map_err(io_error)?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(AddonError::Invalid("command exceeded its timeout".to_string()));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(io_error(error));
+            }
+        }
+    }
+}
+
 fn verify_trusted_service_manifest_signature(
     manifest_path: &Path,
     signature_path: &Path,
 ) -> Result<(), AddonError> {
     let public_key = trusted_service_signing_public_key();
     validate_trusted_service_file(&public_key, 64 * 1024, "manifest signing public key")?;
-    let result = Command::new(trusted_service_signature_verifier_executable())
+    let mut command = Command::new(trusted_service_signature_verifier_executable());
+    command
         .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
         .arg(&public_key)
         .args(["-sigfile"])
         .arg(signature_path)
         .args(["-in"])
-        .arg(manifest_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(io_error)?;
+        .arg(manifest_path);
+    let result = bounded_signature_command(command, std::time::Duration::from_secs(30))?;
     if !result.success() {
         return Err(AddonError::Invalid(
             "Trusted service manifest signature verification failed".to_string(),
@@ -2159,17 +2185,15 @@ fn verify_trusted_service_image_signature(
         digest_file
             .write_all(image_digest.as_bytes())
             .map_err(io_error)?;
-        let status = Command::new(trusted_service_signature_verifier_executable())
+        let mut command = Command::new(trusted_service_signature_verifier_executable());
+        command
             .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
             .arg(&public_key)
             .args(["-sigfile"])
             .arg(signature_path)
             .args(["-in"])
-            .arg(&digest_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map_err(io_error)?;
+            .arg(&digest_path);
+        let status = bounded_signature_command(command, std::time::Duration::from_secs(30))?;
         if !status.success() {
             return Err(AddonError::Invalid(
                 "Trusted service image signature verification failed".to_string(),
@@ -2633,17 +2657,15 @@ fn verify_manifest_signature(manifest: &Path, signature: &Path) -> Result<(), Ad
         Err(error) => return Err(io_error(error)),
         Ok(_) => {}
     }
-    let result = Command::new(trusted_service_signature_verifier_executable())
+    let mut command = Command::new(trusted_service_signature_verifier_executable());
+    command
         .args(["pkeyutl", "-verify", "-rawin", "-pubin", "-inkey"])
         .arg(&public_key)
         .args(["-sigfile"])
         .arg(signature)
         .args(["-in"])
-        .arg(manifest)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(io_error)?;
+        .arg(manifest);
+    let result = bounded_signature_command(command, std::time::Duration::from_secs(30))?;
     if !result.success() {
         return Err(AddonError::Invalid(
             "Addon manifest signature verification failed".to_string(),
@@ -3056,6 +3078,15 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn bounded_signature_command_terminates_timed_out_process() {
+        let mut command = Command::new("python3");
+        command.args(["-c", "import time; time.sleep(5)"]);
+        let error = bounded_signature_command(command, std::time::Duration::from_millis(50))
+            .expect_err("timed-out signature command should be terminated");
+        assert!(error.to_string().contains("command exceeded its timeout"));
+    }
 
     fn manifest() -> AddonManifest {
         AddonManifest {
