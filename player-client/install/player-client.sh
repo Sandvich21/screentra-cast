@@ -6324,7 +6324,11 @@ from pathlib import Path
 path = Path(sys.argv[1])
 base = int(sys.argv[2])
 try:
-    cfg = json.loads(path.read_text()) if path.exists() else {}
+    with path.open('rb') as stream:
+        raw = stream.read((1 << 20) + 1)
+    if len(raw) > (1 << 20):
+        raise ValueError('config too large')
+    cfg = json.loads(raw.decode('utf-8')) if path.exists() else {}
 except Exception:
     cfg = {}
 displays = [d for d in (cfg.get('last_detected_displays') or [])
