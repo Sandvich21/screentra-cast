@@ -543,7 +543,7 @@ def bluetooth_connect(payload: dict | None) -> tuple[bool, str, dict]:
         details['audio_device_selected'] = sink_rc == 0
         if sink_rc == 0:
             return True, f'Connected to {name}; Bluetooth audio output selected', details
-        details['audio_selection_error'] = sink_err or sink_out
+        details['audio_selection_error'] = _bound_hardware_message(sink_err or sink_out)
     else:
         details['audio_device_selected'] = False
         details['audio_selection_error'] = 'Bluetooth connected, but no PipeWire Bluetooth audio sink was found yet'
@@ -772,11 +772,11 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
             width = int(mode.get('width') or 0)
             if idx < active:
                 cp = subprocess.run(['wlr-randr', '--output', name, '--on', '--pos', f'{x},0'], text=True, capture_output=True, timeout=5, env=env)
-                details['steps'].append({'output': name, 'action': 'on', 'x': x, 'code': cp.returncode, 'stderr': (cp.stderr or '')[-500:]})
+                details['steps'].append({'output': name, 'action': 'on', 'x': x, 'code': cp.returncode, 'stderr': _bound_hardware_message(cp.stderr or '')})
                 x += width
             elif o.get('enabled'):
                 cp = subprocess.run(['wlr-randr', '--output', name, '--off'], text=True, capture_output=True, timeout=5, env=env)
-                details['steps'].append({'output': name, 'action': 'off', 'code': cp.returncode, 'stderr': (cp.stderr or '')[-500:]})
+                details['steps'].append({'output': name, 'action': 'off', 'code': cp.returncode, 'stderr': _bound_hardware_message(cp.stderr or '')})
     except Exception as e:
         details['steps'].append({'output_policy': 'skipped', 'error': _bound_hardware_message(str(e))})
         rc,out,err = _run_list(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'])
