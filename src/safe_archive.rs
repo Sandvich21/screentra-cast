@@ -324,6 +324,19 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    #[test]
+    fn limited_reader_rejects_decompressed_overflow() {
+        let mut reader = LimitedReader {
+            inner: io::Cursor::new(vec![b'x'; 4]),
+            remaining: 3,
+        };
+        let mut bytes = Vec::new();
+        let error = reader.read_to_end(&mut bytes).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("decompressed size limit"));
+        assert_eq!(bytes, b"xxx");
+    }
+
     fn make_archive<F>(label: &str, build: F) -> PathBuf
     where
         F: FnOnce(&mut Builder<GzEncoder<File>>),
