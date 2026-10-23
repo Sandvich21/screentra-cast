@@ -5253,6 +5253,7 @@ import datetime as _d
 import json
 import os
 import re
+import selectors
 import shutil
 import ssl
 import subprocess
@@ -5267,6 +5268,8 @@ MAX_PENDING_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
 MAX_UPDATE_INSTALLER_BYTES = 16 * 1024 * 1024
 MAX_UPDATE_SIGNATURE_BYTES = 16 * 1024
+MAX_SUBPROCESS_OUTPUT_BYTES = 64 * 1024
+MAX_HARDWARE_MESSAGE_BYTES = 512
 
 
 def _read_bounded_path(path: Path, maximum: int, encoding: str = 'utf-8') -> str:
@@ -5309,12 +5312,70 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     os.replace(temporary, path)
 
 
-def _run_list(args: list[str], timeout: int = 20, input_data: str | None = None) -> tuple[int, str, str]:
+def _bound_hardware_message(value: str) -> str:
+    encoded = str(value).encode('utf-8', errors='replace')
+    return encoded[:MAX_HARDWARE_MESSAGE_BYTES].decode('utf-8', errors='ignore')
+
+
+def _run_list(args: list[str], timeout: int = 20, input_data: str | None = None, env: dict[str, str] | None = None) -> tuple[int, str, str]:
+    process = None
+    selector = None
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, input=input_data)
-        return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
+        process = subprocess.Popen(
+            args,
+            stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            env=env,
+        )
+        if process.stdin is not None:
+            process.stdin.write((input_data or '').encode('utf-8'))
+            process.stdin.close()
+        assert process.stdout is not None and process.stderr is not None
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
+        selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
+        buffers = {'stdout': bytearray(), 'stderr': bytearray()}
+        deadline = time.monotonic() + timeout
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(args, timeout)
+            for key, _ in selector.select(remaining):
+                chunk = os.read(key.fileobj.fileno(), MAX_SUBPROCESS_OUTPUT_BYTES + 1)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                buffer = buffers[key.data]
+                buffer.extend(chunk)
+                if len(buffer) > MAX_SUBPROCESS_OUTPUT_BYTES:
+                    raise ValueError('subprocess output exceeds its bound')
+        returncode = process.wait(timeout=max(deadline - time.monotonic(), 0.001))
+        return (
+            returncode,
+            bytes(buffers['stdout']).decode('utf-8', errors='replace').strip(),
+            bytes(buffers['stderr']).decode('utf-8', errors='replace').strip(),
+        )
     except Exception as e:
-        return 1, "", str(e)
+        if process is not None and process.poll() is None:
+            process.kill()
+        if process is not None:
+            try:
+                process.wait(timeout=1)
+            except Exception:
+                pass
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+        return 1, '', _bound_hardware_message(str(e))
+    finally:
+        if selector is not None:
+            selector.close()
 
 
 def ddcutil_detect(bus: str | None = None) -> tuple[bool, str]:
@@ -5638,12 +5699,12 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
             mode = cur or pref or {}
             width = int(mode.get('width') or 0)
             if idx < active:
-                cp = subprocess.run(['wlr-randr', '--output', name, '--on', '--pos', f'{x},0'], text=True, capture_output=True, timeout=5, env=env)
-                details['steps'].append({'output': name, 'action': 'on', 'x': x, 'code': cp.returncode, 'stderr': (cp.stderr or '')[-500:]})
+                rc, out, err = _run_list(['wlr-randr', '--output', name, '--on', '--pos', f'{x},0'], timeout=5, env=env)
+                details['steps'].append({'output': name, 'action': 'on', 'x': x, 'code': rc, 'stderr': (err or out)[-500:]})
                 x += width
             elif o.get('enabled'):
-                cp = subprocess.run(['wlr-randr', '--output', name, '--off'], text=True, capture_output=True, timeout=5, env=env)
-                details['steps'].append({'output': name, 'action': 'off', 'code': cp.returncode, 'stderr': (cp.stderr or '')[-500:]})
+                rc, out, err = _run_list(['wlr-randr', '--output', name, '--off'], timeout=5, env=env)
+                details['steps'].append({'output': name, 'action': 'off', 'code': rc, 'stderr': (err or out)[-500:]})
     except Exception as e:
         details['steps'].append({'output_policy': 'skipped', 'error': str(e)})
         rc,out,err = _run_list(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'])
@@ -5676,8 +5737,7 @@ def apply_display_power(cache_dir: Path, display_index: int | None, state: str) 
                 wayland_env['WAYLAND_DISPLAY'] = candidate
                 break
     try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=10, env=wayland_env)
-        rc, out, err = proc.returncode, proc.stdout, proc.stderr
+        rc, out, err = _run_list(args, timeout=10, env=wayland_env)
     except Exception as exc:
         return False, f'compositor display power failed: {exc}', {'display_index': display_index, 'connector': connector, 'state': state, 'command': args}
     details = {'display_index': display_index, 'connector': connector, 'state': state, 'command': args}
@@ -5920,25 +5980,29 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
         tmp_path.write_bytes(data)
         tmp_path.chmod(0o755)
         signature_path.write_bytes(signature)
-        verify = subprocess.run(
+        verify_rc, verify_out, verify_err = _run_list(
             [
                 'openssl', 'pkeyutl', '-verify', '-rawin', '-pubin',
                 '-inkey', str(public_key), '-sigfile', str(signature_path),
                 '-in', str(tmp_path),
             ],
-            capture_output=True, text=True, timeout=20,
+            timeout=20,
         )
-        details['signature_verified'] = verify.returncode == 0
-        if verify.returncode != 0:
+        details['signature_verified'] = verify_rc == 0
+        if verify_rc != 0:
             return False, 'client update refused: installer signature verification failed', details
-        p = subprocess.run(['/bin/bash', str(tmp_path)], env=env, capture_output=True, text=True, timeout=int(payload.get('timeout_seconds') or 180))
-        out = (p.stdout or '').strip()
-        err = (p.stderr or '').strip()
-        details['returncode'] = p.returncode
+        p_rc, out, err = _run_list(
+            ['/bin/bash', str(tmp_path)],
+            timeout=int(payload.get('timeout_seconds') or 180),
+            env=env,
+        )
+        out = out.strip()
+        err = err.strip()
+        details['returncode'] = p_rc
         details['stdout_tail'] = out[-2000:]
         details['stderr_tail'] = err[-2000:]
-        if p.returncode != 0:
-            return False, f'installer exited {p.returncode}: {(err or out)[-500:]}', details
+        if p_rc != 0:
+            return False, f'installer exited {p_rc}: {(err or out)[-500:]}', details
         return True, 'client installer updated/reinstalled successfully', details
     except Exception as e:
         details['error'] = str(e)

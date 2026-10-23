@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import stat
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -102,6 +103,16 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('signature = r.read()', body)
         self.assertNotIn('json.loads(r.read().decode())', body)
         self.assertNotIn('pending_path.read_text', body)
+        self.assertNotIn('subprocess.run(args, capture_output=True', body)
+        namespace = {'__name__': 'embedded_actor_test'}
+        exec(compile(body, 'embedded-actor.py', 'exec'), namespace)
+        rc, out, err = namespace['_run_list'](
+            [sys.executable, '-c', "print('x' * 70000)"],
+            timeout=10,
+        )
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, '')
+        self.assertIn('output exceeds its bound', err)
 
     def test_preview_frame_is_bounded(self):
         frame = b'x' * (actor.MAX_PREVIEW_FRAME_BYTES + 1)
