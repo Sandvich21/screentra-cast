@@ -15,6 +15,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
+use futures_util::StreamExt;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,6 +31,28 @@ type HmacSha256 = Hmac<Sha256>;
 
 const MAX_SIGNED_TOKEN_BYTES: usize = 16 * 1024;
 const MAX_SIGNED_PAYLOAD_BYTES: usize = 8 * 1024;
+const MAX_GOOGLE_RESPONSE_BYTES: usize = 64 * 1024;
+
+async fn read_google_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_GOOGLE_RESPONSE_BYTES as u64)
+    {
+        return Err("Google response exceeds size limit".to_string());
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| error.to_string())?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_GOOGLE_RESPONSE_BYTES {
+            return Err("Google response exceeds size limit".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|error| error.to_string())
+}
 
 #[derive(Clone)]
 pub struct AuthState {
@@ -1522,7 +1545,7 @@ pub async fn google_callback(
         .send()
         .await
     {
-        Ok(r) => match r.json::<GoogleTokenResponse>().await {
+        Ok(r) => match read_google_json::<GoogleTokenResponse>(r).await {
             Ok(t) => t,
             Err(_) => return fail("token_parse_failed"),
         },
@@ -1534,7 +1557,7 @@ pub async fn google_callback(
         .send()
         .await
     {
-        Ok(r) => match r.json::<GoogleUserInfo>().await {
+        Ok(r) => match read_google_json::<GoogleUserInfo>(r).await {
             Ok(i) => i,
             Err(_) => return fail("userinfo_parse_failed"),
         },
