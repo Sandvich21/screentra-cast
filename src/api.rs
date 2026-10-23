@@ -30,7 +30,7 @@ use std::path::{Path as StdPath, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -4536,7 +4536,8 @@ async fn upload_file(
                     "Image upload is too large".to_string(),
                 ));
             }
-            let data = fs::read(&tmp_path).map_err(|_| internal_server_error())?;
+            let data = read_bounded_file(&tmp_path, MAX_IMAGE_UPLOAD_BYTES)
+                .map_err(|_| internal_server_error())?;
             let ext = image_extension_from_upload(&original_name, &data)?;
             fs::remove_file(&tmp_path).map_err(|_| internal_server_error())?;
             image_data = Some(data);
@@ -5665,12 +5666,9 @@ async fn export_state_bundle_handler(
             "Generated state bundle is too large".to_string(),
         ));
     }
-    let bytes = tokio::fs::read(&dest).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("read bundle: {}", e),
-        )
-    })?;
+    let bytes = read_bounded_async_file(&dest, MAX_STATE_BUNDLE_BYTES)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("read bundle: {}", e)))?;
     let _ = tokio::fs::remove_file(&dest).await;
     let header = [(
         axum::http::header::CONTENT_DISPOSITION,
@@ -5878,7 +5876,7 @@ async fn export_update_bundle_handler(
             "Generated update bundle is too large".to_string(),
         ));
     }
-    let bytes = match tokio::fs::read(&dest).await {
+    let bytes = match read_bounded_async_file(&dest, MAX_STATE_BUNDLE_BYTES).await {
         Ok(bytes) => bytes,
         Err(error) => {
             audit_update_export_failure(&state, &principal, "bundle read failed").await;
@@ -6487,12 +6485,14 @@ async fn download_static_install_file(
             "download file is too large".to_string(),
         ));
     }
-    let bytes = tokio::fs::read(&path).await.map_err(|e| {
-        (
-            StatusCode::NOT_FOUND,
-            format!("download file not available: {} ({})", path.display(), e),
-        )
-    })?;
+    let bytes = read_bounded_async_file(&path, MAX_STATE_BUNDLE_BYTES)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("download file not available: {} ({})", path.display(), e),
+            )
+        })?;
     Ok((attachment_headers(filename, content_type), bytes))
 }
 
@@ -6590,6 +6590,30 @@ fn read_bounded_file(path: &StdPath, maximum_bytes: usize) -> Result<Vec<u8>, St
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
     if bytes.len() > maximum_bytes {
+        return Err("file exceeds its bound".to_string());
+    }
+    Ok(bytes)
+}
+
+async fn read_bounded_async_file(path: &StdPath, maximum_bytes: u64) -> Result<Vec<u8>, String> {
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !metadata.is_file() {
+        return Err("file is not regular".to_string());
+    }
+    if metadata.len() > maximum_bytes {
+        return Err("file exceeds its bound".to_string());
+    }
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut bytes = Vec::with_capacity(metadata.len().min(maximum_bytes) as usize);
+    file.take(maximum_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > maximum_bytes {
         return Err("file exceeds its bound".to_string());
     }
     Ok(bytes)
@@ -7941,12 +7965,14 @@ async fn get_client_update_check(
             "client update artifact is too large".to_string(),
         ));
     }
-    let bytes = tokio::fs::read(&installer).await.map_err(|_| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "client update artifact is unavailable".to_string(),
-        )
-    })?;
+    let bytes = read_bounded_async_file(&installer, MAX_STATE_BUNDLE_BYTES)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "client update artifact is unavailable".to_string(),
+            )
+        })?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     let digest = format!("{:x}", hasher.finalize());
@@ -10192,6 +10218,15 @@ mod tests {
         fs::write(&path, vec![b'x'; 17]).unwrap();
         assert!(read_bounded_file(&path, 16).is_err());
         assert_eq!(read_bounded_file(&path, 17).unwrap().len(), 17);
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn bounded_async_file_reader_rejects_oversized_files() {
+        let path = std::env::temp_dir().join(format!("screentra-api-async-bound-{}", Uuid::new_v4()));
+        fs::write(&path, vec![b'x'; 17]).unwrap();
+        assert!(read_bounded_async_file(&path, 16).await.is_err());
+        assert_eq!(read_bounded_async_file(&path, 17).await.unwrap().len(), 17);
         let _ = fs::remove_file(path);
     }
 
