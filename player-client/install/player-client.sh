@@ -309,6 +309,14 @@ def bounded_read(response, limit: int) -> bytes:
     return data
 
 
+def bounded_read_text(path: pathlib.Path, limit: int, encoding: str = 'utf-8') -> str:
+    with path.open('rb') as stream:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise RuntimeError('local update file exceeded its size limit')
+    return data.decode(encoding)
+
+
 def write_result(result_file: pathlib.Path, result: dict) -> None:
     temporary = result_file.with_name('.result.tmp')
     temporary.write_text(json.dumps(result, separators=(',', ':'))[:8192] + '\n', encoding='utf-8')
@@ -332,13 +340,13 @@ def main() -> int:
         raise RuntimeError('trusted update material is missing')
     if not request_file.is_file():
         raise RuntimeError('update request marker is missing')
-    marker = json.loads(request_file.read_text(encoding='utf-8')[:4096])
+    marker = json.loads(bounded_read_text(request_file, 4096))
     if not isinstance(marker, dict) or set(marker) - {'requested_at', 'client_id', 'reason'}:
         raise RuntimeError('update request marker is invalid')
-    token = auth_token_file.read_text(encoding='utf-8').strip()
+    token = bounded_read_text(auth_token_file, 512).strip()
     if not token or len(token) > 512:
         raise RuntimeError('client token is invalid')
-    current = digest_file.read_text(encoding='ascii').strip() if digest_file.is_file() else ''
+    current = bounded_read_text(digest_file, 128, 'ascii').strip() if digest_file.is_file() else ''
     if current and (len(current) != 64 or any(c not in '0123456789abcdef' for c in current.lower())):
         current = ''
     check_url = server + '/api/clients/' + urllib.parse.quote(client_id, safe='') + '/update-check?current_sha256=' + urllib.parse.quote(current, safe='')

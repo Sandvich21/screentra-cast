@@ -43,6 +43,18 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn('CLIENT_ID_FILE" 256', canonical)
         self.assertIn('persisted client ID is missing or invalid', canonical)
 
+    def test_embedded_updater_local_reads_are_bounded(self):
+        canonical = (ROOT / 'player-client/install/player-client.sh').read_text()
+        start = canonical.index("<<'PY_UPDATER'\n") + len("<<'PY_UPDATER'\n")
+        end = canonical.index('\nPY_UPDATER\n', start)
+        namespace = {'__name__': 'embedded_updater_test'}
+        exec(compile(canonical[start:end], 'embedded-updater.py', 'exec'), namespace)
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'oversized'
+            path.write_bytes(b'x' * 17)
+            with self.assertRaisesRegex(RuntimeError, 'local update file'):
+                namespace['bounded_read_text'](path, 16)
+
     def test_preview_frame_is_bounded(self):
         frame = b'x' * (actor.MAX_PREVIEW_FRAME_BYTES + 1)
         with self.assertRaises(ValueError):
