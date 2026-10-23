@@ -21,6 +21,13 @@ class GpuHealthTests(unittest.TestCase):
         self.assertLessEqual(len(stdout.encode('utf-8')), gpu.MAX_SUBPROCESS_OUTPUT_BYTES)
         self.assertEqual(stderr, '')
 
+    def test_gpu_records_are_bounded(self):
+        lines = '\n'.join(f'00:{index:02x}.0 VGA compatible controller: ' + ('x' * 500) for index in range(20))
+        with mock.patch.object(gpu.shutil, 'which', return_value='/usr/bin/lspci'), mock.patch.object(gpu, '_run', return_value=(0, lines, '')):
+            records = gpu.pci_gpus()
+        self.assertLessEqual(len(records), gpu.MAX_GPU_RECORDS)
+        self.assertLessEqual(len(records[0]['name'].encode('utf-8')), gpu.MAX_GPU_NAME_BYTES)
+
     def test_sysfs_reads_are_bounded(self):
         with tempfile.NamedTemporaryFile() as temp:
             temp.write(b'x' * (gpu.MAX_FILE_READ_BYTES + 100))

@@ -11,6 +11,8 @@ from pathlib import Path
 
 MAX_FILE_READ_BYTES = 4096
 MAX_SUBPROCESS_OUTPUT_BYTES = 64 * 1024
+MAX_GPU_RECORDS = 16
+MAX_GPU_NAME_BYTES = 256
 
 
 def _read(path: Path) -> str | None:
@@ -56,6 +58,11 @@ def _bound_subprocess_output(value: str) -> str:
     return encoded[:MAX_SUBPROCESS_OUTPUT_BYTES].decode('utf-8', errors='ignore')
 
 
+def _bound_gpu_name(value: str) -> str:
+    encoded = str(value).encode('utf-8', errors='replace')
+    return encoded[:MAX_GPU_NAME_BYTES].decode('utf-8', errors='ignore').strip()
+
+
 def _run(args: list[str], timeout: float = 2.0) -> tuple[int, str, str]:
     try:
         p = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
@@ -80,7 +87,9 @@ def pci_gpus() -> list[dict]:
                         vendor = 'intel'
                     elif 'amd' in low or 'ati' in low or 'advanced micro devices' in low:
                         vendor = 'amd'
-                    gpus.append({'vendor': vendor, 'name': line, 'source': 'lspci'})
+                    gpus.append({'vendor': vendor, 'name': _bound_gpu_name(line), 'source': 'lspci'})
+                    if len(gpus) >= MAX_GPU_RECORDS:
+                        break
             if gpus:
                 return gpus
     # Sysfs fallback without pciutils.
@@ -89,7 +98,9 @@ def pci_gpus() -> list[dict]:
         device_id = _read(dev / 'device') or ''
         vendor = {'0x10de': 'nvidia', '0x8086': 'intel', '0x1002': 'amd', '0x1022': 'amd'}.get(vendor_id.lower(), 'unknown')
         if vendor != 'unknown' or device_id:
-            gpus.append({'vendor': vendor, 'name': f'{vendor} GPU {vendor_id} {device_id}'.strip(), 'source': str(dev)})
+            gpus.append({'vendor': vendor, 'name': _bound_gpu_name(f'{vendor} GPU {vendor_id} {device_id}'.strip()), 'source': str(dev)})
+            if len(gpus) >= MAX_GPU_RECORDS:
+                break
     return gpus
 
 
