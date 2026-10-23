@@ -37,6 +37,14 @@ class PlayerRendererFileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             renderer._parse_request_json('{"action":"one","action":"two"}')
 
+    def test_renderer_json_rejects_nonstandard_values_and_duplicate_cache_keys(self):
+        with self.assertRaises(ValueError):
+            renderer._parse_request_json('{"value":NaN}')
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'cache.json'
+            path.write_text('{"safe":1,"safe":2}', encoding='utf-8')
+            self.assertEqual(renderer._read_json_file(path, {'fallback': True}), {'fallback': True})
+
     def test_log_tail_rejects_symlinked_files(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

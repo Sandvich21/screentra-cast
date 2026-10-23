@@ -115,7 +115,7 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
 
 def _read_json_file(path: Path, default):
     try:
-        return json.loads(_read_real_file(path).decode('utf-8'))
+        return _parse_request_json(_read_real_file(path).decode('utf-8'))
     except Exception:
         return default
 
@@ -130,7 +130,11 @@ def _reject_duplicate_json_keys(pairs):
 
 
 def _parse_request_json(text: str) -> dict:
-    value = json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
+    value = json.loads(
+        text,
+        object_pairs_hook=_reject_duplicate_json_keys,
+        parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+    )
     if not isinstance(value, dict):
         raise ValueError('request JSON must be an object')
     return value
@@ -636,7 +640,10 @@ def _wlr_outputs() -> list[dict]:
     env = {**os.environ, 'XDG_RUNTIME_DIR': os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'), 'WAYLAND_DISPLAY': os.environ.get('WAYLAND_DISPLAY', 'wayland-0')}
     try:
         completed = _sp.run(['wlr-randr', '--json'], stdout=_sp.PIPE, stderr=_sp.DEVNULL, text=True, timeout=3, env=env, check=False)
-        data = json.loads(_bound_text(completed.stdout or '', MAX_JSON_FILE_BYTES))
+        data = json.loads(
+            _bound_text(completed.stdout or '', MAX_JSON_FILE_BYTES),
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+        )
         if not isinstance(data, list):
             raise ValueError('wlr-randr output is not a list')
         return [{'name': _bound_text(o.get('name'), 128), 'description': _bound_text(o.get('description'), 256), 'enabled': bool(o.get('enabled')), 'position': o.get('position') or {}, 'current_mode': next((m for m in o.get('modes', []) if m.get('current')), None)} for o in data[:MAX_DISPLAY_OUTPUTS] if isinstance(o, dict)]
@@ -818,7 +825,10 @@ def _gpu_usage() -> dict:
             helper_stdout = _bound_text(r.stdout or '', MAX_GPU_HELPER_OUTPUT_BYTES)
             helper_stderr = _bound_text(r.stderr or '', MAX_GPU_HELPER_OUTPUT_BYTES)
             if helper_stdout.strip():
-                data = json.loads(helper_stdout.strip().splitlines()[-1])
+                data = json.loads(
+                    helper_stdout.strip().splitlines()[-1],
+                    parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+                )
                 if helper_stderr.strip():
                     data.setdefault('stderr', helper_stderr.strip()[-500:])
                 return data
