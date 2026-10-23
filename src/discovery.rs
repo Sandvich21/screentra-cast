@@ -1,12 +1,14 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 
 pub const DISCOVERY_PORT: u16 = 3911;
 pub const DISCOVERY_PROTOCOL: &str = "screentra-cast-discovery-v1";
 pub const DISCOVERY_REQUEST: &[u8] = b"SCREENTRA_CAST_DISCOVER_V1";
+const MAX_PUBLISHED_CA_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryResponse {
@@ -87,9 +89,28 @@ pub fn load_published_ca(cert_path: Option<&str>) -> Option<String> {
         "static/install/screentra-cast-signage-ca.crt",
     ));
     candidates.into_iter().find_map(|path| {
-        let value = std::fs::read_to_string(path).ok()?;
+        let value = read_bounded_text(&path, MAX_PUBLISHED_CA_BYTES)?;
         value.contains("BEGIN CERTIFICATE").then_some(value)
     })
+}
+
+fn read_bounded_text(path: &std::path::Path, maximum: usize) -> Option<String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take((maximum as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > maximum {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 pub async fn run_server(
@@ -169,6 +190,19 @@ mod tests {
         assert_eq!(response.url, "http://127.0.0.1:3000");
         assert!(response.ca_pem_b64.is_none());
         assert!(response.ca_sha256.is_none());
+    }
+
+    #[test]
+    fn bounded_ca_reader_rejects_oversized_files() {
+        let path = std::env::temp_dir().join(format!(
+            "screentra-discovery-ca-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, vec![b'x'; 17]).unwrap();
+        assert!(read_bounded_text(&path, 16).is_none());
+        let expected = "x".repeat(17);
+        assert_eq!(read_bounded_text(&path, 17).as_deref(), Some(expected.as_str()));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
