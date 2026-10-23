@@ -434,8 +434,18 @@ def _bluetoothctl_devices(text: str) -> list[dict]:
         if address in seen:
             continue
         seen.add(address)
-        devices.append({'address': address, 'name': match.group(2).strip() or address})
+        try:
+            name = _validate_bluetooth_name(match.group(2).strip())
+        except ValueError:
+            name = address
+        devices.append({'address': address, 'name': name or address})
     return devices
+
+
+def _validate_bluetooth_name(value: str) -> str:
+    if not isinstance(value, str) or not value or len(value.encode('utf-8')) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError('Bluetooth device name is invalid')
+    return value.strip()
 
 
 def bluetooth_scan(payload: dict | None) -> tuple[bool, str, dict]:
@@ -473,7 +483,11 @@ def _find_bluetooth_sink(address: str, name: str | None) -> str | None:
 def bluetooth_connect(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
     address = str(payload.get('address') or '').strip().upper()
-    name = str(payload.get('name') or '').strip() or address
+    raw_name = str(payload.get('name') or '').strip()
+    try:
+        name = _validate_bluetooth_name(raw_name) if raw_name else address
+    except ValueError:
+        return False, 'Bluetooth device name is invalid', {}
     if not re.fullmatch(r'[0-9A-F]{2}(?::[0-9A-F]{2}){5}', address):
         return False, 'A valid Bluetooth device address is required', {}
     if shutil.which('bluetoothctl') is None:

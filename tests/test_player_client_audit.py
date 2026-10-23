@@ -21,6 +21,13 @@ actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 's
 
 
 class PlayerClientAuditTests(unittest.TestCase):
+    def test_bluetooth_name_is_bounded(self):
+        self.assertEqual(actor._validate_bluetooth_name('Living Room'), 'Living Room')
+        with self.assertRaises(ValueError):
+            actor._validate_bluetooth_name('x' * 256)
+        with self.assertRaises(ValueError):
+            actor._validate_bluetooth_name('bad\nname')
+
     def test_subprocess_output_is_bounded(self):
         completed = mock.Mock(returncode=0, stdout='x' * (actor.MAX_SUBPROCESS_OUTPUT_BYTES + 100), stderr='y' * (actor.MAX_SUBPROCESS_OUTPUT_BYTES + 100))
         with mock.patch.object(actor.subprocess, 'run', return_value=completed):
