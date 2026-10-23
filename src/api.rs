@@ -6292,30 +6292,21 @@ async fn build_player_client_bundle_handler(
         ));
     }
     let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("python3")
+        let mut command = std::process::Command::new("python3");
+        command
             .arg(&script)
-            .current_dir(crate::version::install_dir_for_static())
-            .output()
+            .current_dir(crate::version::install_dir_for_static());
+        bounded_command_output(command, 1024 * 1024)
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {}", e)))?
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("run builder: {}", e),
-        )
-    })?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() {
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("run builder: {}", e)))?;
+    let (status, stdout_bytes) = output;
+    let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
+    if !status.success() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!(
-                "bundle builder failed: {}{}{}",
-                output.status,
-                if stderr.is_empty() { "" } else { " - " },
-                stderr
-            ),
+            format!("bundle builder failed: {}", status),
         ));
     }
     let json_line = stdout.lines().last().unwrap_or("{}");
@@ -6366,30 +6357,24 @@ async fn build_server_bundle_handler(
         ));
     }
     let output = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("python3")
+        let mut command = std::process::Command::new("python3");
+        command
             .arg(&script)
-            .current_dir(crate::version::install_dir_for_static())
-            .output()
+            .current_dir(crate::version::install_dir_for_static());
+        bounded_command_output(command, 1024 * 1024)
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {}", e)))?
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("run server bundle builder: {}", e),
-        )
-    })?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() {
+    .map_err(|e| (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("run server bundle builder: {}", e),
+    ))?;
+    let (status, stdout_bytes) = output;
+    let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
+    if !status.success() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!(
-                "server bundle builder failed: {}{}{}",
-                output.status,
-                if stderr.is_empty() { "" } else { " - " },
-                stderr
-            ),
+            format!("server bundle builder failed: {}", status),
         ));
     }
     let json_line = stdout.lines().last().unwrap_or("{}");
