@@ -456,7 +456,7 @@ def _write_display_count(max_displays) -> dict:
     cfg.setdefault('last_detected_displays', [])
     _write_client_config(cfg)
     pending = Handler.cache_dir / 'pending-command.json'
-    pending.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(pending.parent, create=True)
     _atomic_write_text(pending, json.dumps({'action':'set_display_count','payload':{'max_displays': override},'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
     _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service'], timeout=6)
     actor = _safe_run(['systemctl', '--user', 'start', 'screentra-client-actor.service'], timeout=6)
@@ -558,7 +558,7 @@ def _write_touch_binding(payload: dict) -> dict:
     if dev_path:
         _atomic_write_text(Handler.cache_dir / 'touch-device.json', json.dumps({'path': dev_path, 'name': dev_name}, indent=2))
     pending = Handler.cache_dir / 'pending-command.json'
-    pending.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(pending.parent, create=True)
     _atomic_write_text(pending, json.dumps({'action':'set_touch_binding','payload': binding,'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
     _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service'], timeout=6)
     actor = _safe_run(['systemctl', '--user', 'start', 'screentra-client-actor.service'], timeout=6)
