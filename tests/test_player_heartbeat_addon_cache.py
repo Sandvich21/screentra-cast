@@ -42,6 +42,12 @@ class InventoryResponse:
 
 
 class HeartbeatAddonCacheTests(unittest.TestCase):
+    def test_local_probe_output_is_bounded(self):
+        completed = mock.Mock(stdout='x' * (heartbeat.MAX_LOCAL_PROBE_OUTPUT_BYTES + 100), returncode=0)
+        with mock.patch.object(heartbeat.subprocess, 'run', return_value=completed):
+            result = heartbeat.run('cat /etc/machine-id')
+        self.assertLessEqual(len(result.encode('utf-8')), heartbeat.MAX_LOCAL_PROBE_OUTPUT_BYTES)
+
     def inventory(self, version='1.0.0', digest=None):
         return {
             'addons': [{

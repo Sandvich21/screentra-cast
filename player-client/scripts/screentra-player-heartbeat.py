@@ -150,6 +150,14 @@ def _touch_binding():
         return None
 
 
+MAX_LOCAL_PROBE_OUTPUT_BYTES = 4096
+
+
+def _bound_local_probe_output(value: str) -> str:
+    encoded = str(value).encode('utf-8', errors='replace')
+    return encoded[:MAX_LOCAL_PROBE_OUTPUT_BYTES].decode('utf-8', errors='ignore')
+
+
 def run(cmd):
     commands = {
         "hostname -I | awk '{print $1}'": ['hostname', '-I'],
@@ -159,7 +167,8 @@ def run(cmd):
     if args is None:
         return ''
     try:
-        output = subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=3)
+        completed = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=3, check=False)
+        output = _bound_local_probe_output(completed.stdout or '')
         return output.strip().split()[0] if output.strip() else ''
     except Exception:
         return ''
