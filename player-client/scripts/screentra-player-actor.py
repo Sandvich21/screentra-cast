@@ -474,7 +474,7 @@ def bluetooth_scan(payload: dict | None) -> tuple[bool, str, dict]:
     _, listed, list_err = _run_list(['bluetoothctl', 'devices'], timeout=10)
     devices = _bluetoothctl_devices(listed or out)
     if not devices and rc != 0:
-        return False, f'Bluetooth scan failed: {err or out or list_err or "unknown error"}', {'devices': []}
+        return False, f'Bluetooth scan failed: {_bound_hardware_message(err or out or list_err or "unknown error")}', {'devices': []}
     return True, f'Bluetooth scan found {len(devices)} device(s)', {'devices': devices, 'duration_seconds': duration}
 
 
@@ -562,7 +562,7 @@ def audio_list() -> tuple[bool, str, dict]:
     rc, out, err = _run_list(['wpctl', 'status'], timeout=10)
     devices = _wpctl_sinks(out)
     if rc != 0:
-        return False, f'Audio device scan failed: {err or out or f"exit code {rc}"}', {'devices': devices}
+        return False, f'Audio device scan failed: {_bound_hardware_message(err or out or f"exit code {rc}")}', {'devices': devices}
     return True, f'Found {len(devices)} audio output device(s)', {'devices': devices}
 
 
@@ -589,7 +589,7 @@ def audio_set_default(payload: dict | None) -> tuple[bool, str, dict]:
     rc, out, err = _run_list(['wpctl', 'set-default', sink_id], timeout=10)
     if rc == 0:
         return True, f'Audio output selected: {sink_id}', {'sink_id': sink_id}
-    return False, f'Audio output selection failed: {err or out or f"exit code {rc}"}', {'sink_id': sink_id}
+    return False, f'Audio output selection failed: {_bound_hardware_message(err or out or f"exit code {rc}")}', {'sink_id': sink_id}
 
 
 def audio_set_volume(payload: dict | None) -> tuple[bool, str, dict]:
@@ -608,7 +608,7 @@ def audio_set_volume(payload: dict | None) -> tuple[bool, str, dict]:
     rc, out, err = _run_list(['wpctl', 'set-volume', sink_id, f'{value}%'], timeout=10)
     if rc == 0:
         return True, f'Client audio volume set to {value}%', {'sink_id': sink_id, 'volume': value}
-    return False, f'Client audio volume failed: {err or out or f"exit code {rc}"}', {'sink_id': sink_id, 'volume': value}
+    return False, f'Client audio volume failed: {_bound_hardware_message(err or out or f"exit code {rc}")}', {'sink_id': sink_id, 'volume': value}
 
 
 def restart_client() -> tuple[bool, str, dict]:
@@ -617,7 +617,7 @@ def restart_client() -> tuple[bool, str, dict]:
     rc, out, err = _run_list(['sudo', '-n', 'systemctl', 'reboot'], timeout=20)
     if rc == 0:
         return True, 'Client reboot requested', {'reboot_requested': True}
-    return False, f'Client reboot failed: {err or out or f"exit code {rc}"}', {'reboot_requested': False}
+    return False, f'Client reboot failed: {_bound_hardware_message(err or out or f"exit code {rc}")}', {'reboot_requested': False}
 
 
 def has_systemctl_user() -> bool:
@@ -745,7 +745,7 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
     except Exception as e:
         details['steps'].append({'output_policy': 'skipped', 'error': str(e)})
         rc,out,err = _run_list(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'])
-        details['steps'].append({'unit': 'screentra-cast-kiosk@0.service', 'restart_code': rc, 'message': out or err})
+        details['steps'].append({'unit': 'screentra-cast-kiosk@0.service', 'restart_code': rc, 'message': _bound_hardware_message(out or err)})
 
     ok = has_systemctl_user()
     return ok, f'active display count set to {active}', details
@@ -875,7 +875,7 @@ def apply_touch_binding(cache_dir: Path, payload: dict) -> tuple[bool, str, dict
     details = {'config_path': str(config_path), 'touch_binding': binding, 'steps': []}
     # Restart labwc so rc.xml <touch> mapping is reloaded, then let browser services return.
     rc, out, err = _run_list(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'])
-    details['steps'].append({'unit': 'screentra-cast-kiosk@0.service', 'restart_code': rc, 'message': out or err})
+    details['steps'].append({'unit': 'screentra-cast-kiosk@0.service', 'restart_code': rc, 'message': _bound_hardware_message(out or err)})
     if has_systemctl_user():
         systemctl_user('restart', 'screentra-client-heartbeat.service')
         for i in range(4):
@@ -986,7 +986,7 @@ def apply_display_power(cache_dir: Path, display_index: int | None, state: str) 
         timeout=10,
         env=env,
     )
-    message = out or err or ('display enabled' if state == 'on' else 'display disabled')
+    message = _bound_hardware_message(out or err or ('display enabled' if state == 'on' else 'display disabled'))
     return rc == 0, message, {
         'display_index': display_index,
         'connector': connector,
