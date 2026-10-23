@@ -4594,10 +4594,25 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+MAX_SUBPROCESS_OUTPUT_BYTES = 64 * 1024
+
+
+def _read_bounded_path(path: Path, maximum: int, encoding: str = 'utf-8') -> str:
+    with path.open('rb') as stream:
+        data = stream.read(maximum + 1)
+    if len(data) > maximum:
+        raise ValueError('local file exceeds its bound')
+    return data.decode(encoding)
+
+
+def _bound_subprocess_output(value: str) -> str:
+    return value.encode('utf-8', errors='replace')[:MAX_SUBPROCESS_OUTPUT_BYTES].decode('utf-8', errors='ignore')
 
 
 def _read(path: Path) -> str | None:
@@ -4635,11 +4650,51 @@ def _mhz_value(raw: str | None) -> float | None:
 
 
 def _run(args: list[str], timeout: float = 2.0) -> tuple[int, str, str]:
+    process = None
+    selector = None
     try:
-        p = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
-        return p.returncode, p.stdout.strip(), p.stderr.strip()
+        process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        selector = selectors.DefaultSelector()
+        assert process.stdout is not None and process.stderr is not None
+        stdout = bytearray()
+        stderr = bytearray()
+        selector.register(process.stdout, selectors.EVENT_READ, stdout)
+        selector.register(process.stderr, selectors.EVENT_READ, stderr)
+        deadline = time.monotonic() + timeout
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('subprocess timed out')
+            for key, _ in selector.select(remaining):
+                chunk = os.read(key.fileobj.fileno(), 8192)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                buffer = key.data
+                if len(buffer) + len(chunk) > MAX_SUBPROCESS_OUTPUT_BYTES:
+                    raise ValueError('subprocess output exceeded its limit')
+                buffer.extend(chunk)
+        returncode = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+        return returncode, _bound_subprocess_output(stdout.decode('utf-8', errors='replace')).strip(), _bound_subprocess_output(stderr.decode('utf-8', errors='replace')).strip()
     except Exception as e:
-        return 127, '', str(e)
+        if process is not None and process.poll() is None:
+            process.kill()
+            try:
+                process.wait(timeout=1)
+            except Exception:
+                pass
+        return 127, '', _bound_subprocess_output(str(e))
+    finally:
+        if selector is not None:
+            selector.close()
+        if process is not None:
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
 
 
 def pci_gpus() -> list[dict]:

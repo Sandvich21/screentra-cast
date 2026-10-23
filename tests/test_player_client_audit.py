@@ -98,6 +98,18 @@ class PlayerClientAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'stdout exceeds its bound'):
             namespace['_bounded_run']([sys.executable, '-c', "print('x' * 13000)"], timeout=10)
 
+    def test_embedded_gpu_health_commands_are_bounded(self):
+        installer = (ROOT / 'player-client/install/player-client.sh').read_text()
+        start = installer.index("cat > \"$GPU_HEALTH\" <<'PY_GPU_HEALTH'\n") + len("cat > \"$GPU_HEALTH\" <<'PY_GPU_HEALTH'\n")
+        end = installer.index('\nPY_GPU_HEALTH\nchmod +x "$GPU_HEALTH"', start)
+        body = installer[start:end]
+        namespace = {'__name__': 'embedded_gpu_health_test'}
+        exec(compile(body, 'embedded-gpu-health.py', 'exec'), namespace)
+        rc, out, err = namespace['_run']([sys.executable, '-c', "print('x' * 70000)"], timeout=10)
+        self.assertEqual(rc, 127)
+        self.assertEqual(out, '')
+        self.assertIn('subprocess output exceeded its limit', err)
+
     def test_embedded_actor_responses_and_updates_are_bounded(self):
         installer = (ROOT / 'player-client/install/player-client.sh').read_text()
         start = installer.index("cat > \"$ACTOR\" <<'PY_ACTOR'\n") + len("cat > \"$ACTOR\" <<'PY_ACTOR'\n")
