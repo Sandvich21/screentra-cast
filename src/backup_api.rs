@@ -142,6 +142,30 @@ fn validate_postgres_dump_file(path: &StdPath) -> Result<(), String> {
     Ok(())
 }
 
+const BACKUP_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+async fn run_bounded_status(
+    mut command: Command,
+    timeout: std::time::Duration,
+) -> Result<std::process::ExitStatus, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start command: {error}"))?;
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => Ok(status),
+        Ok(Err(error)) => Err(format!("wait command: {error}")),
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err("command exceeded its timeout".to_string())
+        }
+    }
+}
+
 async fn create_postgres_dump(output_path: &StdPath) -> Result<(), String> {
     let database_url = crate::postgres::configured_database_url()?;
     let environment = postgres_tool_environment_from_url(&database_url)?;
@@ -156,7 +180,8 @@ async fn create_postgres_dump(output_path: &StdPath) -> Result<(), String> {
             .open(output_path)
             .map_err(|_| "Failed to prepare PostgreSQL dump file".to_string())?;
     }
-    let output = Command::new("pg_dump")
+    let mut command = Command::new("pg_dump");
+    command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .args([
@@ -168,13 +193,9 @@ async fn create_postgres_dump(output_path: &StdPath) -> Result<(), String> {
             "--file",
         ])
         .arg(output_path)
-        .envs(environment)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .map_err(|_| "Failed to start pg_dump".to_string())?;
-    if !output.status.success() {
+        .envs(environment);
+    let status = run_bounded_status(command, BACKUP_COMMAND_TIMEOUT).await?;
+    if !status.success() {
         let _ = fs::remove_file(output_path);
         return Err("PostgreSQL dump failed".to_string());
     }
@@ -196,7 +217,8 @@ async fn restore_postgres_dump(input_path: &StdPath) -> Result<(), String> {
     validate_postgres_dump_file(input_path)?;
     let database_url = crate::postgres::configured_database_url()?;
     let environment = postgres_tool_environment_from_url(&database_url)?;
-    let output = Command::new("psql")
+    let mut command = Command::new("psql");
+    command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .args([
@@ -208,13 +230,9 @@ async fn restore_postgres_dump(input_path: &StdPath) -> Result<(), String> {
             "--file",
         ])
         .arg(input_path)
-        .envs(environment)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .map_err(|_| "Failed to start psql".to_string())?;
-    if !output.status.success() {
+        .envs(environment);
+    let status = run_bounded_status(command, BACKUP_COMMAND_TIMEOUT).await?;
+    if !status.success() {
         return Err("PostgreSQL restore failed".to_string());
     }
     Ok(())
@@ -330,11 +348,7 @@ pub async fn create_backup(
             .arg(format!("./{filename}"));
     }
 
-    let status = cmd
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
+    let status = run_bounded_status(cmd, BACKUP_COMMAND_TIMEOUT).await;
     if let Some(path) = &postgres_dump_path {
         let _ = fs::remove_file(path);
     }
@@ -610,10 +624,7 @@ async fn systemctl_action(action: &str, service: &str, kind: &str) -> Result<(),
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());
-    let status = cmd
-        .status()
-        .await
-        .map_err(|e| format!("failed to spawn systemctl: {}", e))?;
+    let status = run_bounded_status(cmd, std::time::Duration::from_secs(30)).await?;
     if !status.success() {
         eprintln!("systemctl action failed: action={action} service={service}");
         return Err("service action failed".to_string());
@@ -1296,6 +1307,16 @@ mod tests {
             "/var/run/postgresql".to_string()
         )));
     }
+    #[tokio::test]
+    async fn bounded_command_status_kills_timed_out_process() {
+        let mut command = Command::new("python3");
+        command.args(["-c", "import time; time.sleep(5)"]);
+        let error = run_bounded_status(command, std::time::Duration::from_millis(50))
+            .await
+            .expect_err("timed-out command should be terminated");
+        assert!(error.contains("command exceeded its timeout"));
+    }
+
     #[test]
     fn postgres_dump_validator_accepts_pg_dump_header() {
         let path = test_root("postgres-dump-valid");
