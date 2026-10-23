@@ -9178,7 +9178,14 @@ from pathlib import Path
 path = Path(sys.argv[1])
 base = int(sys.argv[2])
 try:
-    cfg = json.loads(path.read_text()) if path.exists() else {}
+    if path.exists():
+        with path.open('rb') as stream:
+            raw = stream.read((1 << 20) + 1)
+        if len(raw) > (1 << 20):
+            raise ValueError('display config too large')
+        cfg = json.loads(raw.decode('utf-8'))
+    else:
+        cfg = {}
 except Exception:
     cfg = {}
 displays = [d for d in (cfg.get('last_detected_displays') or [])
@@ -9216,7 +9223,7 @@ log "Active displays: $(printf '%s' "$DISPLAY_SPEC" | tr '\n' ' ')"
 SWAY_TRANSFORM="normal"
 ORIENTATION_FILE="$CACHE_DIR/client-config.json"
 if [ -f "$ORIENTATION_FILE" ]; then
-    ORIENTATION_VALUE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("orientation","normal"))' "$ORIENTATION_FILE" 2>/dev/null || echo normal)"
+    ORIENTATION_VALUE="$(head -c 1048577 "$ORIENTATION_FILE" | python3 -c 'import json,sys; raw=sys.stdin.buffer.read(1048577); raise SystemExit(2) if len(raw) > 1048576 else print(json.loads(raw.decode("utf-8")).get("orientation","normal"))' 2>/dev/null || echo normal)"
     case "$ORIENTATION_VALUE" in
         normal) SWAY_TRANSFORM="normal" ;;
         flipped) SWAY_TRANSFORM="180" ;;
@@ -9307,8 +9314,8 @@ while IFS='|' read -r idx connector port; do
     [ -n "$idx" ] || continue
     LIVE_READY=0
     for i in $(seq 1 40); do
-        if curl -fsS --max-time 2 "http://127.0.0.1:${port}/" | \
-            python3 -c 'import sys; raise SystemExit(0 if "Screentra Cast Display" in sys.stdin.read() else 1)'; then
+        if curl -fsS --max-time 2 "http://127.0.0.1:${port}/" | head -c 65537 | \
+            python3 -c 'import sys; data=sys.stdin.buffer.read(65537); raise SystemExit(0 if len(data) <= 65536 and b"Screentra Cast Display" in data else 1)'; then
             LIVE_READY=1
             break
         fi
