@@ -120,6 +120,10 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertFalse(result['ok'])
         self.assertIn('state', result['message'].lower())
 
+    def test_reload_layout_rejects_non_string_orientation(self):
+        result = actor.execute('reload_layout', {'display_index': 0, 'orientation': []}, {'cache_dir': '/tmp/cache', 'client_id': 'client-1', 'server': 'https://example.test'})
+        self.assertEqual(result['code'], 'invalid_payload')
+
     def test_execute_rejects_fractional_ddc_values(self):
         context = {'cache_dir': '/tmp/cache', 'client_id': 'client-1', 'server': 'https://example.test'}
         ddc_float = actor.execute('ddc_set', {'vcp': '10', 'value': 1.5}, context)

@@ -486,6 +486,12 @@ def _validate_display_index(value) -> int:
     return index
 
 
+def _validate_optional_bool(value, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f'{label} must be boolean')
+    return value
+
+
 def bluetooth_scan(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
     if not isinstance(payload, dict):
@@ -1455,13 +1461,19 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
     if action == 'reload_layout':
         cache_path = Path(ctx['cache_dir']) / 'client-config.json'
         requested_orientation = payload.get('orientation')
+        try:
+            if requested_orientation is not None and not isinstance(requested_orientation, str):
+                raise ValueError('orientation must be a string')
+            all_displays = _validate_optional_bool(payload.get('all_displays', False), 'all_displays')
+        except ValueError as exc:
+            return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
         if requested_orientation is not None and requested_orientation not in {'normal', 'flipped', 'rotated_left', 'rotated_right'}:
             return {'action': action, 'display_index': display_index, 'ok': False, 'message': 'invalid orientation', 'started_at': started}
         try:
             before_orientation = _read_json_file(cache_path, {}).get('orientation', 'normal')
         except Exception:
             before_orientation = 'normal'
-        if payload.get('all_displays') or display_index is None:
+        if all_displays or display_index is None:
             ok = fetch_all_display_configs(ctx['server'], ctx['client_id'], Path(ctx['cache_dir']))
             after_orientation = before_orientation
             try:
@@ -1491,7 +1503,11 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         return {'action': action, 'display_index': display_index, 'ok': ok and (restarted or (after_orientation == before_orientation and requested_orientation is None)), 'orientation_changed': after_orientation != before_orientation or requested_orientation is not None, 'kiosk_restarted': restarted, 'message': 'config re-fetched' + ('; kiosk restarted for orientation change' if restarted else (': ' + restart_message if restart_message else '')), 'started_at': started}
 
     if action == 'refresh_cache':
-        if payload.get('all_displays') or display_index is None:
+        try:
+            all_displays = _validate_optional_bool(payload.get('all_displays', False), 'all_displays')
+        except ValueError as exc:
+            return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
+        if all_displays or display_index is None:
             ok = fetch_all_display_configs(ctx['server'], ctx['client_id'], Path(ctx['cache_dir']))
             return {'action': action, 'display_index': display_index, 'all_displays': True, 'ok': ok, 'message': 'all display caches refreshed' if ok else 'one or more display cache refreshes failed', 'started_at': started}
         ok = fetch_config(ctx['server'], ctx['client_id'], Path(ctx['cache_dir']), display_index=display_index)
