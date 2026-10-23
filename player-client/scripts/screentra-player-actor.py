@@ -15,6 +15,7 @@ import importlib.util
 import json
 import os
 import re
+import select
 import signal
 import shutil
 import ssl
@@ -779,7 +780,7 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
         env = os.environ.copy()
         env.setdefault('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
         env.setdefault('WAYLAND_DISPLAY', 'wayland-0')
-        out = _require_bounded_text(subprocess.check_output(['wlr-randr', '--json'], text=True, stderr=subprocess.DEVNULL, timeout=3, env=env), MAX_WLR_JSON_BYTES)
+        out = _bounded_check_output(['wlr-randr', '--json'], MAX_WLR_JSON_BYTES, 3, env=env)
         data = json.loads(
             out,
             parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
@@ -1092,6 +1093,49 @@ def _require_bounded_text(value: str, maximum: int) -> str:
     if not isinstance(value, str) or len(value.encode('utf-8')) > maximum:
         raise ValueError('process text exceeds its bound')
     return value
+
+
+def _bounded_check_output(args: list[str], maximum: int, timeout: float, env: dict[str, str] | None = None) -> str:
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    assert process.stdout is not None
+    chunks: list[bytes] = []
+    total = 0
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(args, timeout)
+            ready, _, _ = select.select([process.stdout], [], [], remaining)
+            if not ready:
+                raise subprocess.TimeoutExpired(args, timeout)
+            chunk = os.read(process.stdout.fileno(), min(65536, maximum + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum:
+                raise ValueError('process output exceeds its bound')
+            chunks.append(chunk)
+        remaining = deadline - time.monotonic()
+        returncode = process.wait(timeout=max(remaining, 0.001))
+        if returncode != 0:
+            raise subprocess.CalledProcessError(returncode, args)
+        return b''.join(chunks).decode('utf-8')
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        try:
+            process.wait(timeout=1)
+        except Exception:
+            pass
+        raise
+    finally:
+        process.stdout.close()
 
 
 def _validate_preview_frame(frame: bytes) -> bytes:

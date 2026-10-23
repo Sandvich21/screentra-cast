@@ -29,6 +29,17 @@ class PlayerClientAuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             actor._require_bounded_text('x' * (actor.MAX_WLR_JSON_BYTES + 1), actor.MAX_WLR_JSON_BYTES)
 
+    def test_bounded_check_output_limits_process_output(self):
+        command = [actor.sys.executable, '-c', 'import sys; sys.stdout.write("x" * 100)']
+        with self.assertRaises(ValueError):
+            actor._bounded_check_output(command, 32, 3)
+        self.assertEqual(
+            actor._bounded_check_output(
+                [actor.sys.executable, '-c', 'print("ok")'], 32, 3
+            ).strip(),
+            'ok',
+        )
+
     def test_preview_pids_are_bounded(self):
         self.assertEqual(actor._validate_preview_pid('1234'), 1234)
         with self.assertRaises(ValueError):
