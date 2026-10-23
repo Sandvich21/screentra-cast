@@ -145,6 +145,21 @@ class HeartbeatAddonCacheTests(unittest.TestCase):
                 archive.addfile(info, io.BytesIO(content))
         return output.getvalue()
 
+    def test_addon_package_member_limit_is_checked_during_iteration(self):
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode='w:gz') as archive:
+            for index in range(65):
+                archive.addfile(tarfile.TarInfo(f'client/padding-{index}.js'))
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(
+            tarfile.TarFile,
+            'getmembers',
+            side_effect=AssertionError('eager member enumeration is forbidden'),
+        ):
+            with self.assertRaisesRegex(ValueError, 'too many members'):
+                heartbeat._extract_verified_addon_package(
+                    output.getvalue(), {}, staging_parent=Path(temp)
+                )
+
     def write_cached_addon(self, temp, manifest=None, active=None, payload=b'console.log("inert");\\n'):
         manifest = manifest or self.package_manifest(payload=payload)
         addon_root = Path(temp) / 'addons'

@@ -746,12 +746,11 @@ def _extract_verified_addon_package(package_bytes, expected, staging_parent=None
         dir=os.fspath(staging_parent) if staging_parent is not None else None,
     ))
     try:
-        seen = set()
         with tarfile.open(fileobj=io.BytesIO(package_bytes), mode='r:gz') as archive:
-            members = archive.getmembers()
-            if len(members) > 64:
-                raise ValueError('addon package contains too many members')
-            for member in members:
+            seen = set()
+            for index, member in enumerate(archive):
+                if index >= 64:
+                    raise ValueError('addon package contains too many members')
                 name = _safe_addon_member(member.name)
                 if name in seen:
                     raise ValueError('addon package contains duplicate members')
