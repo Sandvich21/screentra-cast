@@ -33,9 +33,8 @@ MAX_TEMPLATE_BYTES = 16 * 1024 * 1024
 
 
 def read_bounded_text(path: Path, maximum: int) -> str:
-    if path.stat().st_size > maximum:
-        raise ValueError(f"source file exceeds {maximum} bytes: {path}")
-    data = path.read_bytes()
+    with path.open('rb') as source:
+        data = source.read(maximum + 1)
     if len(data) > maximum:
         raise ValueError(f"source file exceeds {maximum} bytes: {path}")
     return data.decode()

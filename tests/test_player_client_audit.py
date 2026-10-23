@@ -18,9 +18,17 @@ def load_module(path: Path, name: str):
 
 
 actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 'screentra_player_actor_audit')
+builder = load_module(ROOT / 'player-client/scripts/build-installer.py', 'screentra_build_installer_audit')
 
 
 class PlayerClientAuditTests(unittest.TestCase):
+    def test_installer_source_reads_are_bounded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'oversized-source'
+            path.write_bytes(b'x' * 33)
+            with self.assertRaisesRegex(ValueError, 'exceeds 32 bytes'):
+                builder.read_bounded_text(path, 32)
+
     def test_preview_frame_is_bounded(self):
         frame = b'x' * (actor.MAX_PREVIEW_FRAME_BYTES + 1)
         with self.assertRaises(ValueError):
