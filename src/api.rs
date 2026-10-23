@@ -10090,9 +10090,18 @@ fn probe_ripley_status(ip: &str, port: u16) -> Option<serde_json::Value> {
 }
 
 fn reverse_name(ip: &str) -> Option<String> {
-    let cmd = format!("getent hosts {} | awk '{{print $2}}' | head -1", ip);
-    let output = Command::new("sh").arg("-c").arg(cmd).output().ok()?;
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let mut command = Command::new("getent");
+    command.args(["hosts", ip]);
+    let (status, bytes) = bounded_command_output(command, 4096).ok()?;
+    if !status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&bytes)
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("")
+        .to_string();
     if name.is_empty() {
         None
     } else {
@@ -10103,6 +10112,14 @@ fn reverse_name(ip: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reverse_name_does_not_execute_shell_input() {
+        let marker = std::env::temp_dir().join(format!("screentra-reverse-name-{}", Uuid::new_v4()));
+        let malicious = format!("127.0.0.1; touch {}", marker.display());
+        let _ = reverse_name(&malicious);
+        assert!(!marker.exists());
+    }
 
     #[test]
     fn addon_execution_approval_payloads_reject_unknown_fields() {
