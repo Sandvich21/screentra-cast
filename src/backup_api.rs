@@ -546,11 +546,22 @@ async fn sha256_file(path: &str) -> Result<String, String> {
         .take()
         .ok_or_else(|| "sha256sum stdout unavailable".to_string())?;
     let mut bytes = Vec::new();
-    stdout
-        .take((MAX_HASH_COMMAND_OUTPUT_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|e| format!("sha256sum output: {}", e))?;
+    let read_result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        stdout
+            .take((MAX_HASH_COMMAND_OUTPUT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes),
+    )
+    .await;
+    match read_result {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => return Err(format!("sha256sum output: {}", error)),
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err("sha256sum output timed out".to_string());
+        }
+    }
     if bytes.len() > MAX_HASH_COMMAND_OUTPUT_BYTES {
         let _ = child.kill().await;
         let _ = child.wait().await;
