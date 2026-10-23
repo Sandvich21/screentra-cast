@@ -2,6 +2,7 @@
 import importlib.util
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -20,6 +21,17 @@ class GpuHealthTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertLessEqual(len(stdout.encode('utf-8')), gpu.MAX_SUBPROCESS_OUTPUT_BYTES)
         self.assertEqual(stderr, '')
+
+    def test_live_oversized_probe_closes_pipes(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always', ResourceWarning)
+            returncode, stdout, stderr = gpu._run(['yes', 'x'], timeout=2)
+        self.assertEqual(returncode, 127)
+        self.assertEqual(stdout, '')
+        self.assertTrue(stderr)
+        self.assertFalse(
+            any(issubclass(item.category, ResourceWarning) for item in caught)
+        )
 
     def test_gpu_records_are_bounded(self):
         lines = '\n'.join(f'00:{index:02x}.0 VGA compatible controller: ' + ('x' * 500) for index in range(20))

@@ -195,6 +195,9 @@ def _run_bounded_probe(args, maximum=MAX_LOCAL_PROBE_OUTPUT_BYTES, timeout=3):
             process.kill()
             process.wait()
         return None, b''
+    finally:
+        if process is not None and process.stdout is not None:
+            process.stdout.close()
 
 
 def _bound_error(value: str) -> str:

@@ -3,6 +3,7 @@ import importlib.util
 import os
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -23,6 +24,16 @@ class PlayerPreflightFileTests(unittest.TestCase):
         with mock.patch.object(preflight.subprocess, 'run', return_value=completed):
             result = preflight.run('id -Gn')
         self.assertLessEqual(len(result.encode('utf-8')), preflight.MAX_LOCAL_PROBE_OUTPUT_BYTES)
+
+    def test_live_oversized_probe_closes_pipes(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always', ResourceWarning)
+            returncode, output = preflight._run_bounded_probe(['yes', 'x'], maximum=1024, timeout=2)
+        self.assertIsNone(returncode)
+        self.assertEqual(output, b'')
+        self.assertFalse(
+            any(issubclass(item.category, ResourceWarning) for item in caught)
+        )
 
     def test_error_details_are_bounded(self):
         self.assertLessEqual(len(preflight._bound_error('x' * (preflight.MAX_ERROR_BYTES + 1)).encode('utf-8')), preflight.MAX_ERROR_BYTES)

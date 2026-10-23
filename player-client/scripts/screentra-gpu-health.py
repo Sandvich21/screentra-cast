@@ -99,6 +99,11 @@ def _run(args: list[str], timeout: float = 2.0) -> tuple[int, str, str]:
             process.kill()
             process.wait()
         return 127, '', _bound_subprocess_output(str(e))
+    finally:
+        if process is not None:
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
 
 
 def pci_gpus() -> list[dict]:
