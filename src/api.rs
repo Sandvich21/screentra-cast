@@ -2976,7 +2976,9 @@ async fn clear_cache() -> Result<AxumJson<serde_json::Value>, (StatusCode, Strin
     use tokio::process::Command;
 
     // Kill Chrome processes
-    let _ = Command::new("pkill").args(["-9", "chrome"]).status().await;
+    let mut pkill = Command::new("pkill");
+    pkill.args(["-9", "chrome"]);
+    let _ = bounded_async_status(pkill, Duration::from_secs(30)).await;
 
     // Clear cache directories
     let cache_dirs = ["/tmp/chrome-cache-1", "/tmp/chrome-cache-2"];
@@ -2989,10 +2991,9 @@ async fn clear_cache() -> Result<AxumJson<serde_json::Value>, (StatusCode, Strin
     let _ = std::fs::remove_dir_all("/home/thor/.config/google-chrome-2/Default/Cache");
 
     // Restart the OS-level Chromium kiosk-mode service
-    let _ = Command::new("sudo")
-        .args(["systemctl", "restart", "signage-kiosk.service"])  // OS-level Chromium kiosk mode — see signage-kiosk.service
-        .status()
-        .await;
+    let mut restart = Command::new("sudo");
+    restart.args(["systemctl", "restart", "signage-kiosk.service"]); // OS-level Chromium kiosk mode — see signage-kiosk.service
+    let _ = bounded_async_status(restart, Duration::from_secs(30)).await;
 
     Ok(AxumJson(
         serde_json::json!({"ok": true, "message": "Cache cleared and browser restarted"}),
@@ -6683,6 +6684,25 @@ async fn terminate_bounded_child(
     Err(message)
 }
 
+async fn bounded_async_status(
+    mut command: tokio::process::Command,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, String> {
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to spawn command: {error}"))?;
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => Ok(status),
+        Ok(Err(error)) => Err(format!("wait command: {error}")),
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err("command exceeded its timeout".to_string())
+        }
+    }
+}
+
 async fn bounded_async_command_output(
     mut command: tokio::process::Command,
     input: Vec<u8>,
@@ -10365,6 +10385,16 @@ mod tests {
         .await
         .expect_err("oversized command output should be rejected");
         assert!(error.contains("stdout exceeds its bound"));
+    }
+
+    #[tokio::test]
+    async fn bounded_async_status_kills_timed_out_process() {
+        let mut command = tokio::process::Command::new("python3");
+        command.args(["-c", "import time; time.sleep(5)"]);
+        let error = bounded_async_status(command, Duration::from_millis(50))
+            .await
+            .expect_err("timed-out status command should be terminated");
+        assert!(error.contains("command exceeded its timeout"));
     }
 
     #[test]
