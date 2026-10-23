@@ -29,6 +29,13 @@ class PlayerClientAuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             actor._require_bounded_text('x' * (actor.MAX_WLR_JSON_BYTES + 1), actor.MAX_WLR_JSON_BYTES)
 
+    def test_preview_pids_are_bounded(self):
+        self.assertEqual(actor._validate_preview_pid('1234'), 1234)
+        with self.assertRaises(ValueError):
+            actor._validate_preview_pid('0')
+        with self.assertRaises(ValueError):
+            actor._validate_preview_pid('9' * 20)
+
     def test_display_indexes_are_bounded(self):
         self.assertEqual(actor._validate_display_index(3), 3)
         with self.assertRaises(ValueError):

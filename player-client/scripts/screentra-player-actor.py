@@ -1145,9 +1145,18 @@ def run_preview_loop(server: str, client_id: str, cache_dir: Path, display_index
     return 0
 
 
+def _validate_preview_pid(value: str) -> int:
+    if not isinstance(value, str) or re.fullmatch(r'[1-9][0-9]{0,6}', value) is None:
+        raise ValueError('preview process id is invalid')
+    pid = int(value)
+    if pid > 4_194_304:
+        raise ValueError('preview process id is outside the supported range')
+    return pid
+
+
 def _preview_process_alive(pid_path: Path) -> bool:
     try:
-        pid = int(_read_bounded_text(pid_path, 64).strip())
+        pid = _validate_preview_pid(_read_bounded_text(pid_path, 64).strip())
         os.kill(pid, 0)
         return True
     except Exception:
@@ -1201,14 +1210,14 @@ def start_display_preview(ctx: dict, display_index: int, payload: dict) -> tuple
             return False, state.get('message') or 'display preview process exited immediately', state
         return True, 'display preview started', {'display_index': display_index, 'interval_seconds': interval, 'duration_seconds': duration}
     except Exception as exc:
-        return False, f'display preview could not start: {exc}', {}
+        return False, f'display preview could not start: {_bound_hardware_message(str(exc))}', {}
 
 
 def stop_display_preview(ctx: dict, display_index: int) -> tuple[bool, str, dict]:
     cache_dir = Path(ctx['cache_dir'])
     pid_path = _preview_pid_path(cache_dir, display_index)
     try:
-        pid = int(_read_bounded_text(pid_path, 64).strip())
+        pid = _validate_preview_pid(_read_bounded_text(pid_path, 64).strip())
     except Exception:
         pid = None
     if pid is not None:
@@ -1217,7 +1226,7 @@ def stop_display_preview(ctx: dict, display_index: int) -> tuple[bool, str, dict
         except ProcessLookupError:
             pass
         except Exception as exc:
-            return False, f'display preview could not stop: {exc}', {}
+            return False, f'display preview could not stop: {_bound_hardware_message(str(exc))}', {}
     try:
         pid_path.unlink()
     except FileNotFoundError:
