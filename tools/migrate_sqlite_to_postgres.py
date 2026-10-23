@@ -17,15 +17,23 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 MAX_PSQL_OUTPUT_BYTES = 64 * 1024
+MAX_PSQL_INPUT_BYTES = 16 * 1024 * 1024
+MAX_SCHEMA_FILE_BYTES = 16 * 1024 * 1024
+MAX_SQL_VALUE_BYTES = 8 * 1024 * 1024
+PSQL_TIMEOUT_SECONDS = 600
 
 
 def _run_psql(args: list[str], stdin: str | None = None) -> tuple[int, str, str]:
     input_file = None
+    process = None
     try:
         if stdin is not None:
+            if len(stdin.encode('utf-8')) > MAX_PSQL_INPUT_BYTES:
+                raise RuntimeError('psql input exceeds its 16 MiB limit')
             input_file = tempfile.TemporaryFile(mode='w+', encoding='utf-8')
             input_file.write(stdin)
             input_file.flush()
@@ -39,13 +47,19 @@ def _run_psql(args: list[str], stdin: str | None = None) -> tuple[int, str, str]
         selector = selectors.DefaultSelector()
         stdout = bytearray()
         stderr = bytearray()
+        deadline = time.monotonic() + PSQL_TIMEOUT_SECONDS
         streams = ((process.stdout, stdout), (process.stderr, stderr))
         for stream, buffer in streams:
             if stream is not None:
                 selector.register(stream, selectors.EVENT_READ, buffer)
         try:
             while selector.get_map():
-                for key, _ in selector.select():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    process.kill()
+                    process.wait()
+                    raise RuntimeError('psql command timed out')
+                for key, _ in selector.select(remaining):
                     chunk = os.read(key.fileobj.fileno(), 8192)
                     if not chunk:
                         selector.unregister(key.fileobj)
@@ -59,11 +73,24 @@ def _run_psql(args: list[str], stdin: str | None = None) -> tuple[int, str, str]
                     buffer.extend(chunk)
         finally:
             selector.close()
-        returncode = process.wait()
+        returncode = process.wait(timeout=max(0.1, deadline - time.monotonic()))
         return returncode, bytes(stdout).decode('utf-8', errors='replace'), bytes(stderr).decode('utf-8', errors='replace')
     finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
         if input_file is not None:
             input_file.close()
+
+
+def read_bounded_text(path: Path, maximum: int, label: str) -> str:
+    if path.stat().st_size > maximum:
+        raise RuntimeError(f'{label} exceeds its {maximum} byte limit')
+    with path.open('rb') as stream:
+        data = stream.read(maximum + 1)
+    if len(data) > maximum:
+        raise RuntimeError(f'{label} exceeds its {maximum} byte limit')
+    return data.decode('utf-8')
 
 
 def qident(value: str) -> str:
@@ -206,8 +233,12 @@ def csv_value(value, declared: str, target_type: str | None = None):
         if value in (1, "1", True):
             return "true"
     if "BLOB" in (declared or "").upper() or target_type == "bytea":
-        return "\\x" + bytes(value).hex()
-    return str(value)
+        result = "\\x" + bytes(value).hex()
+    else:
+        result = str(value)
+    if len(result.encode('utf-8')) > MAX_SQL_VALUE_BYTES:
+        raise RuntimeError('SQLite value exceeds its 8 MiB migration limit')
+    return result
 
 
 def copy_table(
@@ -224,22 +255,32 @@ def copy_table(
     names = [row[1] for row in columns]
     declared = {row[1]: row[2] for row in columns}
     rows = conn.execute(f"SELECT {', '.join(qident(x) for x in names)} FROM {qident(table)}")
-    buf = io.StringIO()
-    writer = csv.writer(buf, lineterminator="\n")
-    count = 0
-    for row in rows:
-        writer.writerow([
-            csv_value(value, declared[name], target_types.get(name) if target_types else None)
-            for name, value in zip(names, row)
-        ])
-        count += 1
-    if not count:
-        return 0
     copy_sql = (
         f"\\copy {qident(table)} ({', '.join(qident(x) for x in names)}) "
         "FROM STDIN WITH (FORMAT csv, NULL '\\N', ESCAPE '\\')"
     )
-    psql(dsn, copy_sql, stdin=buf.getvalue())
+    buf = io.StringIO()
+    pending_bytes = 0
+    count = 0
+    for row in rows:
+        row_buf = io.StringIO()
+        csv.writer(row_buf, lineterminator="\n").writerow([
+                csv_value(value, declared[name], target_types.get(name) if target_types else None)
+                for name, value in zip(names, row)
+            ])
+        row_data = row_buf.getvalue()
+        row_bytes = len(row_data.encode('utf-8'))
+        if row_bytes > MAX_PSQL_INPUT_BYTES:
+            raise RuntimeError('SQLite row exceeds its 16 MiB migration limit')
+        if pending_bytes and pending_bytes + row_bytes > MAX_PSQL_INPUT_BYTES:
+            psql(dsn, copy_sql, stdin=buf.getvalue())
+            buf = io.StringIO()
+            pending_bytes = 0
+        buf.write(row_data)
+        pending_bytes += row_bytes
+        count += 1
+    if pending_bytes:
+        psql(dsn, copy_sql, stdin=buf.getvalue())
     return count
 
 
@@ -279,7 +320,7 @@ def main() -> int:
     if schema_mode:
         if not args.schema_file.is_file():
             parser.error(f"PostgreSQL schema file does not exist: {args.schema_file}")
-        psql_script(args.dsn, args.schema_file.read_text())
+        psql_script(args.dsn, read_bounded_text(args.schema_file, MAX_SCHEMA_FILE_BYTES, 'PostgreSQL schema file'))
     source = sqlite3.connect(f"file:{args.sqlite_backup}?mode=ro", uri=True)
     tables = sqlite_tables(source)
     print(f"source={args.sqlite_backup} tables={len(tables)}", flush=True)
