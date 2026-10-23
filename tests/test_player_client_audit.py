@@ -21,6 +21,12 @@ actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 's
 
 
 class PlayerClientAuditTests(unittest.TestCase):
+    def test_update_request_requires_object_payload(self):
+        ok, message, details = actor.update_client('https://example.test', 'client-1', Path('/tmp/cache'), ['not-an-object'])
+        self.assertFalse(ok)
+        self.assertIn('payload', message.lower())
+        self.assertEqual(details, {})
+
     def test_bluetooth_connect_requires_object_payload(self):
         ok, message, details = actor.bluetooth_connect(['not-an-object'])
         self.assertFalse(ok)

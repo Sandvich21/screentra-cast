@@ -1173,6 +1173,8 @@ def _write_update_request_marker(path: Path, marker: dict) -> None:
 def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | None) -> tuple[bool, str, dict]:
     """Request the root-owned verifier; never download or execute as the player."""
     payload = payload or {}
+    if not isinstance(payload, dict):
+        return False, 'Client update payload must be an object', {}
     request_path = Path('/var/lib/screentra-cast/update/request')
     details = {'request_path': str(request_path), 'client_id': client_id or None}
     if payload.get('dry_run'):
