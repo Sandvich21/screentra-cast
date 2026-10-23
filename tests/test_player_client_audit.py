@@ -91,7 +91,12 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn('_read_bounded_response', body)
         self.assertNotIn('.read_text()', body)
         self.assertNotIn('target.read_bytes()', body)
+        self.assertNotIn('capture_output=True', body)
         self.assertNotIn('_ur.urlopen(url, context=ctx, timeout=10).read()', body)
+        namespace = {'__name__': 'embedded_renderer_test'}
+        exec(compile(body, 'embedded-renderer.py', 'exec'), namespace)
+        with self.assertRaisesRegex(ValueError, 'stdout exceeds its bound'):
+            namespace['_bounded_run']([sys.executable, '-c', "print('x' * 13000)"], timeout=10)
 
     def test_embedded_actor_responses_and_updates_are_bounded(self):
         installer = (ROOT / 'player-client/install/player-client.sh').read_text()
