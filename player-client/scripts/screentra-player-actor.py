@@ -1258,7 +1258,9 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
             'details': details,
             'started_at': started,
         }
-    payload = payload or {}
+    payload = {} if payload is None else payload
+    if not isinstance(payload, dict):
+        return {'action': action, 'ok': False, 'code': 'invalid_payload', 'message': 'client command payload must be an object', 'started_at': started}
     if action not in ALLOWED_CLIENT_COMMAND_ACTIONS:
         return {
             'action': action, 'ok': False, 'code': 'unsupported_action',

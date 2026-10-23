@@ -21,6 +21,11 @@ actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 's
 
 
 class PlayerClientAuditTests(unittest.TestCase):
+    def test_execute_rejects_non_object_payloads(self):
+        result = actor.execute('ddc_set', ['not-an-object'], {'cache_dir': '/tmp/cache', 'client_id': 'client-1', 'server': 'https://example.test'})
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['code'], 'invalid_payload')
+
     def test_update_request_requires_object_payload(self):
         ok, message, details = actor.update_client('https://example.test', 'client-1', Path('/tmp/cache'), ['not-an-object'])
         self.assertFalse(ok)
