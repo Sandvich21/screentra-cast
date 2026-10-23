@@ -6550,21 +6550,36 @@ struct SetClockBody {
 
 /// Run a command with sudo, return stdout on success or error on failure.
 fn run_sudo(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("sudo")
+    const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
+    let mut child = Command::new("sudo")
         .arg("-n") // non-interactive (fail if password required)
         .args(args)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|e| format!("failed to spawn sudo: {}", e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = child.stdout.take().ok_or_else(|| "sudo stdout unavailable".to_string())?;
+    let mut bytes = Vec::new();
+    stdout
+        .take((MAX_COMMAND_OUTPUT_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("failed to read sudo output: {}", e))?;
+    if bytes.len() > MAX_COMMAND_OUTPUT_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("sudo command output exceeds its bound".to_string());
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("failed to wait for sudo: {}", e))?;
+    if !status.success() {
         return Err(format!(
-            "sudo {} failed (exit {:?}): {}",
+            "sudo {} failed (exit {:?})",
             args.join(" "),
-            output.status.code(),
-            stderr.trim()
+            status.code(),
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
 async fn get_system_time() -> Result<AxumJson<SystemTimeInfo>, (StatusCode, String)> {
