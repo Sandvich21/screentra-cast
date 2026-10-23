@@ -55,6 +55,15 @@ class PlayerClientAuditTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'local update file'):
                 namespace['bounded_read_text'](path, 16)
 
+    def test_kiosk_and_status_server_reads_are_bounded(self):
+        installer = (ROOT / 'player-client/install/player-client.sh').read_text()
+        kiosk = (ROOT / 'player-client/install/screentra-kiosk.sh').read_text()
+        self.assertNotIn('cat "$INSTALL_DIR/server"', installer)
+        self.assertNotIn("pathlib.Path(sys.argv[1]).read_text().strip()", installer)
+        self.assertNotIn("pathlib.Path(sys.argv[1]).read_text().strip()", kiosk)
+        self.assertIn('head -c 2049 "$CLIENT_DIR/server"', kiosk)
+        self.assertIn('head -c 257 "$CLIENT_DIR/client-id"', kiosk)
+
     def test_preview_frame_is_bounded(self):
         frame = b'x' * (actor.MAX_PREVIEW_FRAME_BYTES + 1)
         with self.assertRaises(ValueError):

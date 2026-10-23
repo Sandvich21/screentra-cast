@@ -6127,7 +6127,7 @@ INSTALL_DIR="${RIPLEY_CLIENT_DIR:-$HOME/.local/share/screentra-client}"
 CACHE="$INSTALL_DIR/cache"
 CONFIG="$CACHE/client-config.json"
 RENDERER_URL="${RIPLEY_RENDERER_URL:-http://127.0.0.1:3900}"
-SERVER_URL="${RIPLEY_SERVER_URL:-$(cat "$INSTALL_DIR/server" 2>/dev/null || true)}"
+SERVER_URL="${RIPLEY_SERVER_URL:-$(head -c 2049 "$INSTALL_DIR/server" 2>/dev/null || true)}"
 
 echo "Screentra Cast Player Status"
 echo "===================="
@@ -6399,8 +6399,8 @@ while IFS='|' read -r idx connector port; do
     done
     BROWSER_URL="http://127.0.0.1:${port}/"
     if [ "$LIVE_READY" -eq 1 ]; then
-        SERVER_URL="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text().strip())' "$CLIENT_DIR/server" 2>/dev/null || true)"
-        CLIENT_ID="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text().strip())' "$CLIENT_DIR/client-id" 2>/dev/null || true)"
+        SERVER_URL="$(head -c 2049 "$CLIENT_DIR/server" 2>/dev/null || true)"
+        CLIENT_ID="$(head -c 257 "$CLIENT_DIR/client-id" 2>/dev/null || true)"
         if [ -n "$SERVER_URL" ] && [ -n "$CLIENT_ID" ]; then
             BROWSER_URL="${SERVER_URL%/}/player.html?display=${connector}&client_id=${CLIENT_ID}"
         fi
