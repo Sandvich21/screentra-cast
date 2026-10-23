@@ -20,6 +20,7 @@ import hmac
 import secrets
 import base64
 import threading
+import selectors
 import tarfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -428,10 +429,56 @@ def _nl_status():
 
 # === local admin / easy-setup page ===========================================
 
+def _bounded_run(args, timeout=5, stdout_max=12000, stderr_max=4000):
+    process = _sp.Popen(args, stdout=_sp.PIPE, stderr=_sp.PIPE)
+    selector = selectors.DefaultSelector()
+    assert process.stdout is not None and process.stderr is not None
+    selector.register(process.stdout, selectors.EVENT_READ, ('stdout', stdout_max))
+    selector.register(process.stderr, selectors.EVENT_READ, ('stderr', stderr_max))
+    buffers = {'stdout': bytearray(), 'stderr': bytearray()}
+    deadline = time.monotonic() + timeout
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _sp.TimeoutExpired(args, timeout)
+            for key, _ in selector.select(remaining):
+                stream_name, maximum = key.data
+                chunk = os.read(key.fileobj.fileno(), maximum + 1)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                buffers[stream_name].extend(chunk)
+                if len(buffers[stream_name]) > maximum:
+                    raise ValueError(f'{stream_name} exceeds its bound')
+        returncode = process.wait(timeout=max(deadline - time.monotonic(), 0.001))
+        return returncode, {
+            name: bytes(value).decode('utf-8', errors='replace')
+            for name, value in buffers.items()
+        }
+    except BaseException:
+        if process.poll() is None:
+            process.kill()
+        try:
+            process.wait(timeout=1)
+        except Exception:
+            pass
+        raise
+    finally:
+        selector.close()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+
 def _safe_run(args, timeout=5):
     try:
-        cp = _sp.run(args, text=True, capture_output=True, timeout=timeout)
-        return {'ok': cp.returncode == 0, 'code': cp.returncode, 'stdout': cp.stdout[-12000:], 'stderr': cp.stderr[-4000:]}
+        code, output = _bounded_run(args, timeout=timeout)
+        return {'ok': code == 0, 'code': code, 'stdout': output['stdout'], 'stderr': output['stderr']}
     except Exception as e:
         return {'ok': False, 'code': None, 'stdout': '', 'stderr': _bound_text(str(e), MAX_ERROR_BYTES)}
 

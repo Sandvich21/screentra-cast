@@ -37,6 +37,13 @@ class PlayerRendererFileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             renderer._parse_request_json('{"action":"one","action":"two"}')
 
+    def test_safe_run_bounds_live_output(self):
+        result = renderer._safe_run(
+            [renderer.sys.executable, '-c', 'import sys; sys.stdout.write("x" * 20000)']
+        )
+        self.assertFalse(result['ok'])
+        self.assertIn('stdout exceeds its bound', result['stderr'])
+
     def test_renderer_json_rejects_nonstandard_values_and_duplicate_cache_keys(self):
         with self.assertRaises(ValueError):
             renderer._parse_request_json('{"value":NaN}')
