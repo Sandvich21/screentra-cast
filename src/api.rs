@@ -1402,7 +1402,9 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route("/api/clients/command-bulk", post(bulk_command_clients))
         .route(
             "/api/clients/diagnostics",
-            get(list_client_diagnostics).post(save_client_diagnostics),
+            get(list_client_diagnostics)
+                .post(save_client_diagnostics)
+                .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
         )
         .route(
             "/api/clients/diagnostics/{filename}",
@@ -6574,6 +6576,25 @@ struct SetClockBody {
     local_datetime: String,
 }
 
+fn read_bounded_file(path: &StdPath, maximum_bytes: usize) -> Result<Vec<u8>, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !metadata.is_file() {
+        return Err("file is not regular".to_string());
+    }
+    if metadata.len() > maximum_bytes as u64 {
+        return Err("file exceeds its bound".to_string());
+    }
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.take((maximum_bytes + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > maximum_bytes {
+        return Err("file exceeds its bound".to_string());
+    }
+    Ok(bytes)
+}
+
 fn bounded_command_output(
     mut command: Command,
     maximum: usize,
@@ -6900,7 +6921,13 @@ async fn reset_default_widget_presets(
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
     // Read the default templates from the static file
     let path = std::path::Path::new("static/default-templates.json");
-    let raw = std::fs::read_to_string(path).map_err(|e| {
+    let raw = String::from_utf8(read_bounded_file(path, 1024 * 1024).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("read default templates: {}", e),
+        )
+    })?)
+    .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("read default templates: {}", e),
@@ -10160,6 +10187,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bounded_file_reader_rejects_oversized_files() {
+        let path = std::env::temp_dir().join(format!("screentra-api-bound-{}", Uuid::new_v4()));
+        fs::write(&path, vec![b'x'; 17]).unwrap();
+        assert!(read_bounded_file(&path, 16).is_err());
+        assert_eq!(read_bounded_file(&path, 17).unwrap().len(), 17);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn reverse_name_does_not_execute_shell_input() {
         let marker = std::env::temp_dir().join(format!("screentra-reverse-name-{}", Uuid::new_v4()));
         let malicious = format!("127.0.0.1; touch {}", marker.display());
@@ -12577,8 +12613,9 @@ async fn list_client_diagnostics(
         let mut warning_count = None;
         let mut user = None;
         let mut generated_at = String::new();
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+        if let Ok(bytes) = read_bounded_file(&path, 16 * 1024 * 1024) {
+            if let Ok(text) = String::from_utf8(bytes) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                 if let Some(s) = v.get("saved_at").and_then(|x| x.as_str()) {
                     generated_at = s.to_string();
                 }
@@ -12597,6 +12634,7 @@ async fn list_client_diagnostics(
                     if let Some(n) = r.get("warnings").and_then(|x| x.as_u64()) {
                         warning_count = Some(n);
                     }
+                }
                 }
             }
         }
@@ -12643,9 +12681,13 @@ async fn download_client_diagnostics(
             "Diagnostics file not found".to_string(),
         ));
     }
-    let bytes = std::fs::read(&path).map_err(|e| {
+    let bytes = read_bounded_file(&path, 16 * 1024 * 1024).map_err(|e| {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            if e == "file exceeds its bound" {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
             format!("read {}: {}", path.display(), e),
         )
     })?;
