@@ -43,12 +43,20 @@ def _mhz_value(raw: str | None) -> float | None:
     return round(mhz, 0) if mhz > 0 else None
 
 
+MAX_SUBPROCESS_OUTPUT_BYTES = 64 * 1024
+
+
+def _bound_subprocess_output(value: str) -> str:
+    encoded = str(value).encode('utf-8', errors='replace')
+    return encoded[:MAX_SUBPROCESS_OUTPUT_BYTES].decode('utf-8', errors='ignore')
+
+
 def _run(args: list[str], timeout: float = 2.0) -> tuple[int, str, str]:
     try:
         p = subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
-        return p.returncode, p.stdout.strip(), p.stderr.strip()
+        return p.returncode, _bound_subprocess_output(p.stdout or '').strip(), _bound_subprocess_output(p.stderr or '').strip()
     except Exception as e:
-        return 127, '', str(e)
+        return 127, '', _bound_subprocess_output(str(e))
 
 
 def pci_gpus() -> list[dict]:
