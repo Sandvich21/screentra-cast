@@ -2979,6 +2979,9 @@ MAX_REQUEST_BODY_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
 MAX_TEXT_FILE_BYTES = 256 * 1024
 MAX_REMOTE_CA_BYTES = 256 * 1024
+MAX_STATIC_HTML_BYTES = 4 * 1024 * 1024
+MAX_BACKUP_DOWNLOAD_BYTES = 64 * 1024 * 1024
+MAX_CACHED_ASSET_BYTES = 64 * 1024 * 1024
 
 
 def _read_bounded_path(path: Path, maximum: int, encoding: str = 'utf-8') -> str:
@@ -2987,6 +2990,14 @@ def _read_bounded_path(path: Path, maximum: int, encoding: str = 'utf-8') -> str
     if len(data) > maximum:
         raise ValueError('local file exceeds its bound')
     return data.decode(encoding)
+
+
+def _read_bounded_bytes(path: Path, maximum: int) -> bytes:
+    with path.open('rb') as stream:
+        data = stream.read(maximum + 1)
+    if len(data) > maximum:
+        raise ValueError('local file exceeds its bound')
+    return data
 
 
 def _read_bounded_response(response, maximum: int) -> bytes:
@@ -4360,9 +4371,8 @@ class Handler(BaseHTTPRequestHandler):
             # the touchscreen + pick a layout right from the screen.
             if not layout_target.exists():
                 try:
-                    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'no-layout.html'), 'r') as _f:
-                        html = _f.read().replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
-                        return self.send_text(200, html, 'text/html; charset=utf-8')
+                    html = _read_bounded_path(Path(os.path.dirname(os.path.abspath(__file__))) / 'no-layout.html', MAX_STATIC_HTML_BYTES).replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
+                    return self.send_text(200, html, 'text/html; charset=utf-8')
                 except Exception:
                     pass
 
@@ -4401,7 +4411,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_text(403, 'forbidden')
             if not target.exists() or not target.is_file():
                 return self.send_text(404, 'backup not found')
-            data = target.read_bytes()
+            data = _read_bounded_bytes(target, MAX_BACKUP_DOWNLOAD_BYTES)
             self.send_response(200)
             self.send_header('Content-Type', 'application/gzip')
             self.send_header('Content-Length', str(len(data)))
@@ -4414,16 +4424,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(200, json.dumps(_admin_logs(target)), 'application/json')
         if path == '/no-layout.html':
             display_index = int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0'))
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'no-layout.html'), 'r') as _f:
-                html = _f.read().replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
-                return self.send_text(200, html, 'text/html; charset=utf-8')
+            html = _read_bounded_path(Path(os.path.dirname(os.path.abspath(__file__))) / 'no-layout.html', MAX_STATIC_HTML_BYTES).replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
+            return self.send_text(200, html, 'text/html; charset=utf-8')
         if path == '/touch-calibration.html':
             # Serve the touchscreen calibration test page. Lives next to
             # the renderer script and reads RIPLEY_DISPLAY_INDEX for the
             # results so per-display calibration is recorded separately.
             try:
-                with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'touch-calibration.html'), 'r') as _f:
-                    return self.send_text(200, _f.read(), 'text/html; charset=utf-8')
+                return self.send_text(200, _read_bounded_path(Path(os.path.dirname(os.path.abspath(__file__))) / 'touch-calibration.html', MAX_STATIC_HTML_BYTES), 'text/html; charset=utf-8')
             except FileNotFoundError:
                 return self.send_text(404, 'calibration page not installed', 'text/plain')
         if path == '/api/status.json':
@@ -4501,7 +4509,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return self.send_text(403, 'forbidden')
         if target.exists() and target.is_file():
-            data = target.read_bytes()
+            data = _read_bounded_bytes(target, MAX_CACHED_ASSET_BYTES)
             self.send_response(200)
             self.send_header('Content-Type', mimetypes.guess_type(str(target))[0] or 'application/octet-stream')
             self.send_header('Content-Length', str(len(data)))
