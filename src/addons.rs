@@ -729,12 +729,7 @@ pub fn load_client_status(client_id: &str) -> Result<Option<serde_json::Value>, 
             ));
         }
     }
-    let bytes = fs::read(path).map_err(io_error)?;
-    if bytes.len() > MAX_CLIENT_STATUS_BYTES {
-        return Err(AddonError::Invalid(
-            "Stored addon status is too large".to_string(),
-        ));
-    }
+    let bytes = read_bounded_addon_file(&path, MAX_CLIENT_STATUS_BYTES, "stored addon status")?;
     let payload: StoredClientStatusPayload = serde_json::from_slice(&bytes)
         .map_err(|error| AddonError::Io(format!("Invalid stored addon status: {error}")))?;
     if payload.client_id != client_id {
@@ -1502,15 +1497,18 @@ fn io_error(error: impl std::fmt::Display) -> AddonError {
     AddonError::Io(error.to_string())
 }
 
-fn read_addon_metadata_text(path: &Path, description: &str) -> Result<String, AddonError> {
+fn read_bounded_addon_file(
+    path: &Path,
+    maximum_bytes: usize,
+    description: &str,
+) -> Result<Vec<u8>, AddonError> {
     let metadata = fs::symlink_metadata(path).map_err(io_error)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(AddonError::Invalid(format!("Invalid {description}")));
     }
-    if metadata.len() > MAX_ADDON_METADATA_BYTES as u64 {
+    if metadata.len() > maximum_bytes as u64 {
         return Err(AddonError::Invalid(format!(
-            "{description} exceeds the {} byte limit",
-            MAX_ADDON_METADATA_BYTES
+            "{description} exceeds the {maximum_bytes} byte limit"
         )));
     }
 
@@ -1526,23 +1524,26 @@ fn read_addon_metadata_text(path: &Path, description: &str) -> Result<String, Ad
     if opened_metadata.file_type().is_symlink() || !opened_metadata.is_file() {
         return Err(AddonError::Invalid(format!("Invalid {description}")));
     }
-    if opened_metadata.len() > MAX_ADDON_METADATA_BYTES as u64 {
+    if opened_metadata.len() > maximum_bytes as u64 {
         return Err(AddonError::Invalid(format!(
-            "{description} exceeds the {} byte limit",
-            MAX_ADDON_METADATA_BYTES
+            "{description} exceeds the {maximum_bytes} byte limit"
         )));
     }
 
-    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
-    file.take((MAX_ADDON_METADATA_BYTES as u64) + 1)
+    let mut bytes = Vec::with_capacity(opened_metadata.len().min(maximum_bytes as u64) as usize);
+    file.take((maximum_bytes as u64) + 1)
         .read_to_end(&mut bytes)
         .map_err(io_error)?;
-    if bytes.len() > MAX_ADDON_METADATA_BYTES {
+    if bytes.len() > maximum_bytes {
         return Err(AddonError::Invalid(format!(
-            "{description} exceeds the {} byte limit",
-            MAX_ADDON_METADATA_BYTES
+            "{description} exceeds the {maximum_bytes} byte limit"
         )));
     }
+    Ok(bytes)
+}
+
+fn read_addon_metadata_text(path: &Path, description: &str) -> Result<String, AddonError> {
+    let bytes = read_bounded_addon_file(path, MAX_ADDON_METADATA_BYTES, description)?;
     String::from_utf8(bytes)
         .map_err(|_| AddonError::Invalid(format!("Invalid UTF-8 in {description}")))
 }
@@ -2344,7 +2345,8 @@ pub fn stage_trusted_service_manifest(
     validate_trusted_service_file(manifest_path, 1024 * 1024, "manifest")?;
     validate_trusted_service_file(signature_path, 64 * 1024, "manifest signature")?;
     verify_trusted_service_manifest_signature(manifest_path, signature_path)?;
-    let manifest_bytes = fs::read(manifest_path).map_err(io_error)?;
+    let manifest_bytes =
+        read_bounded_addon_file(manifest_path, 64 * 1024, "trusted service manifest")?;
     let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
     validate_trusted_service_manifest(&manifest)?;
     validate_trusted_service_file(image_signature_path, 64 * 1024, "image signature")?;
@@ -2429,7 +2431,11 @@ fn read_trusted_service_stage(dir: &Path) -> Result<TrustedServiceStage, AddonEr
     validate_private_trusted_service_file(&image_signature_path, 64 * 1024, "image signature")?;
     validate_private_trusted_service_file(&state_path, 64 * 1024, "state")?;
     verify_trusted_service_manifest_signature(&manifest_path, &signature_path)?;
-    let manifest_bytes = fs::read(&manifest_path).map_err(io_error)?;
+    let manifest_bytes = read_bounded_addon_file(
+        &manifest_path,
+        64 * 1024,
+        "trusted service manifest",
+    )?;
     let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
     validate_trusted_service_manifest(&manifest)?;
     let image_digest = manifest
@@ -2439,7 +2445,8 @@ fn read_trusted_service_stage(dir: &Path) -> Result<TrustedServiceStage, AddonEr
         .image_digest
         .as_str();
     verify_trusted_service_image_signature(image_digest, &image_signature_path)?;
-    let state_bytes = fs::read(&state_path).map_err(io_error)?;
+    let state_bytes =
+        read_bounded_addon_file(&state_path, 64 * 1024, "trusted service state")?;
     let state: serde_json::Value = serde_json::from_slice(&state_bytes).map_err(io_error)?;
     let state_name = state
         .get("state")
@@ -2705,7 +2712,8 @@ fn stage_signed_client_package(
         normalize_private_addon_metadata_file(&manifest_path, "addon package manifest")?;
         normalize_private_addon_metadata_file(&signature_path, "addon package signature")?;
         verify_manifest_signature(&manifest_path, &signature_path)?;
-        let manifest_bytes = fs::read(&manifest_path).map_err(io_error)?;
+        let manifest_bytes =
+            read_bounded_addon_file(&manifest_path, 64 * 1024, "addon package manifest")?;
         let manifest: AddonManifest = serde_json::from_slice(&manifest_bytes).map_err(io_error)?;
         validate_client_extension_manifest(&manifest)?;
         let entrypoint = manifest.client_entrypoint.as_deref().ok_or_else(|| {
