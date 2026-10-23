@@ -1297,6 +1297,20 @@ mod update_swap_tests {
     use super::*;
 
     #[test]
+    fn bounded_command_stdout_limits_capture() {
+        let mut small = Command::new("printf");
+        small.arg("small");
+        let (status, output) = bounded_command_stdout(small, 16).expect("small output should pass");
+        assert!(status.success());
+        assert_eq!(output, b"small");
+
+        let mut oversized = Command::new("yes");
+        oversized.arg("x");
+        let error = bounded_command_stdout(oversized, 1024).expect_err("oversized output should fail");
+        assert!(error.contains("exceeded 1024 bytes"));
+    }
+
+    #[test]
     fn archive_member_validation_rejects_traversal_and_absolute_paths() {
         assert!(validate_archive_member_name("bundle/static/index.html").is_ok());
         assert!(validate_archive_member_name("bundle/../outside").is_err());
