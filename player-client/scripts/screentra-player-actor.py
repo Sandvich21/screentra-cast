@@ -456,16 +456,25 @@ def _validate_bluetooth_name(value: str) -> str:
     return value.strip()
 
 
+def _bounded_integer_input(value, minimum: int, maximum: int, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f'{label} must be an integer')
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r'[0-9]+', value):
+        parsed = int(value)
+    else:
+        raise ValueError(f'{label} must be an integer')
+    return max(minimum, min(parsed, maximum))
+
+
 def bluetooth_scan(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
     if not isinstance(payload, dict):
         return False, 'Bluetooth scan payload must be an object', {}
     try:
-        raw_duration = payload.get('duration_seconds', 10)
-        if isinstance(raw_duration, bool):
-            raise ValueError
-        duration = max(5, min(int(raw_duration), 30))
-    except (TypeError, ValueError, OverflowError):
+        duration = _bounded_integer_input(payload.get('duration_seconds', 10), 5, 30, 'duration')
+    except ValueError:
         return False, 'Bluetooth scan duration must be a number from 5 to 30 seconds', {}
     if shutil.which('bluetoothctl') is None:
         return False, 'bluetoothctl is not installed on this client', {'devices': []}
@@ -605,11 +614,11 @@ def audio_set_volume(payload: dict | None) -> tuple[bool, str, dict]:
         return False, 'Audio payload must be an object', {}
     raw_sink_id = payload.get('sink_id', '@DEFAULT_AUDIO_SINK@')
     raw_value = payload.get('value')
-    if not isinstance(raw_sink_id, str) or isinstance(raw_value, bool):
+    if not isinstance(raw_sink_id, str):
         return False, 'Volume must be a number from 0 to 100', {}
     try:
         sink_id = _validate_audio_sink_id(raw_sink_id.strip())
-        value = max(0, min(100, int(raw_value)))
+        value = _bounded_integer_input(raw_value, 0, 100, 'volume')
     except (TypeError, ValueError):
         return False, 'Volume must be a number from 0 to 100', {}
     if not sink_id.isdigit() and sink_id != '@DEFAULT_AUDIO_SINK@':
