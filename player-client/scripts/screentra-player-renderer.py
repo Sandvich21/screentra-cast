@@ -1393,7 +1393,7 @@ class Handler(BaseHTTPRequestHandler):
                 # screen when there are multiple on the same box.
                 data.setdefault('display_index', int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0')))
                 calib_path = Handler.cache_dir / 'touch-calibration.json'
-                calib_path.parent.mkdir(parents=True, exist_ok=True)
+                _ensure_real_directory(calib_path.parent, create=True)
                 history = []
                 if calib_path.exists():
                     try:
@@ -1468,7 +1468,7 @@ class Handler(BaseHTTPRequestHandler):
                 for k in ['theme']:
                     if k in payload:
                         data[k] = payload[k]
-                cfg_path.parent.mkdir(parents=True, exist_ok=True)
+                _ensure_real_directory(cfg_path.parent, create=True)
                 _atomic_write_text(cfg_path, json.dumps(data, indent=2))
                 return self.send_text(200, json.dumps({'ok': True}), 'application/json')
             except Exception as e:
@@ -1695,7 +1695,7 @@ def main():
     if args.port is None:
         args.port = int(os.environ.get('RIPLEY_RENDER_PORT', str(int(os.environ.get('RIPLEY_RENDER_BASE_PORT','3900')) + int(os.environ.get('RIPLEY_DISPLAY_INDEX','0')))))
     Handler.cache_dir=Path(args.cache_dir)
-    Handler.cache_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(Handler.cache_dir, create=True)
     print(f'Screentra Cast cached player renderer listening on http://{args.host}:{args.port}/ using {Handler.cache_dir}', flush=True)
     ThreadingHTTPServer((args.host,args.port), Handler).serve_forever()
 if __name__=='__main__': main()
