@@ -48,6 +48,11 @@ class HeartbeatAddonCacheTests(unittest.TestCase):
             result = heartbeat.run('cat /etc/machine-id')
         self.assertLessEqual(len(result.encode('utf-8')), heartbeat.MAX_LOCAL_PROBE_OUTPUT_BYTES)
 
+    def test_proc_metric_reads_are_bounded(self):
+        with mock.patch('builtins.open', mock.mock_open(read_data=b'x' * (heartbeat.MAX_PROC_METRICS_BYTES + 100))):
+            result = heartbeat._read_bounded_local_text('/proc/meminfo')
+        self.assertLessEqual(len(result.encode('utf-8')), heartbeat.MAX_PROC_METRICS_BYTES)
+
     def inventory(self, version='1.0.0', digest=None):
         return {
             'addons': [{

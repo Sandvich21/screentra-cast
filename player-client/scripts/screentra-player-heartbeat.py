@@ -43,6 +43,12 @@ from pathlib import Path
 MAX_JSON_FILE_BYTES = 1 << 20
 MAX_COMMAND_RESPONSE_BYTES = 64 * 1024
 MAX_TEXT_RESPONSE_BYTES = 64 * 1024
+MAX_PROC_METRICS_BYTES = 64 * 1024
+
+
+def _read_bounded_local_text(path: str, maximum: int = MAX_PROC_METRICS_BYTES) -> str:
+    with open(path, 'rb') as handle:
+        return handle.read(maximum).decode('utf-8', errors='replace')
 
 
 def _read_bounded_response(response, maximum):
@@ -177,7 +183,7 @@ def run(cmd):
 def read_mem():
     values = {}
     try:
-        for line in open('/proc/meminfo'):
+        for line in _read_bounded_local_text('/proc/meminfo').splitlines():
             k, v = line.split(':', 1)
             values[k] = int(v.strip().split()[0]) * 1024
     except Exception:
@@ -200,14 +206,14 @@ def read_disk(path='/'):
 
 def read_uptime():
     try:
-        return int(float(open('/proc/uptime').read().split()[0]))
+        return int(float(_read_bounded_local_text('/proc/uptime', 256).split()[0]))
     except Exception:
         return None
 
 
 def read_cpu_usage(interval=0.25):
     def sample():
-        fields = [int(x) for x in open('/proc/stat').readline().split()[1:]]
+        fields = [int(x) for x in _read_bounded_local_text('/proc/stat').splitlines()[0].split()[1:]]
         idle = fields[3] + fields[4]
         total = sum(fields)
         return idle, total
