@@ -564,9 +564,16 @@ def _wpctl_sinks(text: str) -> list[dict]:
         sink_id = match.group(1)
         name = re.sub(r'^\*\s*', '', match.group(2)).strip()
         name = re.sub(r'\s+\[vol:.*?\]\s*$', '', name).strip()
+        name = _validate_audio_device_name(name)
         if not any(item['id'] == sink_id for item in sinks):
             sinks.append({'id': sink_id, 'name': name, 'default': '*' in line[:match.start(2)]})
     return sinks
+
+
+def _validate_audio_device_name(value: str) -> str:
+    if not isinstance(value, str) or len(value.encode('utf-8')) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        return 'unnamed audio device'
+    return value.strip() or 'unnamed audio device'
 
 
 def audio_list() -> tuple[bool, str, dict]:

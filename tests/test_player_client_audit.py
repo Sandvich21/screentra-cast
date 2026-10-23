@@ -29,15 +29,16 @@ class PlayerClientAuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             actor._require_bounded_text('x' * (actor.MAX_WLR_JSON_BYTES + 1), actor.MAX_WLR_JSON_BYTES)
 
+    def test_audio_sink_names_are_bounded(self):
+        sinks = actor._wpctl_sinks('Audio Sinks:\n  1. ' + ('x' * 1000))
+        self.assertEqual(len(sinks), 1)
+        self.assertLessEqual(len(sinks[0]['name'].encode('utf-8')), 128)
+
     def test_hardware_numeric_inputs_reject_floats(self):
         with self.assertRaises(ValueError):
             actor._bounded_integer_input(5.5, 5, 30, 'duration')
         with self.assertRaises(ValueError):
             actor._bounded_integer_input(50.5, 0, 100, 'volume')
-
-        self.assertFalse(actor.bluetooth_connect({'address': ['AA:BB:CC:DD:EE:FF']})[0])
-        self.assertFalse(actor.bluetooth_connect({'address': 'AA:BB:CC:DD:EE:FF', 'name': ['touch']})[0])
-        self.assertFalse(actor.audio_set_default({'sink_id': ['1']})[0])
 
     def test_hardware_identifiers_reject_non_string_values(self):
         self.assertFalse(actor.bluetooth_connect({'address': ['AA:BB:CC:DD:EE:FF']})[0])
