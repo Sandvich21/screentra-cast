@@ -7,6 +7,7 @@ import os
 import tarfile
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -54,6 +55,18 @@ class HeartbeatAddonCacheTests(unittest.TestCase):
         )
         self.assertIsNone(returncode)
         self.assertEqual(output, b'')
+
+    def test_local_probe_closes_pipe_after_oversized_output(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always', ResourceWarning)
+            returncode, output = heartbeat._run_bounded_probe(
+                ['yes', 'x'], maximum=1024, timeout=2
+            )
+        self.assertIsNone(returncode)
+        self.assertEqual(output, b'')
+        self.assertFalse(
+            any(issubclass(item.category, ResourceWarning) for item in caught)
+        )
 
     def test_proc_metric_reads_are_bounded(self):
         with mock.patch('builtins.open', mock.mock_open(read_data=b'x' * (heartbeat.MAX_PROC_METRICS_BYTES + 100))):
