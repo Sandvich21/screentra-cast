@@ -270,6 +270,7 @@ class PlayerClientAuditTests(unittest.TestCase):
     def test_actor_json_rejects_nonstandard_values(self):
         with self.assertRaises(ValueError):
             actor._parse_pending_command('{"value":NaN}')
+
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'cache.json'
             path.write_text('{"safe":NaN}', encoding='utf-8')

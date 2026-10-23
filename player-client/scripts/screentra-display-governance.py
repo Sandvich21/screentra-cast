@@ -117,6 +117,7 @@ def load_config(config_path: Path) -> Dict[str, Any]:
         cfg = json.loads(
             _read_real_file(config_path).decode('utf-8'),
             object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
         )
     except Exception:
         # Corrupt config.json → return defaults but don't clobber; caller decides.

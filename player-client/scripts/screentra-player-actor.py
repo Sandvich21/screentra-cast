@@ -780,8 +780,13 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
         env.setdefault('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
         env.setdefault('WAYLAND_DISPLAY', 'wayland-0')
         out = _require_bounded_text(subprocess.check_output(['wlr-randr', '--json'], text=True, stderr=subprocess.DEVNULL, timeout=3, env=env), MAX_WLR_JSON_BYTES)
-        data = json.loads(out)
-        outputs = [o for o in data if o.get('name')]
+        data = json.loads(
+            out,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+        )
+        if not isinstance(data, list):
+            raise ValueError('wlr-randr output is not a list')
+        outputs = [o for o in data[:MAX_WLR_OUTPUTS] if isinstance(o, dict) and o.get('name')]
         outputs.sort(key=lambda o: o.get('name',''))
         x = 0
         for idx, o in enumerate(outputs):
@@ -1080,6 +1085,7 @@ def _upload_preview_frame(server: str, client_id: str, display_index: int, frame
 
 MAX_PREVIEW_FRAME_BYTES = 16 * 1024 * 1024
 MAX_WLR_JSON_BYTES = 1 << 20
+MAX_WLR_OUTPUTS = 32
 
 
 def _require_bounded_text(value: str, maximum: int) -> str:
