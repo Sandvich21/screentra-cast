@@ -39,6 +39,7 @@ if [ -f "$CONFIG" ]; then
   CONFIG_PATH="$CONFIG" python3 - <<'PY'
 import json
 import os
+import stat
 config_path = os.environ['CONFIG_PATH']
 
 def reject_duplicate_fields(pairs):
@@ -49,8 +50,15 @@ def reject_duplicate_fields(pairs):
         value[key] = item
     return value
 
-with open(config_path, 'rb') as handle:
-    raw = handle.read((1 << 20) + 1)
+flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+fd = os.open(config_path, flags)
+try:
+    metadata = os.fstat(fd)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > (1 << 20):
+        raise ValueError('client config is not a bounded regular file')
+    raw = os.read(fd, (1 << 20) + 1)
+finally:
+    os.close(fd)
 if len(raw) > (1 << 20):
     raise ValueError('client config exceeds its bound')
 d = json.loads(
