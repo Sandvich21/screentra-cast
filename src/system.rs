@@ -123,7 +123,7 @@ fn read_cpu_temp() -> Option<f32> {
     ];
 
     for path in &temp_paths {
-        if let Ok(content) = fs::read_to_string(path) {
+        if let Some(content) = read_bounded_text(path, 4096) {
             if let Ok(temp) = content.trim().parse::<f32>() {
                 return Some(temp / 1000.0); // Convert millidegree to degree
             }

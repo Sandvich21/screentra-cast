@@ -11,9 +11,11 @@
 //! 22KB vs 168KB for the TTF Roboto) and is the format the
 //! runtime loads via `@font-face`.
 
+use std::io::Read;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 
 /// Public catalog entry returned to the editor's font picker.
@@ -56,6 +58,38 @@ const CATALOG_URL: &str = "https://gwfh.mranftl.com/api/fonts";
 const CATALOG_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const CATALOG_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const DOWNLOAD_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_CATALOG_BODY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_FONT_ZIP_BYTES: usize = 25 * 1024 * 1024;
+const MAX_FONT_CSS_BYTES: usize = 1024 * 1024;
+const MAX_WOFF2_BYTES: usize = 200_000;
+const MAX_WOFF2_ENTRY_BYTES: usize = 2 * 1024 * 1024;
+
+async fn read_response_body_limited(
+    response: reqwest::Response,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > (maximum_bytes + 1) as u64)
+    {
+        return Err(format!("response body exceeds {} bytes", maximum_bytes));
+    }
+    let content_length = response.content_length();
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::with_capacity(
+        content_length
+            .unwrap_or(0)
+            .min(maximum_bytes as u64) as usize,
+    );
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("response body read failed: {e}"))?;
+        if bytes.len().saturating_add(chunk.len()) > maximum_bytes {
+            return Err(format!("response body exceeds {} bytes", maximum_bytes));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
 
 /// Cached catalog. Initialized on first request; the `OnceLock` plus
 /// an `Instant` timestamp gives us lazy refresh without a background
@@ -103,9 +137,8 @@ async fn fetch_catalog_from_upstream() -> Result<Vec<FontCatalogEntry>, String> 
     if !resp.status().is_success() {
         return Err(format!("catalog returned HTTP {}", resp.status()));
     }
-    let raw: Vec<UpstreamFont> = resp
-        .json()
-        .await
+    let body = read_response_body_limited(resp, MAX_CATALOG_BODY_BYTES).await?;
+    let raw: Vec<UpstreamFont> = serde_json::from_slice(&body)
         .map_err(|e| format!("catalog JSON decode failed: {e}"))?;
     Ok(raw
         .into_iter()
@@ -260,13 +293,10 @@ pub async fn download_family(family_id: &str, weights: &[u32]) -> Result<Vec<Ins
     if !resp.status().is_success() {
         return Err(format!("download returned HTTP {}", resp.status()));
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("download body read failed: {e}"))?;
+    let bytes = read_response_body_limited(resp, MAX_FONT_ZIP_BYTES).await?;
     // Sanity cap: 25 MB raw zip. Largest Google Fonts family is
     // ~3MB; anything bigger is probably garbage.
-    if bytes.len() > 25 * 1024 * 1024 {
+    if bytes.len() > MAX_FONT_ZIP_BYTES {
         return Err("downloaded zip too large".to_string());
     }
 
@@ -310,9 +340,16 @@ pub async fn download_family(family_id: &str, weights: &[u32]) -> Result<Vec<Ins
         let dest = dir.join(&filename);
         // Read entry bytes and write atomically (write-to-temp-then-rename)
         // so a half-written file is never visible to the static server.
+        if entry.size() > MAX_WOFF2_ENTRY_BYTES as u64 {
+            return Err(format!("font zip entry is too large: {name}"));
+        }
         let mut buf = Vec::with_capacity(entry.size() as usize);
-        std::io::Read::read_to_end(&mut entry, &mut buf)
+        std::io::Read::take(&mut entry, (MAX_WOFF2_ENTRY_BYTES + 1) as u64)
+            .read_to_end(&mut buf)
             .map_err(|e| format!("zip entry read failed: {e}"))?;
+        if buf.len() > MAX_WOFF2_ENTRY_BYTES {
+            return Err(format!("font zip entry is too large: {name}"));
+        }
         let tmp = dir.join(format!("{filename}.tmp"));
         std::fs::write(&tmp, &buf)
             .map_err(|e| format!("temp write failed: {e}"))?;
@@ -627,9 +664,7 @@ pub async fn ensure_preview_cached(
             family_id
         ));
     }
-    let css = css_resp
-        .text()
-        .await
+    let css = String::from_utf8(read_response_body_limited(css_resp, MAX_FONT_CSS_BYTES).await?)
         .map_err(|e| format!("css read failed: {e}"))?;
     // Extract the latin (U+0000-00FF) subset's woff2 URL. If
     // multiple subsets are present we pick the latin one because
@@ -656,10 +691,7 @@ pub async fn ensure_preview_cached(
             family_id
         ));
     }
-    let bytes = woff2_resp
-        .bytes()
-        .await
-        .map_err(|e| format!("woff2 read failed: {e}"))?;
+    let bytes = read_response_body_limited(woff2_resp, MAX_WOFF2_BYTES).await?;
     if bytes.len() < 100 {
         return Err(format!(
             "woff2 for {} is suspiciously small ({} bytes)",
@@ -870,9 +902,7 @@ pub async fn ensure_full_preview_cached(
             family_id
         ));
     }
-    let css = css_resp
-        .text()
-        .await
+    let css = String::from_utf8(read_response_body_limited(css_resp, MAX_FONT_CSS_BYTES).await?)
         .map_err(|e| format!("css read failed: {e}"))?;
     let subsets = extract_all_subsets(&css);
     if subsets.is_empty() {
@@ -915,7 +945,7 @@ pub async fn ensure_full_preview_cached(
             );
             continue;
         }
-        let bytes = match woff2_resp.bytes().await {
+        let bytes = match read_response_body_limited(woff2_resp, MAX_WOFF2_BYTES).await {
             Ok(b) => b,
             Err(e) => {
                 log::debug!(
@@ -932,7 +962,7 @@ pub async fn ensure_full_preview_cached(
             );
             continue;
         }
-        if bytes.len() > 200_000 {
+        if bytes.len() > MAX_WOFF2_BYTES {
             log::debug!(
                 "preview cache: {} {} too large ({} bytes)",
                 family_id, subset, bytes.len()

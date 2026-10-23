@@ -660,7 +660,17 @@ pub fn fetch_one_update_with_client(
         .get(reqwest::header::LAST_MODIFIED)
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string());
-    let body = resp.bytes().map_err(|e| format!("read body: {e}"))?;
+    if resp
+        .content_length()
+        .is_some_and(|length| length > (MAX_BODY_BYTES + 1) as u64)
+    {
+        return Err(format!("body too large (max {} bytes)", MAX_BODY_BYTES));
+    }
+    let mut limited = resp.take((MAX_BODY_BYTES + 1) as u64);
+    let mut body = Vec::new();
+    limited
+        .read_to_end(&mut body)
+        .map_err(|e| format!("read body: {e}"))?;
     if body.len() > MAX_BODY_BYTES {
         return Err(format!(
             "body too large: {} bytes (max {})",
