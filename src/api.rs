@@ -6548,30 +6548,40 @@ struct SetClockBody {
     local_datetime: String,
 }
 
-/// Run a command with sudo, return stdout on success or error on failure.
-fn run_sudo(args: &[&str]) -> Result<String, String> {
-    const MAX_COMMAND_OUTPUT_BYTES: usize = 64 * 1024;
-    let mut child = Command::new("sudo")
-        .arg("-n") // non-interactive (fail if password required)
-        .args(args)
+fn bounded_command_output(
+    mut command: Command,
+    maximum: usize,
+) -> Result<(std::process::ExitStatus, Vec<u8>), String> {
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("failed to spawn sudo: {}", e))?;
-    let stdout = child.stdout.take().ok_or_else(|| "sudo stdout unavailable".to_string())?;
+        .map_err(|e| format!("failed to spawn command: {}", e))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "command stdout unavailable".to_string())?;
     let mut bytes = Vec::new();
     stdout
-        .take((MAX_COMMAND_OUTPUT_BYTES + 1) as u64)
+        .take((maximum + 1) as u64)
         .read_to_end(&mut bytes)
-        .map_err(|e| format!("failed to read sudo output: {}", e))?;
-    if bytes.len() > MAX_COMMAND_OUTPUT_BYTES {
+        .map_err(|e| format!("failed to read command output: {}", e))?;
+    if bytes.len() > maximum {
         let _ = child.kill();
         let _ = child.wait();
-        return Err("sudo command output exceeds its bound".to_string());
+        return Err("command output exceeds its bound".to_string());
     }
     let status = child
         .wait()
-        .map_err(|e| format!("failed to wait for sudo: {}", e))?;
+        .map_err(|e| format!("failed to wait for command: {}", e))?;
+    Ok((status, bytes))
+}
+
+/// Run a command with sudo, return stdout on success or error on failure.
+fn run_sudo(args: &[&str]) -> Result<String, String> {
+    let mut command = Command::new("sudo");
+    command.arg("-n").args(args);
+    let (status, bytes) = bounded_command_output(command, 64 * 1024)?;
     if !status.success() {
         return Err(format!(
             "sudo {} failed (exit {:?})",
@@ -6584,22 +6594,21 @@ fn run_sudo(args: &[&str]) -> Result<String, String> {
 
 async fn get_system_time() -> Result<AxumJson<SystemTimeInfo>, (StatusCode, String)> {
     // Use timedatectl to get authoritative status
-    let output = Command::new("timedatectl")
-        .arg("show")
-        .output()
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("timedatectl: {}", e),
-            )
-        })?;
-    if !output.status.success() {
+    let mut timedatectl = Command::new("timedatectl");
+    timedatectl.arg("show");
+    let (status, stdout_bytes) = bounded_command_output(timedatectl, 64 * 1024).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("timedatectl: {}", e),
+        )
+    })?;
+    if !status.success() {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("timedatectl show failed: {:?}", output.status.code()),
+            format!("timedatectl show failed: {:?}", status.code()),
         ));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
     let mut timezone = String::new();
     let mut ntpsynchronized = false;
     let mut ntp = false;
@@ -6631,13 +6640,12 @@ async fn get_system_time() -> Result<AxumJson<SystemTimeInfo>, (StatusCode, Stri
     let local_rfc3339 = format!("{}{}", now_local.format("%Y-%m-%dT%H:%M:%S"), offset_str);
 
     // Get timezone abbreviation by parsing the date output
-    let abbr_output = Command::new("date")
-        .arg("+%Z")
-        .env("TZ", &timezone)
-        .output()
+    let mut date_command = Command::new("date");
+    date_command.arg("+%Z").env("TZ", &timezone);
+    let abbr_output = bounded_command_output(date_command, 4096)
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|(status, _)| status.success())
+        .map(|(_, bytes)| String::from_utf8_lossy(&bytes).trim().to_string())
         .unwrap_or_else(|| timezone.split('/').next_back().unwrap_or("").to_string());
 
     Ok(AxumJson(SystemTimeInfo {
