@@ -33,6 +33,10 @@ class PlayerClientAuditTests(unittest.TestCase):
         text = '\n'.join(f'Device AA:BB:CC:DD:{index // 256:02X}:{index % 256:02X} Device {index}' for index in range(130))
         self.assertLessEqual(len(actor._bluetoothctl_devices(text)), actor.MAX_BLUETOOTH_DEVICES)
 
+    def test_audio_sink_result_count_is_bounded(self):
+        text = 'Audio Sinks:\n' + '\n'.join(f'  {index}. Device {index}' for index in range(130))
+        self.assertLessEqual(len(actor._wpctl_sinks(text)), actor.MAX_AUDIO_SINKS)
+
     def test_audio_sink_ids_are_bounded_in_status_parsing(self):
         sinks = actor._wpctl_sinks('Audio Sinks:\n  ' + ('9' * 100) + '. Device')
         self.assertEqual(sinks, [])

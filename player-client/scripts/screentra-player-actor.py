@@ -80,6 +80,7 @@ MAX_JSON_FILE_BYTES = 1 << 20
 MAX_SERVER_RESPONSE_BYTES = 1 << 20
 MAX_COMMAND_PAYLOAD_BYTES = 64 * 1024
 MAX_BLUETOOTH_DEVICES = 128
+MAX_AUDIO_SINKS = 128
 MAX_CLIENT_ID_BYTES = 200
 CLIENT_SERVICE_IDENTIFIER_MAX_BYTES = 128
 CLIENT_SERVICE_REQUEST_ID_MAX_BYTES = 128
@@ -572,6 +573,8 @@ def _wpctl_sinks(text: str) -> list[dict]:
         name = _validate_audio_device_name(name)
         if not any(item['id'] == sink_id for item in sinks):
             sinks.append({'id': sink_id, 'name': name, 'default': '*' in line[:match.start(2)]})
+            if len(sinks) >= MAX_AUDIO_SINKS:
+                break
     return sinks
 
 
