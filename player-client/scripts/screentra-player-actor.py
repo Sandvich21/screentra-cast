@@ -16,6 +16,7 @@ import json
 import os
 import re
 import select
+import selectors
 import signal
 import shutil
 import ssl
@@ -337,11 +338,66 @@ def _bound_hardware_message(value: str) -> str:
 
 
 def _run_list(args: list[str], timeout: int = 20, input_data: str | None = None, env: dict[str, str] | None = None) -> tuple[int, str, str]:
+    process = None
+    selector = None
     try:
-        p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, input=input_data, env=env)
-        return p.returncode, _bound_subprocess_output(p.stdout or "").strip(), _bound_subprocess_output(p.stderr or "").strip()
+        process = subprocess.Popen(
+            args,
+            stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            env=env,
+        )
+        if process.stdin is not None:
+            process.stdin.write((input_data or '').encode('utf-8'))
+            process.stdin.close()
+        assert process.stdout is not None and process.stderr is not None
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
+        selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
+        buffers = {'stdout': bytearray(), 'stderr': bytearray()}
+        deadline = time.monotonic() + timeout
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(args, timeout)
+            for key, _ in selector.select(remaining):
+                chunk = os.read(key.fileobj.fileno(), MAX_SUBPROCESS_OUTPUT_BYTES + 1)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                buffer = buffers[key.data]
+                buffer.extend(chunk)
+                if len(buffer) > MAX_SUBPROCESS_OUTPUT_BYTES:
+                    raise ValueError('subprocess output exceeds its bound')
+        returncode = process.wait(timeout=max(deadline - time.monotonic(), 0.001))
+        return (
+            returncode,
+            bytes(buffers['stdout']).decode('utf-8', errors='replace').strip(),
+            bytes(buffers['stderr']).decode('utf-8', errors='replace').strip(),
+        )
     except Exception as e:
-        return 1, "", _bound_hardware_message(str(e))
+        if process is not None and process.poll() is None:
+            process.kill()
+        if process is not None:
+            try:
+                process.wait(timeout=1)
+            except Exception:
+                pass
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+        if selector is not None:
+            selector.close()
+        return 1, '', _bound_hardware_message(str(e))
+    finally:
+        if selector is not None:
+            selector.close()
 
 
 def ddcutil_detect(bus: str | None = None) -> tuple[bool, str]:
