@@ -30,13 +30,17 @@ SYSTEMD_KIOSK_UNIT="/etc/systemd/system/screentra-cast-kiosk@.service"
 INSTALLER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MAX_SERVER_URL_BYTES=2048
 
-read_saved_server_url() {
-    local value
-    value="$(head -c "$((MAX_SERVER_URL_BYTES + 1))" "$1" 2>/dev/null || true)"
-    if [ "${#value}" -gt "$MAX_SERVER_URL_BYTES" ]; then
+read_bounded_file() {
+    local path="$1" maximum="$2" value
+    value="$(head -c "$((maximum + 1))" "$path" 2>/dev/null || true)"
+    if [ "${#value}" -gt "$maximum" ]; then
         return 1
     fi
     printf '%s' "$value"
+}
+
+read_saved_server_url() {
+    read_bounded_file "$1" "$MAX_SERVER_URL_BYTES"
 }
 
 discover_server() {
@@ -601,7 +605,7 @@ install_gpu_telemetry_dependencies() {
     # If pciutils/lspci is not installed yet, fall back to DRM PCI vendor IDs.
     for vf in /sys/class/drm/card*/device/vendor; do
         [ -r "$vf" ] || continue
-        case "$(cat "$vf" 2>/dev/null | tr '[:upper:]' '[:lower:]')" in
+        case "$(read_bounded_file "$vf" 128 2>/dev/null | tr '[:upper:]' '[:lower:]')" in
             0x10de) vendors="$vendors nvidia" ;;
             0x8086) vendors="$vendors intel" ;;
             0x1002|0x1022) vendors="$vendors amd" ;;
@@ -1115,12 +1119,21 @@ echo "$SERVER_URL" > "$INSTALL_DIR/server"
 
 if [ ! -f "$CLIENT_ID_FILE" ]; then
   if [ -r /etc/machine-id ]; then
-    printf 'ripley-%s\n' "$(cat /etc/machine-id)" > "$CLIENT_ID_FILE"
+    machine_id="$(read_bounded_file /etc/machine-id 256 2>/dev/null || true)"
+    if [ -n "$machine_id" ]; then
+      printf 'ripley-%s\n' "$machine_id" > "$CLIENT_ID_FILE"
+    else
+      printf 'ripley-%s-%s\n' "$(hostname)" "$(date +%s)" > "$CLIENT_ID_FILE"
+    fi
   else
     printf 'ripley-%s-%s\n' "$(hostname)" "$(date +%s)" > "$CLIENT_ID_FILE"
   fi
 fi
-CLIENT_ID="$(cat "$CLIENT_ID_FILE")"
+CLIENT_ID="$(read_bounded_file "$CLIENT_ID_FILE" 256 2>/dev/null || true)"
+if [[ ! "$CLIENT_ID" =~ ^[A-Za-z0-9._-]{1,256}$ ]]; then
+  echo "ERROR: persisted client ID is missing or invalid." >&2
+  exit 1
+fi
 CLIENT_AUTH_TOKEN_FILE="$INSTALL_DIR/client-auth-token"
 if [ ! -s "$CLIENT_AUTH_TOKEN_FILE" ]; then
   umask 077

@@ -39,7 +39,9 @@ class PlayerClientAuditTests(unittest.TestCase):
     def test_canonical_installer_bounds_saved_server_reads(self):
         canonical = (ROOT / 'player-client/install/player-client.sh').read_text()
         self.assertIn('MAX_SERVER_URL_BYTES=2048', canonical)
-        self.assertIn('read_saved_server_url', canonical)
+        self.assertIn('read_bounded_file', canonical)
+        self.assertIn('CLIENT_ID_FILE" 256', canonical)
+        self.assertIn('persisted client ID is missing or invalid', canonical)
 
     def test_preview_frame_is_bounded(self):
         frame = b'x' * (actor.MAX_PREVIEW_FRAME_BYTES + 1)
