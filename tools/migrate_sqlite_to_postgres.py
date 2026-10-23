@@ -12,10 +12,58 @@ import argparse
 import csv
 import io
 import os
+import selectors
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+
+MAX_PSQL_OUTPUT_BYTES = 64 * 1024
+
+
+def _run_psql(args: list[str], stdin: str | None = None) -> tuple[int, str, str]:
+    input_file = None
+    try:
+        if stdin is not None:
+            input_file = tempfile.TemporaryFile(mode='w+', encoding='utf-8')
+            input_file.write(stdin)
+            input_file.flush()
+            input_file.seek(0)
+        process = subprocess.Popen(
+            args,
+            stdin=input_file if input_file is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        selector = selectors.DefaultSelector()
+        stdout = bytearray()
+        stderr = bytearray()
+        streams = ((process.stdout, stdout), (process.stderr, stderr))
+        for stream, buffer in streams:
+            if stream is not None:
+                selector.register(stream, selectors.EVENT_READ, buffer)
+        try:
+            while selector.get_map():
+                for key, _ in selector.select():
+                    chunk = os.read(key.fileobj.fileno(), 8192)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                        continue
+                    buffer = key.data
+                    if len(buffer) + len(chunk) > MAX_PSQL_OUTPUT_BYTES:
+                        process.kill()
+                        process.wait()
+                        raise RuntimeError('psql output exceeds its 64 KiB limit')
+                    buffer.extend(chunk)
+        finally:
+            selector.close()
+        returncode = process.wait()
+        return returncode, bytes(stdout).decode('utf-8', errors='replace'), bytes(stderr).decode('utf-8', errors='replace')
+    finally:
+        if input_file is not None:
+            input_file.close()
 
 
 def qident(value: str) -> str:
@@ -23,56 +71,48 @@ def qident(value: str) -> str:
 
 
 def psql(dsn: str, sql: str, *, stdin: str | None = None) -> str:
-    proc = subprocess.run(
+    returncode, stdout, stderr = _run_psql(
         ["psql", dsn, "--no-psqlrc", "-v", "ON_ERROR_STOP=1", "-X", "-q", "-c", sql],
-        input=stdin,
-        text=True,
-        capture_output=True,
+        stdin,
     )
-    if proc.returncode:
-        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "psql failed")
-    return proc.stdout
+    if returncode:
+        raise RuntimeError(stderr.strip() or stdout.strip() or "psql failed")
+    return stdout
 
 
 def psql_script(dsn: str, script: str) -> str:
-    proc = subprocess.run(
+    returncode, stdout, stderr = _run_psql(
         ["psql", dsn, "--no-psqlrc", "-v", "ON_ERROR_STOP=1", "-X", "-q", "-f", "-"],
-        input=script,
-        text=True,
-        capture_output=True,
+        script,
     )
-    if proc.returncode:
-        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "psql script failed")
-    return proc.stdout
+    if returncode:
+        raise RuntimeError(stderr.strip() or stdout.strip() or "psql script failed")
+    return stdout
 
 
 def psql_at(dsn: str, sql: str) -> str:
-    proc = subprocess.run(
+    returncode, stdout, stderr = _run_psql(
         ["psql", dsn, "--no-psqlrc", "-v", "ON_ERROR_STOP=1", "-X", "-q", "-At", "-c", sql],
-        text=True,
-        capture_output=True,
     )
-    if proc.returncode:
-        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "psql query failed")
-    return proc.stdout
+    if returncode:
+        raise RuntimeError(stderr.strip() or stdout.strip() or "psql query failed")
+    return stdout
 
 
 def pg_columns(dsn: str, table: str) -> dict[str, str]:
-    proc = subprocess.run(
+    returncode, stdout, stderr = _run_psql(
         [
             "psql", dsn, "--no-psqlrc", "-v", "ON_ERROR_STOP=1", "-X", "-q",
             "-At", "-F", "\t", "-c",
             "SELECT column_name, data_type FROM information_schema.columns "
             "WHERE table_schema='public' AND table_name='" + table.replace("'", "''") + "' "
             "ORDER BY ordinal_position",
-        ],
-        text=True,
-        capture_output=True,
+        ]
     )
-    if proc.returncode:
-        raise RuntimeError(proc.stderr.strip() or "could not inspect PostgreSQL table")
+    if returncode:
+        raise RuntimeError(stderr.strip() or "could not inspect PostgreSQL table")
     result = {}
-    for line in proc.stdout.splitlines():
+    for line in stdout.splitlines():
         name, data_type = line.split("\t", 1)
         result[name] = data_type
     return result
