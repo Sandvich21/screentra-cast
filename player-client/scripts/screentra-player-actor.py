@@ -1430,21 +1430,27 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
     # ── Display control (DDC/CI + CEC) ────────────────────────────────────────
     if action == 'ddc_set':
         # payload: { "vcp": "10", "value": 50 }  brightness
-        # or { "vcp": "D6", "value": 1 }          power on
+        # or { "vcp": "D6", "value": 1 }          power on OSD addr 0
         # optional: { "bus": "1" }                specific display bus
         # optional: { "has_layout": true }        retry detect if display not found
-        vcp = payload.get('vcp', '')
-        value = payload.get('value', 0)
-        bus = payload.get('bus')
-        has_layout = payload.get('has_layout', False)
-        ok, msg = apply_ddc_control(str(vcp), int(value), bus=bus, has_layout=has_layout)
+        try:
+            vcp = payload.get('vcp', '')
+            value = payload.get('value', 0)
+            bus = payload.get('bus')
+            has_layout = payload.get('has_layout', False)
+            ok, msg = apply_ddc_control(str(vcp), int(value), bus=bus, has_layout=has_layout)
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
 
     if action == 'cec_send':
         # payload: { "cmd": "pow 0" }   power on OSD addr 0
         # or { "cmd": "is 1" }          input HDMI-2
-        cmd = payload.get('cmd', '')
-        ok, msg = apply_cec_command(cmd)
+        try:
+            cmd = payload.get('cmd', '')
+            ok, msg = apply_cec_command(cmd)
+        except (TypeError, ValueError, OverflowError) as exc:
+            return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
         return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
 
     if action == 'ir_send':
