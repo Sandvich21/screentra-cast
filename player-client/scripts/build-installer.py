@@ -28,6 +28,17 @@ SECTIONS = {
 
 TEMPLATE = PLAYER_ROOT / "install/player-client.sh"
 OUTPUT  = PLAYER_ROOT / "static/install/player-client.sh"
+MAX_SOURCE_FILE_BYTES = 8 * 1024 * 1024
+MAX_TEMPLATE_BYTES = 16 * 1024 * 1024
+
+
+def read_bounded_text(path: Path, maximum: int) -> str:
+    if path.stat().st_size > maximum:
+        raise ValueError(f"source file exceeds {maximum} bytes: {path}")
+    data = path.read_bytes()
+    if len(data) > maximum:
+        raise ValueError(f"source file exceeds {maximum} bytes: {path}")
+    return data.decode()
 
 
 def replace_section(text: str, marker: str, src: Path) -> str:
@@ -36,7 +47,7 @@ def replace_section(text: str, marker: str, src: Path) -> str:
     start = text.index(search) + len(search)  # after the <<'MARKER'
     end_marker = f"\n{marker}\n"
     end = text.index(end_marker, start)
-    content = src.read_text()
+    content = read_bounded_text(src, MAX_SOURCE_FILE_BYTES)
     # Preserve the \n that precedes the heredoc body (it's the end of the
     # opening line). Source file provides the body; end marker follows.
     return text[:start] + "\n" + content + text[end:]
@@ -47,7 +58,7 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--deploy-server":
         deploy_server = Path(sys.argv[2])
 
-    template = TEMPLATE.read_text()
+    template = read_bounded_text(TEMPLATE, MAX_TEMPLATE_BYTES)
     for marker, src_path in SECTIONS.items():
         src = Path(src_path)
         if not src.exists():
@@ -55,6 +66,8 @@ def main():
             continue
         try:
             template = replace_section(template, marker, src)
+            if len(template.encode()) > MAX_TEMPLATE_BYTES:
+                raise ValueError(f"generated installer exceeds {MAX_TEMPLATE_BYTES} bytes")
             print(f"  {marker} <- {src_path}")
         except ValueError as e:
             print(f"ERROR: marker '{marker}' not found in template: {e}")

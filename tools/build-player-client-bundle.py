@@ -17,6 +17,18 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+MAX_METADATA_FILE_BYTES = 64 * 1024
+
+
+def read_bounded_text(path: Path, maximum: int) -> str:
+    if path.stat().st_size > maximum:
+        raise SystemExit(f"metadata file exceeds {maximum} bytes: {path}")
+    with path.open("rb") as stream:
+        data = stream.read(maximum + 1)
+    if len(data) > maximum:
+        raise SystemExit(f"metadata file exceeds {maximum} bytes: {path}")
+    return data.decode("utf-8")
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -100,12 +112,12 @@ def build(repo: Path, install_dir: Path, output: Path) -> dict[str, object]:
         source_label = str(source_repo)
         version_file = source_repo / "VERSION"
         if version_file.exists():
-            version = version_file.read_text(encoding="utf-8").strip()
+            version = read_bounded_text(version_file, MAX_METADATA_FILE_BYTES).strip()
         else:
             cargo_toml = source_repo / "Cargo.toml"
             version = "0.1.0"
             if cargo_toml.exists():
-                for line in cargo_toml.read_text(encoding="utf-8").splitlines():
+                for line in read_bounded_text(cargo_toml, MAX_METADATA_FILE_BYTES).splitlines():
                     if line.startswith("version = \"") and line.endswith("\""):
                         version = line[len("version = \""):-1]
                         break
