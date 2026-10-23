@@ -35,7 +35,8 @@ def _seat_service_running() -> bool:
         try:
             r = subprocess.run(
                 ["systemctl", "--quiet", "is-active", f"screentra-cast-kiosk@{idx}.service"],
-                capture_output=True, text=True, timeout=2,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
             if r.returncode == 0:
                 return True
