@@ -34,6 +34,7 @@ MAX_DISPLAY_OUTPUTS = 32
 MAX_TOUCH_NAME_BYTES = 128
 MAX_SYSTEM_METRICS_BYTES = 64 * 1024
 MAX_GPU_HELPER_OUTPUT_BYTES = 64 * 1024
+MAX_ERROR_BYTES = 512
 
 
 def _bound_text(value: str | None, maximum: int) -> str:
@@ -428,7 +429,7 @@ def _safe_run(args, timeout=5):
         cp = _sp.run(args, text=True, capture_output=True, timeout=timeout)
         return {'ok': cp.returncode == 0, 'code': cp.returncode, 'stdout': cp.stdout[-12000:], 'stderr': cp.stderr[-4000:]}
     except Exception as e:
-        return {'ok': False, 'code': None, 'stdout': '', 'stderr': str(e)}
+        return {'ok': False, 'code': None, 'stdout': '', 'stderr': _bound_text(str(e), MAX_ERROR_BYTES)}
 
 def _client_config_path() -> Path:
     return Handler.cache_dir.parent / 'config.json'
@@ -442,7 +443,7 @@ def _load_display_governance() -> dict:
             if isinstance(data, dict):
                 cfg.update({k: data.get(k) for k in cfg if k in data})
     except Exception as e:
-        cfg['error'] = str(e)
+        cfg['error'] = _bound_text(str(e), MAX_ERROR_BYTES)
     try:
         installer = max(int(cfg.get('installer_detected_max_displays') or 1), 1)
     except Exception:
@@ -711,7 +712,7 @@ def _cert_info() -> dict:
             else:
                 verify = {'ok': True, 'warning': 'server URL is not HTTPS'}
         except Exception as e:
-            verify = {'ok': False, 'error': str(e), 'host': parsed.hostname, 'port': port}
+            verify = {'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES), 'host': parsed.hostname, 'port': port}
     return {'server_url': server_url, 'ca_path': str(ca), 'ca_exists': ca_exists, 'ca_size': len(ca_data), 'ca_sha256': _sha256_file(ca), 'verify': verify, 'published_ca_url': (server_url + '/install/screentra-cast-signage-ca.crt') if server_url else ''}
 
 def _refresh_ca_from_server() -> dict:
@@ -738,7 +739,7 @@ def _refresh_ca_from_server() -> dict:
         restart = _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service', 'screentra-client-actor.service'], timeout=8)
         return {'ok': True, 'url': url, 'ca_path': str(out), 'bytes': len(data), 'sha256': _sha256_file(out), 'verify': verify, 'restart': restart}
     except Exception as e:
-        return {'ok': False, 'error': str(e), 'url': url}
+        return {'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES), 'url': url}
 
 
 
@@ -807,7 +808,7 @@ def _ram_usage() -> dict:
         pct = round((used / total) * 100.0, 1) if total else None
         return {'total_bytes': total, 'used_bytes': used, 'available_bytes': avail, 'percent': pct}
     except Exception as e:
-        return {'error': str(e)}
+        return {'error': _bound_text(str(e), MAX_ERROR_BYTES)}
 
 def _gpu_usage() -> dict:
     helper = Path.home() / '.local/share/screentra-client/ripley-gpu-health.py'
@@ -824,7 +825,7 @@ def _gpu_usage() -> dict:
             if helper_stderr.strip():
                 return {'percent': None, 'device': None, 'source': str(helper), 'error': helper_stderr.strip()[-500:]}
         except Exception as e:
-            return {'percent': None, 'device': None, 'source': str(helper), 'error': str(e)}
+            return {'percent': None, 'device': None, 'source': str(helper), 'error': _bound_text(str(e), MAX_ERROR_BYTES)}
     # Fallback for partial/upgrading installs: generic DRM busy percent.
     out = {'percent': None, 'device': None, 'source': None, 'available': False, 'health': 'unknown', 'health_notes': ['GPU helper not installed yet']}
     try:
@@ -833,7 +834,7 @@ def _gpu_usage() -> dict:
             out.update({'percent': float(raw), 'device': busy.parent.parent.name, 'source': str(busy), 'available': True, 'method': 'drm-gpu_busy_percent', 'health': 'ok'})
             return out
     except Exception as e:
-        out['error'] = str(e)
+        out['error'] = _bound_text(str(e), MAX_ERROR_BYTES)
     return out
 
 def _system_metrics() -> dict:
@@ -930,7 +931,7 @@ def _create_client_software_backup() -> dict:
             if out.exists(): out.unlink()
         except Exception:
             pass
-        return {'ok': False, 'error': str(e)}
+        return {'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}
 
 def _reboot_device(confirm: bool = False) -> dict:
     """Schedule a device reboot after the HTTP response is sent.
@@ -1275,7 +1276,7 @@ def _connector_for_display_index(display_index: int) -> str | None:
                     status_path = d / 'status'
                     if not status_path.exists():
                         continue
-                    if status_path.read_text().strip() != 'connected':
+                    if _read_bounded_path(status_path, 64).strip() != 'connected':
                         continue
                     mode_path = d / 'modes'
                     if mode_path.exists():
@@ -1384,7 +1385,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Set-Cookie', 'ripley_admin_session=' + token + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200')
                 self.end_headers(); self.wfile.write(data); return
             except Exception as e:
-                return self.send_text(400, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
+                return self.send_text(400, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/admin/auth/logout':
             data = json.dumps({'ok': True}).encode()
             self.send_response(200)
@@ -1415,7 +1416,7 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 return self.send_text(200, json.dumps({'saved': True, 'path': selected}), 'application/json')
             except Exception as e:
-                return self.send_text(500, json.dumps({'error': str(e)}), 'application/json')
+                return self.send_text(500, json.dumps({'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/touch-calibration.json':
             try:
                 data = _parse_request_json(body) if body and body.strip() else {}
@@ -1439,7 +1440,7 @@ class Handler(BaseHTTPRequestHandler):
                 _atomic_write_text(calib_path, json.dumps(history, indent=2))
                 return self.send_text(200, json.dumps({'ok': True, 'history_size': len(history)}), 'application/json')
             except Exception as e:
-                return self.send_text(400, json.dumps({'error': str(e)}), 'application/json')
+                return self.send_text(400, json.dumps({'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/admin/ca/refresh':
             return self.send_text(200, json.dumps(_refresh_ca_from_server()), 'application/json')
         if path == '/api/admin/device/reboot':
@@ -1448,7 +1449,7 @@ class Handler(BaseHTTPRequestHandler):
                 _require_request_fields(payload, {'confirm'})
                 result = _reboot_device(bool(payload.get('confirm')))
             except Exception as e:
-                return self.send_text(400, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
+                return self.send_text(400, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
             return self.send_text(200 if result.get('ok') else 400, json.dumps(result), 'application/json')
         if path == '/api/admin/display-count':
             try:
@@ -1458,7 +1459,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = _write_display_count(None if value in (None, '', 'auto') else int(value))
                 return self.send_text(200, json.dumps(result), 'application/json')
             except Exception as e:
-                return self.send_text(400, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
+                return self.send_text(400, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/admin/touch-binding':
             try:
                 payload = _parse_request_json(body) if body and body.strip() else {}
@@ -1469,7 +1470,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = _write_touch_binding(payload)
                 return self.send_text(200, json.dumps(result), 'application/json')
             except Exception as e:
-                return self.send_text(400, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
+                return self.send_text(400, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/admin/client-backup':
             result = _create_client_software_backup()
             return self.send_text(200 if result.get('ok') else 500, json.dumps(result), 'application/json')
@@ -1504,7 +1505,7 @@ class Handler(BaseHTTPRequestHandler):
                 _atomic_write_text(cfg_path, json.dumps(data, indent=2))
                 return self.send_text(200, json.dumps({'ok': True}), 'application/json')
             except Exception as e:
-                return self.send_text(500, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
+                return self.send_text(500, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         return self.send_text(404, json.dumps({'error': 'not found'}), 'application/json')
     def log_message(self, fmt, *args):
         pass
