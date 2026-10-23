@@ -3,6 +3,7 @@ import importlib.util
 import stat
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,13 @@ actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 's
 
 
 class PlayerClientAuditTests(unittest.TestCase):
+    def test_subprocess_output_is_bounded(self):
+        completed = mock.Mock(returncode=0, stdout='x' * (actor.MAX_SUBPROCESS_OUTPUT_BYTES + 100), stderr='y' * (actor.MAX_SUBPROCESS_OUTPUT_BYTES + 100))
+        with mock.patch.object(actor.subprocess, 'run', return_value=completed):
+            _, stdout, stderr = actor._run_list(['fixture'])
+        self.assertLessEqual(len(stdout.encode('utf-8')), actor.MAX_SUBPROCESS_OUTPUT_BYTES)
+        self.assertLessEqual(len(stderr.encode('utf-8')), actor.MAX_SUBPROCESS_OUTPUT_BYTES)
+
     def test_audio_sink_identifiers_are_bounded(self):
         self.assertEqual(actor._validate_audio_sink_id('12'), '12')
         self.assertEqual(actor._validate_audio_sink_id('@DEFAULT_AUDIO_SINK@'), '@DEFAULT_AUDIO_SINK@')

@@ -307,10 +307,20 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
                 pass
 
 
+MAX_SUBPROCESS_OUTPUT_BYTES = 64 * 1024
+
+
+def _bound_subprocess_output(value: str) -> str:
+    encoded = value.encode('utf-8', errors='replace')
+    if len(encoded) <= MAX_SUBPROCESS_OUTPUT_BYTES:
+        return value
+    return encoded[:MAX_SUBPROCESS_OUTPUT_BYTES].decode('utf-8', errors='ignore')
+
+
 def _run_list(args: list[str], timeout: int = 20, input_data: str | None = None, env: dict[str, str] | None = None) -> tuple[int, str, str]:
     try:
         p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, input=input_data, env=env)
-        return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
+        return p.returncode, _bound_subprocess_output(p.stdout or "").strip(), _bound_subprocess_output(p.stderr or "").strip()
     except Exception as e:
         return 1, "", str(e)
 
