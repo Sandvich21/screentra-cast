@@ -630,7 +630,7 @@ def has_systemctl_user() -> bool:
 def systemctl_user(action: str, unit: str) -> tuple[bool, str]:
     rc, out, err = _run_list(["systemctl", "--user", action, unit])
     ok = rc == 0
-    return ok, (out or err or f"{action} {unit} rc={rc}").strip()
+    return ok, _bound_hardware_message((out or err or f"{action} {unit} rc={rc}").strip())
 
 
 def restart_system_kiosk() -> tuple[bool, str]:
@@ -646,7 +646,7 @@ def restart_system_kiosk() -> tuple[bool, str]:
         ['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'],
         timeout=30,
     )
-    return rc == 0, (out or err or f'restart screentra-cast-kiosk@0.service rc={rc}').strip()
+    return rc == 0, _bound_hardware_message((out or err or f'restart screentra-cast-kiosk@0.service rc={rc}').strip())
 
 
 def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]:
