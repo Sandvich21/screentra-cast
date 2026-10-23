@@ -444,7 +444,7 @@ def _load_client_config() -> dict:
 
 def _write_client_config(cfg: dict) -> None:
     path = _client_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(path.parent, create=True)
     _atomic_write_text(path, json.dumps(cfg, indent=2))
 
 def _write_display_count(max_displays) -> dict:
@@ -702,7 +702,7 @@ def _refresh_ca_from_server() -> dict:
             return {'ok': False, 'error': 'downloaded CA exceeds the client limit', 'url': url}
         if len(data) < 200 or b'BEGIN CERTIFICATE' not in data:
             return {'ok': False, 'error': f'downloaded CA did not look like a certificate ({len(data)} bytes)', 'url': url}
-        out.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_real_directory(out.parent, create=True)
         _atomic_write_text(out, data.decode('utf-8'), mode=0o644)
         verify = _cert_info().get('verify')
         restart = _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service', 'screentra-client-actor.service'], timeout=8)
@@ -1369,7 +1369,7 @@ class Handler(BaseHTTPRequestHandler):
                 _require_request_fields(payload, {'path'})
                 selected = payload.get('path')
                 _validate_touch_device_path(selected)
-                Handler.cache_dir.mkdir(parents=True, exist_ok=True)
+                _ensure_real_directory(Handler.cache_dir, create=True)
                 _atomic_write_text(Handler.cache_dir / 'touch-device.json', json.dumps({'path': selected}))
                 # Tell the actor to restart the kiosk so the choice takes effect
                 try:
