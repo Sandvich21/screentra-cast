@@ -11,6 +11,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -20,6 +21,7 @@ use uuid::Uuid;
 const DEFAULT_REPOSITORY: &str = "Sandvich21/screentra-cast";
 const DEFAULT_ASSET: &str = "screentra-cast-server-update.tar.gz";
 const MAX_DOWNLOAD_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_PERSISTED_JSON_BYTES: usize = 64 * 1024;
 const CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 static UPDATE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -110,9 +112,21 @@ fn atomic_write_json<T: Serialize>(path: &PathBuf, value: &T) -> Result<(), Stri
     })
 }
 
+fn read_bounded_json(path: PathBuf) -> Option<Vec<u8>> {
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_PERSISTED_JSON_BYTES as u64 {
+        return None;
+    }
+    let file = fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take((MAX_PERSISTED_JSON_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() <= MAX_PERSISTED_JSON_BYTES).then_some(bytes)
+}
+
 pub fn read_settings() -> UpdateSettings {
-    fs::read(settings_path())
-        .ok()
+    read_bounded_json(settings_path())
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
 }
@@ -125,8 +139,7 @@ pub fn save_settings(settings: &UpdateSettings) -> Result<UpdateSettings, String
 
 pub fn read_status() -> UpdateStatus {
     let settings = read_settings();
-    let mut status = fs::read(state_path())
-        .ok()
+    let mut status = read_bounded_json(state_path())
         .and_then(|bytes| serde_json::from_slice::<UpdateStatus>(&bytes).ok())
         .unwrap_or_default();
     status.auto_update = settings.auto_update;
@@ -465,12 +478,22 @@ pub async fn run_auto_update_loop(repository: ClientRepository) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer_release, normalized_version};
+    use super::{is_newer_release, normalized_version, read_bounded_json, MAX_PERSISTED_JSON_BYTES};
+    use std::fs;
+    use uuid::Uuid;
 
     #[test]
     fn release_version_comparison_handles_v_prefix() {
         assert_eq!(normalized_version("v1.2.3"), "1.2.3");
         assert!(is_newer_release("999.0.0"));
         assert!(!is_newer_release("0.1.0"));
+    }
+
+    #[test]
+    fn persisted_json_reader_rejects_oversized_files() {
+        let path = std::env::temp_dir().join(format!("screentra-update-json-{}", Uuid::new_v4()));
+        fs::write(&path, vec![b'x'; MAX_PERSISTED_JSON_BYTES + 1]).unwrap();
+        assert!(read_bounded_json(path.clone()).is_none());
+        let _ = fs::remove_file(path);
     }
 }
