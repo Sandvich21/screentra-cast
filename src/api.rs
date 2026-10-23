@@ -6672,7 +6672,105 @@ fn bounded_command_output(
     Ok((status, bytes))
 }
 
-/// Run a command with sudo, return stdout on success or error on failure.
+async fn terminate_bounded_child(
+    child: &mut tokio::process::Child,
+    write_task: &tokio::task::JoinHandle<Result<(), String>>,
+    message: String,
+) -> Result<std::process::Output, String> {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    write_task.abort();
+    Err(message)
+}
+
+async fn bounded_async_command_output(
+    mut command: tokio::process::Command,
+    input: Vec<u8>,
+    maximum: usize,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to spawn command: {error}"))?;
+    let stdin = child.stdin.take();
+    let write_task = tokio::spawn(async move {
+        if let Some(mut stdin) = stdin {
+            stdin
+                .write_all(&input)
+                .await
+                .map_err(|error| error.to_string())?;
+            stdin.shutdown().await.map_err(|error| error.to_string())?;
+        }
+        Ok::<(), String>(())
+    });
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "command stdout unavailable".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "command stderr unavailable".to_string())?;
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+    let mut stdout_chunk = [0_u8; 8192];
+    let mut stderr_chunk = [0_u8; 8192];
+    let started = Instant::now();
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+
+    while !stdout_done || !stderr_done {
+        tokio::select! {
+            result = stdout.read(&mut stdout_chunk), if !stdout_done => {
+                match result {
+                    Ok(0) => stdout_done = true,
+                    Ok(count) => {
+                        stdout_bytes.extend_from_slice(&stdout_chunk[..count]);
+                        if stdout_bytes.len() > maximum {
+                            return terminate_bounded_child(&mut child, &write_task, "command stdout exceeds its bound".to_string()).await;
+                        }
+                    }
+                    Err(error) => return terminate_bounded_child(&mut child, &write_task, format!("read command stdout: {error}")).await,
+                }
+            }
+            result = stderr.read(&mut stderr_chunk), if !stderr_done => {
+                match result {
+                    Ok(0) => stderr_done = true,
+                    Ok(count) => {
+                        stderr_bytes.extend_from_slice(&stderr_chunk[..count]);
+                        if stderr_bytes.len() > maximum {
+                            return terminate_bounded_child(&mut child, &write_task, "command stderr exceeds its bound".to_string()).await;
+                        }
+                    }
+                    Err(error) => return terminate_bounded_child(&mut child, &write_task, format!("read command stderr: {error}")).await,
+                }
+            }
+            _ = &mut deadline => {
+                return terminate_bounded_child(&mut child, &write_task, "command exceeded its timeout".to_string()).await;
+            }
+        }
+    }
+
+    let remaining = timeout.saturating_sub(started.elapsed());
+    let status = match tokio::time::timeout(remaining, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => return terminate_bounded_child(&mut child, &write_task, format!("wait for command: {error}")).await,
+        Err(_) => return terminate_bounded_child(&mut child, &write_task, "command exceeded its timeout".to_string()).await,
+    };
+    let _ = write_task.await;
+    Ok(std::process::Output {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    })
+}
+
 fn run_sudo(args: &[&str]) -> Result<String, String> {
     let mut command = Command::new("sudo");
     command.arg("-n").args(args);
@@ -10254,6 +10352,21 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    #[tokio::test]
+    async fn bounded_async_command_output_rejects_oversized_stdout() {
+        let mut command = tokio::process::Command::new("python3");
+        command.args(["-c", "import sys; sys.stdout.write('x' * 70000)"]);
+        let error = bounded_async_command_output(
+            command,
+            Vec::new(),
+            1024,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect_err("oversized command output should be rejected");
+        assert!(error.contains("stdout exceeds its bound"));
+    }
+
     #[test]
     fn reverse_name_does_not_execute_shell_input() {
         let marker = std::env::temp_dir().join(format!("screentra-reverse-name-{}", Uuid::new_v4()));
@@ -13597,28 +13710,19 @@ async fn push_submissions_to_google_sheets(
         }
     };
 
-    use std::io::Write;
-    use std::process::Stdio;
-    let mut child = std::process::Command::new("python3")
+    let mut command = tokio::process::Command::new("python3");
+    command
         .arg(&script)
         .arg(&sheet_arg)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .current_dir(crate::version::install_dir_for_static())
-        .spawn()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("spawn: {e}")))?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin.write_all(csv.as_bytes()).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("write stdin: {e}"),
-            )
-        })?;
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("wait: {e}")))?;
+        .current_dir(crate::version::install_dir_for_static());
+    let output = bounded_async_command_output(
+        command,
+        csv.into_bytes(),
+        64 * 1024,
+        Duration::from_secs(30),
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Google Sheets push failed: {e}")))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if output.status.success() && stdout.starts_with("OK") {
