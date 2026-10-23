@@ -490,6 +490,8 @@ def _find_bluetooth_sink(address: str, name: str | None) -> str | None:
 
 def bluetooth_connect(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
+    if not isinstance(payload, dict):
+        return False, 'Bluetooth connect payload must be an object', {}
     address = str(payload.get('address') or '').strip().upper()
     raw_name = str(payload.get('name') or '').strip()
     try:
@@ -567,6 +569,8 @@ def _validate_audio_sink_id(value: str) -> str:
 
 def audio_set_default(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
+    if not isinstance(payload, dict):
+        return False, 'Audio payload must be an object', {}
     try:
         sink_id = _validate_audio_sink_id(str(payload.get('sink_id') or '').strip())
     except ValueError:
@@ -581,6 +585,8 @@ def audio_set_default(payload: dict | None) -> tuple[bool, str, dict]:
 
 def audio_set_volume(payload: dict | None) -> tuple[bool, str, dict]:
     payload = payload or {}
+    if not isinstance(payload, dict):
+        return False, 'Audio payload must be an object', {}
     try:
         sink_id = _validate_audio_sink_id(str(payload.get('sink_id') or '@DEFAULT_AUDIO_SINK@').strip())
         value = max(0, min(100, int(payload.get('value'))))

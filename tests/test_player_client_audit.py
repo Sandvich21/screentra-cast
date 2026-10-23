@@ -21,6 +21,12 @@ actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 's
 
 
 class PlayerClientAuditTests(unittest.TestCase):
+    def test_bluetooth_connect_requires_object_payload(self):
+        ok, message, details = actor.bluetooth_connect(['not-an-object'])
+        self.assertFalse(ok)
+        self.assertIn('payload', message.lower())
+        self.assertEqual(details, {})
+
     def test_bluetooth_scan_duration_is_bounded(self):
         ok, message, details = actor.bluetooth_scan({'duration_seconds': 'invalid'})
         self.assertFalse(ok)
@@ -40,6 +46,12 @@ class PlayerClientAuditTests(unittest.TestCase):
             _, stdout, stderr = actor._run_list(['fixture'])
         self.assertLessEqual(len(stdout.encode('utf-8')), actor.MAX_SUBPROCESS_OUTPUT_BYTES)
         self.assertLessEqual(len(stderr.encode('utf-8')), actor.MAX_SUBPROCESS_OUTPUT_BYTES)
+
+    def test_audio_controls_require_object_payloads(self):
+        ok, message, details = actor.audio_set_default(['not-an-object'])
+        self.assertFalse(ok)
+        self.assertIn('payload', message.lower())
+        self.assertEqual(details, {})
 
     def test_audio_sink_identifiers_are_bounded(self):
         self.assertEqual(actor._validate_audio_sink_id('12'), '12')
