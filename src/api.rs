@@ -3348,24 +3348,21 @@ fn weather_response_with_meta(mut value: serde_json::Value, fetched_at: &str) ->
 
 fn curl_json(url: &str) -> Option<serde_json::Value> {
     const MAX_WEATHER_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
-    let mut child = Command::new("curl")
-        .args(["-fsSL", "--max-time", "12", "-A", "Screentra Cast/1.0 weather contact: admin@screentra-cast.local", url])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let stdout = child.stdout.take()?;
-    let mut bytes = Vec::new();
-    stdout
-        .take((MAX_WEATHER_RESPONSE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() > MAX_WEATHER_RESPONSE_BYTES {
-        let _ = child.kill();
-        let _ = child.wait();
-        return None;
-    }
-    let status = child.wait().ok()?;
+    let mut command = Command::new("curl");
+    command.args([
+        "-fsSL",
+        "--max-time",
+        "12",
+        "-A",
+        "Screentra Cast/1.0 weather contact: admin@screentra-cast.local",
+        url,
+    ]);
+    let (status, bytes) = bounded_command_output(
+        command,
+        MAX_WEATHER_RESPONSE_BYTES,
+        Duration::from_secs(15),
+    )
+    .ok()?;
     if !status.success() {
         return None;
     }
@@ -6327,7 +6324,7 @@ async fn build_player_client_bundle_handler(
         command
             .arg(&script)
             .current_dir(crate::version::install_dir_for_static());
-        bounded_command_output(command, 1024 * 1024)
+        bounded_command_output(command, 1024 * 1024, Duration::from_secs(30))
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {}", e)))?
@@ -6392,7 +6389,7 @@ async fn build_server_bundle_handler(
         command
             .arg(&script)
             .current_dir(crate::version::install_dir_for_static());
-        bounded_command_output(command, 1024 * 1024)
+        bounded_command_output(command, 1024 * 1024, Duration::from_secs(30))
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {}", e)))?
@@ -6647,29 +6644,55 @@ async fn read_bounded_async_file(path: &StdPath, maximum_bytes: u64) -> Result<V
 fn bounded_command_output(
     mut command: Command,
     maximum: usize,
+    timeout: Duration,
 ) -> Result<(std::process::ExitStatus, Vec<u8>), String> {
     let mut child = command
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("failed to spawn command: {}", e))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "command stdout unavailable".to_string())?;
-    let mut bytes = Vec::new();
-    stdout
-        .take((maximum + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("failed to read command output: {}", e))?;
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("command stdout unavailable".to_string());
+        }
+    };
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout
+            .take((maximum + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("failed to read command output: {}", e))?;
+        Ok::<Vec<u8>, String>(bytes)
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err("command exceeded its timeout".to_string());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(format!("failed to wait for command: {}", error));
+            }
+        }
+    };
+    let bytes = reader
+        .join()
+        .map_err(|_| "command output reader panicked".to_string())??;
     if bytes.len() > maximum {
-        let _ = child.kill();
-        let _ = child.wait();
         return Err("command output exceeds its bound".to_string());
     }
-    let status = child
-        .wait()
-        .map_err(|e| format!("failed to wait for command: {}", e))?;
     Ok((status, bytes))
 }
 
@@ -6794,7 +6817,7 @@ async fn bounded_async_command_output(
 fn run_sudo(args: &[&str]) -> Result<String, String> {
     let mut command = Command::new("sudo");
     command.arg("-n").args(args);
-    let (status, bytes) = bounded_command_output(command, 64 * 1024)?;
+    let (status, bytes) = bounded_command_output(command, 64 * 1024, Duration::from_secs(30))?;
     if !status.success() {
         return Err(format!(
             "sudo {} failed (exit {:?})",
@@ -6809,7 +6832,11 @@ async fn get_system_time() -> Result<AxumJson<SystemTimeInfo>, (StatusCode, Stri
     // Use timedatectl to get authoritative status
     let mut timedatectl = Command::new("timedatectl");
     timedatectl.arg("show");
-    let (status, stdout_bytes) = bounded_command_output(timedatectl, 64 * 1024).map_err(|e| {
+    let (status, stdout_bytes) = bounded_command_output(
+        timedatectl,
+        64 * 1024,
+        Duration::from_secs(30),
+    ).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("timedatectl: {}", e),
@@ -6855,7 +6882,7 @@ async fn get_system_time() -> Result<AxumJson<SystemTimeInfo>, (StatusCode, Stri
     // Get timezone abbreviation by parsing the date output
     let mut date_command = Command::new("date");
     date_command.arg("+%Z").env("TZ", &timezone);
-    let abbr_output = bounded_command_output(date_command, 4096)
+    let abbr_output = bounded_command_output(date_command, 4096, Duration::from_secs(30))
         .ok()
         .filter(|(status, _)| status.success())
         .map(|(_, bytes)| String::from_utf8_lossy(&bytes).trim().to_string())
@@ -10186,7 +10213,7 @@ fn request_peer_ip() -> Option<String> {
 fn local_ip() -> Option<String> {
     let mut command = Command::new("hostname");
     command.arg("-I");
-    let (status, bytes) = bounded_command_output(command, 4096).ok()?;
+    let (status, bytes) = bounded_command_output(command, 4096, Duration::from_secs(30)).ok()?;
     if !status.success() {
         return None;
     }
@@ -10200,7 +10227,7 @@ fn discover_neighbor_ips() -> Vec<String> {
     let mut ips = Vec::new();
     let mut command = Command::new("ip");
     command.args(["-4", "neigh", "show"]);
-    if let Ok((status, bytes)) = bounded_command_output(command, 64 * 1024) {
+    if let Ok((status, bytes)) = bounded_command_output(command, 64 * 1024, Duration::from_secs(30)) {
         if !status.success() {
             return ips;
         }
@@ -10333,7 +10360,7 @@ fn probe_ripley_status(ip: &str, port: u16) -> Option<serde_json::Value> {
 fn reverse_name(ip: &str) -> Option<String> {
     let mut command = Command::new("getent");
     command.args(["hosts", ip]);
-    let (status, bytes) = bounded_command_output(command, 4096).ok()?;
+    let (status, bytes) = bounded_command_output(command, 4096, Duration::from_secs(30)).ok()?;
     if !status.success() {
         return None;
     }
@@ -10372,6 +10399,14 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    #[test]
+    fn bounded_command_output_terminates_timed_out_process() {
+        let mut command = Command::new("python3");
+        command.args(["-c", "import time; time.sleep(5)"]);
+        let error = bounded_command_output(command, 1024, Duration::from_millis(50))
+            .expect_err("timed-out command should be terminated");
+        assert!(error.contains("command exceeded its timeout"));
+    }
     #[tokio::test]
     async fn bounded_async_command_output_rejects_oversized_stdout() {
         let mut command = tokio::process::Command::new("python3");
