@@ -24,6 +24,9 @@ class PlayerPreflightFileTests(unittest.TestCase):
             result = preflight.run('id -Gn')
         self.assertLessEqual(len(result.encode('utf-8')), preflight.MAX_LOCAL_PROBE_OUTPUT_BYTES)
 
+    def test_error_details_are_bounded(self):
+        self.assertLessEqual(len(preflight._bound_error('x' * (preflight.MAX_ERROR_BYTES + 1)).encode('utf-8')), preflight.MAX_ERROR_BYTES)
+
     def test_directory_check_rejects_symlinked_install_path(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

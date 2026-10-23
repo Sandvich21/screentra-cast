@@ -154,11 +154,17 @@ def add(name: str, ok: bool, detail: str = "", required: bool = True) -> None:
 
 
 MAX_LOCAL_PROBE_OUTPUT_BYTES = 4096
+MAX_ERROR_BYTES = 512
 
 
 def _bound_local_probe_output(value: str) -> str:
     encoded = str(value).encode('utf-8', errors='replace')
     return encoded[:MAX_LOCAL_PROBE_OUTPUT_BYTES].decode('utf-8', errors='ignore')
+
+
+def _bound_error(value: str) -> str:
+    encoded = str(value).encode('utf-8', errors='replace')
+    return encoded[:MAX_ERROR_BYTES].decode('utf-8', errors='ignore')
 
 
 def run(cmd: str) -> str:
@@ -273,7 +279,7 @@ def main() -> int:
                 ok = r.status == 200
                 detail = f"status {r.status}"
         except Exception as e:
-            ok, detail = False, str(e)
+            ok, detail = False, _bound_error(str(e))
         add("server reachable", ok, f"{server} ({detail})")
     else:
         add("server url configured", False, "RIPLEY_SERVER_URL not set (will be sourced from install args or server file)", required=False)
