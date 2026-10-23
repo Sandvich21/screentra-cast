@@ -308,6 +308,7 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
 
 
 MAX_SUBPROCESS_OUTPUT_BYTES = 64 * 1024
+MAX_HARDWARE_MESSAGE_BYTES = 512
 
 
 def _bound_subprocess_output(value: str) -> str:
@@ -315,6 +316,13 @@ def _bound_subprocess_output(value: str) -> str:
     if len(encoded) <= MAX_SUBPROCESS_OUTPUT_BYTES:
         return value
     return encoded[:MAX_SUBPROCESS_OUTPUT_BYTES].decode('utf-8', errors='ignore')
+
+
+def _bound_hardware_message(value: str) -> str:
+    encoded = str(value).encode('utf-8', errors='replace')
+    if len(encoded) <= MAX_HARDWARE_MESSAGE_BYTES:
+        return str(value)
+    return encoded[:MAX_HARDWARE_MESSAGE_BYTES].decode('utf-8', errors='ignore')
 
 
 def _run_list(args: list[str], timeout: int = 20, input_data: str | None = None, env: dict[str, str] | None = None) -> tuple[int, str, str]:
@@ -379,12 +387,12 @@ def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_lay
             return True, f'DDC: {vcp_code}={value}' + (f' ({out.strip()})' if out.strip() else '')
         err_msg = err.strip() or out.strip()
         if 'not found' in err_msg.lower() or 'no such file' in err_msg.lower():
-            return False, f'ddcutil_not_installed: {err_msg}'
+            return False, f'ddcutil_not_installed: {_bound_hardware_message(err_msg)}'
         if 'unable to open' in err_msg.lower() or 'i2c' in err_msg.lower() or 'no bus' in err_msg.lower():
             return False, 'ddcutil_no_bus', err_msg
         if 'communication' in err_msg.lower() or 'timeout' in err_msg.lower():
-            return False, f'ddcutil_no_support: {err_msg}'
-        return False, f'DDC failed (rc={rc}): {err_msg}'
+            return False, f'ddcutil_no_support: {_bound_hardware_message(err_msg)}'
+        return False, f'DDC failed (rc={rc}): {_bound_hardware_message(err_msg)}'
 
     ok, msg_or_tag, *extra = _do_set()
     if ok:
@@ -397,7 +405,7 @@ def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_lay
         ok2, msg2 = _do_set()
         if ok2:
             return True, f'{msg2} (re-detected)'
-        return False, f'{msg_or_tag}: {err_msg} — retry after re-detection failed: {msg2}'
+        return False, f'{msg_or_tag}: {_bound_hardware_message(err_msg)} — retry after re-detection failed: {_bound_hardware_message(msg2)}'
 
     return False, msg_or_tag
 
@@ -419,8 +427,8 @@ def apply_cec_command(cec_cmd: str) -> tuple[bool, str]:
         input_data=f'{cec_cmd}\n',
     )
     if rc == 0:
-        return True, f'CEC: {cec_cmd}' + (f' — {out.strip()}' if out.strip() else '')
-    return False, f'CEC failed (rc={rc}): {err.strip() or out.strip()}'
+        return True, f'CEC: {cec_cmd}' + (f' — {_bound_hardware_message(out.strip())}' if out.strip() else '')
+    return False, f'CEC failed (rc={rc}): {_bound_hardware_message(err.strip() or out.strip())}'
 
 
 def _bluetoothctl_devices(text: str) -> list[dict]:
@@ -505,10 +513,11 @@ def bluetooth_connect(payload: dict | None) -> tuple[bool, str, dict]:
     _run_list(['bluetoothctl', 'power', 'on'], timeout=10)
     rc, out, err = _run_list(['bluetoothctl', 'connect', address], timeout=30)
     text = '\n'.join(v for v in (out, err) if v)
+    message_text = _bound_hardware_message(text)
     connected = rc == 0 and not re.search(r'failed|not available|error', text, re.IGNORECASE)
-    details = {'address': address, 'name': name, 'connected': connected, 'bluetooth_output': text[-1200:]}
+    details = {'address': address, 'name': name, 'connected': connected, 'bluetooth_output': _bound_hardware_message(text[-1200:])}
     if not connected:
-        return False, f'Bluetooth connection failed: {text or f"exit code {rc}"}', details
+        return False, f'Bluetooth connection failed: {message_text or f"exit code {rc}"}', details
     time.sleep(1)
     sink_id = _find_bluetooth_sink(address, name)
     if sink_id and shutil.which('wpctl'):

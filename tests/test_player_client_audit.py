@@ -52,6 +52,7 @@ class PlayerClientAuditTests(unittest.TestCase):
             _, stdout, stderr = actor._run_list(['fixture'])
         self.assertLessEqual(len(stdout.encode('utf-8')), actor.MAX_SUBPROCESS_OUTPUT_BYTES)
         self.assertLessEqual(len(stderr.encode('utf-8')), actor.MAX_SUBPROCESS_OUTPUT_BYTES)
+        self.assertLessEqual(len(actor._bound_hardware_message('x' * 2048).encode('utf-8')), actor.MAX_HARDWARE_MESSAGE_BYTES)
 
     def test_audio_controls_require_object_payloads(self):
         ok, message, details = actor.audio_set_default(['not-an-object'])
