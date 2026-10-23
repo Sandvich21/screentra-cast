@@ -460,7 +460,7 @@ def _read_cache_json(path, default):
     if not _path_exists(path):
         return default
     try:
-        return json.loads(_read_real_file(path).decode('utf-8'))
+        return _parse_server_json(_read_real_file(path).decode('utf-8'))
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
         raise ValueError('addon cache metadata is invalid')
 
@@ -1213,7 +1213,7 @@ def main():
         try:
             status, body = post(args.server, data)
             try:
-                response = json.loads(body)
+                response = _parse_server_json(body)
                 server_theme = response.get('theme')
                 if server_theme in ('midnight', 'light', 'classic'):
                     theme_path = Path(args.cache_dir) / 'client-config.json'
