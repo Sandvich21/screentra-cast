@@ -68,6 +68,8 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn("pathlib.Path(sys.argv[1]).read_text().strip()", kiosk)
         self.assertIn('head -c 2049 "$CLIENT_DIR/server"', kiosk)
         self.assertIn('head -c 257 "$CLIENT_DIR/client-id"', kiosk)
+        self.assertNotIn('python3 -c \'import sys; raise SystemExit(0 if "Screentra Cast Live Player" in sys.stdin.read()', installer)
+        self.assertIn('head -c 65537', installer)
 
     def test_embedded_heartbeat_reads_are_bounded(self):
         installer = (ROOT / 'player-client/install/player-client.sh').read_text()

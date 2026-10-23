@@ -6625,8 +6625,8 @@ while IFS='|' read -r idx connector port; do
     [ -n "$idx" ] || continue
     LIVE_READY=0
     for i in $(seq 1 40); do
-        if curl -fsS --max-time 2 "http://127.0.0.1:${port}/" | \
-            python3 -c 'import sys; raise SystemExit(0 if "Screentra Cast Live Player" in sys.stdin.read() else 1)'; then
+        if curl -fsS --max-time 2 "http://127.0.0.1:${port}/" | head -c 65537 | \
+            python3 -c 'import sys; data=sys.stdin.buffer.read(65537); raise SystemExit(0 if len(data) <= 65536 and b"Screentra Cast Live Player" in data else 1)'; then
             LIVE_READY=1
             break
         fi
