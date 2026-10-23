@@ -79,6 +79,7 @@ MAX_PENDING_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
 MAX_SERVER_RESPONSE_BYTES = 1 << 20
 MAX_COMMAND_PAYLOAD_BYTES = 64 * 1024
+MAX_BLUETOOTH_DEVICES = 128
 MAX_CLIENT_ID_BYTES = 200
 CLIENT_SERVICE_IDENTIFIER_MAX_BYTES = 128
 CLIENT_SERVICE_REQUEST_ID_MAX_BYTES = 128
@@ -447,6 +448,8 @@ def _bluetoothctl_devices(text: str) -> list[dict]:
         except ValueError:
             name = address
         devices.append({'address': address, 'name': name or address})
+        if len(devices) >= MAX_BLUETOOTH_DEVICES:
+            break
     return devices
 
 
