@@ -5652,6 +5652,17 @@ async fn export_state_bundle_handler(
     ));
     crate::version::export_state_bundle(&dest)
         .map_err(|_| internal_server_error())?;
+    let bundle_size = tokio::fs::metadata(&dest)
+        .await
+        .map_err(|_| internal_server_error())?
+        .len();
+    if bundle_size > MAX_STATE_BUNDLE_BYTES {
+        let _ = tokio::fs::remove_file(&dest).await;
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Generated state bundle is too large".to_string(),
+        ));
+    }
     let bytes = tokio::fs::read(&dest).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -5847,6 +5858,24 @@ async fn export_update_bundle_handler(
             return Err((StatusCode::INTERNAL_SERVER_ERROR, error));
         }
     };
+    let bundle_size = match tokio::fs::metadata(&dest).await {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
+            audit_update_export_failure(&state, &principal, "bundle metadata failed").await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("inspect bundle: {}", error),
+            ));
+        }
+    };
+    if bundle_size > MAX_STATE_BUNDLE_BYTES {
+        let _ = tokio::fs::remove_file(&dest).await;
+        audit_update_export_failure(&state, &principal, "bundle too large").await;
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Generated update bundle is too large".to_string(),
+        ));
+    }
     let bytes = match tokio::fs::read(&dest).await {
         Ok(bytes) => bytes,
         Err(error) => {
