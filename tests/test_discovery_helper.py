@@ -42,6 +42,21 @@ class DiscoveryHelperTests(unittest.TestCase):
         }
         self.assertIsNone(module.validate_record(record))
 
+    def test_rejects_nonstandard_json_constants(self):
+        with self.assertRaises(ValueError):
+            module._parse_discovery_json('{"protocol":NaN}')
+
+    def test_rejects_oversized_discovery_record_names(self):
+        ca = "-----BEGIN CERTIFICATE-----\\nCA\\n-----END CERTIFICATE-----\\n"
+        record = {
+            "protocol": module.DISCOVERY_PROTOCOL,
+            "server_name": "é" * 128,
+            "url": "https://10.0.0.25:3000",
+            "ca_pem_b64": module.base64.b64encode(ca.encode()).decode(),
+            "ca_sha256": module.sha256_bytes(ca.encode()),
+        }
+        self.assertIsNone(module.validate_record(record))
+
     def test_rejects_http_or_mismatched_ca(self):
         ca = "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----\n"
         base = {

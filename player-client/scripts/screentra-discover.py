@@ -15,6 +15,7 @@ import urllib.parse
 DISCOVERY_PROTOCOL = "screentra-cast-discovery-v1"
 DISCOVERY_REQUEST = b"SCREENTRA_CAST_DISCOVER_V1"
 MAX_RESPONSE_BYTES = 64 * 1024
+MAX_DISCOVERY_RECORDS = 128
 _DISCOVERY_FIELDS = frozenset({
     "protocol", "server_name", "url", "ca_pem_b64", "ca_sha256",
 })
@@ -31,11 +32,14 @@ def validate_record(raw: object) -> dict[str, str] | None:
     url = raw.get("url")
     ca_b64 = raw.get("ca_pem_b64")
     ca_hash = raw.get("ca_sha256")
-    if not isinstance(name, str) or not name.strip() or len(name) > 128:
+    try:
+        if not isinstance(name, str) or not name.strip() or len(name.encode('utf-8')) > 128:
+            return None
+        if not isinstance(url, str) or len(url.encode('utf-8')) > 512:
+            return None
+    except UnicodeEncodeError:
         return None
-    if any(ord(char) < 32 for char in name):
-        return None
-    if not isinstance(url, str) or len(url) > 512:
+    if any(ord(char) < 32 or ord(char) == 127 for char in name):
         return None
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
@@ -77,7 +81,11 @@ def _reject_duplicate_json_keys(pairs):
 
 def _parse_discovery_json(text):
     try:
-        return json.loads(text, object_pairs_hook=_reject_duplicate_json_keys)
+        return json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non-standard JSON constant")),
+        )
     except (TypeError, ValueError, UnicodeError) as exc:
         raise ValueError("discovery response is not valid JSON") from exc
 
@@ -104,6 +112,8 @@ def discover(port: int, timeout: float) -> list[dict[str, str]]:
             record = validate_record(raw)
             if record:
                 records[(record["url"], record["ca_sha256"])] = record
+                if len(records) >= MAX_DISCOVERY_RECORDS:
+                    break
         return sorted(records.values(), key=lambda value: (value["server_name"].lower(), value["url"]))
     finally:
         request.close()
