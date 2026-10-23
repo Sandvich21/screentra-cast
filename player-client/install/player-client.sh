@@ -5240,13 +5240,28 @@ from pathlib import Path
 
 MAX_PENDING_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
+MAX_UPDATE_INSTALLER_BYTES = 16 * 1024 * 1024
+MAX_UPDATE_SIGNATURE_BYTES = 16 * 1024
+
+
+def _read_bounded_path(path: Path, maximum: int, encoding: str = 'utf-8') -> str:
+    with path.open('rb') as stream:
+        data = stream.read(maximum + 1)
+    if len(data) > maximum:
+        raise ValueError('local file exceeds its bound')
+    return data.decode(encoding)
+
+
+def _read_bounded_response(response, maximum: int) -> bytes:
+    data = response.read(maximum + 1)
+    if len(data) > maximum:
+        raise ValueError('server response exceeds its bound')
+    return data
 
 
 def _read_json_file(path: Path, default):
     try:
-        if not path.is_file() or path.stat().st_size > MAX_JSON_FILE_BYTES:
-            return default
-        return json.loads(path.read_text(encoding='utf-8'))
+        return json.loads(_read_bounded_path(path, MAX_JSON_FILE_BYTES))
     except Exception:
         return default
 
@@ -5769,7 +5784,7 @@ def fetch_config(server: str, client_id: str, cache_dir: Path, display_index: in
         target = f'assigned-layout-display-{display_index}.json'
     try:
         with urlopen_ripley(url, timeout=10, cache_dir=cache_dir) as r:
-            data = json.loads(r.read().decode())
+            data = json.loads(_read_bounded_response(r, MAX_JSON_FILE_BYTES).decode('utf-8'))
         # The server display-config payload does not include local-admin theme.
         try:
             previous = _read_json_file(cache_dir / 'client-config.json', {})
@@ -5810,7 +5825,7 @@ def fetch_all_display_configs(server: str, client_id: str, cache_dir: Path) -> b
     try:
         url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/displays'
         with urlopen_ripley(url, timeout=10, cache_dir=cache_dir) as r:
-            displays = json.loads(r.read().decode())
+            displays = json.loads(_read_bounded_response(r, MAX_JSON_FILE_BYTES).decode('utf-8'))
         ok = True
         seen = set()
         for d in displays:
@@ -5867,10 +5882,10 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
         if ctx_ssl is not None:
             kw['context'] = ctx_ssl
         with urllib.request.urlopen(installer_url, **kw) as r:
-            data = r.read()
+            data = _read_bounded_response(r, MAX_UPDATE_INSTALLER_BYTES)
         signature_url = server + '/install/player-client.sh.sig'
         with urllib.request.urlopen(signature_url, **kw) as r:
-            signature = r.read()
+            signature = _read_bounded_response(r, MAX_UPDATE_SIGNATURE_BYTES)
         public_key = Path(
             os.environ.get('SCREENTRA_CAST_UPDATE_PUBLIC_KEY_PATH')
             or '/etc/screentra-cast/client-update-signing.pub'

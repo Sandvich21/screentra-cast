@@ -83,6 +83,18 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn('_read_bounded_path', body)
         self.assertNotIn('.read_text()', body)
 
+    def test_embedded_actor_responses_and_updates_are_bounded(self):
+        installer = (ROOT / 'player-client/install/player-client.sh').read_text()
+        start = installer.index("cat > \"$ACTOR\" <<'PY_ACTOR'\n") + len("cat > \"$ACTOR\" <<'PY_ACTOR'\n")
+        end = installer.index('\nPY_ACTOR\nchmod +x "$ACTOR"', start)
+        body = installer[start:end]
+        compile(body, 'embedded-actor.py', 'exec')
+        self.assertIn('_read_bounded_response', body)
+        self.assertIn('MAX_UPDATE_INSTALLER_BYTES', body)
+        self.assertNotIn('data = r.read()', body)
+        self.assertNotIn('signature = r.read()', body)
+        self.assertNotIn('json.loads(r.read().decode())', body)
+
     def test_preview_frame_is_bounded(self):
         frame = b'x' * (actor.MAX_PREVIEW_FRAME_BYTES + 1)
         with self.assertRaises(ValueError):
