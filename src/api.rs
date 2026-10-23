@@ -27,7 +27,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path as StdPath, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
@@ -3343,11 +3343,29 @@ fn weather_response_with_meta(mut value: serde_json::Value, fetched_at: &str) ->
 }
 
 fn curl_json(url: &str) -> Option<serde_json::Value> {
-    let output = Command::new("curl")
+    const MAX_WEATHER_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+    let mut child = Command::new("curl")
         .args(["-fsSL", "--max-time", "12", "-A", "Screentra Cast/1.0 weather contact: admin@screentra-cast.local", url])
-        .output().ok()?;
-    if !output.status.success() { return None; }
-    serde_json::from_slice(&output.stdout).ok()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    let mut bytes = Vec::new();
+    stdout
+        .take((MAX_WEATHER_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > MAX_WEATHER_RESPONSE_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    let status = child.wait().ok()?;
+    if !status.success() {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
 }
 
 async fn weather_forecast(
