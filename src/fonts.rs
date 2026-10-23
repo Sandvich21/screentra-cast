@@ -60,9 +60,25 @@ const CATALOG_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const DOWNLOAD_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CATALOG_BODY_BYTES: usize = 4 * 1024 * 1024;
 const MAX_FONT_ZIP_BYTES: usize = 25 * 1024 * 1024;
+const MAX_FONT_ZIP_ENTRIES: usize = 4096;
+const MAX_FONT_EXTRACTED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FONT_CSS_BYTES: usize = 1024 * 1024;
 const MAX_WOFF2_BYTES: usize = 200_000;
 const MAX_WOFF2_ENTRY_BYTES: usize = 2 * 1024 * 1024;
+
+fn validate_font_archive_limits(entry_count: usize, extracted_bytes: usize) -> Result<(), String> {
+    if entry_count > MAX_FONT_ZIP_ENTRIES {
+        return Err(format!(
+            "font zip contains too many entries (max {MAX_FONT_ZIP_ENTRIES})"
+        ));
+    }
+    if extracted_bytes > MAX_FONT_EXTRACTED_BYTES {
+        return Err(format!(
+            "font zip extracted data exceeds {MAX_FONT_EXTRACTED_BYTES} bytes"
+        ));
+    }
+    Ok(())
+}
 
 async fn read_response_body_limited(
     response: reqwest::Response,
@@ -305,8 +321,11 @@ pub async fn download_family(family_id: &str, weights: &[u32]) -> Result<Vec<Ins
     let cursor = std::io::Cursor::new(&bytes[..]);
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|e| format!("zip decode failed: {e}"))?;
+    let archive_entry_count = archive.len();
+    validate_font_archive_limits(archive_entry_count, 0)?;
+    let mut extracted_bytes = 0usize;
 
-    for i in 0..archive.len() {
+    for i in 0..archive_entry_count {
         let mut entry = archive
             .by_index(i)
             .map_err(|e| format!("zip entry {i} read failed: {e}"))?;
@@ -350,6 +369,10 @@ pub async fn download_family(family_id: &str, weights: &[u32]) -> Result<Vec<Ins
         if buf.len() > MAX_WOFF2_ENTRY_BYTES {
             return Err(format!("font zip entry is too large: {name}"));
         }
+        extracted_bytes = extracted_bytes
+            .checked_add(buf.len())
+            .ok_or_else(|| "font zip extracted data size overflowed".to_string())?;
+        validate_font_archive_limits(archive_entry_count, extracted_bytes)?;
         let tmp = dir.join(format!("{filename}.tmp"));
         std::fs::write(&tmp, &buf)
             .map_err(|e| format!("temp write failed: {e}"))?;
@@ -1773,6 +1796,12 @@ pub async fn run_preview_cache_loop() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn font_archive_limits_reject_entry_and_output_amplification() {
+        assert!(validate_font_archive_limits(MAX_FONT_ZIP_ENTRIES, MAX_FONT_EXTRACTED_BYTES).is_ok());
+        assert!(validate_font_archive_limits(MAX_FONT_ZIP_ENTRIES + 1, 0).is_err());
+        assert!(validate_font_archive_limits(0, MAX_FONT_EXTRACTED_BYTES + 1).is_err());
+    }
     #[test]
     fn variant_to_weight_known_values() {
         assert_eq!(variant_to_weight("regular"), Some(400));
