@@ -743,7 +743,7 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
                 cp = subprocess.run(['wlr-randr', '--output', name, '--off'], text=True, capture_output=True, timeout=5, env=env)
                 details['steps'].append({'output': name, 'action': 'off', 'code': cp.returncode, 'stderr': (cp.stderr or '')[-500:]})
     except Exception as e:
-        details['steps'].append({'output_policy': 'skipped', 'error': str(e)})
+        details['steps'].append({'output_policy': 'skipped', 'error': _bound_hardware_message(str(e))})
         rc,out,err = _run_list(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'])
         details['steps'].append({'unit': 'screentra-cast-kiosk@0.service', 'restart_code': rc, 'message': _bound_hardware_message(out or err)})
 
@@ -1057,7 +1057,7 @@ def run_preview_loop(server: str, client_id: str, cache_dir: Path, display_index
                     env=_preview_wayland_env(),
                 )
             except Exception as exc:
-                _write_preview_state(cache_dir, display_index, {'status': 'error', 'connector': connector, 'message': f'capture failed: {exc}'})
+                _write_preview_state(cache_dir, display_index, {'status': 'error', 'connector': connector, 'message': f'capture failed: {_bound_hardware_message(str(exc))}'})
                 time.sleep(interval)
                 continue
             try:
@@ -1295,8 +1295,8 @@ def update_client(server: str, client_id: str, cache_dir: Path, payload: dict | 
         _write_update_request_marker(request_path, marker)
         return True, 'verified root client updater requested', details
     except Exception as e:
-        details['error'] = str(e)
-        return False, f'client update request failed: {e}', details
+        details['error'] = _bound_hardware_message(str(e))
+        return False, f'client update request failed: {_bound_hardware_message(str(e))}', details
 
 
 def execute(action: str, payload: dict | None, ctx: dict) -> dict:
