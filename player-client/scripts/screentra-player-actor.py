@@ -857,12 +857,20 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
             mode = cur or pref or {}
             width = int(mode.get('width') or 0)
             if idx < active:
-                cp = subprocess.run(['wlr-randr', '--output', name, '--on', '--pos', f'{x},0'], text=True, capture_output=True, timeout=5, env=env)
-                details['steps'].append({'output': name, 'action': 'on', 'x': x, 'code': cp.returncode, 'stderr': _bound_hardware_message(cp.stderr or '')})
+                rc, _, err = _run_list(
+                    ['wlr-randr', '--output', name, '--on', '--pos', f'{x},0'],
+                    timeout=5,
+                    env=env,
+                )
+                details['steps'].append({'output': name, 'action': 'on', 'x': x, 'code': rc, 'stderr': _bound_hardware_message(err)})
                 x += width
             elif o.get('enabled'):
-                cp = subprocess.run(['wlr-randr', '--output', name, '--off'], text=True, capture_output=True, timeout=5, env=env)
-                details['steps'].append({'output': name, 'action': 'off', 'code': cp.returncode, 'stderr': _bound_hardware_message(cp.stderr or '')})
+                rc, _, err = _run_list(
+                    ['wlr-randr', '--output', name, '--off'],
+                    timeout=5,
+                    env=env,
+                )
+                details['steps'].append({'output': name, 'action': 'off', 'code': rc, 'stderr': _bound_hardware_message(err)})
     except Exception as e:
         details['steps'].append({'output_policy': 'skipped', 'error': _bound_hardware_message(str(e))})
         rc,out,err = _run_list(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'])
