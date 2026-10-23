@@ -30,10 +30,13 @@ MAX_BACKUP_DOWNLOAD_BYTES = 256 * 1024 * 1024
 MAX_CACHED_ASSET_BYTES = 16 * 1024 * 1024
 MAX_INPUT_DEVICE_FILE_BYTES = 256 * 1024
 MAX_TOUCH_DEVICES = 128
+MAX_DISPLAY_OUTPUTS = 32
 MAX_TOUCH_NAME_BYTES = 128
 
 
-def _bound_text(value: str, maximum: int) -> str:
+def _bound_text(value: str | None, maximum: int) -> str:
+    if value is None:
+        return ''
     encoded = str(value).encode('utf-8', errors='replace')
     return encoded[:maximum].decode('utf-8', errors='ignore')
 
@@ -600,14 +603,14 @@ def _sysfs_outputs() -> list[dict]:
             status = d / 'status'
             if not status.exists():
                 continue
-            state = status.read_text().strip()
+            state = _read_real_file(status, 64).decode('utf-8', errors='replace').strip()
             if state != 'connected':
                 continue
             name = d.name.split('-', 1)[1]
             mode = None
             modes = d / 'modes'
             if modes.exists():
-                first = (modes.read_text().splitlines() or [''])[0]
+                first = (_read_real_file(modes, 4096).decode('utf-8', errors='replace').splitlines() or [''])[0]
                 if 'x' in first:
                     try:
                         w, h = first.split('x', 1)[0], first.split('x', 1)[1].split()[0]
@@ -615,6 +618,8 @@ def _sysfs_outputs() -> list[dict]:
                     except Exception:
                         mode = {'label': first, 'source': 'sysfs'}
             out.append({'name': name, 'description': name, 'enabled': None, 'connected': True, 'position': {}, 'current_mode': mode, 'source': 'sysfs'})
+            if len(out) >= MAX_DISPLAY_OUTPUTS:
+                break
     except Exception:
         return []
     return out
@@ -622,9 +627,11 @@ def _sysfs_outputs() -> list[dict]:
 def _wlr_outputs() -> list[dict]:
     env = {**os.environ, 'XDG_RUNTIME_DIR': os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'), 'WAYLAND_DISPLAY': os.environ.get('WAYLAND_DISPLAY', 'wayland-0')}
     try:
-        out = _sp.check_output(['wlr-randr', '--json'], text=True, stderr=_sp.DEVNULL, timeout=3, env=env)
-        data = json.loads(out)
-        return [{'name': o.get('name'), 'description': o.get('description'), 'enabled': bool(o.get('enabled')), 'position': o.get('position') or {}, 'current_mode': next((m for m in o.get('modes', []) if m.get('current')), None)} for o in data]
+        completed = _sp.run(['wlr-randr', '--json'], stdout=_sp.PIPE, stderr=_sp.DEVNULL, text=True, timeout=3, env=env, check=False)
+        data = json.loads(_bound_text(completed.stdout or '', MAX_JSON_FILE_BYTES))
+        if not isinstance(data, list):
+            raise ValueError('wlr-randr output is not a list')
+        return [{'name': _bound_text(o.get('name'), 128), 'description': _bound_text(o.get('description'), 256), 'enabled': bool(o.get('enabled')), 'position': o.get('position') or {}, 'current_mode': next((m for m in o.get('modes', []) if m.get('current')), None)} for o in data[:MAX_DISPLAY_OUTPUTS] if isinstance(o, dict)]
     except Exception:
         return _sysfs_outputs()
 
