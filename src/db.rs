@@ -2901,7 +2901,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         let mut stmt = conn
             .prepare(
                 "SELECT url, title, headlines_json, last_fetched_at, last_error, etag, last_modified
-                 FROM news_feeds ORDER BY url",
+                 FROM news_feeds ORDER BY url LIMIT 4096",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -5167,6 +5167,28 @@ mod tests {
 
         let clients = db.list_registered_clients().expect("list clients");
         assert_eq!(clients.len(), 10_000);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn list_news_feeds_is_bounded() {
+        let path = unique_temp_path("news-feed-list-bound");
+        let db = Database::open(&path).expect("open db");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            let tx = conn.unchecked_transaction().expect("begin transaction");
+            for index in 0..4_097 {
+                tx.execute(
+                    "INSERT INTO news_feeds (url) VALUES (?1)",
+                    rusqlite::params![format!("https://example.invalid/feed-{index:04}.xml")],
+                )
+                .expect("insert news feed");
+            }
+            tx.commit().expect("commit news feeds");
+        }
+
+        let feeds = db.list_news_feeds().expect("list news feeds");
+        assert_eq!(feeds.len(), 4_096);
         std::fs::remove_file(&path).ok();
     }
 }

@@ -2240,7 +2240,7 @@ impl PostgresStore {
     }
     pub async fn list_news_feeds(&self) -> Result<Vec<NewsFeed>, String> {
         self.client
-            .query("SELECT url, title, headlines_json, last_fetched_at, last_error, etag, last_modified FROM news_feeds ORDER BY url ASC", &[])
+            .query("SELECT url, title, headlines_json, last_fetched_at, last_error, etag, last_modified FROM news_feeds ORDER BY url ASC LIMIT 4096", &[])
             .await
             .map(|rows| rows.into_iter().map(|row| NewsFeed { url: row.get(0), title: row.get(1), headlines_json: row.get(2), last_fetched_at: row.get(3), last_error: row.get(4), etag: row.get(5), last_modified: row.get(6) }).collect())
             .map_err(|error| format!("list news feeds: {error}"))
