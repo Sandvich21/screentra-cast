@@ -1849,11 +1849,12 @@ const App = {
                     const sizeBytes = r.size_bytes || 0;
                     const sizeText = sizeBytes < 1024 * 1024 ? ((sizeBytes / 1024).toFixed(1) + ' KB') : ((sizeBytes / (1024 * 1024)).toFixed(2) + ' MB');
                     const shortHash = (r.sha256 || '').slice(0, 16);
+                    const curlTls = window.location.protocol === 'https:' ? " --proto '=https' --tlsv1.2" : '';
                     if (playerBundlePreview) playerBundlePreview.textContent = [
                         `Tarball: ${r.url}`,
                         `Bootstrap: ${r.bootstrap_url}`,
                         `Size: ${sizeText}  sha256: ${shortHash}…`,
-                        `Install command: curl --fail --show-error --location --proto '=https' --tlsv1.2 -o /tmp/ripley-player-client-bundle-install.sh https://11.1.1.53:3000${r.bootstrap_url}`,
+                        `Install command: curl --fail --show-error --location${curlTls} -o /tmp/ripley-player-client-bundle-install.sh ${window.location.origin}${r.bootstrap_url}`,
                     ].join('\n');
                     if (playerBundleStatus) playerBundleStatus.textContent = '✓ Bundle ready';
                     // Auto-log to installer changelog
@@ -1885,11 +1886,12 @@ const App = {
                     const sizeBytes = r.size_bytes || 0;
                     const sizeText = sizeBytes < 1024 * 1024 ? ((sizeBytes / 1024).toFixed(1) + ' KB') : ((sizeBytes / (1024 * 1024)).toFixed(2) + ' MB');
                     const shortHash = (r.sha256 || '').slice(0, 16);
+                    const curlTls = window.location.protocol === 'https:' ? " --proto '=https' --tlsv1.2" : '';
                     if (serverBundlePreview) serverBundlePreview.textContent = [
                         `Tarball: ${r.url}`,
                         `Bootstrap: ${r.bootstrap_url}`,
                         `Size: ${sizeText}  sha256: ${shortHash}…`,
-                        `Install command: curl --fail --show-error --location --proto '=https' --tlsv1.2 -o /tmp/ripley-signage-server-bundle-install.sh https://11.1.1.53:3000${r.bootstrap_url}`,
+                        `Install command: curl --fail --show-error --location${curlTls} -o /tmp/ripley-signage-server-bundle-install.sh ${window.location.origin}${r.bootstrap_url}`,
                         `Run: RIPLEY_SERVER_DIR=~/ripley-kiosk /tmp/ripley-signage-server-bundle-install.sh`,
                     ].join('\n');
                     if (serverBundleStatus) serverBundleStatus.textContent = '✓ Server bundle ready';

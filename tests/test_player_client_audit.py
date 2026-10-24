@@ -202,6 +202,11 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('.json()', source)
         self.assertNotIn('.text()', source)
 
+    def test_bundle_install_commands_use_current_origin(self):
+        source = (ROOT / 'static/js/app.js').read_text()
+        self.assertIn('window.location.origin', source)
+        self.assertNotIn('https://11.1.1.53:3000${r.bootstrap_url}', source)
+
     def test_player_slideshow_errors_do_not_use_raw_html(self):
         source = (ROOT / 'static/js/player.js').read_text()
         self.assertIn('error.textContent', source)
