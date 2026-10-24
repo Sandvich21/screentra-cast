@@ -14,6 +14,7 @@ use tokio_postgres::{Client, NoTls};
 use uuid::Uuid;
 
 const MAX_TABLE_ROWS: u32 = 10_000;
+const MAX_TABLE_COLUMNS: i64 = 1_024;
 
 const DATABASE_URL_ENV: &str = "SIGNAGE_DATABASE_URL";
 const INITIAL_SCHEMA: &str = include_str!("../migrations/postgres/0001_initial.sql");
@@ -1460,7 +1461,7 @@ impl PostgresStore {
     pub async fn query_table_rows(&self, table: &str, limit: u32, offset: u32) -> Result<TableQueryResult, String> {
         Self::validate_table_name(table)?;
         let limit = limit.min(MAX_TABLE_ROWS);
-        let columns = self.client.query("SELECT column_name,data_type,is_nullable,column_default FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position", &[&table]).await.map_err(|error| format!("table columns: {error}"))?.into_iter().map(|row| TableColumnRecord { name: row.get(0), col_type: row.get(1), notnull: row.get::<_, String>(2) == "NO", dflt_value: row.get(3), pk: false }).collect::<Vec<_>>();
+        let columns = self.client.query("SELECT column_name,data_type,is_nullable,column_default FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 ORDER BY ordinal_position LIMIT $2", &[&table, &MAX_TABLE_COLUMNS]).await.map_err(|error| format!("table columns: {error}"))?.into_iter().map(|row| TableColumnRecord { name: row.get(0), col_type: row.get(1), notnull: row.get::<_, String>(2) == "NO", dflt_value: row.get(3), pk: false }).collect::<Vec<_>>();
         let total = self.client.query_one(&format!("SELECT count(*) FROM public.\"{table}\""), &[]).await.map(|row| row.get(0)).map_err(|error| format!("table count: {error}"))?;
         let rows = self.client.query(&format!("SELECT row_to_json(t)::text FROM (SELECT * FROM public.\"{table}\" LIMIT {limit} OFFSET {offset}) t"), &[]).await.map_err(|error| format!("table rows: {error}"))?;
         let values = rows.into_iter().map(|row| { let object: serde_json::Value = serde_json::from_str(row.get::<_, String>(0).as_str()).unwrap_or(serde_json::Value::Null); columns.iter().map(|column| object.get(&column.name).cloned().unwrap_or(serde_json::Value::Null)).collect() }).collect();

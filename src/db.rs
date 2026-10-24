@@ -9,6 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::{sync::Mutex, time::Duration};
 
 const MAX_TABLE_ROWS: u32 = 10_000;
+const MAX_TABLE_COLUMNS: usize = 1_024;
 const MAX_INTERACTIVE_SUBMISSIONS: i64 = 10_000;
 const MAX_CLIENT_HEARTBEATS: i64 = 1_000;
 
@@ -1133,7 +1134,9 @@ impl Database {
         }
         let conn = self.conn()?;
         let mut col_stmt = conn
-            .prepare(&format!("PRAGMA table_info({table})"))
+            .prepare(&format!(
+                "SELECT * FROM pragma_table_info('{table}') LIMIT {MAX_TABLE_COLUMNS}"
+            ))
             .map_err(|e| e.to_string())?;
         let columns = col_stmt
             .query_map([], |row| {
@@ -1203,7 +1206,9 @@ impl Database {
         }
         let conn = self.conn()?;
         let mut col_stmt = conn
-            .prepare(&format!("PRAGMA table_info({table})"))
+            .prepare(&format!(
+                "SELECT * FROM pragma_table_info('{table}') LIMIT {MAX_TABLE_COLUMNS}"
+            ))
             .map_err(|e| e.to_string())?;
         let columns = col_stmt
             .query_map([], |row| row.get(1))
@@ -4911,6 +4916,28 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
             .expect("count users");
         assert_eq!(count, 1);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn table_metadata_column_listing_is_bounded() {
+        let path = unique_temp_path("table-column-bound");
+        let db = Database::open(&path).expect("open db");
+        {
+            let conn = db.conn.lock().unwrap();
+            let columns = (0..1_025)
+                .map(|index| format!("c{index} INTEGER"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            conn.execute_batch(&format!("CREATE TABLE wide_table ({columns});"))
+                .expect("create wide table");
+        }
+        let result = db
+            .query_table_rows("wide_table", 1, 0)
+            .expect("query wide table");
+        assert_eq!(result.columns.len(), 1_024);
+        let export = db.export_table_rows("wide_table").expect("export wide table");
+        assert_eq!(export.columns.len(), 1_024);
         std::fs::remove_file(&path).ok();
     }
 
