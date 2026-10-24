@@ -1045,8 +1045,8 @@ mod csrf_tests {
     #[test]
     fn csrf_allows_same_origin() {
         let m = map_with(&[
-            ("host", "11.1.1.53:3000"),
-            ("origin", "http://11.1.1.53:3000"),
+            ("host", "screentra-cast.home.arpa:3000"),
+            ("origin", "http://screentra-cast.home.arpa:3000"),
         ]);
         assert!(csrf_check_login(&m).is_ok());
     }
@@ -1054,7 +1054,7 @@ mod csrf_tests {
     #[test]
     fn csrf_rejects_cross_origin() {
         let m = map_with(&[
-            ("host", "11.1.1.53:3000"),
+            ("host", "screentra-cast.home.arpa:3000"),
             ("origin", "http://evil.example.com"),
         ]);
         assert!(matches!(
@@ -1066,7 +1066,7 @@ mod csrf_tests {
     #[test]
     fn csrf_rejects_cross_referer() {
         let m = map_with(&[
-            ("host", "11.1.1.53:3000"),
+            ("host", "screentra-cast.home.arpa:3000"),
             ("referer", "http://evil.example.com/login"),
         ]);
         assert!(matches!(
@@ -1077,15 +1077,15 @@ mod csrf_tests {
 
     #[test]
     fn csrf_allows_no_origin_or_referer() {
-        let m = map_with(&[("host", "11.1.1.53:3000")]);
+        let m = map_with(&[("host", "screentra-cast.home.arpa:3000")]);
         assert!(csrf_check_login(&m).is_ok());
     }
 
     #[test]
     fn csrf_allows_https_matching_host() {
         let m = map_with(&[
-            ("host", "11.1.1.53:3000"),
-            ("origin", "https://11.1.1.53:3000"),
+            ("host", "screentra-cast.home.arpa:3000"),
+            ("origin", "https://screentra-cast.home.arpa:3000"),
         ]);
         assert!(csrf_check_login(&m).is_ok());
     }
