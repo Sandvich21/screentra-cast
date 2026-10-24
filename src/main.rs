@@ -50,6 +50,15 @@ fn open_sqlite_database(path: &str) -> Result<Database, String> {
     Database::open(path).map_err(|error| format!("failed to open database: {error}"))
 }
 
+fn validate_tls_env_pair(cert: Option<&str>, key: Option<&str>) -> Result<(), String> {
+    let cert_set = cert.is_some();
+    let key_set = key.is_some();
+    if cert_set != key_set {
+        return Err("SIGNAGE_TLS_CERT and SIGNAGE_TLS_KEY must be set together".to_string());
+    }
+    Ok(())
+}
+
 fn read_bounded_hostname() -> Result<String, std::io::Error> {
     let file = std::fs::File::open("/etc/hostname")?;
     let mut bytes = Vec::new();
@@ -728,6 +737,10 @@ async fn main() {
     // `target/release/` or a system install under /usr/local/bin.
     let tls_cert_path = std::env::var("SIGNAGE_TLS_CERT").ok();
     let tls_key_path = std::env::var("SIGNAGE_TLS_KEY").ok();
+    validate_tls_env_pair(tls_cert_path.as_deref(), tls_key_path.as_deref()).unwrap_or_else(|error| {
+        eprintln!("FATAL: {error}");
+        std::process::exit(1);
+    });
 
     let (default_cert, default_key) = default_tls_paths();
     let (tls_cert_path, tls_key_path) = match (tls_cert_path, tls_key_path) {
@@ -743,7 +756,10 @@ async fn main() {
             }
             _ => (None, None),
         },
-        _ => panic!("SIGNAGE_TLS_CERT and SIGNAGE_TLS_KEY must be set together"),
+        _ => {
+            eprintln!("FATAL: SIGNAGE_TLS_CERT and SIGNAGE_TLS_KEY must be set together");
+            std::process::exit(1);
+        }
     };
 
     let discovery_name = std::env::var("SCREENTRA_CAST_SERVER_NAME")
@@ -1018,6 +1034,15 @@ mod startup_tests {
     #[test]
     fn invalid_sqlite_database_returns_an_error_without_panicking() {
         let result = std::panic::catch_unwind(|| super::open_sqlite_database("/dev/null"));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn mismatched_tls_environment_returns_an_error_without_panicking() {
+        let result = std::panic::catch_unwind(|| {
+            super::validate_tls_env_pair(Some("cert.pem"), None)
+        });
         assert!(result.is_ok());
         assert!(result.unwrap().is_err());
     }
