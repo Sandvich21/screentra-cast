@@ -389,7 +389,11 @@ function renderCalendar() {
       })
       .then(function() { doRender(); })
       .catch(function(e) {
-        el.innerHTML = '<div style="opacity:0.5;text-align:center;padding:3vh;font-size:1.8vh;">Failed to load calendar: ' + e.message + '</div>';
+        el.textContent = '';
+        var error = document.createElement('div');
+        error.style.cssText = 'opacity:0.5;text-align:center;padding:3vh;font-size:1.8vh;';
+        error.textContent = 'Failed to load calendar: ' + (e && e.message ? e.message : 'unknown error');
+        el.appendChild(error);
         // Fall back to sample events so the widget still shows something
         events = getSampleEvents();
         doRender();

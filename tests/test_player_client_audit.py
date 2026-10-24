@@ -190,6 +190,11 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('.json()', source)
         self.assertNotIn('.text()', source)
 
+    def test_calendar_error_messages_do_not_use_raw_html(self):
+        source = (ROOT / 'static/js/calendar.js').read_text()
+        self.assertIn('textContent', source)
+        self.assertNotIn("' + e.message + '</div>'", source)
+
     def test_player_browser_reads_are_bounded(self):
         source = (ROOT / 'static/js/player.js').read_text()
         self.assertIn('readPlayerJsonBounded', source)
