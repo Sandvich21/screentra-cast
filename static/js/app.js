@@ -1,4 +1,26 @@
 // App navigation and page logic
+const MAX_APP_RESPONSE_BYTES = 4 * 1024 * 1024;
+async function readAppTextBounded(response, maximumBytes = MAX_APP_RESPONSE_BYTES) {
+    const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+    if (!reader) throw new Error('response body is unavailable');
+    const decoder = new TextDecoder(); let total = 0, text = '';
+    try {
+        while (true) {
+            const part = await reader.read();
+            if (part.done) { text += decoder.decode(); return text; }
+            const value = part.value || new Uint8Array();
+            total += value.byteLength;
+            if (total > maximumBytes) {
+                try { await reader.cancel(); } catch (_) {}
+                throw new Error('response exceeds its size limit');
+            }
+            text += decoder.decode(value, { stream: true });
+        }
+    } finally { reader.releaseLock(); }
+}
+async function readAppJsonBounded(response, maximumBytes = MAX_APP_RESPONSE_BYTES) {
+    return JSON.parse(await readAppTextBounded(response, maximumBytes));
+}
 
 (function bootstrapAuth(){
     let pendingReauth = null;
@@ -719,7 +741,7 @@ const App = {
         btn.textContent = 'Clearing cache...';
         try {
             const res = await fetch('/api/clear-cache', { method: 'POST' });
-            if (!res.ok) throw new Error(await res.text());
+            if (!res.ok) throw new Error(await readAppTextBounded(res, 64 * 1024));
             btn.textContent = '✓ Cache cleared! TVs reloading...';
             // The Chromium browser on each display is restarting; TVs will reload automatically
         } catch (e) {
@@ -792,7 +814,7 @@ const App = {
 
                 try {
                     const res = await fetch('/api/backups', { method: 'POST' });
-                    if (!res.ok) throw new Error(await res.text());
+                    if (!res.ok) throw new Error(await readAppTextBounded(res, 64 * 1024));
                     
                     progressFill.style.width = '100%';
                     setTimeout(() => {
@@ -1262,7 +1284,7 @@ const App = {
         
         try {
             const res = await fetch(`/api/backups/${id}`, { method: 'PUT' });
-            if (!res.ok) throw new Error(await res.text());
+            if (!res.ok) throw new Error(await readAppTextBounded(res, 64 * 1024));
             alert('Restore successful! The system will now refresh.');
             window.location.reload();
         } catch (e) {
@@ -1290,7 +1312,7 @@ const App = {
                 body: formData
             });
 
-            if (!res.ok) throw new Error(await res.text());
+            if (!res.ok) throw new Error(await readAppTextBounded(res, 64 * 1024));
 
             btn.textContent = '✅ Uploaded!';
             alert('Backup uploaded and restored successfully! The system will now refresh.');
@@ -1306,7 +1328,7 @@ const App = {
 
         try {
             const res = await fetch(`/api/backups/${id}`, { method: 'DELETE' });
-            if (!res.ok) throw new Error(await res.text());
+            if (!res.ok) throw new Error(await readAppTextBounded(res, 64 * 1024));
 
             await this.loadBackups();
         } catch (e) {
@@ -2247,7 +2269,7 @@ const App = {
         try {
             const res = await fetch(healthUrl, { method: 'GET' });
             if (res.ok) {
-                const body = await res.text();
+                const body = await readAppTextBounded(res, 64 * 1024);
                 note.style.color = '#4ade80';
                 note.textContent = `✓ ${res.status} — ${body.slice(0, 120)}${body.length > 120 ? '…' : ''}`;
             } else {
@@ -3585,8 +3607,8 @@ ${targetSection}
                 const fileForm = new FormData();
                 fileForm.append('file', file);
                 const fileRes = await fetch('/api/files/icons', { method: 'PUT', body: fileForm });
-                if (!fileRes.ok) { const txt = await fileRes.text(); throw new Error(txt || 'Upload failed'); }
-                const fileEntry = await fileRes.json();
+                if (!fileRes.ok) { const txt = await readAppTextBounded(fileRes, 64 * 1024); throw new Error(txt || 'Upload failed'); }
+                const fileEntry = await readAppJsonBounded(fileRes);
                 // Step 2: register as a weather_icon asset on the preset
                 const isNightUpload = String(code).endsWith('_night');
                 const uploadKind = isNightUpload ? 'weather_icon_night' : 'weather_icon';
@@ -3596,8 +3618,8 @@ ${targetSection}
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ kind: uploadKind, key: uploadKey, url: fileEntry.url }),
                 });
-                if (!assetRes.ok) { const txt = await assetRes.text(); throw new Error(txt || 'Asset registration failed'); }
-                const uploaded = await assetRes.json();
+                if (!assetRes.ok) { const txt = await readAppTextBounded(assetRes, 64 * 1024); throw new Error(txt || 'Asset registration failed'); }
+                const uploaded = await readAppJsonBounded(assetRes);
                 // Add or replace the weather_icon asset
                 // Add or replace both day and night variants
                 this.currentTemplateAssets = (this.currentTemplateAssets || []).filter(a => !(a.kind === uploadKind && a.key === uploadKey));
@@ -5051,7 +5073,7 @@ document.addEventListener('DOMContentLoaded', () => App.init());
             const r = await fetch('/api/clients', { cache: 'no-store' });
             report.api.clients = { status: r.status, ok: r.ok };
             if (!r.ok) return { ok: false, detail: `/api/clients HTTP ${r.status}` };
-            const arr = await r.json();
+            const arr = await readAppJsonBounded(r);
             report.clients.known = Array.isArray(arr) ? arr.length : 0;
             for (const c of (arr || [])) {
               const s = (c && c.status || '').toLowerCase();
@@ -5151,7 +5173,7 @@ document.addEventListener('DOMContentLoaded', () => App.init());
   API.getConnectedClients = async function(search=false) {
     const res = await fetch(search ? '/api/clients/search' : '/api/clients');
     if (!res.ok) throw new Error('Failed to fetch connected clients');
-    return res.json();
+    return readAppJsonBounded(res);
   };
 
   App.loadConnectedClientsPage = async function(){
@@ -5326,7 +5348,7 @@ document.addEventListener('DOMContentLoaded', () => App.init());
         if (!client || !await App.confirm(`Delete virtual client "${client.name || client.id}"?`, 'This removes the virtual client and its display.')) return;
         try {
           const response = await fetch(`/api/clients/${encodeURIComponent(client.id)}/virtual`, { method: 'DELETE' });
-          const body = await response.json().catch(() => ({}));
+          const body = await readAppJsonBounded(response).catch(() => ({}));
           if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
           await App.loadConnectedClients(false);
         } catch (error) {
@@ -5362,7 +5384,7 @@ document.addEventListener('DOMContentLoaded', () => App.init());
         btn.disabled = true;
         try {
           const response = await fetch(`/api/clients/${encodeURIComponent(clientId)}`, { method: 'DELETE' });
-          const body = await response.json().catch(() => ({}));
+          const body = await readAppJsonBounded(response).catch(() => ({}));
           if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
           await App.loadConnectedClients(false);
         } catch (error) {
@@ -5491,12 +5513,12 @@ document.addEventListener('DOMContentLoaded', () => App.init());
       const res = await fetch(`/api/clients/${encodeURIComponent(clientId)}/assignment`, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({layout_id: layoutId || null})});
       const dur = Date.now() - t0;
       if (!res.ok) {
-        const body = await res.text();
+        const body = await readAppTextBounded(res, 64 * 1024);
         App.clientDiagnostics.log('assignment:set:error', 'error', `HTTP ${res.status} ${body}`, { clientId, durationMs: dur });
         throw new Error(body || ('HTTP ' + res.status));
       }
       App.clientDiagnostics.log('assignment:set:ok', 'info', `HTTP ${res.status}`, { clientId, durationMs: dur });
-      return res.json();
+      return readAppJsonBounded(res);
     } catch (e) {
       App.clientDiagnostics.log('assignment:set:error', 'error', e && e.message ? e.message : String(e), { clientId, durationMs: Date.now() - t0 });
       throw e;
@@ -5540,12 +5562,12 @@ const btn = document.createElement('button');
       const res = await fetch('/api/clients/assign-bulk', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({client_ids: clientIds, layout_id: layoutId || null})});
       const dur = Date.now() - t0;
       if (!res.ok) {
-        const body = await res.text();
+        const body = await readAppTextBounded(res, 64 * 1024);
         App.clientDiagnostics.log('assignment:bulk:error', 'error', `HTTP ${res.status} ${body}`, { durationMs: dur });
         throw new Error(body || ('HTTP ' + res.status));
       }
       App.clientDiagnostics.log('assignment:bulk:ok', 'info', `HTTP ${res.status}`, { durationMs: dur });
-      return res.json();
+      return readAppJsonBounded(res);
     } catch (e) {
       App.clientDiagnostics.log('assignment:bulk:error', 'error', e && e.message ? e.message : String(e), { durationMs: Date.now() - t0 });
       throw e;
@@ -5558,12 +5580,12 @@ const btn = document.createElement('button');
       const res = await fetch(`/api/clients/${encodeURIComponent(clientId)}/nudge`, {method:'POST'});
       const dur = Date.now() - t0;
       if (!res.ok) {
-        const body = await res.text();
+        const body = await readAppTextBounded(res, 64 * 1024);
         App.clientDiagnostics.log('nudge:error', 'error', `HTTP ${res.status} ${body}`, { clientId, durationMs: dur });
         throw new Error(body || ('HTTP ' + res.status));
       }
       App.clientDiagnostics.log('nudge:ok', 'info', `HTTP ${res.status}`, { clientId, durationMs: dur });
-      return res.json();
+      return readAppJsonBounded(res);
     } catch (e) {
       App.clientDiagnostics.log('nudge:error', 'error', e && e.message ? e.message : String(e), { clientId, durationMs: Date.now() - t0 });
       throw e;
@@ -5683,8 +5705,8 @@ const btn = document.createElement('button');
 
   API.deleteClient = async function(id){
     const res = await fetch(`/api/clients/${encodeURIComponent(id)}`, {method:'DELETE'});
-    if (!res.ok) throw new Error(await res.text());
-    return res.json();
+    if (!res.ok) throw new Error(await readAppTextBounded(res, 64 * 1024));
+    return readAppJsonBounded(res);
   };
 
   function ensureOverlay(){
@@ -6180,7 +6202,7 @@ ${_cmds.oneLiner}`;
           if (!await App.confirm(`Delete virtual client "${client.name || client.id}"?`, 'This removes the virtual client and its display.')) return;
           try {
             const r = await fetch(`/api/clients/${encodeURIComponent(client.id)}/virtual`, { method: 'DELETE' }).then(async response => {
-              const body = await response.json().catch(() => ({}));
+              const body = await readAppJsonBounded(response).catch(() => ({}));
               if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
               return body;
             });
@@ -6376,8 +6398,8 @@ ${_cmds.oneLiner}`;
 
   API.getClientHistory = async function(id, limit=50){
     const res = await fetch(`/api/clients/${encodeURIComponent(id)}/history?limit=${limit}`);
-    if (!res.ok) throw new Error(await res.text());
-    return res.json();
+    if (!res.ok) throw new Error(await readAppTextBounded(res, 64 * 1024));
+    return readAppJsonBounded(res);
   };
 
   function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -6517,34 +6539,34 @@ ${_cmds.oneLiner}`;
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({max_displays: Number(maxDisplays)}),
     });
-    if (!res.ok) throw new Error(await res.text());
-    return res.json();
+    if (!res.ok) throw new Error(await readAppTextBounded(res, 64 * 1024));
+    return readAppJsonBounded(res);
   };
   API.setClientTouchBinding = async function(id, payload){
     const res = await fetch(`/api/clients/${encodeURIComponent(id)}/touch-binding`, {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(payload || {}),
     });
-    if (!res.ok) throw new Error(await res.text());
-    return res.json();
+    if (!res.ok) throw new Error(await readAppTextBounded(res, 64 * 1024));
+    return readAppJsonBounded(res);
   };
   API.sendBulkCommand = async function(clientIds, action){
     const res = await fetch('/api/clients/command-bulk', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({client_ids: clientIds, action, requested_by:'web-ui'}),
     });
-    if (!res.ok) throw new Error(await res.text());
-    return res.json();
+    if (!res.ok) throw new Error(await readAppTextBounded(res, 64 * 1024));
+    return readAppJsonBounded(res);
   };
   API.getClientCommand = async function(id){
     const res = await fetch(`/api/clients/${encodeURIComponent(id)}/command`, {method:'GET'});
-    if (!res.ok) throw new Error(await res.text());
-    return res.json();
+    if (!res.ok) throw new Error(await readAppTextBounded(res, 64 * 1024));
+    return readAppJsonBounded(res);
   };
   API.clearClientCommand = async function(id){
     const res = await fetch(`/api/clients/${encodeURIComponent(id)}/command`, {method:'DELETE'});
-    if (!res.ok) throw new Error(await res.text());
-    return res.json();
+    if (!res.ok) throw new Error(await readAppTextBounded(res, 64 * 1024));
+    return readAppJsonBounded(res);
   };
 
   const ACTIONS = [
@@ -6818,39 +6840,39 @@ ${_cmds.oneLiner}`;
       return App.state.layouts;
     }
     const r = await fetch('/api/layouts');
-    if (!r.ok) throw new Error(await r.text());
-    App.state.layouts = await r.json();
+    if (!r.ok) throw new Error(await readAppTextBounded(r, 64 * 1024));
+    App.state.layouts = await readAppJsonBounded(r);
     return App.state.layouts;
   }
 
   API.getClientDisplays = async function(id){
     const r = await fetch(`/api/clients/${encodeURIComponent(id)}/displays`, {method:'GET'});
-    if (!r.ok) throw new Error(await r.text());
-    return r.json();
+    if (!r.ok) throw new Error(await readAppTextBounded(r, 64 * 1024));
+    return readAppJsonBounded(r);
   };
   API.bulkAssignDisplays = async function(id, layoutId){
     const r = await fetch(`/api/clients/${encodeURIComponent(id)}/displays/bulk-assign`, {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({layout_id: layoutId || null}),
     });
-    if (!r.ok) throw new Error(await r.text());
-    return r.json();
+    if (!r.ok) throw new Error(await readAppTextBounded(r, 64 * 1024));
+    return readAppJsonBounded(r);
   };
   API.assignDisplayLayout = async function(id, idx, layoutId){
     const r = await fetch(`/api/clients/${encodeURIComponent(id)}/displays/${idx}/layout`, {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({layout_id: layoutId || null}),
     });
-    if (!r.ok) throw new Error(await r.text());
-    return r.json();
+    if (!r.ok) throw new Error(await readAppTextBounded(r, 64 * 1024));
+    return readAppJsonBounded(r);
   };
   API.sendDisplayCommand = async function(id, idx, action, payload={}){
     const r = await fetch(`/api/clients/${encodeURIComponent(id)}/displays/${idx}/command`, {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({action, payload:{display_index:idx, ...payload}, requested_by:'web-ui'}),
     });
-    if (!r.ok) throw new Error(await r.text());
-    return r.json();
+    if (!r.ok) throw new Error(await readAppTextBounded(r, 64 * 1024));
+    return readAppJsonBounded(r);
   };
 
   function layoutOptionsHtml(selectedId, includeClear=true){
@@ -6899,8 +6921,8 @@ ${_cmds.oneLiner}`;
   if (!API.getClientDisplays) {
     API.getClientDisplays = async function(id){
       const r = await fetch(`/api/clients/${encodeURIComponent(id)}/displays`, {method:'GET'});
-      if (!r.ok) throw new Error(await r.text());
-      return r.json();
+      if (!r.ok) throw new Error(await readAppTextBounded(r, 64 * 1024));
+      return readAppJsonBounded(r);
     };
   }
   if (!API.sendDisplayCommand) {
@@ -6909,8 +6931,8 @@ ${_cmds.oneLiner}`;
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({action, payload:{display_index:idx, ...payload}, requested_by:'web-ui'}),
       });
-      if (!r.ok) throw new Error(await r.text());
-      return r.json();
+      if (!r.ok) throw new Error(await readAppTextBounded(r, 64 * 1024));
+      return readAppJsonBounded(r);
     };
   }
   if (!API.assignDisplayLayout) {
@@ -6919,8 +6941,8 @@ ${_cmds.oneLiner}`;
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify({layout_id: layoutId || null}),
       });
-      if (!r.ok) throw new Error(await r.text());
-      return r.json();
+      if (!r.ok) throw new Error(await readAppTextBounded(r, 64 * 1024));
+      return readAppJsonBounded(r);
     };
   }
   function modeText(d){

@@ -138,6 +138,13 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('.json()', source)
         self.assertNotIn('.text()', source)
 
+    def test_app_browser_reads_are_bounded(self):
+        source = (ROOT / 'static/js/app.js').read_text()
+        self.assertIn('readAppJsonBounded', source)
+        self.assertIn('readAppTextBounded', source)
+        self.assertIn('reader.cancel()', source)
+        self.assertNotRegex(source, r'\b(?:response|res|r|fileRes|assetRes)\.(?:json|text)\(\)')
+
     def test_calendar_browser_reads_are_bounded(self):
         source = (ROOT / 'static/js/calendar.js').read_text()
         self.assertIn('readCalendarTextBounded', source)
