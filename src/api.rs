@@ -5000,11 +5000,20 @@ fn validate_schedule_entry(entry: &ScheduleEntry) -> Result<(), (StatusCode, Str
     Ok(())
 }
 
+const MAX_LAYOUT_SET_ITEMS: usize = 256;
+
+fn validate_layout_set_item_count(count: usize) -> Result<(), StatusCode> {
+    if count > MAX_LAYOUT_SET_ITEMS {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
 fn validate_layout_set_values(set: &LayoutSetWithItems) -> Result<(), StatusCode> {
     if set.id.trim().is_empty() || set.id.len() > 128 || set.name.trim().is_empty() || set.name.len() > 256 {
         return Err(StatusCode::BAD_REQUEST);
     }
-    if set.dwell_secs == 0 || set.dwell_secs > 86_400 || set.items.len() > 256 {
+    if set.dwell_secs == 0 || set.dwell_secs > 86_400 || set.items.len() > MAX_LAYOUT_SET_ITEMS {
         return Err(StatusCode::BAD_REQUEST);
     }
     for item in &set.items {
@@ -5129,6 +5138,7 @@ async fn create_layout_set(
     State(repository): State<ClientRepository>,
     Json(payload): Json<CreateLayoutSet>,
 ) -> Result<Json<LayoutSetWithItems>, StatusCode> {
+    validate_layout_set_item_count(payload.items.len())?;
     let now = chrono::Utc::now().to_rfc3339();
     let items: Vec<LayoutSetEntry> = payload
         .items
@@ -5287,6 +5297,7 @@ async fn replace_layout_set_entries(
     if layout_set_id.trim().is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
+    validate_layout_set_item_count(entries.len())?;
     let entries: Vec<LayoutSetEntry> = entries
         .into_iter()
         .map(|e| {
@@ -10469,6 +10480,15 @@ fn reverse_name(ip: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layout_set_item_lists_are_bounded() {
+        assert_eq!(validate_layout_set_item_count(MAX_LAYOUT_SET_ITEMS).is_ok(), true);
+        assert_eq!(
+            validate_layout_set_item_count(MAX_LAYOUT_SET_ITEMS + 1),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
 
     #[test]
     fn mutation_id_lists_are_bounded() {
