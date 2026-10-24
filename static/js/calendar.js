@@ -4,6 +4,25 @@ var requestedFont = p.get('font_family');
 if (requestedFont && requestedFont.length <= 200 && !/[<>]|javascript:/i.test(requestedFont)) document.documentElement.style.fontFamily = requestedFont;
 var ICS_URL = p.get('ics') || '';
 var TIME_FORMAT = p.get('time_format') === '24' ? '24' : '12';
+var MAX_CALENDAR_RESPONSE_BYTES = 4 * 1024 * 1024;
+function readCalendarTextBounded(response, maximumBytes) {
+  var reader = response.body && response.body.getReader ? response.body.getReader() : null;
+  if (!reader) return Promise.reject(new Error('response body is unavailable'));
+  var decoder = new TextDecoder(), total = 0, text = '';
+  return (async function() {
+    try {
+      while (true) {
+        var part = await reader.read();
+        if (part.done) { text += decoder.decode(); return text; }
+        var value = part.value || new Uint8Array();
+        total += value.byteLength;
+        if (total > maximumBytes) { try { await reader.cancel(); } catch (_) {} throw new Error('response exceeds its size limit'); }
+        text += decoder.decode(value, { stream: true });
+      }
+    } finally { reader.releaseLock(); }
+  })();
+}
+function readCalendarJsonBounded(response) { return readCalendarTextBounded(response, MAX_CALENDAR_RESPONSE_BYTES).then(function(text){ return JSON.parse(text); }); }
 
 // Built-in sample ICS data for previews and unconfigured widgets
 var SAMPLE_ICS = `BEGIN:VCALENDAR
@@ -117,7 +136,7 @@ function getWeatherIcon(dateStr) {
 function fetchWeatherData() {
   if (!INCLUDE_WEATHER || !LAT || !LON) return Promise.resolve();
   var url = '/api/weather/forecast?lat=' + encodeURIComponent(LAT) + '&lon=' + encodeURIComponent(LON);
-  return fetch(url).then(function(r){return r.json();}).then(function(d){weatherData=d;}).catch(function(){});
+  return fetch(url).then(function(r){return readCalendarJsonBounded(r);}).then(function(d){weatherData=d;}).catch(function(){});
 }
 
 function parseICS(text) {
@@ -363,7 +382,7 @@ function renderCalendar() {
   if (now - lastFetch > 60000) {
     lastFetch = now;
     fetch('/api/ics-proxy?url=' + encodeURIComponent(ICS_URL))
-      .then(function(r) { return r.text(); })
+      .then(function(r) { return readCalendarTextBounded(r, MAX_CALENDAR_RESPONSE_BYTES); })
       .then(function(text) {
         events = parseICS(text);
         return fetchWeatherData();
