@@ -668,8 +668,18 @@ pub fn sha256_of_file(path: &Path) -> Result<String, String> {
 /// alongside their contents so a signed manifest protects both filenames and
 /// frontend bytes, not only the server binary.
 pub fn sha256_of_directory(path: &Path) -> Result<String, String> {
+    const MAX_DIRECTORY_FILES: usize = 100_000;
+    const MAX_DIRECTORY_BYTES: u64 = 512 * 1024 * 1024;
     let mut files = Vec::new();
-    collect_directory_files(path, path, &mut files)?;
+    let mut total_bytes = 0u64;
+    collect_directory_files(
+        path,
+        path,
+        &mut files,
+        &mut total_bytes,
+        MAX_DIRECTORY_FILES,
+        MAX_DIRECTORY_BYTES,
+    )?;
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut hasher = Sha256::new();
@@ -697,15 +707,39 @@ fn collect_directory_files(
     root: &Path,
     current: &Path,
     files: &mut Vec<(String, PathBuf)>,
+    total_bytes: &mut u64,
+    maximum_files: usize,
+    maximum_bytes: u64,
 ) -> Result<(), String> {
     for entry in fs::read_dir(current)
         .map_err(|e| format!("read directory {}: {}", current.display(), e))?
     {
         let entry = entry.map_err(|e| format!("read directory entry: {e}"))?;
         let absolute = entry.path();
-        if absolute.is_dir() {
-            collect_directory_files(root, &absolute, files)?;
-        } else {
+        let metadata = fs::symlink_metadata(&absolute)
+            .map_err(|e| format!("stat directory entry {}: {}", absolute.display(), e))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!("directory contains symlink: {}", absolute.display()));
+        }
+        if metadata.is_dir() {
+            collect_directory_files(
+                root,
+                &absolute,
+                files,
+                total_bytes,
+                maximum_files,
+                maximum_bytes,
+            )?;
+        } else if metadata.is_file() {
+            if files.len() >= maximum_files {
+                return Err("directory contains too many files".to_string());
+            }
+            *total_bytes = total_bytes
+                .checked_add(metadata.len())
+                .ok_or_else(|| "directory size exceeds its bound".to_string())?;
+            if *total_bytes > maximum_bytes {
+                return Err("directory contents exceed their size bound".to_string());
+            }
             let relative = absolute
                 .strip_prefix(root)
                 .map_err(|e| format!("relative static path: {e}"))?
