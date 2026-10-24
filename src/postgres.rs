@@ -2050,7 +2050,7 @@ impl PostgresStore {
     }
 
     pub async fn list_layouts(&self) -> Result<Vec<Layout>, String> {
-        let rows = self.client.query("SELECT id, name, interactive, page_type, timing_mode, duration, shuffle, canvas_orientation, folder_id, items, created_at, updated_at FROM layouts ORDER BY updated_at DESC", &[]).await.map_err(|error| format!("list layouts: {error}"))?;
+        let rows = self.client.query("SELECT id, name, interactive, page_type, timing_mode, duration, shuffle, canvas_orientation, folder_id, items, created_at, updated_at FROM layouts ORDER BY updated_at DESC LIMIT 10000", &[]).await.map_err(|error| format!("list layouts: {error}"))?;
         let mut layouts = Vec::with_capacity(rows.len());
         for row in rows {
             let mut layout = Self::layout_from_row(&row)?;

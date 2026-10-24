@@ -2037,7 +2037,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
     pub fn list_layouts(&self) -> Result<Vec<Layout>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, interactive, page_type, timing_mode, duration, shuffle, canvas_orientation, folder_id, items, created_at, updated_at FROM layouts ORDER BY updated_at DESC")
+            .prepare("SELECT id, name, interactive, page_type, timing_mode, duration, shuffle, canvas_orientation, folder_id, items, created_at, updated_at FROM layouts ORDER BY updated_at DESC LIMIT 10000")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
@@ -5029,6 +5029,29 @@ mod tests {
             .expect("different action should have an independent burst");
         db.queue_client_command("client-2", "restart_client", None, &now, Some("test"))
             .expect("different client should have an independent burst");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn list_layouts_is_bounded() {
+        let path = unique_temp_path("layout-list-bound");
+        let db = Database::open(&path).expect("open db");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            let tx = conn.unchecked_transaction().expect("begin transaction");
+            for index in 0..10_001 {
+                let id = format!("layout-{index:05}");
+                tx.execute(
+                    "INSERT INTO layouts (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+                    rusqlite::params![id, "bounded layout", "2026-10-01T00:00:00Z"],
+                )
+                .expect("insert layout");
+            }
+            tx.commit().expect("commit layouts");
+        }
+
+        let layouts = db.list_layouts().expect("list layouts");
+        assert_eq!(layouts.len(), 10_000);
         std::fs::remove_file(&path).ok();
     }
 }
