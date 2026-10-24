@@ -2836,6 +2836,7 @@ async fn upload_addon_package_with_mode(
     mut multipart: Multipart,
     update: bool,
 ) -> Result<(StatusCode, AxumJson<AddonRecord>), (StatusCode, String)> {
+    const MAX_ADDON_PACKAGE_UPLOAD_BYTES: usize = 8 * 1024 * 1024;
     let package_path = std::env::temp_dir().join(format!("screentra-addon-{}.tar.gz", Uuid::new_v4()));
     let mut received = false;
     let mut file = fs::File::create(&package_path).map_err(|_| internal_server_error())?;
@@ -2845,15 +2846,28 @@ async fn upload_addon_package_with_mode(
         .map_err(|_| (StatusCode::BAD_REQUEST, "Unable to read addon package upload".to_string()))?
     {
         if received {
-            continue;
+            let _ = fs::remove_file(&package_path);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Addon package upload must contain exactly one file".to_string(),
+            ));
         }
         received = true;
         let mut field = field;
+        let mut total = 0usize;
         while let Some(chunk) = field
             .chunk()
             .await
             .map_err(|_| (StatusCode::BAD_REQUEST, "Unable to read addon package upload".to_string()))?
         {
+            if total.saturating_add(chunk.len()) > MAX_ADDON_PACKAGE_UPLOAD_BYTES {
+                let _ = fs::remove_file(&package_path);
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Addon package upload is too large".to_string(),
+                ));
+            }
+            total = total.saturating_add(chunk.len());
             file.write_all(&chunk).map_err(|_| internal_server_error())?;
         }
     }
@@ -11812,6 +11826,23 @@ mod signed_client_package_http_tests {
         (status, String::from_utf8(body.to_vec()).unwrap())
     }
 
+    #[tokio::test]
+    async fn addon_package_upload_rejects_oversized_payload() {
+        let app = rollback_app("admin");
+        let oversized = vec![0u8; 8 * 1024 * 1024 + 1];
+        let response = app
+            .oneshot(multipart_request("POST", &oversized))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert!(
+            String::from_utf8(body.to_vec()).unwrap().contains("too large"),
+            "unexpected response body: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
     fn rollback_request(id: &str) -> Request<Body> {
         Request::builder()
             .method("POST")
@@ -11847,6 +11878,7 @@ mod signed_client_package_http_tests {
                 username: "test-user".to_string(),
                 role: role.to_string(),
             }))
+            .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
             .with_state(state)
     }
 
