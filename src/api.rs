@@ -5726,7 +5726,10 @@ async fn stage_multipart_bundle(
             return Err(internal_server_error());
         }
     }
-    file.flush().await.map_err(|_| internal_server_error())?;
+    if file.flush().await.is_err() {
+        let _ = tokio::fs::remove_file(&dest).await;
+        return Err(internal_server_error());
+    }
     Ok(dest)
 }
 
@@ -5977,6 +5980,14 @@ async fn import_update_bundle_handler(
         };
         let name = field.name().unwrap_or("").to_string();
         if name == "bundle" || name == "file" {
+            if let Some(previous_path) = bundle_path.take() {
+                let _ = tokio::fs::remove_file(&previous_path).await;
+                audit_update_import_failure(&state, &principal, "duplicate bundle fields").await;
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Update upload must contain exactly one bundle file".to_string(),
+                ));
+            }
             match stage_multipart_bundle(field, "signage-update-import").await {
                 Ok(path) => bundle_path = Some(path),
                 Err(error) => {
