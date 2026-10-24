@@ -1957,6 +1957,7 @@ pub struct TrustedServiceStage {
 }
 
 const MAX_TRUSTED_SERVICE_STAGES: usize = 1_024;
+const MAX_TRUSTED_SERVICE_DIRECTORY_ENTRIES: usize = MAX_TRUSTED_SERVICE_STAGES;
 
 fn trusted_service_signing_public_key() -> PathBuf {
     std::env::var("SCREENTRA_CAST_TRUSTED_SERVICE_SIGNING_PUBKEY")
@@ -2535,7 +2536,14 @@ pub fn list_trusted_service_stages() -> Result<Vec<TrustedServiceStage>, AddonEr
         return Ok(Vec::new());
     };
     let mut stages = Vec::new();
+    let mut scanned_entries = 0usize;
     for entry in fs::read_dir(&root).map_err(io_error)? {
+        scanned_entries = scanned_entries.saturating_add(1);
+        if scanned_entries > MAX_TRUSTED_SERVICE_DIRECTORY_ENTRIES {
+            return Err(AddonError::Invalid(
+                "Too many trusted service directory entries".to_string(),
+            ));
+        }
         let entry = entry.map_err(io_error)?;
         if stages.len() >= MAX_TRUSTED_SERVICE_STAGES {
             return Err(AddonError::Invalid(
@@ -4791,6 +4799,34 @@ mod tests {
             unsafe {
                 std::env::remove_var("SIGNAGE_DATA_DIR");
             }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn trusted_service_stage_listing_bounds_directory_entries() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("screentra-stage-entry-limit-{}", Uuid::new_v4()));
+        let storage = root.join("trusted-services");
+        fs::create_dir_all(&storage).unwrap();
+        fs::set_permissions(&storage, fs::Permissions::from_mode(0o700)).unwrap();
+        for index in 0..=MAX_TRUSTED_SERVICE_STAGES {
+            fs::write(storage.join(format!("unrelated-{index}")), b"ignored").unwrap();
+        }
+        let old_data_root = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &root); }
+        let result = list_trusted_service_stages();
+        assert!(matches!(
+            result,
+            Err(AddonError::Invalid(message)) if message.contains("Too many trusted service directory entries")
+        ));
+        if let Some(value) = old_data_root {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
         }
         let _ = fs::remove_dir_all(root);
     }
