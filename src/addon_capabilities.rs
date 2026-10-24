@@ -142,6 +142,7 @@ pub enum CapabilityContractError {
     MissingContainerSpec(ExecutionTarget),
     UnexpectedContainerSpec(ExecutionTarget),
     InvalidContainerSpec(String),
+    TooManyCapabilities,
     CapabilityTargetMismatch,
     DuplicateCapability,
     InvalidHostApiScope,
@@ -151,10 +152,15 @@ pub enum CapabilityContractError {
     InvalidNetworkRule,
 }
 
+pub const MAX_CAPABILITY_REQUESTS: usize = 64;
+
 impl AddonExecutionRequest {
     pub fn validate(&self) -> Result<(), CapabilityContractError> {
         if self.targets.is_empty() || self.targets.len() > 2 {
             return Err(CapabilityContractError::InvalidTargets);
+        }
+        if self.capabilities.len() > MAX_CAPABILITY_REQUESTS {
+            return Err(CapabilityContractError::TooManyCapabilities);
         }
         let targets: BTreeSet<_> = self.targets.iter().copied().collect();
         if targets.len() != self.targets.len() {
@@ -2826,6 +2832,22 @@ mod tests {
         );
         assert!(nested_unknown.is_err());
     }
+    #[test]
+    fn execution_request_rejects_oversized_capability_lists() {
+        let request = AddonExecutionRequest {
+            targets: vec![ExecutionTarget::Client],
+            server: None,
+            client: Some(container("registry.example/client", 'b')),
+            capabilities: (0..=MAX_CAPABILITY_REQUESTS)
+                .map(|_| AddonCapabilityRequest::speaker(ExecutionTarget::Client))
+                .collect(),
+        };
+        assert_eq!(
+            request.validate(),
+            Err(CapabilityContractError::TooManyCapabilities)
+        );
+    }
+
     #[test]
     fn execution_request_accepts_server_client_and_dual_targets_with_scoped_access() {
         let request = AddonExecutionRequest {
