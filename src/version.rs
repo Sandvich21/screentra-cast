@@ -1450,8 +1450,13 @@ fn swap_static_atomic(
     // handle a half-merged state if copy fails. If skip_names is empty
     // or the source static doesn't exist, this loop is a no-op.
     if static_dir.exists() {
+        const MAX_STATIC_TOP_LEVEL_ENTRIES: usize = 100_000;
         if let Ok(entries) = fs::read_dir(static_dir) {
-            for entry in entries.flatten() {
+            for (scanned_entries, entry) in entries.flatten().enumerate() {
+                if scanned_entries >= MAX_STATIC_TOP_LEVEL_ENTRIES {
+                    let _ = fs::remove_dir_all(&staged);
+                    return Err("live static directory contains too many entries".to_string());
+                }
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
                 if !skip_names.iter().any(|skip| *skip == name_str) {
@@ -1459,14 +1464,26 @@ fn swap_static_atomic(
                 }
                 let from = entry.path();
                 let to = staged.join(&name);
-                if from.is_dir() {
+                let metadata = fs::symlink_metadata(&from)
+                    .map_err(|e| format!("stat {}: {}", from.display(), e))?;
+                if metadata.file_type().is_symlink() {
+                    let _ = fs::remove_dir_all(&staged);
+                    return Err(format!("live static contains symlink: {}", from.display()));
+                }
+                if metadata.is_dir() {
                     copy_dir_recursive(&from, &to).map_err(|e| {
                         format!("carry over {} to {}: {}", from.display(), to.display(), e)
                     })?;
-                } else {
+                } else if metadata.is_file() {
                     fs::copy(&from, &to).map_err(|e| {
                         format!("carry over {} to {}: {}", from.display(), to.display(), e)
                     })?;
+                } else {
+                    let _ = fs::remove_dir_all(&staged);
+                    return Err(format!(
+                        "live static contains unsupported entry: {}",
+                        from.display()
+                    ));
                 }
             }
         }
