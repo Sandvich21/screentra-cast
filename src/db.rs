@@ -2552,11 +2552,11 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let (sql, filter): (&str, Vec<String>) = match widget_type {
             Some(t) => (
-                "SELECT id, name, widget_type, is_builtin, created_at, updated_at FROM widget_presets WHERE widget_type = ?1 ORDER BY name ASC",
+                "SELECT id, name, widget_type, is_builtin, created_at, updated_at FROM widget_presets WHERE widget_type = ?1 ORDER BY name ASC LIMIT 4096",
                 vec![t.to_string()],
             ),
             None => (
-                "SELECT id, name, widget_type, is_builtin, created_at, updated_at FROM widget_presets ORDER BY widget_type, name",
+                "SELECT id, name, widget_type, is_builtin, created_at, updated_at FROM widget_presets ORDER BY widget_type, name LIMIT 4096",
                 vec![],
             ),
         };
@@ -2608,7 +2608,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         };
         // Load custom assets for this preset
         let mut stmt = conn
-            .prepare("SELECT id, kind, key, url FROM widget_preset_assets WHERE preset_id = ?1 ORDER BY kind, key")
+            .prepare("SELECT id, kind, key, url FROM widget_preset_assets WHERE preset_id = ?1 ORDER BY kind, key LIMIT 4096")
             .map_err(|e| e.to_string())?;
         let asset_rows = stmt
             .query_map([id], |row| {
@@ -2719,7 +2719,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
     ) -> Result<Vec<WidgetPresetAsset>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, kind, key, url FROM widget_preset_assets WHERE preset_id = ?1 ORDER BY kind, key")
+            .prepare("SELECT id, kind, key, url FROM widget_preset_assets WHERE preset_id = ?1 ORDER BY kind, key LIMIT 4096")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([preset_id], |row| {
@@ -5299,6 +5299,26 @@ mod tests {
 
         let layout_sets = db.list_layout_sets().expect("list layout sets");
         assert_eq!(layout_sets.len(), 4_096);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn list_widget_presets_is_bounded() {
+        let path = unique_temp_path("widget-preset-list-bound");
+        let db = Database::open(&path).expect("open db");
+        for index in 0..4_097 {
+            db.create_widget_preset(
+                &format!("preset-{index:04}"),
+                "bounded preset",
+                "weather",
+                "{}",
+                "2026-10-01T00:00:00Z",
+            )
+            .expect("insert widget preset");
+        }
+
+        let presets = db.list_widget_presets(None).expect("list widget presets");
+        assert_eq!(presets.len(), 4_096);
         std::fs::remove_file(&path).ok();
     }
 }

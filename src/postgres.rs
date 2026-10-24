@@ -1763,8 +1763,8 @@ impl PostgresStore {
     }
     pub async fn list_widget_presets(&self, widget_type: Option<&str>) -> Result<Vec<WidgetPresetMeta>, String> {
         let rows = match widget_type {
-            Some(widget_type) => self.client.query("SELECT id,name,widget_type,is_builtin,created_at,updated_at FROM widget_presets WHERE widget_type=$1 ORDER BY name", &[&widget_type]).await,
-            None => self.client.query("SELECT id,name,widget_type,is_builtin,created_at,updated_at FROM widget_presets ORDER BY widget_type,name", &[]).await,
+            Some(widget_type) => self.client.query("SELECT id,name,widget_type,is_builtin,created_at,updated_at FROM widget_presets WHERE widget_type=$1 ORDER BY name LIMIT 4096", &[&widget_type]).await,
+            None => self.client.query("SELECT id,name,widget_type,is_builtin,created_at,updated_at FROM widget_presets ORDER BY widget_type,name LIMIT 4096", &[]).await,
         }.map_err(|error| format!("list widget presets: {error}"))?;
         Ok(rows.into_iter().map(|row| WidgetPresetMeta { id: row.get(0), name: row.get(1), widget_type: row.get(2), is_builtin: row.get(3), created_at: row.get(4), updated_at: row.get(5) }).collect())
     }
@@ -1772,7 +1772,7 @@ impl PostgresStore {
     pub async fn get_widget_preset(&self, id: &str) -> Result<Option<WidgetPreset>, String> {
         let row = self.client.query_opt("SELECT id,name,widget_type,props_json,created_at,updated_at FROM widget_presets WHERE id=$1", &[&id]).await.map_err(|error| format!("get widget preset: {error}"))?;
         let Some(row) = row else { return Ok(None); };
-        let assets = self.client.query("SELECT id,kind,key,url FROM widget_preset_assets WHERE preset_id=$1 ORDER BY kind,key", &[&id]).await.map_err(|error| format!("get widget preset assets: {error}"))?;
+        let assets = self.client.query("SELECT id,kind,key,url FROM widget_preset_assets WHERE preset_id=$1 ORDER BY kind,key LIMIT 4096", &[&id]).await.map_err(|error| format!("get widget preset assets: {error}"))?;
         let mut props: serde_json::Value = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(3)).unwrap_or(serde_json::json!({}));
         if row.get::<_, String>(2) == "weather" {
             let mut icons = serde_json::Map::new();
@@ -1796,7 +1796,7 @@ impl PostgresStore {
     }
 
     pub async fn list_widget_preset_assets(&self, preset_id: &str) -> Result<Vec<WidgetPresetAsset>, String> {
-        self.client.query("SELECT id,kind,key,url FROM widget_preset_assets WHERE preset_id=$1 ORDER BY kind,key", &[&preset_id]).await.map(|rows| rows.into_iter().map(|row| WidgetPresetAsset { id: row.get(0), preset_id: preset_id.to_string(), kind: row.get(1), key: row.get(2), url: row.get(3) }).collect()).map_err(|error| format!("list widget preset assets: {error}"))
+        self.client.query("SELECT id,kind,key,url FROM widget_preset_assets WHERE preset_id=$1 ORDER BY kind,key LIMIT 4096", &[&preset_id]).await.map(|rows| rows.into_iter().map(|row| WidgetPresetAsset { id: row.get(0), preset_id: preset_id.to_string(), kind: row.get(1), key: row.get(2), url: row.get(3) }).collect()).map_err(|error| format!("list widget preset assets: {error}"))
     }
 
     pub async fn upsert_widget_preset_asset(&self, asset: &WidgetPresetAsset) -> Result<(), String> {
