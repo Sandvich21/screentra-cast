@@ -1948,7 +1948,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
     pub fn list_layout_folders(&self) -> Result<Vec<LayoutFolder>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, parent_id, created_at, updated_at FROM layout_folders ORDER BY COALESCE(parent_id, ''), name COLLATE NOCASE")
+            .prepare("SELECT id, name, parent_id, created_at, updated_at FROM layout_folders ORDER BY COALESCE(parent_id, ''), name COLLATE NOCASE LIMIT 10000")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
@@ -5098,6 +5098,28 @@ mod tests {
             .expect("list revisions");
         assert_eq!(revisions.len(), 1_000);
         assert_eq!(revisions[0].revision, 1_001);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn list_layout_folders_is_bounded() {
+        let path = unique_temp_path("layout-folder-list-bound");
+        let db = Database::open(&path).expect("open db");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            let tx = conn.unchecked_transaction().expect("begin transaction");
+            for index in 0..10_001 {
+                tx.execute(
+                    "INSERT INTO layout_folders (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+                    rusqlite::params![format!("folder-{index:05}"), "bounded folder", "2026-10-01T00:00:00Z"],
+                )
+                .expect("insert folder");
+            }
+            tx.commit().expect("commit folders");
+        }
+
+        let folders = db.list_layout_folders().expect("list folders");
+        assert_eq!(folders.len(), 10_000);
         std::fs::remove_file(&path).ok();
     }
 }

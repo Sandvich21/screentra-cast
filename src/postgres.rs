@@ -2126,7 +2126,7 @@ impl PostgresStore {
     }
     pub async fn list_layout_folders(&self) -> Result<Vec<LayoutFolder>, String> {
         self.client
-            .query("SELECT id, name, parent_id, created_at, updated_at FROM layout_folders ORDER BY COALESCE(parent_id, ''), name ASC", &[])
+            .query("SELECT id, name, parent_id, created_at, updated_at FROM layout_folders ORDER BY COALESCE(parent_id, ''), name ASC LIMIT 10000", &[])
             .await
             .map(|rows| rows.into_iter().map(|row| LayoutFolder { id: row.get(0), name: row.get(1), parent_id: row.get(2), created_at: row.get(3), updated_at: row.get(4) }).collect())
             .map_err(|error| format!("list layout folders: {error}"))
