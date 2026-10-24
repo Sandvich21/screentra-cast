@@ -1063,8 +1063,7 @@ mod startup_tests {
     #[test]
     fn generated_certificate_names_do_not_include_deployment_addresses() {
         let names = super::self_signed_certificate_names();
-        assert!(names.iter().all(|name| name != "11.1.1.53"));
-        assert!(names.iter().any(|name| name == "localhost"));
+        assert_eq!(names, vec!["localhost".to_string(), "signage-server".to_string()]);
     }
 
     #[test]

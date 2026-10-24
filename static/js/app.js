@@ -2307,7 +2307,7 @@ const App = {
         try {
             // navigator.clipboard requires a secure context (HTTPS or
             // localhost). Fall back to a temporary textarea for the
-            // dev http://11.1.1.25:3000 case.
+            // dev http://server.example:3000 case.
             if (navigator.clipboard && window.isSecureContext) {
                 await navigator.clipboard.writeText(text);
             } else {
