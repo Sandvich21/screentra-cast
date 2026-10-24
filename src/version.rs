@@ -669,14 +669,18 @@ pub fn sha256_of_file(path: &Path) -> Result<String, String> {
 /// frontend bytes, not only the server binary.
 pub fn sha256_of_directory(path: &Path) -> Result<String, String> {
     const MAX_DIRECTORY_FILES: usize = 100_000;
+    const MAX_DIRECTORY_ENTRIES: usize = 200_000;
     const MAX_DIRECTORY_BYTES: u64 = 512 * 1024 * 1024;
     let mut files = Vec::new();
     let mut total_bytes = 0u64;
+    let mut scanned_entries = 0usize;
     collect_directory_files(
         path,
         path,
         &mut files,
         &mut total_bytes,
+        &mut scanned_entries,
+        MAX_DIRECTORY_ENTRIES,
         MAX_DIRECTORY_FILES,
         MAX_DIRECTORY_BYTES,
     )?;
@@ -708,12 +712,18 @@ fn collect_directory_files(
     current: &Path,
     files: &mut Vec<(String, PathBuf)>,
     total_bytes: &mut u64,
+    scanned_entries: &mut usize,
+    maximum_entries: usize,
     maximum_files: usize,
     maximum_bytes: u64,
 ) -> Result<(), String> {
-    for entry in fs::read_dir(current)
-        .map_err(|e| format!("read directory {}: {}", current.display(), e))?
+    for entry in
+        fs::read_dir(current).map_err(|e| format!("read directory {}: {}", current.display(), e))?
     {
+        *scanned_entries = scanned_entries.saturating_add(1);
+        if *scanned_entries > maximum_entries {
+            return Err("directory contains too many entries".to_string());
+        }
         let entry = entry.map_err(|e| format!("read directory entry: {e}"))?;
         let absolute = entry.path();
         let metadata = fs::symlink_metadata(&absolute)
@@ -727,6 +737,8 @@ fn collect_directory_files(
                 &absolute,
                 files,
                 total_bytes,
+                scanned_entries,
+                maximum_entries,
                 maximum_files,
                 maximum_bytes,
             )?;
@@ -1606,6 +1618,32 @@ mod update_swap_tests {
         let error = bounded_command_status(command, Duration::from_millis(50))
             .expect_err("timed-out command should be terminated");
         assert!(error.contains("command exceeded its timeout"));
+    }
+
+    #[test]
+    fn directory_hash_listing_bounds_scanned_entries() {
+        let root = std::env::temp_dir().join(format!("screentra-directory-entry-limit-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(root.join("empty-a")).unwrap();
+        fs::create_dir_all(root.join("empty-b")).unwrap();
+        fs::create_dir_all(root.join("empty-c")).unwrap();
+        let mut files = Vec::new();
+        let mut total_bytes = 0u64;
+        let mut scanned_entries = 0usize;
+        let result = collect_directory_files(
+            &root,
+            &root,
+            &mut files,
+            &mut total_bytes,
+            &mut scanned_entries,
+            2,
+            1024,
+            1024,
+        );
+        assert!(result
+            .unwrap_err()
+            .contains("directory contains too many entries"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
