@@ -3159,16 +3159,11 @@ async fn weather_location_lookup(
             ])
             .send()
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Location lookup failed: {}", e),
-                )
-            })?;
+            .map_err(|_| (StatusCode::BAD_GATEWAY, "Location lookup failed".to_string()))?;
 
         let status = res.status();
         if !status.is_success() {
-            last_error = Some(format!("Location lookup returned {}", status));
+            last_error = Some("unavailable".to_string());
             continue;
         }
 
@@ -3178,7 +3173,7 @@ async fn weather_location_lookup(
             "Invalid lookup response",
         )
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+        .map_err(|_| (StatusCode::BAD_GATEWAY, "Location lookup response invalid".to_string()))?;
         let results = body
             .as_array()
             .cloned()
@@ -3201,8 +3196,8 @@ async fn weather_location_lookup(
         }
     }
 
-    if let Some(err) = last_error {
-        return Err((StatusCode::BAD_GATEWAY, err));
+    if last_error.is_some() {
+        return Err((StatusCode::BAD_GATEWAY, "Location lookup unavailable".to_string()));
     }
 
     Ok(AxumJson(WeatherLocationLookupResponse { results: vec![] }))
@@ -6319,7 +6314,7 @@ async fn github_update_check_handler() -> Result<AxumJson<crate::github_update::
     crate::github_update::check_latest()
         .await
         .map(AxumJson)
-        .map_err(|error| (StatusCode::BAD_GATEWAY, error))
+        .map_err(|_| (StatusCode::BAD_GATEWAY, "GitHub update check failed".to_string()))
 }
 
 async fn github_update_settings_handler(

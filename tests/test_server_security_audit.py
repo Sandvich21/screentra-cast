@@ -48,6 +48,17 @@ class ServerSecurityAuditTests(unittest.TestCase):
             self.assertNotIn('format!("Target approval rejected:', block, marker)
             self.assertNotIn('format!("Target revocation rejected:', block, marker)
             self.assertNotIn('format!("Google Sheets push failed:', block, marker)
+    def test_public_upstream_errors_are_opaque(self):
+        source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
+        for marker, end_marker, forbidden in (
+            ('async fn github_update_check_handler(', 'async fn github_update_settings_handler(', ('map_err(|error| (StatusCode::BAD_GATEWAY, error))',)),
+            ('async fn weather_location_lookup(', 'fn weather_code_from_nws(', ('Location lookup failed: {}', 'map_err(|e| (StatusCode::BAD_GATEWAY, e))', 'Location lookup returned {}')),
+        ):
+            start = source.index(marker)
+            end = source.index(end_marker, start + len(marker))
+            for needle in forbidden:
+                self.assertNotIn(needle, source[start:end], marker)
+
     def test_remaining_operational_error_responses_are_opaque(self):
         source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
         for marker, end_marker, forbidden in (
