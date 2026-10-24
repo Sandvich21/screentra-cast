@@ -1937,6 +1937,9 @@ impl PostgresStore {
         if layout_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
+        if layout_ids.len() > MAX_TABLE_ROWS as usize {
+            return Err("too many layout ids".to_string());
+        }
         let rows = self
             .client
             .query(

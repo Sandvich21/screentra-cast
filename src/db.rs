@@ -3921,6 +3921,9 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         if layout_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
+        if layout_ids.len() > MAX_TABLE_ROWS as usize {
+            return Err("too many layout ids".to_string());
+        }
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let placeholders: Vec<String> = layout_ids.iter().map(|_| "?".to_string()).collect();
         let sql = format!(
@@ -5063,6 +5066,18 @@ mod tests {
             )
             .expect("count heartbeat history");
         assert_eq!(remaining, 0);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn layout_set_lookup_rejects_oversized_layout_id_lists() {
+        let path = unique_temp_path("layout-set-lookup-bound");
+        let db = Database::open(&path).expect("open db");
+        let ids = vec!["layout".to_string(); 10_001];
+        let error = db
+            .get_layout_sets_for_layouts(&ids)
+            .expect_err("oversized layout lookup should fail");
+        assert!(error.contains("too many layout ids"));
         std::fs::remove_file(&path).ok();
     }
 
