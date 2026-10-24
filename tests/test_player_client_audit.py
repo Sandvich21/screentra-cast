@@ -131,6 +131,13 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('await response.json()', source)
         self.assertNotIn('await r.json()', source)
 
+    def test_preview_browser_reads_are_bounded(self):
+        source = (ROOT / 'static/js/preview.js').read_text()
+        self.assertIn('readPreviewJsonBounded', source)
+        self.assertIn('reader.cancel()', source)
+        self.assertNotIn('.json()', source)
+        self.assertNotIn('.text()', source)
+
     def test_font_picker_browser_reads_are_bounded(self):
         source = (ROOT / 'static/js/font-picker.js').read_text()
         self.assertIn('readJsonBounded', source)

@@ -1,6 +1,15 @@
 
 const params=new URLSearchParams(window.location.search);
 const layoutId=params.get('layout');
+const MAX_PREVIEW_RESPONSE_BYTES = 4 * 1024 * 1024;
+async function readPreviewTextBounded(response, maximumBytes = MAX_PREVIEW_RESPONSE_BYTES) {
+ const reader=response.body&&response.body.getReader?response.body.getReader():null;
+ if(!reader) throw new Error('response body is unavailable');
+ const decoder=new TextDecoder(); let total=0, text='';
+ try { while(true) { const part=await reader.read(); if(part.done){text+=decoder.decode();return text;} const value=part.value||new Uint8Array(); total+=value.byteLength; if(total>maximumBytes){try{await reader.cancel();}catch(_e){} throw new Error('response exceeds its size limit');} text+=decoder.decode(value,{stream:true}); } }
+ finally { reader.releaseLock(); }
+}
+async function readPreviewJsonBounded(response, maximumBytes = MAX_PREVIEW_RESPONSE_BYTES) { return JSON.parse(await readPreviewTextBounded(response, maximumBytes)); }
 let previewCountdownTimer=null;
 var RIPLEY_COUNTDOWN_MAX_FONT_SIZE=160;
 function ripleyCountdownFontSize(value){const size=Number(value);return Math.max(8,Math.min(RIPLEY_COUNTDOWN_MAX_FONT_SIZE,Number.isFinite(size)?Math.round(size):48));}
@@ -45,7 +54,7 @@ function startPreviewCountdowns(layout){
     const w=(layout.widgets||[]).find(function(x){return x.id===node.dataset.countdownWidgetId;})||{id:'countdown',widget_type:'countdown',props:{}};
     submitInteractive(w,{action:'countdown_expired'},node);
    } else if(action==='page_switch' && targetId){
-    fetch('/api/layouts/'+encodeURIComponent(targetId)+'/render').then(function(r){return r.ok?r.json():null;}).then(async function(target){if(target){await ripleyHydrateTrafficTemplates(target);document.getElementById('title').textContent='Preview: '+target.name+' • '+target.id;renderShared(target);}});
+    fetch('/api/layouts/'+encodeURIComponent(targetId)+'/render').then(function(r){return r.ok?readPreviewJsonBounded(r):null;}).then(async function(target){if(target){await ripleyHydrateTrafficTemplates(target);document.getElementById('title').textContent='Preview: '+target.name+' • '+target.id;renderShared(target);}});
    }
   });
  }
@@ -111,12 +120,12 @@ function renderShared(layout){
  var keyboardRuntime = window.RipleyPreviewRenderer && window.RipleyPreviewRenderer.bindInteractiveKeyboardRuntime;
  if(typeof keyboardRuntime==='function') keyboardRuntime(stage);
  startPreviewCountdowns(layout);
- stage.querySelectorAll('.interactive-live-button').forEach(function(btn){btn.onclick=async function(){const buttonWidget=(layout.widgets||[]).find(function(x){return x.id===btn.closest('[data-interactive-widget-id]').dataset.interactiveWidgetId;});if(buttonWidget&&buttonWidget.props&&buttonWidget.props.action==='play_sound'){const soundWidget=(layout.widgets||[]).find(function(x){return x.id===buttonWidget.props.targetSoundWidgetId;});if(soundWidget)playPreviewSound(soundWidget);return;}const targetId=btn.dataset.interactiveTargetPage;if(!targetId){return submitInteractive((layout.widgets||[]).find(function(w){return w.id===btn.closest('[data-interactive-widget-id]').dataset.interactiveWidgetId}),{action:'click'},btn);}const r=await fetch('/api/layouts/'+encodeURIComponent(targetId)+'/render');if(!r.ok){document.getElementById('preview-status').textContent='Target layout not found';return;}const target=await r.json();await ripleyHydrateTrafficTemplates(target);await refreshPreviewWeather(target);await refreshPreviewTraffic(target);await refreshPreviewCalendars(target);document.getElementById('title').textContent='Preview: '+target.name+' • '+target.id;renderShared(target);document.getElementById('preview-status').textContent='Switched to layout: '+target.name;};});
+ stage.querySelectorAll('.interactive-live-button').forEach(function(btn){btn.onclick=async function(){const buttonWidget=(layout.widgets||[]).find(function(x){return x.id===btn.closest('[data-interactive-widget-id]').dataset.interactiveWidgetId;});if(buttonWidget&&buttonWidget.props&&buttonWidget.props.action==='play_sound'){const soundWidget=(layout.widgets||[]).find(function(x){return x.id===buttonWidget.props.targetSoundWidgetId;});if(soundWidget)playPreviewSound(soundWidget);return;}const targetId=btn.dataset.interactiveTargetPage;if(!targetId){return submitInteractive((layout.widgets||[]).find(function(w){return w.id===btn.closest('[data-interactive-widget-id]').dataset.interactiveWidgetId}),{action:'click'},btn);}const r=await fetch('/api/layouts/'+encodeURIComponent(targetId)+'/render');if(!r.ok){document.getElementById('preview-status').textContent='Target layout not found';return;}const target=await readPreviewJsonBounded(r);await ripleyHydrateTrafficTemplates(target);await refreshPreviewWeather(target);await refreshPreviewTraffic(target);await refreshPreviewCalendars(target);document.getElementById('title').textContent='Preview: '+target.name+' • '+target.id;renderShared(target);document.getElementById('preview-status').textContent='Switched to layout: '+target.name;};});
  stage.querySelectorAll('[data-interactive-widget-id]').forEach(function(node){const w=(layout.widgets||[]).find(function(x){return x.id===node.dataset.interactiveWidgetId;});if(!w||w.widget_type==='button')return;node.querySelectorAll('input,select,textarea').forEach(function(input){input.addEventListener('change',function(){let payload={};if(w.widget_type==='checkbox')payload.checked=input.checked;else if(w.widget_type==='checkbox-list')payload.checkedValues=Array.from(node.querySelectorAll('input:checked')).map(function(x){return x.value;});else if(w.widget_type==='radio')payload.selected=input.value;else if(w.widget_type==='dropdown')payload.selected=input.value;else payload.value=input.value;submitInteractive(w,payload,node);});});});
 }
 async function refreshPreviewWeather(layout){
  const widgets=(layout.widgets||[]).filter(function(w){return w&&((w.widget_type||w.type)==='weather')&&w.props&&Number(w.props.lat)&&Number(w.props.lon);});
- await Promise.all(widgets.map(async function(w){try{const r=await fetch('/api/weather/forecast?lat='+encodeURIComponent(w.props.lat)+'&lon='+encodeURIComponent(w.props.lon),{cache:'no-store'});if(r.ok){const fresh=await r.json();w.props=Object.assign({},w.props,{_weather_data:fresh});}}catch(_e){}}));
+ await Promise.all(widgets.map(async function(w){try{const r=await fetch('/api/weather/forecast?lat='+encodeURIComponent(w.props.lat)+'&lon='+encodeURIComponent(w.props.lon),{cache:'no-store'});if(r.ok){const fresh=await readPreviewJsonBounded(r);w.props=Object.assign({},w.props,{_weather_data:fresh});}}catch(_e){}}));
 }
 async function refreshPreviewTraffic(layout){
  const widgets=(layout.widgets||[]).filter(function(w){return w&&((w.widget_type||w.type)==='traffic')&&w.props;});
@@ -127,7 +136,7 @@ async function refreshPreviewTraffic(layout){
    var url='/api/traffic/events?lat='+encodeURIComponent(p.lat)+'&lon='+encodeURIComponent(p.lon)+'&radius_miles='+encodeURIComponent(p.radius_miles||25);
    var r=await fetch(url,{cache:'no-store'});
    if(!r.ok) throw new Error('traffic request failed');
-   p._traffic_data=await r.json();
+   p._traffic_data=await readPreviewJsonBounded(r);
    if(p._traffic_data.configured!==false && p._traffic_data.available!==false && typeof window.ripleyFilterTrafficEvents==='function') p._traffic_data.events=window.ripleyFilterTrafficEvents(p._traffic_data.events,p,w.id);
    p._traffic_data_source=p._traffic_data.configured?'live':'unavailable';
   }catch(_e){p._traffic_data={configured:false,events:[]};p._traffic_data_source='unavailable';}
@@ -135,21 +144,21 @@ async function refreshPreviewTraffic(layout){
 }
 async function refreshPreviewCalendars(layout){
  const widgets=(layout.widgets||[]).filter(function(w){var p=w&&w.props||{};return w&&((w.widget_type||w.type)==='calendar')&&Array.isArray(p.template_elements)&&p.template_elements.length&&(p.ics_url||p.ical_url||p.ical||p.calendar_url);});
- await Promise.all(widgets.map(async function(w){try{var p=w.props;var url=p.ics_url||p.ical_url||p.ical||p.calendar_url;var r=await fetch('/api/ics-proxy?url='+encodeURIComponent(url),{cache:'no-store'});if(r.ok){p._calendar_events=ripleyParseCalendarText(await r.text(),ripleyCalendarRequiredEventCount(p),p.time_format === '24' ? '24' : '12');}}catch(_e){w.props._calendar_events=[];}}));
+ await Promise.all(widgets.map(async function(w){try{var p=w.props;var url=p.ics_url||p.ical_url||p.ical||p.calendar_url;var r=await fetch('/api/ics-proxy?url='+encodeURIComponent(url),{cache:'no-store'});if(r.ok){p._calendar_events=ripleyParseCalendarText(await readPreviewTextBounded(r),ripleyCalendarRequiredEventCount(p),p.time_format === '24' ? '24' : '12');}}catch(_e){w.props._calendar_events=[];}}));
 }
 async function load(){
  // preview mode skips player.js init(), so load installed fonts here.
  try {
    const fontsResp=await fetch('/api/fonts/installed');
    if(fontsResp.ok && typeof injectInstalledFonts==='function') {
-     injectInstalledFonts(await fontsResp.json());
+     injectInstalledFonts(await readPreviewJsonBounded(fontsResp));
      if(document.fonts && document.fonts.ready) await document.fonts.ready;
    }
  } catch(_fontError) { /* system fallback remains usable */ }
  if(!layoutId){ document.getElementById('title').textContent='No layout specified'; return; }
  const r=await fetch('/api/layouts/'+encodeURIComponent(layoutId)+'/render');
  if(!r.ok){ document.getElementById('title').textContent='Layout not found'; return; }
- const layout=await r.json();await ripleyHydrateTrafficTemplates(layout);await refreshPreviewWeather(layout);await refreshPreviewTraffic(layout);await refreshPreviewCalendars(layout);
+ const layout=await readPreviewJsonBounded(r);await ripleyHydrateTrafficTemplates(layout);await refreshPreviewWeather(layout);await refreshPreviewTraffic(layout);await refreshPreviewCalendars(layout);
  document.getElementById('title').textContent='Preview: '+layout.name+' • '+layout.id;
  if(window.RipleyPreviewRenderer){ renderShared(layout); return; }
  const stage=document.getElementById('stage'); ripleySetRenderOrientation(layout); stage.innerHTML='';
@@ -172,7 +181,7 @@ function escCss(v){
 }
 function submitInteractive(w, payload, node){
  const layout=window.__previewLayout||{};
- fetch('/api/interactive/submit',{method:'POST',headers:{'Content-Type':'application/json','X-Ripley-Client-Id':'editor-preview'},body:JSON.stringify({client_id:'editor-preview',interactive_layout_id:layout.id||null,interactive_layout_name:layout.name||null,widget_id:w.id,widget_type:w.widget_type,widget_label:(w.props||{}).label||null,payload:payload,collected_at:new Date().toISOString()})}).then(function(r){return r.json().then(function(j){return {ok:r.ok,data:j};});}).then(function(result){
+ fetch('/api/interactive/submit',{method:'POST',headers:{'Content-Type':'application/json','X-Ripley-Client-Id':'editor-preview'},body:JSON.stringify({client_id:'editor-preview',interactive_layout_id:layout.id||null,interactive_layout_name:layout.name||null,widget_id:w.id,widget_type:w.widget_type,widget_label:(w.props||{}).label||null,payload:payload,collected_at:new Date().toISOString()})}).then(function(r){return readPreviewJsonBounded(r).then(function(j){return {ok:r.ok,data:j};});}).then(function(result){
   var msg=document.getElementById('preview-status');
   if(msg){msg.textContent=result.ok?'Data collected (submission '+(result.data.id||'received')+')':'Submission failed: '+(result.data.error||'HTTP error');msg.className=result.ok?'ok':'error';}
   if(node) node.classList.toggle('submitted',result.ok);
@@ -193,7 +202,7 @@ else {box.innerHTML='<button type="button">'+esc(buttonLabel)+'</button>';box.qu
    const targetId=p.targetPageId||p.targetLayoutId;
    const r=await fetch('/api/layouts/'+encodeURIComponent(targetId)+'/render');
    if(!r.ok){var msg=document.getElementById('preview-status');if(msg){msg.textContent='Target layout not found: '+targetId;msg.className='error';}return;}
-   const target=await r.json(); window.__previewLayout=target; document.getElementById('title').textContent='Preview: '+target.name+' • '+target.id; document.getElementById('stage').innerHTML='';
+   const target=await readPreviewJsonBounded(r); window.__previewLayout=target; document.getElementById('title').textContent='Preview: '+target.name+' • '+target.id; document.getElementById('stage').innerHTML='';
    (target.widgets||[]).slice().sort((a,b)=>(a.z||0)-(b.z||0)).forEach(function(tw){document.getElementById('stage').appendChild(['button','textbox','dropdown','checkbox','checkbox-list','radio','keyboard'].includes(String(tw.widget_type||'').toLowerCase())?renderInteractive(tw):renderWidget(tw));});
    var msg=document.getElementById('preview-status');if(msg){msg.textContent='Switched to layout: '+target.name;msg.className='ok';}
  });}
