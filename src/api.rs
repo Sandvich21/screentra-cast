@@ -3578,7 +3578,7 @@ async fn traffic_map_image(
     let coordinate = format!("{lat:.6},{lon:.6}");
     let marker = format!("color:{marker_color}|label:{marker_label}|{coordinate}");
     let mut map_url = url::Url::parse("https://maps.googleapis.com/maps/api/staticmap")
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+        .map_err(|_| internal_server_error())?;
     {
         let mut query = map_url.query_pairs_mut();
         query
@@ -5945,9 +5945,9 @@ async fn export_update_bundle_handler(
     ));
     let _manifest = match crate::version::export_update_bundle(&dest) {
         Ok(manifest) => manifest,
-        Err(error) => {
+        Err(_error) => {
             audit_update_export_failure(&state, &principal, "bundle export failed").await;
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, error));
+            return Err(internal_server_error());
         }
     };
     let bundle_size = match tokio::fs::metadata(&dest).await {
@@ -6279,7 +6279,7 @@ async fn list_audit_events_handler(
         .list_audit_events(limit)
         .await
         .map(AxumJson)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))
+        .map_err(|_| internal_server_error())
 }
 async fn update_last_failure_handler() -> AxumJson<UpdateLastFailure> {
     let install = crate::version::install_dir_for_static();
@@ -6339,7 +6339,7 @@ async fn github_update_settings_handler(
     crate::github_update::save_settings(&crate::github_update::UpdateSettings {
         auto_update: payload.auto_update,
     })
-    .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    .map_err(|_| internal_server_error())?;
     Ok(AxumJson(crate::github_update::read_status()))
 }
 
@@ -6637,9 +6637,9 @@ async fn download_screentra_cast_installers_handler() -> Result<
 async fn restart_service_handler() -> Result<StatusCode, (StatusCode, String)> {
     tokio::task::spawn_blocking(crate::version::restart_configured_service)
         .await
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, format!("restart worker: {error}")))?
+        .map_err(|_| internal_server_error())?
         .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))
+        .map_err(|_| internal_server_error())
 }
 
 // ── System Time / Timezone handlers ───────────────────────
@@ -7570,7 +7570,7 @@ async fn create_user(
             if e.contains("UNIQUE") {
                 (StatusCode::CONFLICT, "Username already exists".to_string())
             } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e)
+                internal_server_error()
             }
         })?;
     let user = state
@@ -7649,7 +7649,7 @@ async fn update_user(
             if e.contains("UNIQUE") {
                 (StatusCode::CONFLICT, "Username already exists".to_string())
             } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e)
+                internal_server_error()
             }
         })?;
     if !updated {
@@ -8864,7 +8864,7 @@ async fn get_client_command(
             )
             .await;
         if command_is_stale(&record.requested_at) {
-            if let Err(error) = repository
+            if let Err(_error) = repository
                 .delete_client_command_if_requested_at(&record.client_id, &record.requested_at)
                 .await
             {
@@ -8879,7 +8879,7 @@ async fn get_client_command(
                         &Utc::now().to_rfc3339(),
                     )
                     .await;
-                return Err((StatusCode::INTERNAL_SERVER_ERROR, error));
+                return Err(internal_server_error());
             }
             let _ = repository
                 .record_audit_event(
@@ -8918,7 +8918,7 @@ async fn clear_client_command(
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
     let rows = match repository.clear_client_command(&id).await {
         Ok(rows) => rows,
-        Err(error) => {
+        Err(_error) => {
             let _ = repository
                 .record_audit_event(
                     Some(&principal.username),
@@ -8930,7 +8930,7 @@ async fn clear_client_command(
                     &Utc::now().to_rfc3339(),
                 )
                 .await;
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, error));
+            return Err(internal_server_error());
         }
     };
     let _ = repository
@@ -8958,7 +8958,7 @@ async fn acknowledge_client_command(
     let now = Utc::now().to_rfc3339();
     let rows = match repository.clear_client_command(&id).await {
         Ok(rows) => rows,
-        Err(error) => {
+        Err(_error) => {
             let _ = repository
                 .record_audit_event(
                     Some(&id),
@@ -8970,7 +8970,7 @@ async fn acknowledge_client_command(
                     &now,
                 )
                 .await;
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, error));
+            return Err(internal_server_error());
         }
     };
     let _ = repository
@@ -10073,7 +10073,7 @@ async fn register_client(
         enabled: disp.enabled,
         last_error: disp.last_error.clone(),
     }).collect::<Vec<_>>();
-    if let Err(error) = repository
+    if let Err(_error) = repository
         .register_client(&client_record, &display_records)
         .await
     {
@@ -10101,7 +10101,7 @@ async fn register_client(
                 )
                 .await;
         }
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, error));
+        return Err(internal_server_error());
     }
     if let Some((action, ok)) = command_result.as_ref() {
         let outcome = if *ok { "success" } else { "failure" };

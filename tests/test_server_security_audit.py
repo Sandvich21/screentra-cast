@@ -15,6 +15,20 @@ class ServerSecurityAuditTests(unittest.TestCase):
         self.assertIn('else {\n                internal_server_error()\n            }', block)
         self.assertNotIn('StatusCode::INTERNAL_SERVER_ERROR, e', block)
 
+    def test_privileged_and_player_error_responses_are_opaque(self):
+        source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
+        for marker, end_marker in (
+            ('async fn create_user(', 'async fn update_user('),
+            ('async fn update_user(', 'async fn delete_user('),
+            ('async fn get_client_command(', 'async fn clear_client_command('),
+            ('async fn acknowledge_client_command(', 'async fn register_client('),
+        ):
+            start = source.index(marker)
+            end = source.index(end_marker, start)
+            block = source[start:end]
+            self.assertNotIn('StatusCode::INTERNAL_SERVER_ERROR, e', block, marker)
+            self.assertNotIn('StatusCode::INTERNAL_SERVER_ERROR, error', block, marker)
+
 
 if __name__ == '__main__':
     unittest.main()
