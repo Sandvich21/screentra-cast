@@ -2300,7 +2300,7 @@ impl PostgresStore {
     > {
         self.client
             .query(
-                "SELECT id, name, address, role, version, uptime_seconds, cpu_usage, memory_used, memory_total, disk_used, disk_total, active_layout_id, assigned_layout_id, last_seen, enrolled, last_command_result, last_command_at, max_displays, installer_detected_max_displays, touch_binding, theme, is_virtual FROM clients ORDER BY last_seen DESC",
+                "SELECT id, name, address, role, version, uptime_seconds, cpu_usage, memory_used, memory_total, disk_used, disk_total, active_layout_id, assigned_layout_id, last_seen, enrolled, last_command_result, last_command_at, max_displays, installer_detected_max_displays, touch_binding, theme, is_virtual FROM clients ORDER BY last_seen DESC LIMIT 10000",
                 &[],
             )
             .await

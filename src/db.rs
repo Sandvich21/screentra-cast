@@ -990,7 +990,7 @@ impl Database {
         let conn = self.conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, address, role, version, uptime_seconds, cpu_usage, memory_used, memory_total, disk_used, disk_total, active_layout_id, assigned_layout_id, last_seen, enrolled, last_command_result, last_command_at, max_displays, installer_detected_max_displays, touch_binding, theme, is_virtual FROM clients ORDER BY last_seen DESC",
+                "SELECT id, name, address, role, version, uptime_seconds, cpu_usage, memory_used, memory_total, disk_used, disk_total, active_layout_id, assigned_layout_id, last_seen, enrolled, last_command_result, last_command_at, max_displays, installer_detected_max_displays, touch_binding, theme, is_virtual FROM clients ORDER BY last_seen DESC LIMIT 10000",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -5144,6 +5144,29 @@ mod tests {
 
         let users = db.list_users().expect("list users");
         assert_eq!(users.len(), 10_000);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn list_registered_clients_is_bounded() {
+        let path = unique_temp_path("client-list-bound");
+        let db = Database::open(&path).expect("open db");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            let tx = conn.unchecked_transaction().expect("begin transaction");
+            for index in 0..10_001 {
+                let id = format!("client-{index:05}");
+                tx.execute(
+                    "INSERT INTO clients (id, name, address, last_seen) VALUES (?1, ?2, ?3, ?3)",
+                    rusqlite::params![id, "bounded client", "2026-10-01T00:00:00Z"],
+                )
+                .expect("insert client");
+            }
+            tx.commit().expect("commit clients");
+        }
+
+        let clients = db.list_registered_clients().expect("list clients");
+        assert_eq!(clients.len(), 10_000);
         std::fs::remove_file(&path).ok();
     }
 }
