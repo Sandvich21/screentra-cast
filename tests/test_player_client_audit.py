@@ -21,6 +21,7 @@ def load_module(path: Path, name: str):
 
 actor = load_module(ROOT / 'player-client/scripts/screentra-player-actor.py', 'screentra_player_actor_audit')
 builder = load_module(ROOT / 'player-client/scripts/build-installer.py', 'screentra_build_installer_audit')
+renderer = load_module(ROOT / 'player-client/scripts/screentra-player-renderer.py', 'screentra_player_renderer_audit')
 
 
 class PlayerClientAuditTests(unittest.TestCase):
@@ -143,6 +144,13 @@ class PlayerClientAuditTests(unittest.TestCase):
             source = path.read_text()
             self.assertNotIn('11.1.1.54:3910', source)
             self.assertIn("new URL(window.location.href)", source)
+
+    def test_local_admin_mutations_require_same_origin_when_origin_is_sent(self):
+        same = {'Host': '127.0.0.1:3910', 'Origin': 'http://127.0.0.1:3910'}
+        cross = {'Host': '127.0.0.1:3910', 'Origin': 'http://evil.example'}
+        self.assertTrue(renderer._csrf_allows_mutation(same))
+        self.assertFalse(renderer._csrf_allows_mutation(cross))
+        self.assertTrue(renderer._csrf_allows_mutation({'Host': '127.0.0.1:3910'}))
 
     def test_served_player_installer_matches_generated_installer(self):
         generated = (ROOT / 'player-client/static/install/player-client.sh').read_bytes()

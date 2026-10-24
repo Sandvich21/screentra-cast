@@ -1147,6 +1147,21 @@ def _admin_auth_payload(handler) -> dict:
     user = _session_user(handler.headers.get('Cookie', ''))
     return {'authenticated': bool(user), 'user': user, **_auth_source()}
 
+def _csrf_allows_mutation(headers) -> bool:
+    """Allow same-origin browser mutations; tolerate headerless local clients."""
+    source = headers.get('Origin') or headers.get('Referer')
+    if not source:
+        return True
+    try:
+        parsed = urllib.parse.urlparse(source)
+        host = str(headers.get('Host') or '').strip().lower()
+        if not host or parsed.scheme != 'http' or parsed.netloc.lower() != host:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _admin_requires_auth(path: str) -> bool:
     if os.environ.get('RIPLEY_ADMIN_MODE', '').lower() not in ('1', 'true', 'yes'):
         return False
@@ -1427,6 +1442,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = unquote(self.path.split('?', 1)[0])
+        if not _csrf_allows_mutation(self.headers):
+            return self.send_text(403, json.dumps({'error': 'cross-origin mutation blocked'}), 'application/json')
         try:
             body = _request_body(self)
         except OverflowError:
