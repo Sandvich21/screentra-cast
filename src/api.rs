@@ -6357,7 +6357,8 @@ async fn apply_github_update_handler(
                     &Utc::now().to_rfc3339(),
                 )
                 .await;
-            return Err((StatusCode::BAD_GATEWAY, error));
+            log::error!("GitHub update failed: {}", error);
+            return Err((StatusCode::BAD_GATEWAY, "GitHub update failed".to_string()));
         }
     };
     let (configured_service, _) = crate::version::configured_service();
@@ -6378,12 +6379,14 @@ async fn apply_github_update_handler(
         Ok(Err(error)) => {
             let message = format!("update applied but {configured_service} restart failed: {error}");
             let _ = crate::github_update::mark_error(&message);
-            Err((StatusCode::INTERNAL_SERVER_ERROR, message))
+            log::error!("{message}");
+            Err(internal_server_error())
         }
         Err(error) => {
             let message = format!("update applied but restart task failed: {error}");
             let _ = crate::github_update::mark_error(&message);
-            Err((StatusCode::INTERNAL_SERVER_ERROR, message))
+            log::error!("{message}");
+            Err(internal_server_error())
         }
     }
 }
@@ -6404,10 +6407,7 @@ async fn build_player_client_bundle_handler(
     let script = std::path::PathBuf::from(crate::version::install_dir_for_static())
         .join("tools/build-player-client-bundle.py");
     if !script.exists() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("bundle builder missing: {}", script.display()),
-        ));
+        return Err(internal_server_error());
     }
     let output = tokio::task::spawn_blocking(move || {
         let mut command = std::process::Command::new("python3");
@@ -6462,10 +6462,7 @@ async fn build_server_bundle_handler(
     let script = std::path::PathBuf::from(crate::version::install_dir_for_static())
         .join("tools/build-server-bundle.py");
     if !script.exists() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("server bundle builder missing: {}", script.display()),
-        ));
+        return Err(internal_server_error());
     }
     let output = tokio::task::spawn_blocking(move || {
         let mut command = std::process::Command::new("python3");
@@ -6545,12 +6542,10 @@ async fn download_static_install_file(
     let path = crate::version::static_dir_path()
         .join("install")
         .join(filename);
-    let bundle_size = tokio::fs::metadata(&path).await.map_err(|error| {
-        (
-            StatusCode::NOT_FOUND,
-            format!("download file not available: {} ({})", path.display(), error),
-        )
-    })?.len();
+    let bundle_size = tokio::fs::metadata(&path)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "download file not available".to_string()))?
+        .len();
     if bundle_size > MAX_STATE_BUNDLE_BYTES {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -6559,12 +6554,7 @@ async fn download_static_install_file(
     }
     let bytes = read_bounded_async_file(&path, MAX_STATE_BUNDLE_BYTES)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::NOT_FOUND,
-                format!("download file not available: {} ({})", path.display(), e),
-            )
-        })?;
+        .map_err(|_| (StatusCode::NOT_FOUND, "download file not available".to_string()))?;
     Ok((attachment_headers(filename, content_type), bytes))
 }
 
@@ -6909,17 +6899,9 @@ async fn get_system_time() -> Result<AxumJson<SystemTimeInfo>, (StatusCode, Stri
         timedatectl,
         64 * 1024,
         Duration::from_secs(30),
-    ).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("timedatectl: {}", e),
-        )
-    })?;
+    ).map_err(|_| internal_server_error())?;
     if !status.success() {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("timedatectl show failed: {:?}", status.code()),
-        ));
+        return Err(internal_server_error());
     }
     let stdout = String::from_utf8_lossy(&stdout_bytes);
     let mut timezone = String::new();

@@ -48,7 +48,18 @@ class ServerSecurityAuditTests(unittest.TestCase):
             self.assertNotIn('format!("Target approval rejected:', block, marker)
             self.assertNotIn('format!("Target revocation rejected:', block, marker)
             self.assertNotIn('format!("Google Sheets push failed:', block, marker)
-    def test_infrastructure_error_responses_do_not_expose_details(self):
+    def test_remaining_operational_error_responses_are_opaque(self):
+        source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
+        for marker, end_marker, forbidden in (
+            ('async fn apply_github_update_handler(', 'struct PlayerClientBundleBuildResult', ('Err((StatusCode::INTERNAL_SERVER_ERROR, message))', 'StatusCode::BAD_GATEWAY, error')),
+            ('async fn build_player_client_bundle_handler(', 'async fn get_system_time(', ('bundle builder missing:', 'server bundle builder missing:', 'download file not available:')),
+            ('async fn get_system_time(', 'async fn set_timezone(', ('timedatectl:', 'timedatectl show failed:')),
+        ):
+            start = source.index(marker)
+            end = source.index(end_marker, start + len(marker))
+            for needle in forbidden:
+                self.assertNotIn(needle, source[start:end], marker)
+
         source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
         self.assertNotIn('StatusCode::INTERNAL_SERVER_ERROR, format!', source)
         self.assertNotIn('format!("multipart:', source)
