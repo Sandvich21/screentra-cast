@@ -46,6 +46,10 @@ fn ensure_data_dir(path: &std::path::Path) -> Result<(), String> {
         .map_err(|error| format!("failed to create data directory: {error}"))
 }
 
+fn open_sqlite_database(path: &str) -> Result<Database, String> {
+    Database::open(path).map_err(|error| format!("failed to open database: {error}"))
+}
+
 fn read_bounded_hostname() -> Result<String, std::io::Error> {
     let file = std::fs::File::open("/etc/hostname")?;
     let mut bytes = Vec::new();
@@ -640,11 +644,17 @@ async fn main() {
         RepositoryBackend::Postgres => RuntimeState::from_env(None).await,
         RepositoryBackend::Sqlite => {
             let db_path = format!("{}/signage.db", data_dir);
-            let database = Database::open(&db_path).expect("Failed to open database");
+            let database = open_sqlite_database(&db_path).unwrap_or_else(|error| {
+                eprintln!("FATAL: failed to open database: {error}");
+                std::process::exit(1);
+            });
             RuntimeState::from_env(Some(Arc::new(database))).await
         }
     }
-    .expect("failed to initialize repository backend");
+    .unwrap_or_else(|error| {
+        eprintln!("FATAL: failed to initialize repository backend: {error}");
+        std::process::exit(1);
+    });
     crate::screenshot::init(256 * 1024 * 1024);
 
     match crate::addons::ensure_bundled_standard_addons() {
@@ -1001,6 +1011,13 @@ mod startup_tests {
         let result = std::panic::catch_unwind(|| {
             super::ensure_data_dir(std::path::Path::new("/dev/null/screentra-data"))
         });
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn invalid_sqlite_database_returns_an_error_without_panicking() {
+        let result = std::panic::catch_unwind(|| super::open_sqlite_database("/dev/null"));
         assert!(result.is_ok());
         assert!(result.unwrap().is_err());
     }
