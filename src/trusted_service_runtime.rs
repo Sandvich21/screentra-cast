@@ -20,6 +20,7 @@ const RUNTIME_FILE: &str = "runtime.json";
 const RUNTIME_RECORD_VERSION: u32 = 1;
 const MAX_RUNTIME_RECORD_BYTES: u64 = 128 * 1024;
 const MAX_RUNTIME_RECORDS: usize = 1_024;
+const MAX_RUNTIME_DIRECTORY_ENTRIES: usize = 4_096;
 
 /// This is a compile-time safety marker for the first runtime phase.
 /// It must remain false until a separately reviewed execution backend exists.
@@ -665,7 +666,14 @@ pub fn list() -> Result<Vec<TrustedServiceRuntimeRecord>, RuntimeError> {
     };
     validate_private_runtime_directory(&root_metadata, "Invalid trusted service runtime root")?;
     let mut records = Vec::new();
+    let mut scanned_entries = 0usize;
     for entry in fs::read_dir(&root).map_err(|error| RuntimeError::Io(error.to_string()))? {
+        scanned_entries = scanned_entries.saturating_add(1);
+        if scanned_entries > MAX_RUNTIME_DIRECTORY_ENTRIES {
+            return Err(RuntimeError::Invalid(
+                "Too many trusted service runtime directory entries".to_string(),
+            ));
+        }
         let entry = entry.map_err(|error| RuntimeError::Io(error.to_string()))?;
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with('.') {

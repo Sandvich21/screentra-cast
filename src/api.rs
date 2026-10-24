@@ -4655,12 +4655,21 @@ struct TrashEntry {
 }
 
 async fn list_trash() -> Result<Json<Vec<TrashEntry>>, (StatusCode, String)> {
+    const MAX_TRASH_ENTRIES: usize = 10_000;
     let trash_dir = std::path::Path::new("trash");
     if !trash_dir.exists() {
         return Ok(Json(vec![]));
     }
     let mut entries = Vec::new();
+    let mut scanned_entries = 0usize;
     for entry in fs::read_dir(trash_dir).map_err(|_| internal_server_error())? {
+        scanned_entries = scanned_entries.saturating_add(1);
+        if scanned_entries > MAX_TRASH_ENTRIES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Too many trash entries".to_string(),
+            ));
+        }
         let entry = entry.map_err(|_| internal_server_error())?;
         let path = entry.path();
         if !path.is_file() { continue; }
@@ -12897,8 +12906,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 
 async fn list_client_diagnostics(
 ) -> Result<AxumJson<Vec<ClientDiagnosticsSummary>>, (StatusCode, String)> {
+    const MAX_DIAGNOSTIC_ENTRIES: usize = 4096;
     let dir = client_diagnostics_dir();
     let mut entries: Vec<ClientDiagnosticsSummary> = Vec::new();
+    let mut scanned_entries = 0usize;
     let read_dir = std::fs::read_dir(&dir).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -12906,6 +12917,13 @@ async fn list_client_diagnostics(
         )
     })?;
     for e in read_dir.flatten() {
+        scanned_entries = scanned_entries.saturating_add(1);
+        if scanned_entries > MAX_DIAGNOSTIC_ENTRIES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Too many client diagnostic entries".to_string(),
+            ));
+        }
         let path = e.path();
         if !path.is_file() {
             continue;
