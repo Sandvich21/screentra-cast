@@ -145,6 +145,30 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn('reader.cancel()', source)
         self.assertNotRegex(source, r'\b(?:response|res|r|fileRes|assetRes)\.(?:json|text)\(\)')
 
+    def test_auth_browser_reads_are_bounded(self):
+        source = (ROOT / 'static/js/auth.js').read_text()
+        self.assertIn('readAuthJsonBounded', source)
+        self.assertIn('reader.cancel()', source)
+        self.assertNotRegex(source, r'\b(?:response|res)\.(?:json|text)\(\)')
+
+    def test_news_template_browser_reads_are_bounded(self):
+        source = (ROOT / 'static/js/news-template.js').read_text()
+        self.assertIn('readNewsJsonBounded', source)
+        self.assertIn('reader.cancel()', source)
+        self.assertNotIn('.json()', source)
+
+    def test_no_layout_js_browser_reads_are_bounded(self):
+        source = (ROOT / 'static/js/no-layout.js').read_text()
+        self.assertIn('readNoLayoutJsonBounded', source)
+        self.assertIn('reader.cancel()', source)
+        self.assertNotRegex(source, r'\br\.(?:json|text)\(\)')
+
+    def test_weather_browser_reads_are_bounded(self):
+        source = (ROOT / 'static/js/weather.js').read_text()
+        self.assertIn('readWeatherJsonBounded', source)
+        self.assertIn('reader.cancel()', source)
+        self.assertNotIn('response.json()', source)
+
     def test_calendar_browser_reads_are_bounded(self):
         source = (ROOT / 'static/js/calendar.js').read_text()
         self.assertIn('readCalendarTextBounded', source)

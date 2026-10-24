@@ -81,6 +81,29 @@
             return Math.round(c);
         }
 
+        const MAX_WEATHER_RESPONSE_BYTES = 4 * 1024 * 1024;
+        async function readWeatherTextBounded(response, maximumBytes = MAX_WEATHER_RESPONSE_BYTES) {
+            const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+            if (!reader) throw new Error('response body is unavailable');
+            const decoder = new TextDecoder(); let total = 0; let text = '';
+            try {
+                while (true) {
+                    const part = await reader.read();
+                    if (part.done) { text += decoder.decode(); return text; }
+                    const value = part.value || new Uint8Array();
+                    total += value.byteLength;
+                    if (total > maximumBytes) {
+                        try { await reader.cancel(); } catch (_) {}
+                        throw new Error('response exceeds its size limit');
+                    }
+                    text += decoder.decode(value, { stream: true });
+                }
+            } finally { reader.releaseLock(); }
+        }
+        async function readWeatherJsonBounded(response, maximumBytes = MAX_WEATHER_RESPONSE_BYTES) {
+            return JSON.parse(await readWeatherTextBounded(response, maximumBytes));
+        }
+
         async function init() {
             const params = new URLSearchParams(window.location.search);
             const requestedFont = params.get('font_family');
@@ -139,7 +162,7 @@
             try {
                 const response = await fetch(`/api/weather/forecast?lat=${encodeURIComponent(state.lat)}&lon=${encodeURIComponent(state.lon)}`, {cache: 'no-store'});
                 if (!response.ok) throw new Error('Network response was not ok');
-                state.data = await response.json();
+                state.data = await readWeatherJsonBounded(response);
                 render();
             } catch (error) {
                 console.error(error);

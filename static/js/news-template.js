@@ -12,6 +12,32 @@
   // window short means fresh headlines after a refresh; long enough to
   // avoid hammering the server on a busy ticker.
   var _cache = {};
+  var MAX_NEWS_RESPONSE_BYTES = 4 * 1024 * 1024;
+  function readNewsJsonBounded(response, maximumBytes) {
+    maximumBytes = maximumBytes || MAX_NEWS_RESPONSE_BYTES;
+    var reader = response.body && response.body.getReader ? response.body.getReader() : null;
+    if (!reader) return Promise.reject(new Error('response body is unavailable'));
+    var decoder = new TextDecoder();
+    var total = 0;
+    var text = '';
+    function release() { try { reader.releaseLock(); } catch (_) {} }
+    function readNext() {
+      return reader.read().then(function(part) {
+        if (part.done) { text += decoder.decode(); release(); return JSON.parse(text); }
+        var value = part.value || new Uint8Array();
+        total += value.byteLength;
+        if (total > maximumBytes) {
+          return Promise.resolve(reader.cancel()).catch(function() {}).then(function() {
+            release();
+            throw new Error('response exceeds its size limit');
+          });
+        }
+        text += decoder.decode(value, { stream: true });
+        return readNext();
+      }, function(error) { release(); throw error; });
+    }
+    return readNext();
+  }
   function cachedFetch(url) {
     var now = Date.now();
     var entry = _cache[url];
@@ -21,7 +47,7 @@
     return fetch(url, { credentials: 'include' })
       .then(function(r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
+        return readNewsJsonBounded(r);
       })
       .then(function(j) {
         _cache[url] = { at: now, json: j };

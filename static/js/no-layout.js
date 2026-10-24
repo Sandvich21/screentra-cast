@@ -3,6 +3,28 @@
     window.addEventListener("error", e => __dbg("err " + (e.message || e)));
     window.addEventListener("unhandledrejection", e => __dbg("rej " + (e.reason && e.reason.message || e.reason || e)));
     const $ = (id) => document.getElementById(id);
+    const MAX_NO_LAYOUT_RESPONSE_BYTES = 4 * 1024 * 1024;
+    async function readNoLayoutTextBounded(response, maximumBytes = MAX_NO_LAYOUT_RESPONSE_BYTES) {
+      const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+      if (!reader) throw new Error('response body is unavailable');
+      const decoder = new TextDecoder(); let total = 0; let text = '';
+      try {
+        while (true) {
+          const part = await reader.read();
+          if (part.done) { text += decoder.decode(); return text; }
+          const value = part.value || new Uint8Array();
+          total += value.byteLength;
+          if (total > maximumBytes) {
+            try { await reader.cancel(); } catch (_) {}
+            throw new Error('response exceeds its size limit');
+          }
+          text += decoder.decode(value, { stream: true });
+        }
+      } finally { reader.releaseLock(); }
+    }
+    async function readNoLayoutJsonBounded(response, maximumBytes = MAX_NO_LAYOUT_RESPONSE_BYTES) {
+      return JSON.parse(await readNoLayoutTextBounded(response, maximumBytes));
+    }
     let currentDevices = [];
     let selectedPath = null;
 
@@ -10,7 +32,7 @@
       try {
         const r = await fetch('/api/status.json', { cache: 'no-store' });
         if (!r.ok) return;
-        const s = await r.json();
+        const s = await readNoLayoutJsonBounded(r, 64 * 1024);
         if (s.display_index != null) document.title = 'Screentra Cast Player display ' + s.display_index;
         $('serverUrl').textContent = s.server_url || '—';
         $('hostname').textContent  = s.hostname || '—';
@@ -79,7 +101,7 @@
       list.textContent = 'Detecting…';
       try {
         const r = await fetch('/api/touchscreen.json', { cache: 'no-store' });
-        const data = await r.json();
+        const data = await readNoLayoutJsonBounded(r, 64 * 1024);
         currentDevices = data.devices || [];
         selectedPath = data.selected || null;
         if (currentDevices.length === 0) {
@@ -184,7 +206,7 @@
       try {
         const r = await fetch('/assigned-layout.json?ts=' + Date.now(), { cache: 'no-store' });
         if (r.ok) {
-          const txt = await r.text();
+          const txt = await readNoLayoutTextBounded(r, 4 * 1024 * 1024);
           if (txt && txt.trim() && txt.trim() !== '{}') {
             window.location.reload();
           }
@@ -204,7 +226,7 @@
     async function __cursorLoadConfig() {
       try {
         const r = await fetch('/api/cursor-config.json', { cache: 'no-store' });
-        if (r.ok) { const c = await r.json(); __cursorHideSecs = Number(c.hide_secs) || 3.5; }
+        if (r.ok) { const c = await readNoLayoutJsonBounded(r, 64 * 1024); __cursorHideSecs = Number(c.hide_secs) || 3.5; }
       } catch (e) {}
     }
     setInterval(() => {

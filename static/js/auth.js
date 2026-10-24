@@ -5,6 +5,30 @@
 // on the same `API` const that api.js declares.
 (function () {
     const TOKEN_KEY = 'signage.adminToken';
+    const MAX_AUTH_RESPONSE_BYTES = 64 * 1024;
+    async function readAuthTextBounded(response, maximumBytes = MAX_AUTH_RESPONSE_BYTES) {
+        const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+        if (!reader) throw new Error('response body is unavailable');
+        const decoder = new TextDecoder();
+        let total = 0;
+        let text = '';
+        try {
+            while (true) {
+                const part = await reader.read();
+                if (part.done) { text += decoder.decode(); return text; }
+                const value = part.value || new Uint8Array();
+                total += value.byteLength;
+                if (total > maximumBytes) {
+                    try { await reader.cancel(); } catch (_) {}
+                    throw new Error('response exceeds its size limit');
+                }
+                text += decoder.decode(value, { stream: true });
+            }
+        } finally { reader.releaseLock(); }
+    }
+    async function readAuthJsonBounded(response, maximumBytes = MAX_AUTH_RESPONSE_BYTES) {
+        return JSON.parse(await readAuthTextBounded(response, maximumBytes));
+    }
     let _token = null;
     try { _token = localStorage.getItem(TOKEN_KEY); } catch (_) {}
 
@@ -76,10 +100,10 @@
                         credentials: 'same-origin',
                     });
                     if (!res.ok) {
-                        const txt = await res.text().catch(() => '');
+                        const txt = await readAuthTextBounded(res, 64 * 1024).catch(() => '');
                         throw new Error('login failed: ' + res.status + ' ' + txt);
                     }
-                    const data = await res.json();
+                    const data = await readAuthJsonBounded(res);
                     setToken(data.token);
                     return data;
                 },
@@ -97,8 +121,8 @@
             Object.defineProperty(apiObj, 'loginWithGoogle', {
                 value: async function () {
                     const res = await _realFetch('/api/auth/google/login-url', { credentials: 'same-origin' });
-                    if (!res.ok) throw new Error(await res.text().catch(() => 'Google login unavailable'));
-                    const data = await res.json();
+                    if (!res.ok) throw new Error(await readAuthTextBounded(res, 64 * 1024).catch(() => 'Google login unavailable'));
+                    const data = await readAuthJsonBounded(res);
                     if (!data.url) throw new Error('Google login is not configured');
                     window.location.href = data.url;
                 },
@@ -121,7 +145,7 @@
                     const res = await _realFetch('/api/auth/status', {
                         credentials: 'same-origin',
                     });
-                    return res.json().catch(() => ({ authenticated: false }));
+                    return readAuthJsonBounded(res).catch(() => ({ authenticated: false }));
                 },
                 configurable: true, enumerable: false, writable: true,
             });
@@ -130,8 +154,8 @@
                     const res = await _realFetch('/api/setup/status', {
                         credentials: 'same-origin',
                     });
-                    if (!res.ok) throw new Error(await res.text().catch(() => 'Setup status unavailable'));
-                    return res.json();
+                    if (!res.ok) throw new Error(await readAuthTextBounded(res, 64 * 1024).catch(() => 'Setup status unavailable'));
+                    return readAuthJsonBounded(res);
                 },
                 configurable: true, enumerable: false, writable: true,
             });
@@ -143,7 +167,7 @@
                         credentials: 'same-origin',
                         body: JSON.stringify({ username, display_name: displayName, password }),
                     });
-                    const data = await res.json().catch(() => null);
+                    const data = await readAuthJsonBounded(res).catch(() => null);
                     if (!res.ok) {
                         const message = typeof data === 'string' ? data : (data && (data.message || data.error));
                         throw new Error(message || `setup failed: ${res.status}`);
