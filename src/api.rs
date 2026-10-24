@@ -4476,13 +4476,22 @@ fn image_extension_from_upload(
 async fn list_files(
     Path(category): Path<String>,
 ) -> Result<AxumJson<Vec<FileEntry>>, (StatusCode, String)> {
+    const MAX_FILE_LIST_ENTRIES: usize = 10_000;
     let dir = uploads_dir(&category)?;
     if !dir.exists() {
         return Ok(AxumJson(vec![]));
     }
     let mut entries = Vec::new();
+    let mut scanned_entries = 0usize;
     if let Ok(read_dir) = fs::read_dir(&dir) {
         for entry in read_dir.flatten() {
+            scanned_entries = scanned_entries.saturating_add(1);
+            if scanned_entries > MAX_FILE_LIST_ENTRIES || entries.len() >= MAX_FILE_LIST_ENTRIES {
+                return Err((
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Too many uploaded files".to_string(),
+                ));
+            }
             if let Ok(meta) = entry.metadata() {
                 if meta.is_file() {
                     let name = entry.file_name().to_string_lossy().to_string();
