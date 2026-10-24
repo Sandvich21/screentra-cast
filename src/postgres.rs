@@ -1563,7 +1563,7 @@ impl PostgresStore {
     }
 
     pub async fn list_schedules(&self) -> Result<Vec<ScheduleEntry>, String> {
-        self.client.query("SELECT id,display,layout_id,day_of_week,start_time,end_time,created_at,layout_set_id,action,target_client,power_state,updated_at,display_name,control_method,display_index,brightness,contrast,end_action FROM schedules ORDER BY day_of_week,start_time", &[]).await.map(|rows| rows.iter().map(Self::schedule_from_row).collect()).map_err(|error| format!("list schedules: {error}"))
+        self.client.query("SELECT id,display,layout_id,day_of_week,start_time,end_time,created_at,layout_set_id,action,target_client,power_state,updated_at,display_name,control_method,display_index,brightness,contrast,end_action FROM schedules ORDER BY day_of_week,start_time LIMIT 10000", &[]).await.map(|rows| rows.iter().map(Self::schedule_from_row).collect()).map_err(|error| format!("list schedules: {error}"))
     }
 
     pub async fn get_schedule(&self, id: &str) -> Result<Option<ScheduleEntry>, String> {

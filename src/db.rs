@@ -3049,7 +3049,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
     pub fn list_schedules(&self) -> Result<Vec<ScheduleEntry>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, display_name, control_method, display_index, brightness, contrast, end_action FROM schedules ORDER BY start_time ASC")
+            .prepare("SELECT id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, display_name, control_method, display_index, brightness, contrast, end_action FROM schedules ORDER BY start_time ASC LIMIT 10000")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
@@ -5233,6 +5233,28 @@ mod tests {
 
         let backups = db.list_backups().expect("list backups");
         assert_eq!(backups.len(), 4_096);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn list_schedules_is_bounded() {
+        let path = unique_temp_path("schedule-list-bound");
+        let db = Database::open(&path).expect("open db");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            let tx = conn.unchecked_transaction().expect("begin transaction");
+            for index in 0..10_001 {
+                tx.execute(
+                    "INSERT INTO schedules (id, display, day_of_week, start_time, end_time, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![format!("schedule-{index:05}"), "all", -1, "00:00", "23:59", "2026-10-01T00:00:00Z"],
+                )
+                .expect("insert schedule");
+            }
+            tx.commit().expect("commit schedules");
+        }
+
+        let schedules = db.list_schedules().expect("list schedules");
+        assert_eq!(schedules.len(), 10_000);
         std::fs::remove_file(&path).ok();
     }
 }
