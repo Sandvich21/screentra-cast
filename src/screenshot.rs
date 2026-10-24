@@ -73,6 +73,27 @@ impl ScreenshotStore {
         store.get(client_id).and_then(|d| d.get(&display).cloned())
     }
 
+    pub async fn list(&self, max_entries: usize) -> Vec<ScreenshotInfo> {
+        if max_entries == 0 {
+            return Vec::new();
+        }
+        let store = self.inner.read().await;
+        let mut out = Vec::with_capacity(max_entries.min(store.len()));
+        'clients: for (client_id, displays) in store.iter() {
+            for (&display, scr) in displays {
+                if out.len() >= max_entries {
+                    break 'clients;
+                }
+                out.push(ScreenshotInfo {
+                    client_id: client_id.clone(),
+                    display,
+                    age_seconds: scr.timestamp.elapsed().as_secs(),
+                });
+            }
+        }
+        out
+    }
+
     pub async fn clear(&self, client_id: &str, display: u32) {
         let mut store = self.inner.write().await;
         if let Some(displays) = store.get_mut(client_id) {
@@ -164,19 +185,9 @@ pub struct ScreenshotInfo {
 
 pub(crate) async fn list_screenshots(
 ) -> Json<Vec<ScreenshotInfo>> {
+    const MAX_SCREENSHOT_LIST_ENTRIES: usize = 4096;
     let store = SCREENSHOT_STORE.get().unwrap();
-    let data = store.inner.read().await;
-    let mut out = Vec::new();
-    for (client_id, displays) in data.iter() {
-        for (&display, scr) in displays {
-            out.push(ScreenshotInfo {
-                client_id: client_id.clone(),
-                display,
-                age_seconds: scr.timestamp.elapsed().as_secs(),
-            });
-        }
-    }
-    Json(out)
+    Json(store.list(MAX_SCREENSHOT_LIST_ENTRIES).await)
 }
 
 /// Initialize the global screenshot store. Must be called once before use.
@@ -206,5 +217,14 @@ mod tests {
         store.put("other", 0, vec![7, 6, 5], "image/png".to_string()).await;
         assert_eq!(store.get("client", 0).await.unwrap().data, vec![9, 8]);
         assert_eq!(store.get("other", 0).await.unwrap().data, vec![7, 6, 5]);
+    }
+
+    #[tokio::test]
+    async fn listing_screenshots_is_bounded() {
+        let store = ScreenshotStore::new(10_000);
+        for index in 0..8 {
+            store.put(&format!("client-{index}"), 0, vec![1], "image/png".to_string()).await;
+        }
+        assert_eq!(store.list(4).await.len(), 4);
     }
 }
