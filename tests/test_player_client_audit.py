@@ -125,6 +125,13 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('await r.json()', browser)
         self.assertNotIn('await c.json()', browser)
 
+    def test_no_layout_browser_reads_are_bounded(self):
+        source = (ROOT / 'player-client/static/no-layout.html').read_text()
+        self.assertIn('readTextBounded', source)
+        self.assertIn('reader.cancel()', source)
+        self.assertNotIn('await r.json()', source)
+        self.assertNotIn('await r.text()', source)
+
     def test_embedded_gpu_health_commands_are_bounded(self):
         installer = (ROOT / 'player-client/install/player-client.sh').read_text()
         start = installer.index("cat > \"$GPU_HEALTH\" <<'PY_GPU_HEALTH'\n") + len("cat > \"$GPU_HEALTH\" <<'PY_GPU_HEALTH'\n")
