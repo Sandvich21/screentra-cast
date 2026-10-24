@@ -2138,7 +2138,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
     pub fn list_layout_revisions(&self, layout_id: &str) -> Result<Vec<crate::models::LayoutRevision>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT revision, snapshot, created_at, published_by FROM layout_revisions WHERE layout_id = ?1 ORDER BY revision DESC")
+            .prepare("SELECT revision, snapshot, created_at, published_by FROM layout_revisions WHERE layout_id = ?1 ORDER BY revision DESC LIMIT 1000")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([layout_id], |row| {
@@ -5052,6 +5052,52 @@ mod tests {
 
         let layouts = db.list_layouts().expect("list layouts");
         assert_eq!(layouts.len(), 10_000);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn list_layout_revisions_is_bounded() {
+        let path = unique_temp_path("layout-revision-list-bound");
+        let db = Database::open(&path).expect("open db");
+        let layout = Layout {
+            id: "revision-layout".into(),
+            name: "Revision layout".into(),
+            widgets: vec![],
+            interactive: false,
+            canvas_orientation: "landscape".into(),
+            folder_id: None,
+            page_type: "single".into(),
+            timing_mode: "global".into(),
+            duration: 15,
+            shuffle: false,
+            items: vec![],
+            created_at: "2026-10-01T00:00:00Z".into(),
+            updated_at: "2026-10-01T00:00:00Z".into(),
+        };
+        let snapshot = serde_json::to_string(&layout).expect("encode snapshot");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            let tx = conn.unchecked_transaction().expect("begin transaction");
+            tx.execute(
+                "INSERT INTO layouts (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+                rusqlite::params![layout.id, layout.name, layout.created_at],
+            )
+            .expect("insert layout");
+            for revision in 1..=1_001 {
+                tx.execute(
+                    "INSERT INTO layout_revisions (layout_id, revision, snapshot, created_at) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![layout.id, revision, snapshot, "2026-10-01T00:00:00Z"],
+                )
+                .expect("insert revision");
+            }
+            tx.commit().expect("commit revisions");
+        }
+
+        let revisions = db
+            .list_layout_revisions(&layout.id)
+            .expect("list revisions");
+        assert_eq!(revisions.len(), 1_000);
+        assert_eq!(revisions[0].revision, 1_001);
         std::fs::remove_file(&path).ok();
     }
 }

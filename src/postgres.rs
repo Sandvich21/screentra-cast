@@ -2094,7 +2094,7 @@ impl PostgresStore {
     }
 
     pub async fn list_layout_revisions(&self, layout_id: &str) -> Result<Vec<LayoutRevision>, String> {
-        let rows = self.client.query("SELECT revision, snapshot, created_at, published_by FROM layout_revisions WHERE layout_id=$1 ORDER BY revision DESC", &[&layout_id]).await.map_err(|error| format!("list layout revisions: {error}"))?;
+        let rows = self.client.query("SELECT revision, snapshot, created_at, published_by FROM layout_revisions WHERE layout_id=$1 ORDER BY revision DESC LIMIT 1000", &[&layout_id]).await.map_err(|error| format!("list layout revisions: {error}"))?;
         rows.into_iter().map(|row| {
             let snapshot: String = row.get(1);
             Ok(LayoutRevision { layout_id: layout_id.to_string(), revision: row.get(0), snapshot: serde_json::from_str(&snapshot).map_err(|error| format!("decode layout revision: {error}"))?, created_at: row.get(2), published_by: row.get(3) })
