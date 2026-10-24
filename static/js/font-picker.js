@@ -28,19 +28,45 @@
       return h;
     }
 
+    async function readTextBounded(response, maximumBytes) {
+      const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+      if (!reader) throw new Error('response body is unavailable');
+      const decoder = new TextDecoder();
+      let total = 0;
+      let text = '';
+      try {
+        while (true) {
+          const part = await reader.read();
+          if (part.done) { text += decoder.decode(); return text; }
+          const value = part.value || new Uint8Array();
+          total += value.byteLength;
+          if (total > maximumBytes) {
+            try { await reader.cancel(); } catch (_) {}
+            throw new Error('response exceeds its size limit');
+          }
+          text += decoder.decode(value, { stream: true });
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    }
+    async function readJsonBounded(response, maximumBytes = 4 * 1024 * 1024) {
+      return JSON.parse(await readTextBounded(response, maximumBytes));
+    }
+
     // ============= API =============
     async function fetchCatalog() {
       const r = await fetch('/api/fonts/catalog', { headers: authHeadersNoBody() });
       if (!r.ok) {
-        const t = await r.text();
+        const t = await readTextBounded(r, 64 * 1024);
         throw new Error('catalog fetch failed: ' + t);
       }
-      return r.json();
+      return readJsonBounded(r);
     }
     async function fetchInstalled() {
       const r = await fetch('/api/fonts/installed', { headers: authHeadersNoBody() });
       if (!r.ok) throw new Error('installed fetch failed: ' + r.status);
-      return r.json();
+      return readJsonBounded(r);
     }
     async function downloadFont(family, weights) {
       const r = await fetch('/api/fonts/download', {
@@ -49,10 +75,10 @@
         body: JSON.stringify({ family, weights }),
       });
       if (!r.ok) {
-        const t = await r.text();
+        const t = await readTextBounded(r, 64 * 1024);
         throw new Error('download failed: ' + t);
       }
-      return r.json();
+      return readJsonBounded(r);
     }
     async function deleteFont(filename) {
       const r = await fetch('/api/fonts/' + encodeURIComponent(filename), {
@@ -187,7 +213,7 @@
         const r = await fetch('/api/fonts/preview-status?families=' +
           encodeURIComponent(uniq.join(',')));
         if (!r.ok) return {};
-        const data = await r.json();
+        const data = await readJsonBounded(r);
         return data.cached || {};
       } catch (e) {
         return {};
