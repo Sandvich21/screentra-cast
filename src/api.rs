@@ -10464,6 +10464,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mutation_id_lists_are_bounded() {
+        let ids = vec![0_i64; MAX_MUTATION_IDS + 1];
+        let (status, error) = validate_mutation_id_count(&ids, "too many ids")
+            .expect_err("oversized mutation id list should fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error, "too many ids");
+    }
+
+    #[test]
     fn bulk_command_client_ids_are_bounded() {
         let ids = vec!["client".to_string(); MAX_BULK_COMMAND_CLIENT_IDS + 1];
         let (status, error) = validate_bulk_command_client_ids(&ids)
@@ -13504,10 +13513,21 @@ fn csv_escape(s: &str) -> String {
 struct DeleteInteractiveSubmissionsPayload {
     ids: Vec<i64>,
 }
+
+const MAX_MUTATION_IDS: usize = 10_000;
+
+fn validate_mutation_id_count<T>(ids: &[T], error_message: &str) -> Result<(), (StatusCode, String)> {
+    if ids.len() > MAX_MUTATION_IDS {
+        return Err((StatusCode::BAD_REQUEST, error_message.to_string()));
+    }
+    Ok(())
+}
+
 async fn delete_interactive_submissions_handler(
     State(repository): State<ClientRepository>,
     AxumJson(payload): AxumJson<DeleteInteractiveSubmissionsPayload>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_mutation_id_count(&payload.ids, "too many interactive submission ids")?;
     let n = repository
         .delete_interactive_submissions(&payload.ids)
         .await
@@ -13536,6 +13556,9 @@ async fn sync_interactive_submissions_to_google_handler(
     AxumJson(payload): AxumJson<SyncToGooglePayload>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
     // Resolve which submission IDs to sync.
+    if let Some(specific) = payload.ids.as_deref() {
+        validate_mutation_id_count(specific, "too many interactive submission ids")?;
+    }
     let ids: Vec<i64> = if let Some(specific) = payload.ids.clone() {
         specific
     } else {
@@ -13768,6 +13791,7 @@ async fn delete_table_rows_handler(
     if payload.ids.is_empty() {
         return Ok(AxumJson(serde_json::json!({"deleted": 0})));
     }
+    validate_mutation_id_count(&payload.ids, "too many table row ids")?;
 
     let deleted = db
         .delete_table_rows(&safe_table, &payload.ids)
