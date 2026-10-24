@@ -842,7 +842,7 @@ impl PostgresStore {
         let rows = self
             .client
             .query(
-                "SELECT display_index, layout_id FROM scene_display_layouts WHERE scene_id=$1 ORDER BY display_index ASC",
+                "SELECT display_index, layout_id FROM scene_display_layouts WHERE scene_id=$1 ORDER BY display_index ASC LIMIT 4096",
                 &[&scene_id],
             )
             .await
@@ -1923,7 +1923,7 @@ impl PostgresStore {
         let rows = self
             .client
             .query(
-                "SELECT ls.id,ls.name,ls.shuffle,ls.dwell_secs,ls.created_at,ls.updated_at,lse.layout_id,lse.order_index,lse.interval_secs FROM layout_sets ls JOIN layout_set_entries lse ON lse.layout_set_id=ls.id WHERE EXISTS (SELECT 1 FROM layout_set_entries assigned WHERE assigned.layout_set_id=ls.id AND assigned.layout_id=ANY($1::text[]))",
+                "SELECT ls.id,ls.name,ls.shuffle,ls.dwell_secs,ls.created_at,ls.updated_at,lse.layout_id,lse.order_index,lse.interval_secs FROM layout_sets ls JOIN layout_set_entries lse ON lse.layout_set_id=ls.id WHERE EXISTS (SELECT 1 FROM layout_set_entries assigned WHERE assigned.layout_set_id=ls.id AND assigned.layout_id=ANY($1::text[])) LIMIT 10000",
                 &[&layout_ids],
             )
             .await
@@ -2263,7 +2263,7 @@ impl PostgresStore {
         let max_age_secs = max_age_secs as f64;
         self.client
             .query(
-                "SELECT url, title, headlines_json, last_fetched_at, last_error, etag, last_modified FROM news_feeds WHERE last_fetched_at='' OR last_fetched_at::timestamptz < now() - ($1::double precision * interval '1 second') ORDER BY url ASC",
+                "SELECT url, title, headlines_json, last_fetched_at, last_error, etag, last_modified FROM news_feeds WHERE last_fetched_at='' OR last_fetched_at::timestamptz < now() - ($1::double precision * interval '1 second') ORDER BY url ASC LIMIT 4096",
                 &[&max_age_secs],
             )
             .await
@@ -2666,7 +2666,7 @@ impl PostgresStore {
         let rows = self
             .client
             .query(
-                "SELECT client_id, display_index, connector, label, width, height, refresh_rate, enabled, assigned_layout_id, active_layout_id, last_seen, last_error, orientation, control_method FROM client_displays WHERE client_id=$1 ORDER BY display_index ASC",
+                "SELECT client_id, display_index, connector, label, width, height, refresh_rate, enabled, assigned_layout_id, active_layout_id, last_seen, last_error, orientation, control_method FROM client_displays WHERE client_id=$1 ORDER BY display_index ASC LIMIT 4096",
                 &[&client_id],
             )
             .await

@@ -1279,7 +1279,7 @@ impl Database {
             )
             .unwrap_or((false, None));
         let mut stmt = conn
-            .prepare("SELECT client_id, display_index, connector, label, width, height, refresh_rate, enabled, assigned_layout_id, active_layout_id, last_seen, last_error, orientation, control_method FROM client_displays WHERE client_id = ?1 ORDER BY display_index ASC")
+            .prepare("SELECT client_id, display_index, connector, label, width, height, refresh_rate, enabled, assigned_layout_id, active_layout_id, last_seen, last_error, orientation, control_method FROM client_displays WHERE client_id = ?1 ORDER BY display_index ASC LIMIT 4096")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([client_id], |row| {
@@ -1368,7 +1368,7 @@ impl Database {
             .map_err(|e| e.to_string())?;
         let Some(base) = base else { return Ok(None); };
         let mut stmt = conn
-            .prepare("SELECT display_index, layout_id FROM scene_display_layouts WHERE scene_id = ?1 ORDER BY display_index ASC")
+            .prepare("SELECT display_index, layout_id FROM scene_display_layouts WHERE scene_id = ?1 ORDER BY display_index ASC LIMIT 4096")
             .map_err(|e| e.to_string())?;
         let assignments = stmt
             .query_map([scene_id], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -2882,7 +2882,8 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
                 "SELECT url, title, headlines_json, last_fetched_at, last_error, etag, last_modified
                  FROM news_feeds
                  WHERE last_fetched_at = ''
-                    OR CAST(strftime('%s', last_fetched_at) AS INTEGER) < ?1",
+                    OR CAST(strftime('%s', last_fetched_at) AS INTEGER) < ?1
+                 ORDER BY url LIMIT 4096",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -3908,7 +3909,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
                  SELECT 1 FROM layout_set_entries assigned
                  WHERE assigned.layout_set_id = ls.id
                    AND assigned.layout_id IN ({})
-             )",
+             ) LIMIT 10000",
             placeholders.join(",")
         );
         let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
