@@ -1315,7 +1315,17 @@ fn republish_local_ca(static_dir: &Path) -> Result<bool, String> {
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     let mut file_count = 0usize;
     let mut total_bytes = 0u64;
-    copy_dir_recursive_bounded(src, dst, &mut file_count, &mut total_bytes)
+    let mut scanned_entries = 0usize;
+    copy_dir_recursive_bounded(
+        src,
+        dst,
+        &mut file_count,
+        &mut total_bytes,
+        &mut scanned_entries,
+        200_000,
+        100_000,
+        1024 * 1024 * 1024,
+    )
 }
 
 fn copy_dir_recursive_bounded(
@@ -1323,14 +1333,23 @@ fn copy_dir_recursive_bounded(
     dst: &Path,
     file_count: &mut usize,
     total_bytes: &mut u64,
+    scanned_entries: &mut usize,
+    maximum_entries: usize,
+    maximum_files: usize,
+    maximum_bytes: u64,
 ) -> std::io::Result<()> {
-    const MAX_COPIED_FILES: usize = 100_000;
-    const MAX_COPIED_BYTES: u64 = 1024 * 1024 * 1024;
     if !src.exists() {
         return Ok(());
     }
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
+        *scanned_entries = scanned_entries.saturating_add(1);
+        if *scanned_entries > maximum_entries {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "recursive copy source exceeds its entry bound",
+            ));
+        }
         let entry = entry?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
@@ -1342,11 +1361,20 @@ fn copy_dir_recursive_bounded(
             ));
         }
         if metadata.is_dir() {
-            copy_dir_recursive_bounded(&from, &to, file_count, total_bytes)?;
+            copy_dir_recursive_bounded(
+                &from,
+                &to,
+                file_count,
+                total_bytes,
+                scanned_entries,
+                maximum_entries,
+                maximum_files,
+                maximum_bytes,
+            )?;
         } else if metadata.is_file() {
             *file_count = file_count.saturating_add(1);
             *total_bytes = total_bytes.saturating_add(metadata.len());
-            if *file_count > MAX_COPIED_FILES || *total_bytes > MAX_COPIED_BYTES {
+            if *file_count > maximum_files || *total_bytes > maximum_bytes {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::FileTooLarge,
                     "recursive copy source exceeds its bounds",
@@ -1372,7 +1400,18 @@ fn copy_dir_recursive_excluding(
 ) -> std::io::Result<()> {
     let mut file_count = 0usize;
     let mut total_bytes = 0u64;
-    copy_dir_recursive_excluding_bounded(src, dst, skip_names, &mut file_count, &mut total_bytes)
+    let mut scanned_entries = 0usize;
+    copy_dir_recursive_excluding_bounded(
+        src,
+        dst,
+        skip_names,
+        &mut file_count,
+        &mut total_bytes,
+        &mut scanned_entries,
+        200_000,
+        100_000,
+        1024 * 1024 * 1024,
+    )
 }
 
 fn copy_dir_recursive_excluding_bounded(
@@ -1381,14 +1420,23 @@ fn copy_dir_recursive_excluding_bounded(
     skip_names: &[&str],
     file_count: &mut usize,
     total_bytes: &mut u64,
+    scanned_entries: &mut usize,
+    maximum_entries: usize,
+    maximum_files: usize,
+    maximum_bytes: u64,
 ) -> std::io::Result<()> {
-    const MAX_COPIED_FILES: usize = 100_000;
-    const MAX_COPIED_BYTES: u64 = 1024 * 1024 * 1024;
     if !src.exists() {
         return Ok(());
     }
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
+        *scanned_entries = scanned_entries.saturating_add(1);
+        if *scanned_entries > maximum_entries {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "recursive copy source exceeds its entry bound",
+            ));
+        }
         let entry = entry?;
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
@@ -1411,11 +1459,15 @@ fn copy_dir_recursive_excluding_bounded(
                 skip_names,
                 file_count,
                 total_bytes,
+                scanned_entries,
+                maximum_entries,
+                maximum_files,
+                maximum_bytes,
             )?;
         } else if metadata.is_file() {
             *file_count = file_count.saturating_add(1);
             *total_bytes = total_bytes.saturating_add(metadata.len());
-            if *file_count > MAX_COPIED_FILES || *total_bytes > MAX_COPIED_BYTES {
+            if *file_count > maximum_files || *total_bytes > maximum_bytes {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::FileTooLarge,
                     "recursive copy source exceeds its bounds",
@@ -1643,6 +1695,34 @@ mod update_swap_tests {
         assert!(result
             .unwrap_err()
             .contains("directory contains too many entries"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recursive_copy_bounds_scanned_directory_entries() {
+        let root = std::env::temp_dir().join(format!("screentra-copy-entry-limit-{}", Uuid::new_v4()));
+        let src = root.join("src");
+        fs::create_dir_all(src.join("empty-a")).unwrap();
+        fs::create_dir_all(src.join("empty-b")).unwrap();
+        fs::create_dir_all(src.join("empty-c")).unwrap();
+        let dst = root.join("dst");
+        let mut file_count = 0usize;
+        let mut total_bytes = 0u64;
+        let mut scanned_entries = 0usize;
+        let result = copy_dir_recursive_bounded(
+            &src,
+            &dst,
+            &mut file_count,
+            &mut total_bytes,
+            &mut scanned_entries,
+            2,
+            1024,
+            1024,
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("recursive copy source exceeds its entry bound"));
         let _ = fs::remove_dir_all(root);
     }
 
