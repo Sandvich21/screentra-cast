@@ -42,6 +42,28 @@ pub const OPEN_ROUTES: &[&str] = &[
     "/install/screentra-cast-signage-ca.crt",
 ];
 
+fn is_client_resource_path(path: &str, expected: &[&str]) -> bool {
+    let Some(rest) = path.strip_prefix("/api/clients/") else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    parts.len() == expected.len() + 1
+        && !parts[0].is_empty()
+        && parts[1..] == *expected
+}
+
+fn is_client_addon_package_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/clients/") else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    parts.len() == 4
+        && !parts[0].is_empty()
+        && parts[1] == "addons"
+        && !parts[2].is_empty()
+        && parts[3] == "package"
+}
+
 /// Method+path prefixes that are always open even though the prefix overlaps
 /// with the gated namespace (e.g. config fetches by enrolled players).
 fn is_open_path(path: &str, method: &str) -> bool {
@@ -92,16 +114,10 @@ fn is_open_path(path: &str, method: &str) -> bool {
     }
     // Client command acknowledgements authenticate in the handler with the
     // enrolled per-client credential rather than an admin session.
-    if method == "POST"
-        && path.starts_with("/api/clients/")
-        && path.ends_with("/command/ack")
-    {
+    if method == "POST" && is_client_resource_path(path, &["command", "ack"]) {
         return true;
     }
-    if method == "POST"
-        && path.starts_with("/api/clients/")
-        && path.ends_with("/addons/status")
-    {
+    if method == "POST" && is_client_resource_path(path, &["addons", "status"]) {
         return true;
     }
     // Player config fetches (read-only) are open so enrolled players still work
@@ -110,23 +126,23 @@ fn is_open_path(path: &str, method: &str) -> bool {
         return true;
     }
     if method == "GET" {
-        if path.starts_with("/api/clients/") && path.ends_with("/config") {
+        if is_client_resource_path(path, &["config"]) {
             return true;
         }
         // The addon inventory is read by enrolled players; the handler still
         // requires the per-client credential or an admin session.
-        if path.starts_with("/api/clients/") && path.ends_with("/addons") {
+        if is_client_resource_path(path, &["addons"]) {
             return true;
         }
-        if path.starts_with("/api/clients/") && path.ends_with("/package") {
+        if is_client_addon_package_path(path) {
             return true;
         }
         // The privileged client updater authenticates this read with the
         // enrolled per-client token in the handler.
-        if path.starts_with("/api/clients/") && path.ends_with("/update-check") {
+        if is_client_resource_path(path, &["update-check"]) {
             return true;
         }
-        if path.starts_with("/api/clients/") && path.ends_with("/admin-users") {
+        if is_client_resource_path(path, &["admin-users"]) {
             return true;
         }
         if let Some(rest) = path.strip_prefix("/api/clients/") {
@@ -136,20 +152,15 @@ fn is_open_path(path: &str, method: &str) -> bool {
                 return true;
             }
         }
-        // GET /api/clients/{id}/virtual — fetch virtual client info
-        if method == "GET" && path.contains("/virtual") && path.split("/virtual").count() == 2 && path.ends_with("/virtual") {
-            return true;
-        }
-        // PATCH /api/clients/{id}/virtual — update virtual client name
-        if method == "PATCH" && path.contains("/virtual") && path.split("/virtual").count() == 2 && path.ends_with("/virtual") {
+        if is_client_resource_path(path, &["virtual"]) {
             return true;
         }
         // Player heartbeat reads (no such endpoint yet; placeholder).
 
         // Player command poll (read-only — clients pull to see if they have
-        // a pending nudge/layout-assignment/etc. Idempotent and safe to
-        // expose without auth since no state leaks.
-        if path.starts_with("/api/clients/") && path.ends_with("/command") {
+        // a pending nudge/layout-assignment/etc. The handler still requires
+        // the enrolled per-client token before returning a command.
+        if is_client_resource_path(path, &["command"]) {
             return true;
         }
         // GET status, list templates, list layouts, list schedules etc. are read-only
@@ -560,6 +571,9 @@ mod authorization_tests {
     fn client_command_poll_is_open_only_for_get() {
         assert!(is_open_path("/api/clients/example/command", "GET"));
         assert!(is_open_path("/api/clients/example/addons", "GET"));
+        assert!(!is_open_path("/api/clients/example/nested/command", "GET"));
+        assert!(!is_open_path("/api/clients/example/addons/status/extra", "POST"));
+        assert!(!is_open_path("/api/clients/example/nested/command/ack", "POST"));
         assert!(!is_open_path("/api/clients/example/command", "DELETE"));
         assert!(!is_open_path("/api/clients/example/displays/0/command", "DELETE"));
         assert!(is_open_path("/api/clients/example/command/ack", "POST"));
