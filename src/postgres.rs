@@ -2540,6 +2540,7 @@ impl PostgresStore {
         client_id: &str,
         limit: i64,
     ) -> Result<Vec<(String, Option<f64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)>, String> {
+        let limit = limit.clamp(0, 1_000);
         self.client
             .query(
                 "SELECT recorded_at, cpu_usage, memory_used, memory_total, disk_used, disk_total, uptime_seconds FROM client_heartbeats WHERE client_id=$1 ORDER BY recorded_at DESC LIMIT $2",

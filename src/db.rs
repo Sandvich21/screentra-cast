@@ -10,6 +10,7 @@ use std::{sync::Mutex, time::Duration};
 
 const MAX_TABLE_ROWS: u32 = 10_000;
 const MAX_INTERACTIVE_SUBMISSIONS: i64 = 10_000;
+const MAX_CLIENT_HEARTBEATS: i64 = 1_000;
 
 /// Rebuild the `schedules` table so that `layout_id` is nullable.
 /// SQLite has no `ALTER TABLE ... DROP NOT NULL`, so we:
@@ -830,6 +831,7 @@ impl Database {
         client_id: &str,
         limit: i64,
     ) -> Result<Vec<(String, Option<f64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)>, String> {
+        let limit = limit.clamp(0, MAX_CLIENT_HEARTBEATS);
         let conn = self.conn()?;
         let mut stmt = conn
             .prepare(
@@ -5036,6 +5038,30 @@ mod tests {
             .expect("different action should have an independent burst");
         db.queue_client_command("client-2", "restart_client", None, &now, Some("test"))
             .expect("different client should have an independent burst");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn list_client_heartbeats_is_bounded() {
+        let path = unique_temp_path("heartbeat-list-bound");
+        let db = Database::open(&path).expect("open db");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            let tx = conn.unchecked_transaction().expect("begin transaction");
+            tx.execute(
+                "INSERT INTO clients (id, name, address, last_seen) VALUES ('heartbeat-client', 'Heartbeat Client', '127.0.0.1', '2026-10-01T00:00:00Z')",
+                [],
+            ).expect("insert client");
+            for index in 0..1_001 {
+                tx.execute(
+                    "INSERT INTO client_heartbeats (client_id, recorded_at) VALUES (?1, ?2)",
+                    rusqlite::params!["heartbeat-client", format!("2026-10-01T00:{:02}:00Z", index % 60)],
+                ).expect("insert heartbeat");
+            }
+            tx.commit().expect("commit heartbeats");
+        }
+        let heartbeats = db.list_client_heartbeats("heartbeat-client", 5_000).expect("list heartbeats");
+        assert_eq!(heartbeats.len(), 1_000);
         std::fs::remove_file(&path).ok();
     }
 
