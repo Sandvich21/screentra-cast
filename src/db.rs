@@ -1355,6 +1355,9 @@ impl Database {
         client_id: &str,
         assignments: &[(i64, Option<String>)],
     ) -> Result<usize, String> {
+        if assignments.len() > MAX_TABLE_ROWS as usize {
+            return Err("too many scene assignments".to_string());
+        }
         let mut conn = self.conn()?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         let mut updated = 0;
@@ -5436,6 +5439,19 @@ mod tests {
         let schedules = db.list_schedules().expect("list schedules");
         assert_eq!(schedules.len(), 10_000);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn publish_scene_assignments_rejects_oversized_assignment_lists() {
+        let path = unique_temp_path("scene-publish-assignment-bound");
+        let db = Database::open(&path).expect("open db");
+        let assignments: Vec<(i64, Option<String>)> = (0..10_001)
+            .map(|display_index| (display_index as i64, None))
+            .collect();
+        let result = db.publish_scene_assignments("client-bound", &assignments);
+        std::fs::remove_file(&path).ok();
+        let error = result.expect_err("oversized scene publish list should fail");
+        assert!(error.contains("too many scene assignments"));
     }
 
     #[test]
