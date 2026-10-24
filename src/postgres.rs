@@ -1733,7 +1733,7 @@ impl PostgresStore {
     }
 
     pub async fn list_templates(&self) -> Result<Vec<TemplateMeta>, String> {
-        self.client.query("SELECT id,name,category,is_builtin,created_at FROM templates ORDER BY name", &[]).await.map(|rows| rows.into_iter().map(|row| TemplateMeta { id: row.get(0), name: row.get(1), category: row.get(2), is_builtin: row.get(3), created_at: row.get(4) }).collect()).map_err(|error| format!("list templates: {error}"))
+        self.client.query("SELECT id,name,category,is_builtin,created_at FROM templates ORDER BY name LIMIT 4096", &[]).await.map(|rows| rows.into_iter().map(|row| TemplateMeta { id: row.get(0), name: row.get(1), category: row.get(2), is_builtin: row.get(3), created_at: row.get(4) }).collect()).map_err(|error| format!("list templates: {error}"))
     }
 
     pub async fn get_template(&self, id: &str) -> Result<Option<String>, String> {
