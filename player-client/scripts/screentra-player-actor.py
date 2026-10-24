@@ -1143,17 +1143,37 @@ def apply_display_power(cache_dir: Path, display_index: int | None, state: str) 
     env = _preview_wayland_env()
     requested = '--on' if state == 'on' else '--off'
     if state == 'on' and env.get('SWAYSOCK') and shutil.which('swaymsg'):
+        enable_rc, enable_out, enable_err = _run_list(
+            ['wlr-randr', '--output', connector, '--on'],
+            timeout=10,
+            env=env,
+        )
+        if enable_rc != 0:
+            message = _bound_hardware_message(
+                enable_out or enable_err or 'failed to re-enable output before Sway DPMS wake'
+            )
+            return False, message, {
+                'display_index': display_index,
+                'connector': connector,
+                'state': state,
+                'method': 'wlr-randr+sway-dpms',
+                'stage': 'enable-output',
+                'enable_return_code': enable_rc,
+            }
         rc, out, err = _run_list(
             ['swaymsg', '-s', env['SWAYSOCK'], 'output', connector, 'power', 'on'],
             timeout=10,
             env=env,
         )
-        message = out or err or ('display powered on via Sway DPMS' if rc == 0 else 'Sway DPMS wake failed')
+        message = _bound_hardware_message(
+            out or err or ('display powered on via Sway DPMS' if rc == 0 else 'Sway DPMS wake failed')
+        )
         return rc == 0, message, {
             'display_index': display_index,
             'connector': connector,
             'state': state,
-            'method': 'sway-dpms',
+            'method': 'wlr-randr+sway-dpms',
+            'enable_return_code': enable_rc,
             'return_code': rc,
         }
     rc, out, err = _run_list(

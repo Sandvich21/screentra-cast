@@ -67,8 +67,9 @@ class DisplaySettingsActorTests(unittest.TestCase):
             actor._preview_wayland_env = original_env
             actor.shutil.which = original_which
         self.assertTrue(result['ok'])
-        self.assertEqual(result['details']['method'], 'sway-dpms')
-        self.assertEqual(calls[0][0], [
+        self.assertEqual(result['details']['method'], 'wlr-randr+sway-dpms')
+        self.assertEqual(calls[0][0], ['wlr-randr', '--output', 'DP-2', '--on'])
+        self.assertEqual(calls[1][0], [
             'swaymsg', '-s', '/run/board/sway-ipc.1000.1820.sock',
             'output', 'DP-2', 'power', 'on',
         ])
