@@ -9143,12 +9143,14 @@ async fn create_scene(
     {
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "scene insert failed".to_string()));
     }
-    Ok(AxumJson(
-        load_scene(&repository, &id)
-            .await
-            .map_err(|_| internal_server_error())?
-            .unwrap(),
-    ))
+    let scene = load_scene(&repository, &id)
+        .await
+        .map_err(|_| internal_server_error())?
+        .ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "scene insert succeeded but scene could not be reloaded".to_string(),
+        ))?;
+    Ok(AxumJson(scene))
 }
 
 async fn update_scene(
@@ -9169,12 +9171,14 @@ async fn update_scene(
     if !updated {
         return Err((StatusCode::NOT_FOUND, "scene not found".to_string()));
     }
-    Ok(AxumJson(
-        load_scene(&repository, &id)
-            .await
-            .map_err(|_| internal_server_error())?
-            .unwrap(),
-    ))
+    let scene = load_scene(&repository, &id)
+        .await
+        .map_err(|_| internal_server_error())?
+        .ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "scene update succeeded but scene could not be reloaded".to_string(),
+        ))?;
+    Ok(AxumJson(scene))
 }
 
 async fn delete_scene(
@@ -10512,6 +10516,24 @@ fn reverse_name(ip: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scene_mutation_handlers_do_not_unwrap_reload_results() {
+        let source = include_str!("api.rs");
+        let start = source.find("async fn create_scene(").expect("create_scene handler");
+        let end_offset = source[start..]
+            .find("async fn update_scene(")
+            .expect("update_scene boundary");
+        let span = &source[start..start + end_offset];
+        assert!(!span.contains(".unwrap()"), "create_scene reload must handle missing rows");
+
+        let update_start = start + end_offset;
+        let update_end_offset = source[update_start..]
+            .find("async fn delete_scene(")
+            .expect("delete_scene boundary");
+        let update_span = &source[update_start..update_start + update_end_offset];
+        assert!(!update_span.contains(".unwrap()"), "update_scene reload must handle missing rows");
+    }
+
     use super::*;
 
     #[test]
