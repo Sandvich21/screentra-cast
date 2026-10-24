@@ -110,6 +110,21 @@ class PlayerClientAuditTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'stdout exceeds its bound'):
             namespace['_bounded_run']([sys.executable, '-c', "print('x' * 13000)"], timeout=10)
 
+    def test_embedded_renderer_browser_reads_are_bounded(self):
+        installer = (ROOT / 'player-client/static/install/player-client.sh').read_text()
+        marker = "PY_RENDERER'" + chr(10)
+        start = installer.index(marker) + len(marker)
+        end = installer.index(chr(10) + 'PY_RENDERER' + chr(10) + 'chmod +x "$RENDERER"', start)
+        body = installer[start:end]
+        html_start = body.index("PLAYER_HTML = r'''")
+        html_end = body.index("'''", html_start + len("PLAYER_HTML = r'''"))
+        browser = body[html_start:html_end]
+        self.assertIn('readTextBounded', browser)
+        self.assertIn('reader.cancel()', browser)
+        self.assertNotIn('await r.text()', browser)
+        self.assertNotIn('await r.json()', browser)
+        self.assertNotIn('await c.json()', browser)
+
     def test_embedded_gpu_health_commands_are_bounded(self):
         installer = (ROOT / 'player-client/install/player-client.sh').read_text()
         start = installer.index("cat > \"$GPU_HEALTH\" <<'PY_GPU_HEALTH'\n") + len("cat > \"$GPU_HEALTH\" <<'PY_GPU_HEALTH'\n")
