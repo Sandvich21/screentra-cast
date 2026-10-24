@@ -72,6 +72,16 @@ fn is_player_screenshot_path(path: &str) -> bool {
     parts.len() == 2 && !parts[0].is_empty() && parts[1] == "screenshot"
 }
 
+fn is_display_state_path(path: &str) -> bool {
+    if path == "/api/display-state" {
+        return true;
+    }
+    let Some(rest) = path.strip_prefix("/api/display-state/") else {
+        return false;
+    };
+    !rest.is_empty() && !rest.contains('/')
+}
+
 /// Method+path prefixes that are always open even though the prefix overlaps
 /// with the gated namespace (e.g. config fetches by enrolled players).
 fn is_open_path(path: &str, method: &str) -> bool {
@@ -176,7 +186,7 @@ fn is_open_path(path: &str, method: &str) -> bool {
             if path == "/api/displays" {
                 return true;
             }
-            if path == "/api/display-state" || path.starts_with("/api/display-state/") {
+            if is_display_state_path(path) {
                 return true;
             }
             // Layout fetches by enrolled players — player.js hits
@@ -626,6 +636,8 @@ mod authorization_tests {
         assert!(!role_has_capability("layout-manager", "manage_clients"));
         assert!(!is_open_path("/api/system/time", "POST"));
         assert!(is_open_path("/api/system/time", "GET"));
+        assert!(is_open_path("/api/display-state/display-1", "GET"));
+        assert!(!is_open_path("/api/display-state/display-1/extra", "GET"));
         assert!(!is_open_path("/api/clients/virtual", "POST"));
     }
 
