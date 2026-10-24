@@ -170,6 +170,13 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn('reader.cancel()', source)
         self.assertNotRegex(source, r'\br\.(?:json|text)\(\)')
 
+    def test_legacy_no_layout_browser_reads_are_bounded(self):
+        source = (ROOT / 'player-client/scripts/no-layout.html').read_text()
+        self.assertIn('readNoLayoutJsonBounded', source)
+        self.assertIn('reader.cancel()', source)
+        self.assertNotIn('await r.json()', source)
+        self.assertNotIn('await r.text()', source)
+
     def test_weather_browser_reads_are_bounded(self):
         source = (ROOT / 'static/js/weather.js').read_text()
         self.assertIn('readWeatherJsonBounded', source)
