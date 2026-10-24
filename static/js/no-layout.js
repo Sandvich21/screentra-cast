@@ -37,7 +37,8 @@
         $('serverUrl').textContent = s.server_url || '—';
         $('hostname').textContent  = s.hostname || '—';
         $('clientId').textContent  = s.client_id || '—';
-        const adminUrl = s.admin_url || (s.lan_ip ? ('http://' + s.lan_ip + ':3910/') : 'http://11.1.1.54:3910/');
+        const localAdminUrl = (() => { try { const url = new URL(window.location.href); url.port = '3910'; url.pathname = '/'; url.search = ''; url.hash = ''; return url.href; } catch (_) { return 'http://localhost:3910/'; } })();
+        const adminUrl = s.admin_url || (s.lan_ip ? ('http://' + s.lan_ip + ':3910/') : localAdminUrl);
         const adminUrlEl = $('adminUrl');
         if (adminUrlEl) adminUrlEl.textContent = adminUrl;
         $('lastSeen').textContent  = 'Last seen ' + (s.last_seen || '—');

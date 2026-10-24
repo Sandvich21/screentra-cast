@@ -133,6 +133,17 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn('await reader.cancel()', source)
         self.assertNotIn('await r.json()', source)
 
+    def test_no_layout_admin_url_uses_local_origin_fallback(self):
+        paths = [
+            ROOT / 'static/js/no-layout.js',
+            ROOT / 'player-client/static/no-layout.html',
+            ROOT / 'player-client/scripts/no-layout.html',
+        ]
+        for path in paths:
+            source = path.read_text()
+            self.assertNotIn('11.1.1.54:3910', source)
+            self.assertIn("new URL(window.location.href)", source)
+
     def test_served_player_installer_matches_generated_installer(self):
         generated = (ROOT / 'player-client/static/install/player-client.sh').read_bytes()
         served = (ROOT / 'static/install/player-client.sh').read_bytes()
