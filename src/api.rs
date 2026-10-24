@@ -2279,7 +2279,7 @@ async fn create_addon_execution_approval(
         &payload.artifact_digest,
         payload.request,
     )
-    .map_err(|error| (StatusCode::BAD_REQUEST, format!("Invalid approval request: {error:?}")))?;
+    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid approval request".to_string()))?;
     crate::addon_capabilities::AddonApprovalStore::save(&record)
         .map_err(|error| {
             log::error!("addon approval save failed: {error}");
@@ -2344,7 +2344,7 @@ async fn approve_addon_execution_approval(
     let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     record
         .approve(&principal.username, &timestamp)
-        .map_err(|error| (StatusCode::BAD_REQUEST, format!("Approval rejected: {error:?}")))?;
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Approval request rejected".to_string()))?;
     crate::addon_capabilities::AddonApprovalStore::save(&record)
         .map_err(|_| internal_server_error())?;
     audit_trusted_service_stage_event(
@@ -2371,7 +2371,7 @@ async fn revoke_addon_execution_approval(
     let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     record
         .revoke(&principal.username, &timestamp)
-        .map_err(|error| (StatusCode::BAD_REQUEST, format!("Revocation rejected: {error:?}")))?;
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Approval revocation rejected".to_string()))?;
     crate::addon_capabilities::AddonApprovalStore::save(&record)
         .map_err(|_| internal_server_error())?;
     audit_trusted_service_stage_event(
@@ -2409,7 +2409,7 @@ async fn approve_addon_execution_target(
     let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     record
         .approve_target(target, &principal.username, &timestamp)
-        .map_err(|error| (StatusCode::BAD_REQUEST, format!("Target approval rejected: {error:?}")))?;
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Target approval rejected".to_string()))?;
     crate::addon_capabilities::AddonApprovalStore::save(&record)
         .map_err(|_| internal_server_error())?;
     audit_trusted_service_stage_event(
@@ -2437,7 +2437,7 @@ async fn revoke_addon_execution_target(
     let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     record
         .revoke_target(target, &principal.username, &timestamp)
-        .map_err(|error| (StatusCode::BAD_REQUEST, format!("Target revocation rejected: {error:?}")))?;
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Target revocation rejected".to_string()))?;
     crate::addon_capabilities::AddonApprovalStore::save(&record)
         .map_err(|_| internal_server_error())?;
     audit_trusted_service_stage_event(
@@ -14040,9 +14040,8 @@ async fn push_submissions_to_google_sheets(
         Duration::from_secs(30),
     )
     .await
-    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Google Sheets push failed: {e}")))?;
+    .map_err(|_| (StatusCode::BAD_GATEWAY, "Google Sheets push failed".to_string()))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if output.status.success() && stdout.starts_with("OK") {
         let sheet_id = stdout
             .split_whitespace()
@@ -14051,10 +14050,10 @@ async fn push_submissions_to_google_sheets(
             .or(Some(sheet_arg));
         Ok(sheet_id)
     } else {
-        let msg = if !stderr.is_empty() { stderr } else { stdout };
+        log::error!("Google Sheets push helper failed");
         Err((
             StatusCode::BAD_GATEWAY,
-            format!("Google Sheets push failed: {msg}"),
+            "Google Sheets push failed".to_string(),
         ))
     }
 }

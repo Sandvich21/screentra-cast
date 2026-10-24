@@ -29,6 +29,25 @@ class ServerSecurityAuditTests(unittest.TestCase):
             self.assertNotIn('StatusCode::INTERNAL_SERVER_ERROR, e', block, marker)
             self.assertNotIn('StatusCode::INTERNAL_SERVER_ERROR, error', block, marker)
 
+    def test_approval_and_external_command_errors_are_opaque(self):
+        source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
+        for marker, end_marker in (
+            ('async fn create_addon_execution_approval(', 'async fn update_addon_execution_capabilities('),
+            ('async fn approve_addon_execution_approval(', 'async fn revoke_addon_execution_approval('),
+            ('async fn revoke_addon_execution_approval(', 'fn parse_addon_execution_target('),
+            ('async fn approve_addon_execution_target(', 'async fn revoke_addon_execution_target('),
+            ('async fn revoke_addon_execution_target(', 'async fn list_addon_widget_types('),
+            ('async fn push_submissions_to_google_sheets(', 'async fn '),
+        ):
+            start = source.index(marker)
+            end = source.index(end_marker, start + len(marker))
+            block = source[start:end]
+            self.assertNotIn('format!("Invalid approval request:', block, marker)
+            self.assertNotIn('format!("Approval rejected:', block, marker)
+            self.assertNotIn('format!("Revocation rejected:', block, marker)
+            self.assertNotIn('format!("Target approval rejected:', block, marker)
+            self.assertNotIn('format!("Target revocation rejected:', block, marker)
+            self.assertNotIn('format!("Google Sheets push failed:', block, marker)
     def test_infrastructure_error_responses_do_not_expose_details(self):
         source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
         self.assertNotIn('StatusCode::INTERNAL_SERVER_ERROR, format!', source)
