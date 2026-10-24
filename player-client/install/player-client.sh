@@ -3057,62 +3057,150 @@ import sys
 import urllib.parse
 import socket
 import ssl
-import selectors
+import stat
+import tempfile
 import time
 import hashlib
 import hmac
 import secrets
 import base64
 import threading
+import selectors
 import tarfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 MAX_REQUEST_BODY_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
-MAX_TEXT_FILE_BYTES = 256 * 1024
-MAX_REMOTE_CA_BYTES = 256 * 1024
-MAX_STATIC_HTML_BYTES = 4 * 1024 * 1024
-MAX_BACKUP_DOWNLOAD_BYTES = 64 * 1024 * 1024
-MAX_CACHED_ASSET_BYTES = 64 * 1024 * 1024
+MAX_BACKUP_DOWNLOAD_BYTES = 256 * 1024 * 1024
+MAX_CACHED_ASSET_BYTES = 16 * 1024 * 1024
+MAX_INPUT_DEVICE_FILE_BYTES = 256 * 1024
+MAX_TOUCH_DEVICES = 128
+MAX_DISPLAY_OUTPUTS = 32
+MAX_TOUCH_NAME_BYTES = 128
+MAX_SYSTEM_METRICS_BYTES = 64 * 1024
+MAX_GPU_HELPER_OUTPUT_BYTES = 64 * 1024
+MAX_ERROR_BYTES = 512
+MAX_STATIC_HTML_BYTES = 2 * 1024 * 1024
 
 
-def _read_bounded_path(path: Path, maximum: int, encoding: str = 'utf-8') -> str:
-    with path.open('rb') as stream:
-        data = stream.read(maximum + 1)
-    if len(data) > maximum:
-        raise ValueError('local file exceeds its bound')
-    return data.decode(encoding)
+def _bound_text(value: str | None, maximum: int) -> str:
+    if value is None:
+        return ''
+    encoded = str(value).encode('utf-8', errors='replace')
+    return encoded[:maximum].decode('utf-8', errors='ignore')
 
 
-def _read_bounded_bytes(path: Path, maximum: int) -> bytes:
-    with path.open('rb') as stream:
-        data = stream.read(maximum + 1)
-    if len(data) > maximum:
-        raise ValueError('local file exceeds its bound')
-    return data
+def _read_bounded_path(path: Path, maximum: int) -> str:
+    with path.open('rb') as handle:
+        return handle.read(maximum).decode('utf-8', errors='replace')
 
 
-def _read_bounded_response(response, maximum: int) -> bytes:
-    data = response.read(maximum + 1)
-    if len(data) > maximum:
-        raise ValueError('server response exceeds its bound')
-    return data
+def client_pairing_code(client_id):
+    """Return the short physical-confirmation code for a client ID."""
+    digest = hashlib.sha256(b'screentra-cast-pairing-v1\0' + str(client_id).encode('utf-8')).digest()
+    return f'{int.from_bytes(digest[:4], "big") % 1_000_000:06d}'
+
+
+def _ensure_real_directory(path: Path, create: bool = False) -> bool:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            if not create:
+                return False
+            current.mkdir()
+            metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError('renderer cache directory is not a real directory')
+    return True
+
+
+def _read_real_file(path: Path, maximum: int = MAX_JSON_FILE_BYTES) -> bytes:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        metadata = os.lstat(current)
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ValueError('renderer cache path contains a symlink')
+    descriptor = os.open(absolute, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > maximum:
+            raise ValueError('renderer cache file is not bounded')
+        raw = os.read(descriptor, maximum + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > maximum:
+        raise ValueError('renderer cache file exceeds its bound')
+    return raw
 
 
 def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
-    temporary.write_text(text, encoding='utf-8')
-    os.chmod(temporary, mode)
-    os.replace(temporary, path)
+    _ensure_real_directory(path.parent, create=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f'.{path.name}.', suffix='.tmp', dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _read_json_file(path: Path, default):
     try:
-        return json.loads(_read_bounded_path(path, MAX_JSON_FILE_BYTES))
+        return _parse_request_json(_read_real_file(path).decode('utf-8'))
     except Exception:
         return default
+
+
+def _reject_duplicate_json_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate JSON object key')
+        result[key] = value
+    return result
+
+
+def _parse_request_json(text: str) -> dict:
+    value = json.loads(
+        text,
+        object_pairs_hook=_reject_duplicate_json_keys,
+        parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+    )
+    if not isinstance(value, dict):
+        raise ValueError('request JSON must be an object')
+    return value
+
+
+def _require_request_fields(payload: dict, allowed: set[str]) -> None:
+    unknown = set(payload) - allowed
+    if unknown:
+        raise ValueError('request contains unsupported fields')
+
+
+def _validate_login_payload(payload: dict) -> tuple[str, str]:
+    username = payload.get('username')
+    password = payload.get('password')
+    if not isinstance(username, str) or not 1 <= len(username) <= 128:
+        raise ValueError('username must be a bounded string')
+    if not isinstance(password, str) or not 1 <= len(password) <= 256:
+        raise ValueError('password must be a bounded string')
+    return username, password
 
 
 def _request_body(handler) -> str:
@@ -3160,13 +3248,12 @@ def _udev_has_touchscreen_property(dev_path: str) -> bool:
     regardless of the device name.
     """
     try:
-        returncode, output = _bounded_run(
+        completed = _sp.run(
             ['udevadm', 'info', '--query=property', '--name=' + dev_path],
-            timeout=2, stdout_max=8192, stderr_max=1024,
+            stdout=_sp.PIPE, stderr=_sp.DEVNULL, timeout=2, text=True, check=False,
         )
-        if returncode != 0:
-            return False
-        for line in output['stdout'].splitlines():
+        out = _bound_text(completed.stdout or '', MAX_INPUT_DEVICE_FILE_BYTES)
+        for line in out.splitlines():
             if line.startswith('ID_INPUT_TOUCHSCREEN=1'):
                 return True
     except Exception:
@@ -3222,14 +3309,18 @@ def _nl_detect_touch_devices():
     p = Path('/proc/bus/input/devices')
     if not p.exists():
         return devs
+    try:
+        raw_devices = _read_real_file(p, MAX_INPUT_DEVICE_FILE_BYTES).decode('utf-8', errors='replace')
+    except Exception:
+        return devs
     cur = {}
-    for line in _read_bounded_path(p, MAX_TEXT_FILE_BYTES).splitlines():
+    for line in raw_devices.splitlines():
         if not line.strip():
             if cur:
                 devs.append(cur); cur = {}
             continue
         if line.startswith('N:'):
-            cur['name'] = line.split('N:', 1)[1].strip().lstrip('Name=').strip('"')
+            cur['name'] = _bound_text(line.split('N:', 1)[1].strip().lstrip('Name=').strip('"'), MAX_TOUCH_NAME_BYTES)
         elif line.startswith('H:'):
             cur.setdefault('handlers', '')
             cur['handlers'] += ' ' + line.split('H:', 1)[1].strip()
@@ -3272,28 +3363,30 @@ def _nl_detect_touch_devices():
                 'recommended': recommended,
                 'reason': reason,
             })
+            if len(out) >= MAX_TOUCH_DEVICES:
+                return out
     out.sort(key=lambda x: (not x['recommended'], x['name']))
     return out
 
-def _lan_ip_for_admin() -> str | None:
+def _lan_ip_for_admin(server_url: str | None) -> str | None:
     try:
-        # Prefer a UDP route lookup; it does not send packets but asks the kernel
-        # which local source IP would reach the saved server/LAN.
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(0.5)
-            sock.connect(('11.1.1.53', 3000))
-            ip = sock.getsockname()[0]
-            if ip and not ip.startswith('127.'):
-                return ip
+        parsed = urllib.parse.urlparse(server_url or '')
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == 'https' else 3000)
+        if host:
+            # Prefer a UDP route lookup; it does not send packets but asks the
+            # kernel which local source IP would reach the configured server.
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(0.5)
+                sock.connect((host, port))
+                ip = sock.getsockname()[0]
+                if ip and not ip.startswith('127.'):
+                    return ip
     except Exception:
         pass
     try:
-        returncode, output = _bounded_run(
-            ['hostname', '-I'], timeout=2, stdout_max=4096, stderr_max=1024,
-        )
-        if returncode != 0:
-            return ''
-        out = output['stdout'].split()
+        completed = _sp.run(['hostname', '-I'], stdout=_sp.PIPE, stderr=_sp.DEVNULL, text=True, timeout=2, check=False)
+        out = _bound_text(completed.stdout or '', 4096).split()
         for ip in out:
             if ip and not ip.startswith('127.') and ':' not in ip:
                 return ip
@@ -3304,17 +3397,22 @@ def _lan_ip_for_admin() -> str | None:
 def _nl_status():
     cid_path = Path.home() / '.local/share/screentra-client/client-id'
     srv_path = Path.home() / '.local/share/screentra-client/server'
-    client_id = _read_bounded_path(cid_path, 4096).strip() if cid_path.exists() else None
-    server_url = _read_bounded_path(srv_path, 4096).strip() if srv_path.exists() else 'unknown'
+    try:
+        client_id = _read_real_file(cid_path, 4096).decode('utf-8').strip() if cid_path.exists() else None
+    except Exception:
+        client_id = None
+    try:
+        server_url = _read_real_file(srv_path, 4096).decode('utf-8').strip() if srv_path.exists() else 'unknown'
+    except Exception:
+        server_url = 'unknown'
     last_path = Handler.cache_dir / 'last-heartbeat.json'
-    last_seen = connection = last_layout = pairing_code = None
+    last_seen = connection = last_layout = None
     if last_path.exists():
         try:
             last = _read_json_file(last_path, {})
             last_seen = last.get('at')
             connection = last.get('connection', 'offline')
             last_layout = last.get('assigned_layout_id')
-            pairing_code = last.get('pairing_code')
         except Exception:
             pass
     disp_path = Handler.cache_dir / f'display-{int(os.environ.get("RIPLEY_DISPLAY_INDEX", "0"))}.json'
@@ -3354,17 +3452,17 @@ def _nl_status():
             pass
     else:
         last_layout = None
+    lan_ip = _lan_ip_for_admin(server_url)
     return {
         'screentra_client_client': True,
         'client_installed': True,
         'client_id': client_id,
-        'pairing_code': pairing_code or (client_pairing_code(client_id) if client_id else None),
         'identity_source': 'persistent_client_id',
         'server_url': server_url,
         'hostname': socket.gethostname() if 'socket' in dir() else os.uname().nodename,
-        'lan_ip': _lan_ip_for_admin(),
+        'lan_ip': lan_ip,
         'admin_port': 3910,
-        'admin_url': ('http://' + _lan_ip_for_admin() + ':3910/') if _lan_ip_for_admin() else None,
+        'admin_url': ('http://' + lan_ip + ':3910/') if lan_ip else None,
         'role': 'player',
         'port': int(os.environ.get('RIPLEY_RENDER_PORT', str(int(os.environ.get('RIPLEY_RENDER_BASE_PORT','3900')) + int(os.environ.get('RIPLEY_DISPLAY_INDEX','0'))))),
         'display_index': int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0')),
@@ -3433,7 +3531,7 @@ def _safe_run(args, timeout=5, env=None):
         code, output = _bounded_run(args, timeout=timeout, env=env)
         return {'ok': code == 0, 'code': code, 'stdout': output['stdout'], 'stderr': output['stderr']}
     except Exception as e:
-        return {'ok': False, 'code': None, 'stdout': '', 'stderr': str(e)[:4000]}
+        return {'ok': False, 'code': None, 'stdout': '', 'stderr': _bound_text(str(e), MAX_ERROR_BYTES)}
 
 def _client_config_path() -> Path:
     return Handler.cache_dir.parent / 'config.json'
@@ -3447,7 +3545,7 @@ def _load_display_governance() -> dict:
             if isinstance(data, dict):
                 cfg.update({k: data.get(k) for k in cfg if k in data})
     except Exception as e:
-        cfg['error'] = str(e)
+        cfg['error'] = _bound_text(str(e), MAX_ERROR_BYTES)
     try:
         installer = max(int(cfg.get('installer_detected_max_displays') or 1), 1)
     except Exception:
@@ -3475,7 +3573,7 @@ def _load_client_config() -> dict:
 
 def _write_client_config(cfg: dict) -> None:
     path = _client_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(path.parent, create=True)
     _atomic_write_text(path, json.dumps(cfg, indent=2))
 
 def _write_display_count(max_displays) -> dict:
@@ -3487,7 +3585,7 @@ def _write_display_count(max_displays) -> dict:
     cfg.setdefault('last_detected_displays', [])
     _write_client_config(cfg)
     pending = Handler.cache_dir / 'pending-command.json'
-    pending.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(pending.parent, create=True)
     _atomic_write_text(pending, json.dumps({'action':'set_display_count','payload':{'max_displays': override},'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
     _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service'], timeout=6)
     actor = _safe_run(['systemctl', '--user', 'start', 'screentra-client-actor.service'], timeout=6)
@@ -3539,10 +3637,24 @@ def _current_touch_binding() -> dict:
             pass
     return binding or {'device_path': None, 'device_name': None, 'target_display_indexes': [0], 'target_connectors': _display_connectors_for_indexes([0]), 'allow_joined_displays': False}
 
+def _validate_touch_device_path(dev_path: str | None) -> None:
+    if dev_path is None:
+        return
+    if not isinstance(dev_path, str) or len(dev_path) > 256 or not dev_path.startswith('/dev/'):
+        raise ValueError('touch device path is invalid')
+    detected_paths = {
+        device.get('path') for device in _nl_detect_touch_devices()
+        if isinstance(device, dict) and isinstance(device.get('path'), str)
+    }
+    if dev_path not in detected_paths:
+        raise ValueError('touch device path is not a detected touchscreen')
+
+
 def _write_touch_binding(payload: dict) -> dict:
     cfg = _load_client_config()
     dev_path = payload.get('device_path') or payload.get('path')
-    dev_name = _resolve_touch_name(dev_path, payload.get('device_name'))
+    _validate_touch_device_path(dev_path)
+    dev_name = _resolve_touch_name(dev_path)
     allow_joined = bool(payload.get('allow_joined_displays'))
     raw_indexes = payload.get('target_display_indexes') or payload.get('display_indexes') or payload.get('display_index') or [0]
     if not isinstance(raw_indexes, list):
@@ -3575,7 +3687,7 @@ def _write_touch_binding(payload: dict) -> dict:
     if dev_path:
         _atomic_write_text(Handler.cache_dir / 'touch-device.json', json.dumps({'path': dev_path, 'name': dev_name}, indent=2))
     pending = Handler.cache_dir / 'pending-command.json'
-    pending.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(pending.parent, create=True)
     _atomic_write_text(pending, json.dumps({'action':'set_touch_binding','payload': binding,'requested_at':_iso_now(),'requested_by':'local-admin'}, indent=2))
     _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service'], timeout=6)
     actor = _safe_run(['systemctl', '--user', 'start', 'screentra-client-actor.service'], timeout=6)
@@ -3601,14 +3713,14 @@ def _sysfs_outputs() -> list[dict]:
             status = d / 'status'
             if not status.exists():
                 continue
-            state = _read_bounded_path(status, 128).strip()
+            state = _read_real_file(status, 64).decode('utf-8', errors='replace').strip()
             if state != 'connected':
                 continue
             name = d.name.split('-', 1)[1]
             mode = None
             modes = d / 'modes'
             if modes.exists():
-                first = (_read_bounded_path(modes, 4096).splitlines() or [''])[0]
+                first = (_read_real_file(modes, 4096).decode('utf-8', errors='replace').splitlines() or [''])[0]
                 if 'x' in first:
                     try:
                         w, h = first.split('x', 1)[0], first.split('x', 1)[1].split()[0]
@@ -3616,6 +3728,8 @@ def _sysfs_outputs() -> list[dict]:
                     except Exception:
                         mode = {'label': first, 'source': 'sysfs'}
             out.append({'name': name, 'description': name, 'enabled': None, 'connected': True, 'position': {}, 'current_mode': mode, 'source': 'sysfs'})
+            if len(out) >= MAX_DISPLAY_OUTPUTS:
+                break
     except Exception:
         return []
     return out
@@ -3623,22 +3737,22 @@ def _sysfs_outputs() -> list[dict]:
 def _wlr_outputs() -> list[dict]:
     env = {**os.environ, 'XDG_RUNTIME_DIR': os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'), 'WAYLAND_DISPLAY': os.environ.get('WAYLAND_DISPLAY', 'wayland-0')}
     try:
-        returncode, output = _bounded_run(
-            ['wlr-randr', '--json'], timeout=3, stdout_max=MAX_JSON_FILE_BYTES, stderr_max=1024, env=env,
+        completed = _safe_run(['wlr-randr', '--json'], timeout=3, env=env)
+        if completed.get('code') != 0:
+            raise ValueError('wlr-randr failed')
+        data = json.loads(
+            _bound_text(completed.get('stdout') or '', MAX_JSON_FILE_BYTES),
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
         )
-        if returncode != 0:
-            return []
-        data = json.loads(output['stdout'])
-        return [{'name': o.get('name'), 'description': o.get('description'), 'enabled': bool(o.get('enabled')), 'position': o.get('position') or {}, 'current_mode': next((m for m in o.get('modes', []) if m.get('current')), None)} for o in data]
+        if not isinstance(data, list):
+            raise ValueError('wlr-randr output is not a list')
+        return [{'name': _bound_text(o.get('name'), 128), 'description': _bound_text(o.get('description'), 256), 'enabled': bool(o.get('enabled')), 'position': o.get('position') or {}, 'current_mode': next((m for m in o.get('modes', []) if m.get('current')), None)} for o in data[:MAX_DISPLAY_OUTPUTS] if isinstance(o, dict)]
     except Exception:
         return _sysfs_outputs()
 
 def _read_tail(path: Path, max_bytes: int = 40000) -> str:
     try:
-        if not path.exists() or not path.is_file():
-            return ''
-        with path.open('rb') as f:
-            f.seek(0, os.SEEK_END); size = f.tell(); f.seek(max(0, size - max_bytes)); data = f.read()
+        data = _read_real_file(path, maximum=max(max_bytes, 4 * 1024 * 1024))
         return data.decode('utf-8', 'replace')[-max_bytes:]
     except Exception as e:
         return f'error reading {path}: {e}'
@@ -3675,24 +3789,29 @@ def _ca_file() -> Path:
 
 def _sha256_file(path: Path) -> str | None:
     try:
-        h = hashlib.sha256()
-        with path.open('rb') as f:
-            for chunk in iter(lambda: f.read(65536), b''): h.update(chunk)
-        return h.hexdigest()
+        return hashlib.sha256(_read_real_file(path, maximum=256 * 1024)).hexdigest()
     except Exception:
         return None
 
 def _cert_info() -> dict:
     srv_path = Path.home() / '.local/share/screentra-client/server'
-    server_url = _read_bounded_path(srv_path, 4096).strip().rstrip('/') if srv_path.exists() else ''
-    ca = _ca_file(); ca_exists = ca.exists() and ca.stat().st_size > 0
+    try:
+        server_url = _read_real_file(srv_path, 4096).decode('utf-8').strip().rstrip('/')
+    except Exception:
+        server_url = ''
+    ca = _ca_file()
+    try:
+        ca_data = _read_real_file(ca, maximum=256 * 1024)
+    except Exception:
+        ca_data = b''
+    ca_exists = bool(ca_data)
     verify = {'ok': False, 'error': 'server or CA missing'}
     parsed = urllib.parse.urlparse(server_url) if server_url else None
     if parsed and parsed.hostname and ca_exists:
         port = parsed.port or (443 if parsed.scheme == 'https' else 80)
         try:
             if parsed.scheme == 'https':
-                ctx = ssl.create_default_context(cafile=str(ca))
+                ctx = ssl.create_default_context(cadata=ca_data.decode('utf-8'))
                 with socket.create_connection((parsed.hostname, port), timeout=5) as sock:
                     with ctx.wrap_socket(sock, server_hostname=parsed.hostname) as ssock:
                         cert = ssock.getpeercert()
@@ -3700,37 +3819,40 @@ def _cert_info() -> dict:
             else:
                 verify = {'ok': True, 'warning': 'server URL is not HTTPS'}
         except Exception as e:
-            verify = {'ok': False, 'error': str(e), 'host': parsed.hostname, 'port': port}
-    return {'server_url': server_url, 'ca_path': str(ca), 'ca_exists': ca_exists, 'ca_size': ca.stat().st_size if ca.exists() else 0, 'ca_sha256': _sha256_file(ca), 'verify': verify, 'published_ca_url': (server_url + '/install/screentra-cast-signage-ca.crt') if server_url else ''}
+            verify = {'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES), 'host': parsed.hostname, 'port': port}
+    return {'server_url': server_url, 'ca_path': str(ca), 'ca_exists': ca_exists, 'ca_size': len(ca_data), 'ca_sha256': _sha256_file(ca), 'verify': verify, 'published_ca_url': (server_url + '/install/screentra-cast-signage-ca.crt') if server_url else ''}
 
 def _refresh_ca_from_server() -> dict:
     srv_path = Path.home() / '.local/share/screentra-client/server'
-    if not srv_path.exists(): return {'ok': False, 'error': 'server file missing'}
-    server_url = _read_bounded_path(srv_path, 4096).strip().rstrip('/')
+    try:
+        server_url = _read_real_file(srv_path, 4096).decode('utf-8').strip().rstrip('/')
+    except Exception:
+        return {'ok': False, 'error': 'server file missing'}
     if not server_url: return {'ok': False, 'error': 'server URL empty'}
     url = server_url + '/install/screentra-cast-signage-ca.crt'; out = _ca_file()
     try:
         ca_path = _ca_file()
-        if not ca_path.exists():
-            return {'ok': False, 'error': 'existing CA certificate is required to refresh trust', 'url': url}
-        ctx = _ssl.create_default_context(cafile=str(ca_path))
+        ca_data = _read_real_file(ca_path, maximum=256 * 1024)
+        ctx = _ssl.create_default_context(cadata=ca_data.decode('utf-8'))
         with _ur.urlopen(url, context=ctx, timeout=10) as response:
-            data = _read_bounded_response(response, MAX_REMOTE_CA_BYTES)
+            data = response.read(256 * 1024 + 1)
+        if len(data) > 256 * 1024:
+            return {'ok': False, 'error': 'downloaded CA exceeds the client limit', 'url': url}
         if len(data) < 200 or b'BEGIN CERTIFICATE' not in data:
             return {'ok': False, 'error': f'downloaded CA did not look like a certificate ({len(data)} bytes)', 'url': url}
-        out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_suffix(out.suffix + '.tmp'); tmp.write_bytes(data); os.chmod(tmp, 0o644); tmp.replace(out)
+        _ensure_real_directory(out.parent, create=True)
+        _atomic_write_text(out, data.decode('utf-8'), mode=0o644)
         verify = _cert_info().get('verify')
         restart = _safe_run(['systemctl', '--user', 'restart', 'screentra-client-heartbeat.service', 'screentra-client-actor.service'], timeout=8)
         return {'ok': True, 'url': url, 'ca_path': str(out), 'bytes': len(data), 'sha256': _sha256_file(out), 'verify': verify, 'restart': restart}
     except Exception as e:
-        return {'ok': False, 'error': str(e), 'url': url}
+        return {'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES), 'url': url}
 
 
 
 def _read_proc_stat_cpu() -> tuple[int, int] | None:
     try:
-        parts = _read_bounded_path(Path('/proc/stat'), 64 * 1024).splitlines()[0].split()[1:]
+        parts = _read_bounded_path(Path('/proc/stat'), MAX_SYSTEM_METRICS_BYTES).splitlines()[0].split()[1:]
         vals = [int(x) for x in parts]
         idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
         total = sum(vals)
@@ -3784,7 +3906,7 @@ def _cpu_temp_c() -> float | None:
 def _ram_usage() -> dict:
     info = {}
     try:
-        for line in _read_bounded_path(Path('/proc/meminfo'), 64 * 1024).splitlines():
+        for line in _read_bounded_path(Path('/proc/meminfo'), MAX_SYSTEM_METRICS_BYTES).splitlines():
             k, v = line.split(':', 1)
             info[k] = int(v.strip().split()[0]) * 1024
         total = info.get('MemTotal') or 0
@@ -3793,22 +3915,27 @@ def _ram_usage() -> dict:
         pct = round((used / total) * 100.0, 1) if total else None
         return {'total_bytes': total, 'used_bytes': used, 'available_bytes': avail, 'percent': pct}
     except Exception as e:
-        return {'error': str(e)}
+        return {'error': _bound_text(str(e), MAX_ERROR_BYTES)}
 
 def _gpu_usage() -> dict:
     helper = Path.home() / '.local/share/screentra-client/ripley-gpu-health.py'
     if helper.exists():
         try:
             r = _sp.run([sys.executable, str(helper)], stdout=_sp.PIPE, stderr=_sp.PIPE, text=True, timeout=4, check=False)
-            if r.stdout.strip():
-                data = json.loads(r.stdout.strip().splitlines()[-1])
-                if r.stderr.strip():
-                    data.setdefault('stderr', r.stderr.strip()[-500:])
+            helper_stdout = _bound_text(r.stdout or '', MAX_GPU_HELPER_OUTPUT_BYTES)
+            helper_stderr = _bound_text(r.stderr or '', MAX_GPU_HELPER_OUTPUT_BYTES)
+            if helper_stdout.strip():
+                data = json.loads(
+                    helper_stdout.strip().splitlines()[-1],
+                    parse_constant=lambda _: (_ for _ in ()).throw(ValueError('non-standard JSON constant')),
+                )
+                if helper_stderr.strip():
+                    data.setdefault('stderr', helper_stderr.strip()[-500:])
                 return data
-            if r.stderr.strip():
-                return {'percent': None, 'device': None, 'source': str(helper), 'error': r.stderr.strip()[-500:]}
+            if helper_stderr.strip():
+                return {'percent': None, 'device': None, 'source': str(helper), 'error': helper_stderr.strip()[-500:]}
         except Exception as e:
-            return {'percent': None, 'device': None, 'source': str(helper), 'error': str(e)}
+            return {'percent': None, 'device': None, 'source': str(helper), 'error': _bound_text(str(e), MAX_ERROR_BYTES)}
     # Fallback for partial/upgrading installs: generic DRM busy percent.
     out = {'percent': None, 'device': None, 'source': None, 'available': False, 'health': 'unknown', 'health_notes': ['GPU helper not installed yet']}
     try:
@@ -3817,7 +3944,7 @@ def _gpu_usage() -> dict:
             out.update({'percent': float(raw), 'device': busy.parent.parent.name, 'source': str(busy), 'available': True, 'method': 'drm-gpu_busy_percent', 'health': 'ok'})
             return out
     except Exception as e:
-        out['error'] = str(e)
+        out['error'] = _bound_text(str(e), MAX_ERROR_BYTES)
     return out
 
 def _system_metrics() -> dict:
@@ -3834,7 +3961,7 @@ def _system_metrics() -> dict:
 
 def _client_backup_root() -> Path:
     p = Handler.cache_dir.parent / 'backups'
-    p.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(p, create=True)
     return p
 
 def _safe_tar_add(tar, path: Path, arcname: str, *, exclude_state: bool = True) -> int:
@@ -3914,7 +4041,7 @@ def _create_client_software_backup() -> dict:
             if out.exists(): out.unlink()
         except Exception:
             pass
-        return {'ok': False, 'error': str(e)}
+        return {'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}
 
 def _reboot_device(confirm: bool = False) -> dict:
     """Schedule a device reboot after the HTTP response is sent.
@@ -3962,16 +4089,16 @@ def _admin_status() -> dict:
 
 def _auth_dir() -> Path:
     p = Handler.cache_dir.parent / 'admin-auth'
-    p.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(p, create=True)
     return p
 
 def _auth_secret() -> bytes:
     p = _auth_dir() / 'session-secret'
-    if not p.exists():
-        p.write_text(secrets.token_urlsafe(32))
-        try: os.chmod(p, 0o600)
-        except Exception: pass
-    return _read_bounded_path(p, 512).strip().encode()
+    try:
+        return _read_real_file(p, maximum=4096).strip()
+    except FileNotFoundError:
+        _atomic_write_text(p, secrets.token_urlsafe(32), mode=0o600)
+        return _read_real_file(p, maximum=4096).strip()
 
 def _password_hash(password: str, salt: str | None = None) -> str:
     salt = salt or secrets.token_hex(16)
@@ -4059,7 +4186,7 @@ def _session_user(cookie_header: str) -> dict | None:
 def _admin_login_html() -> str:
     src = _auth_source()
     warn = 'No local admin account is provisioned yet; sync an operator account from the managed server.' if not src.get('user_count') else 'Using synced server users.'
-    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Screentra Cast Admin Sign In</title><style>body{margin:0;background:#07111f;color:#e5eefc;font-family:system-ui,-apple-system,Segoe UI,sans-serif;display:grid;place-items:center;min-height:100vh}.card{width:min(430px,92vw);background:#0f172a;border:1px solid #243247;border-radius:18px;padding:24px;box-shadow:0 20px 70px rgba(0,0,0,.4)}h1{margin:0 0 8px}.muted{color:#91a4bf}.warn{border:1px solid rgba(245,158,11,.45);background:rgba(245,158,11,.08);border-radius:12px;padding:10px;margin:14px 0;color:#facc15}label{display:block;margin-top:12px;color:#91a4bf;font-size:12px;text-transform:uppercase;letter-spacing:.08em}input{width:100%;margin-top:6px;padding:12px;border-radius:10px;border:1px solid #243247;background:#07111f;color:#e5eefc;font-size:16px}button{width:100%;margin-top:16px;padding:12px;border:0;border-radius:999px;background:#38bdf8;color:#03131f;font-weight:900;font-size:15px}.err{color:#fca5a5;min-height:20px;margin-top:10px}</style></head><body><form class="card" id="f"><h1>Screentra Cast Admin</h1><div class="muted">Sign in to manage this local player.</div><div class="warn">'+warn+'</div><label>Username</label><input id="u" autocomplete="username" value="admin"><label>Password</label><input id="p" type="password" autocomplete="current-password" autofocus><button>Sign in</button><div class="err" id="e"></div></form><script>document.getElementById("f").addEventListener("submit",async ev=>{ev.preventDefault();e.textContent="Signing in…";try{const r=await fetch("/api/admin/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:u.value,password:p.value})});const j=await r.json();if(r.ok&&j.ok){location.href="/"}else{e.textContent=j.error||"Login failed"}}catch(x){e.textContent=String(x)}});</script></body></html>'
+    return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Screentra Cast Admin Sign In</title><style>body{margin:0;background:#07111f;color:#e5eefc;font-family:system-ui,-apple-system,Segoe UI,sans-serif;display:grid;place-items:center;min-height:100vh}.card{width:min(430px,92vw);background:#0f172a;border:1px solid #243247;border-radius:18px;padding:24px;box-shadow:0 20px 70px rgba(0,0,0,.4)}h1{margin:0 0 8px}.muted{color:#91a4bf}.warn{border:1px solid rgba(245,158,11,.45);background:rgba(245,158,11,.08);border-radius:12px;padding:10px;margin:14px 0;color:#facc15}label{display:block;margin-top:12px;color:#91a4bf;font-size:12px;text-transform:uppercase;letter-spacing:.08em}input{width:100%;margin-top:6px;padding:12px;border-radius:10px;border:1px solid #243247;background:#07111f;color:#e5eefc;font-size:16px}button{width:100%;margin-top:16px;padding:12px;border:0;border-radius:999px;background:#38bdf8;color:#03131f;font-weight:900;font-size:15px}.err{color:#fca5a5;min-height:20px;margin-top:10px}</style></head><body><form class="card" id="f"><h1>Screentra Cast Admin</h1><div class="muted">Sign in to manage this local player.</div><div class="warn">'+warn+'</div><label>Username</label><input id="u" autocomplete="username" value="admin"><label>Password</label><input id="p" type="password" autocomplete="current-password" autofocus><button>Sign in</button><div class="err" id="e"></div></form><script>async function readJsonBounded(r,max=65536){const reader=r.body&&r.body.getReader?r.body.getReader():null;if(!reader)throw new Error("response body unavailable");const decoder=new TextDecoder();let total=0,text="";try{while(true){const p=await reader.read();if(p.done){text+=decoder.decode();return JSON.parse(text)}const v=p.value||new Uint8Array();total+=v.byteLength;if(total>max){try{await reader.cancel()}catch(_e){}throw new Error("response exceeds its size limit")}text+=decoder.decode(v,{stream:true})}}finally{reader.releaseLock()}}document.getElementById("f").addEventListener("submit",async ev=>{ev.preventDefault();e.textContent="Signing in…";try{const r=await fetch("/api/admin/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:u.value,password:p.value})});const j=await readJsonBounded(r);if(r.ok&&j.ok){location.href="/"}else{e.textContent=j.error||"Login failed"}}catch(x){e.textContent=String(x)}});</script></body></html>'
 
 def _admin_auth_payload(handler) -> dict:
     user = _session_user(handler.headers.get('Cookie', ''))
@@ -4093,7 +4220,8 @@ ADMIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta
 const $=id=>document.getElementById(id); const esc=s=>String(s??'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));
 function kv(keys){return keys.map(([k,v])=>`<div class="k">${esc(k)}</div><div class="v">${esc(v??'—')}</div>`).join('')} function pill(ok,txt,cls){return `<span class="pill ${cls|| (ok?'ok':'err')}">${esc(txt)}</span>`} function servicePill(x){const active=String(x.active||'unknown').toLowerCase(); const enabled=String(x.enabled||'').toLowerCase(); if(active==='ready')return pill(true,'READY','ready'); if(active==='disabled'||enabled==='disabled')return pill(true,'DISABLED','disabled'); return pill(!!x.active_ok,x.active||'unknown');}
 function pct(v){v=Number(v); return Number.isFinite(v)?Math.max(0,Math.min(100,v)):0} function fmtPct(v){return Number.isFinite(Number(v))?Number(v).toFixed(1)+'%':'—'} function bytes(n){n=Number(n); if(!Number.isFinite(n)||n<=0)return '—'; const u=['B','KB','MB','GB','TB']; let i=0; while(n>=1024&&i<u.length-1){n/=1024;i++} return n.toFixed(i?1:0)+' '+u[i]}
-async function api(path,opts){const r=await fetch(path,{cache:'no-store',...(opts||{})}); const t=await r.text(); try{return JSON.parse(t)}catch{return {raw:t,status:r.status}}}
+async function readTextBounded(response,maximum){const reader=response.body&&response.body.getReader?response.body.getReader():null;if(!reader)throw new Error('response body is unavailable');const decoder=new TextDecoder();let total=0,text='';try{while(true){const part=await reader.read();if(part.done){text+=decoder.decode();return text;}const value=part.value||new Uint8Array();total+=value.byteLength;if(total>maximum){try{await reader.cancel();}catch(_e){}throw new Error('response exceeds its size limit');}text+=decoder.decode(value,{stream:true});}}finally{reader.releaseLock();}}
+async function api(path,opts){const r=await fetch(path,{cache:'no-store',...(opts||{})}); const t=await readTextBounded(r,64*1024); try{return JSON.parse(t)}catch{return {raw:t,status:r.status}}}
 async function refreshAll(){const d=await api('/api/admin/status'); renderStatus(d)}
 function renderCards(d){const m=d.metrics||{}, cpu=m.cpu||{}, ram=m.ram||{}, gpu=m.gpu||{}, s=d.status||{}; $('cpuValue').textContent=fmtPct(cpu.percent); $('cpuSub').textContent='Temp '+(cpu.temp_c!=null?cpu.temp_c+' °C':'—')+(cpu.loadavg?` · load ${Number(cpu.loadavg[0]).toFixed(2)}`:''); $('cpuBar').style.width=pct(cpu.percent)+'%'; $('ramValue').textContent=fmtPct(ram.percent); $('ramSub').textContent=`${bytes(ram.used_bytes)} / ${bytes(ram.total_bytes)}`; $('ramBar').style.width=pct(ram.percent)+'%'; $('gpuValue').textContent=gpu.percent!=null?fmtPct(gpu.percent):(gpu.temp_c!=null?gpu.temp_c+' °C':'—'); const gpuNotes=(gpu.health_notes||[]).join(' · '); $('gpuSub').textContent=(gpu.device||gpu.vendor||'GPU')+(gpu.health?` · ${gpu.health}`:'')+(gpu.percent==null?' · usage n/a':'')+(gpu.frequency_mhz!=null?` · ${gpu.frequency_mhz} MHz`:'')+(gpu.vram_percent!=null?` · VRAM ${fmtPct(gpu.vram_percent)}`:'')+(gpuNotes?` · ${gpuNotes}`:''); $('gpuBar').style.width=pct(gpu.percent)+'%';}
 function renderStatus(d){const s=d.status||{}; $('overall').className='pill '+(s.connection==='online'?'ok':'err'); $('overall').textContent=s.connection==='online'?'ONLINE':'CHECK'; renderCards(d); $('device').innerHTML=kv([['Hostname',s.hostname],['LAN admin URL',s.admin_url],['Client ID',s.client_id],['Server',s.server_url],['Connection',s.connection],['Last seen',s.last_seen],['Display',`${s.display_label||'—'} · ${s.display_resolution||'—'} · idx ${s.display_index}`],['Layout',s.assigned_layout_id||'No layout assigned'],['Touch',s.touch_device||'not detected']]); const ca=d.ca||{}; $('ca').innerHTML=kv([['CA path',ca.ca_path],['CA SHA256',ca.ca_sha256],['Published CA',ca.published_ca_url],['Verify',ca.verify?.ok?'OK':(ca.verify?.error||'failed')],['Server cert expires',ca.verify?.not_after]]); $('services').innerHTML=(d.services||[]).map(x=>`<div class="service"><div><b>${esc(x.name)}</b><div class="small">enabled: ${esc(x.enabled)}${x.note?' · '+esc(x.note):''}</div></div>${servicePill(x)}</div>`).join(''); const g=d.display_governance||{}; const dc=$('displayCount'); if(dc) dc.value=String(g.active_max_displays||1); renderTouchControls(d); const tb=d.touch?.binding||{}; $('displays').innerHTML=kv([['Active display count',`${g.active_max_displays||1} / detected ${g.installer_detected_max_displays||1}`],['Outputs',(d.outputs||[]).map(o=>`${o.name}:${o.enabled===true?'on':(o.enabled===false?'off':'connected')} ${o.current_mode?(o.current_mode.width?o.current_mode.width+'x'+o.current_mode.height:(o.current_mode.label||'')):''}`).join(' | ')||'—'],['Calibration runs',(d.touch?.calibration||[]).length]]); $('touchSummary').innerHTML=kv([['Touch devices',(d.touch?.devices||[]).map(t=>`${t.name} ${t.path} ${t.reason||''}`).join(' | ')||'—'],['Touch binding',tb.device_name?`${tb.device_name} → ${(tb.target_connectors||tb.target_display_indexes||[]).join(', ')||'all active outputs'}${tb.allow_joined_displays?' (joined/tiled span)':''}`:'not set']]);}
@@ -4124,6 +4252,7 @@ PLAYER_HTML = r'''<!doctype html>
 <body><div id="player"><div class="fallback"><div><strong>Waiting for assigned layout</strong><span>Heartbeat will cache a layout when assigned.</span></div></div></div>
 <script>
 let currentHash='';
+async function readTextBounded(response,maximum){const reader=response.body&&response.body.getReader?response.body.getReader():null;if(!reader)throw new Error('response body is unavailable');const decoder=new TextDecoder();let total=0,text='';try{while(true){const part=await reader.read();if(part.done){text+=decoder.decode();return text;}const value=part.value||new Uint8Array();total+=value.byteLength;if(total>maximum){try{await reader.cancel();}catch(_e){}throw new Error('response exceeds its size limit');}text+=decoder.decode(value,{stream:true});}}finally{reader.releaseLock();}}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function normWidgetType(w){return (w.widget_type || w.type || '').toLowerCase().replace(/_/g,'-');}
 function props(w){return w.props || w.properties || {};}
@@ -4138,10 +4267,14 @@ function repeatCount(p,e){const r=e.repeat||{};return r.group?Math.max(1,Math.mi
 function groupMetrics(es){const g={};es.forEach(e=>{const id=e.repeat&&e.repeat.group;if(!id)return;const r=e.repeat,x=Number(e.x)||0,y=Number(e.y)||0,w=Number(e.width)||120,h=Number(e.height)||80,m=g[id]||(g[id]={minX:x,minY:y,maxX:x+w,maxY:y+h,gapX:Number(r.gap_x)||0,gapY:Number(r.gap_y)||0,mode:r.mode||'rows'});m.minX=Math.min(m.minX,x);m.minY=Math.min(m.minY,y);m.maxX=Math.max(m.maxX,x+w);m.maxY=Math.max(m.maxY,y+h);});return g;}
 function templateEl(e,p,i,g,dw,dh){const q=Object.assign({},e.props||{}),r=e.repeat||{},m=r.group&&g[r.group];if(i){const n=Number(q.day_offset??q.weather_day_offset)||0;q.day_offset=n+i;q.weather_day_offset=n+i;}let x=Number(e.x)||0,y=Number(e.y)||0,w=Number(e.width)||120,h=Number(e.height)||80;if(m&&i){if((m.mode||'rows')==='columns')x+=i*(m.maxX-m.minX+m.gapX);else y+=i*(m.maxY-m.minY+m.gapY);}const a=q.align||'center',j=a==='left'?'flex-start':a==='right'?'flex-end':'center';let st=`position:absolute;box-sizing:border-box;left:${x/dw*100}%;top:${y/dh*100}%;width:${w/dw*100}%;height:${h/dh*100}%;display:flex;align-items:center;justify-content:${j};text-align:${a};overflow:hidden;z-index:${Number(e.z)||0};color:${q.color||'#fff'};font-size:${Number(q.font_size)||24}px;`;let inner='';if(e.type==='rectangle')st+=`background:${q.color||'#1e293b'};opacity:${Number(q.opacity??100)/100};border-radius:${Number(q.radius)||0}px;`;else if(e.type==='text')inner=esc(q.text||'Text');else if(['variable_icon','variable_text','variable','date'].includes(e.type)){const k=q.variable_key||'',wx=weatherFor(p,Math.max(0,Math.min(6,Number(q.day_offset??q.weather_day_offset)||0)));if(k==='weather_icon'||e.type==='variable_icon'||q.display_mode==='weather_icon')inner=wmoIconHtml(wx.code,p);else if(k==='weather_description')inner=esc('Weather');else if(k==='high_temp')inner=esc('High '+(wx.high??'—'));else if(k==='low_temp')inner=esc('Low '+(wx.low??'—'));else if(k==='wind_speed')inner=esc('Wind '+Math.round(wx.wind)+' mph');else{const d=new Date();d.setDate(d.getDate()+(Number(q.day_offset??q.weather_day_offset)||0));inner=esc(k==='day_name'?d.toLocaleDateString(undefined,{weekday:'long'}):d.toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'}));}}else inner=esc(q.label||e.type||'');return `<div style="${st}">${inner}</div>`;}
 function templateHtml(w){const p=props(w),es=Array.isArray(p.template_elements)?p.template_elements:[];if(!es.length)return '';const g=groupMetrics(es);let dw=Number(p.template_width)||760,dh=Number(p.template_height)||427.5;es.forEach(e=>{dw=Math.max(dw,(Number(e.x)||0)+(Number(e.width)||120));dh=Math.max(dh,(Number(e.y)||0)+(Number(e.height)||80));});return `<div style="position:relative;width:100%;height:100%;overflow:hidden;">${es.slice().sort((a,b)=>(Number(a.z)||0)-(Number(b.z)||0)).map(e=>Array.from({length:repeatCount(p,e)},(_,i)=>templateEl(e,p,i,g,dw,dh)).join('')).join('')}</div>`;}
-async function loadWeather(p){const lat=Number(p.lat||0),lon=Number(p.lon||0);if(!lat||!lon)return;try{const r=await fetch(`/api/weather/forecast?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`,{cache:'no-store'});if(r.ok)p._weather_data=await r.json();}catch(_e){}}
+async function loadWeather(p){const lat=Number(p.lat||0),lon=Number(p.lon||0);if(!lat||!lon)return;try{const r=await fetch(`/api/weather/forecast?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`,{cache:'no-store'});if(r.ok)p._weather_data=JSON.parse(await readTextBounded(r,4*1024*1024));}catch(_e){}}
 function countdownFontSize(p){return Math.max(8,Math.min(160,Number(p.font_size||p.fontSize||48)||48))*2;}
-function countdownText(node,now){const mode=node.getAttribute('data-countdown-mode')||'date',unit=node.getAttribute('data-countdown-duration-unit')||'minutes',value=Math.max(1,Number(node.getAttribute('data-countdown-duration-value'))||1),started=Number(node.getAttribute('data-countdown-started-at'))||now,target=mode==='duration'?started+value*({seconds:1000,minutes:60000,hours:3600000,days:86400000}[unit]||60000):new Date(node.getAttribute('data-countdown-target-date')||'').getTime(),diff=Math.max(0,target-now),expiry=node.getAttribute('data-countdown-expiry-text')||'Time\u2019s up!';if(!Number.isFinite(target)||target<=0)return node.getAttribute('data-countdown-invalid-text')||'Choose a date and time';if(diff<=0)return expiry;const d=Math.floor(diff/86400000),h=Math.floor(diff%86400000/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000);return d?d+'d '+h+'h':h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s';}
+function countdownText(node,now){const get=(name)=>node.getAttribute?node.getAttribute(name):(node.dataset||{})[name.slice(5).split('-').map((part,i)=>i?part[0].toUpperCase()+part.slice(1):part).join('')]||'',mode=get('data-countdown-mode')||'date',unit=get('data-countdown-duration-unit')||'minutes',value=Math.max(1,Number(get('data-countdown-duration-value'))||1),started=Number(get('data-countdown-started-at'))||now,target=mode==='duration'?started+value*({seconds:1000,minutes:60000,hours:3600000,days:86400000}[unit]||60000):new Date(get('data-countdown-target-date')||'').getTime(),diff=Math.max(0,target-now),expiry=get('data-countdown-expiry-text')||'Time\u2019s up!';if(!Number.isFinite(target)||target<=0)return get('data-countdown-invalid-text')||'Choose a date and time';if(diff<=0)return expiry;const d=Math.floor(diff/86400000),h=Math.floor(diff%86400000/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000);return d?d+'d '+h+'h':h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s';}
 function tickCountdowns(){const now=Date.now();document.querySelectorAll('[data-countdown-widget]').forEach(node=>{const value=node.querySelector('.countdown-value');if(value)value.textContent=countdownText(node,now);});}
+function cachedCameraFilterName(value){return ['none','grayscale','sepia','halloween'].includes(value)?value:'none';}
+function cachedCameraFilterCss(value){return ({none:'none',grayscale:'grayscale(1)',sepia:'sepia(1)',halloween:'saturate(1.35) contrast(1.15) hue-rotate(300deg)'})[cachedCameraFilterName(value)];}
+function cachedCameraFilterOverlay(value,id){return cachedCameraFilterName(value)==='halloween'?`<span data-camera-filter-overlay="halloween" data-camera-filter-overlay-id="${esc(id||'')}" aria-hidden="true" style="position:absolute;inset:0;pointer-events:none;background:linear-gradient(135deg,rgba(249,115,22,.34),rgba(88,28,135,.42));mix-blend-mode:screen;opacity:.8;"></span>`:'';}
+function initCachedCameraWidgets(widgets){const nodes=document.querySelectorAll('[data-camera-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-camera-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget);if(!p||p.capture_enabled!==true||!navigator.mediaDevices||typeof navigator.mediaDevices.getUserMedia!=='function'||node.tagName!=='VIDEO')return;const facing=['user','environment','left','right'].includes(p.facing_mode)?p.facing_mode:'environment';const constraints={video:{facingMode:{ideal:facing},width:{ideal:1280,max:1280},height:{ideal:720,max:720},frameRate:{ideal:30,max:30}},audio:false};node.muted=true;node.autoplay=true;node.playsInline=true;navigator.mediaDevices.getUserMedia(constraints).then(stream=>{node.srcObject=stream;const result=typeof node.play==='function'?node.play():null;if(result&&typeof result.catch==='function')result.catch(()=>{});}).catch(()=>{});});}
 function initCachedVideoWidgets(widgets){const nodes=document.querySelectorAll('[data-video-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-video-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget),list=p&&Array.isArray(p.playlist)?p.playlist:[];if(!list.length)return;let index=0;const advance=()=>{index=(index+1)%list.length;node.src=String(list[index].url||'');if(typeof node.load==='function')node.load();const result=typeof node.play==='function'?node.play():null;if(result&&typeof result.catch==='function')result.catch(()=>{});};node.src=String(list[0].url||'');node.loop=list.length===1&&p.loop!==false;node.onended=list.length>1?advance:null;node.onerror=list.length>1?advance:null;});}
 async function renderWidget(w){const p=props(w),t=normWidgetType(w);if(t==='weather')await loadWeather(p);let inner='';
  if(t==='weather'&&Array.isArray(p.template_elements)&&p.template_elements.length) inner=templateHtml(w);
@@ -4149,6 +4282,8 @@ async function renderWidget(w){const p=props(w),t=normWidgetType(w);if(t==='weat
  else if(t==='countdown') { const target=p.countdown_mode==='duration' ? Date.now() + Math.max(1,Number(p.duration_value||1))*({seconds:1000,minutes:60000,hours:3600000,days:86400000}[p.duration_unit||'minutes']||60000) : new Date(p.targetDate||'').getTime(); const diff=Math.max(0,target-Date.now()); const d=Math.floor(diff/86400000),h=Math.floor(diff%86400000/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000); const text=Number.isFinite(target)&&target>0?(d?d+'d '+h+'h':h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s'):(p.expiry_text||'Choose a date and time'); inner=`<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;padding:1rem;color:${p.color||'#fff'};font-size:${countdownFontSize(p)}px;font-weight:800;line-height:1;text-align:center;overflow:hidden;white-space:nowrap;">${esc(text)}</div>`; }
  else if(t==='video') { const list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url?[{url:p.url}]:[]),u=String((list[0]||{}).url||''); const fit=['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'; inner=`<video data-video-widget-id="${esc(w.id||'')}" src="${esc(u)}" autoplay playsinline preload="auto" ${p.loop !== false && list.length === 1 ? 'loop' : ''} ${p.muted||p.mute?'muted':''} style="width:100%;height:100%;object-fit:${fit};background:#000;"></video>`;}
  else if(t==='image') inner=`<img src="${esc(p.url||p.src||'')}" style="width:100%;height:100%;object-fit:${p.fit||'cover'};">`;
+ else if(t==='camera') { const cameraFilter=cachedCameraFilterName(p.filter); const facing=['user','environment','left','right'].includes(p.facing_mode)?p.facing_mode:'environment'; if(p.capture_enabled===true) inner=`<div style="position:relative;width:100%;height:100%;background:#020617;color:#cbd5e1;"><video data-camera-widget-id="${esc(w.id||'')}" data-camera-filter="${cameraFilter}" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;background:#020617;filter:${cachedCameraFilterCss(cameraFilter)};"></video>${cachedCameraFilterOverlay(cameraFilter,w.id)}<span style="position:absolute;left:.5rem;bottom:.5rem;padding:.2rem .45rem;border-radius:.25rem;background:rgba(2,6,23,.75);font:600 12px system-ui;">Camera · ${esc(facing)}</span></div>`; else inner=`<div data-camera-widget-id="${esc(w.id||'')}" style="width:100%;height:100%;display:grid;place-items:center;border:1px dashed #334155;background:#020617;color:#94a3b8;font:600 14px system-ui;text-align:center;">📷 Camera preview<br><small style="font-weight:400;">capture disabled</small></div>`;}
+ else if(t==='video') { const list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url?[{url:p.url}]:[]), u=String((list[0]||{}).url||''); if(isYouTubeUrl(u)){ inner=`<iframe src="${esc(youtubeEmbedUrl(u,Object.assign({},p,{muted:true})))}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:0;background:#000;"></iframe>`; } else { const fit=['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'; inner=`<video src="${esc(u)}" autoplay playsinline preload="auto" ${p.loop !== false && list.length === 1 ? 'loop' : ''} ${p.muted||p.mute?'muted':''} style="width:100%;height:100%;object-fit:${fit};background:#000;"></video>`; } }
  else if(t==='clock') inner=`<div class="clock" data-clock style="color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||48)*2}px"></div>`;
  else if(t==='datetime'||t==='date') inner=`<div class="date" data-date style="color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||36)*2}px"></div>`;
  else if(t==='rectangle') inner=`<div style="width:100%;height:100%;background:${p.color||'#e94560'};border-radius:${p.radius||0}px;"></div>`;
@@ -4160,7 +4295,7 @@ async function renderWidget(w){const p=props(w),t=normWidgetType(w);if(t==='weat
  return `<div class="widget" style="${styleFor(w)}">${inner}</div>`;}
 function tickClocks(){const now=new Date();document.querySelectorAll('[data-clock]').forEach(e=>e.textContent=now.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}));document.querySelectorAll('[data-date]').forEach(e=>e.textContent=now.toLocaleDateString());tickCountdowns();}
 function applyOrientation(value){const v=String(value||'normal');document.body.dataset.orientation=['normal','flipped','rotated_left','rotated_right'].includes(v)?v:'normal';}
-async function loadLayout(){try{const r=await fetch('/assigned-layout.json?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('no assigned layout');const txt=await r.text();try{const c=await fetch('/api/client-config.json?ts='+Date.now(),{cache:'no-store'});if(c.ok)applyOrientation((await c.json()).orientation);}catch(_e){}if(txt===currentHash)return;currentHash=txt;const layout=JSON.parse(txt);const ws=(layout.widgets||[]).slice().sort((a,b)=>(a.z||0)-(b.z||0));const rendered=await Promise.all(ws.map(renderWidget));document.getElementById('player').innerHTML=rendered.join('')||'<div class="fallback"><div><strong>Empty Layout</strong></div></div>';tickClocks();initCachedVideoWidgets(ws);}catch(e){if(!currentHash)document.getElementById('player').innerHTML='<div class="fallback"><div><strong>Waiting for cached assigned layout</strong><span>'+esc(e.message)+'</span></div></div>';}}
+async function loadLayout(){try{const r=await fetch('/assigned-layout.json?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('no assigned layout');const txt=await readTextBounded(r,4*1024*1024);try{const c=await fetch('/api/client-config.json?ts='+Date.now(),{cache:'no-store'});if(c.ok)applyOrientation(JSON.parse(await readTextBounded(c,256*1024)).orientation);}catch(_e){}if(txt===currentHash)return;currentHash=txt;const layout=JSON.parse(txt);const ws=(layout.widgets||[]).slice().sort((a,b)=>(a.z||0)-(b.z||0));const rendered=await Promise.all(ws.map(renderWidget));document.getElementById('player').innerHTML=rendered.join('')||'<div class="fallback"><div><strong>Empty Layout</strong></div></div>';tickClocks();initCachedVideoWidgets(ws);initCachedCameraWidgets(ws);}catch(e){if(!currentHash)document.getElementById('player').innerHTML='<div class="fallback"><div><strong>Waiting for cached assigned layout</strong><span>'+esc(e.message)+'</span></div></div>';}}
 setInterval(tickClocks,1000);setInterval(loadLayout,5000);setInterval(()=>{currentHash='';loadLayout().catch(()=>{});},15*60*1000);loadLayout();
 
 // === Cursor auto-hide (3.5s default, configurable via /api/cursor-config.json) ===
@@ -4172,7 +4307,7 @@ let __cursorHideSecs = 3.5;
 async function __cursorLoadConfig() {
   try {
     const r = await fetch('/api/cursor-config.json', { cache: 'no-store' });
-    if (r.ok) { const c = await r.json(); __cursorHideSecs = Number(c.hide_secs) || 3.5; }
+    if (r.ok) { const c = JSON.parse(await readTextBounded(r, 64 * 1024)); __cursorHideSecs = Number(c.hide_secs) || 3.5; }
   } catch (e) {}
 }
 setInterval(() => {
@@ -4199,7 +4334,7 @@ def _live_player_url() -> str | None:
         try:
             server_path = Path.home() / '.local/share/screentra-client/server'
             if server_path.exists():
-                server = _read_bounded_path(server_path, 4096).strip()
+                server = _read_real_file(server_path, 4096).decode('utf-8').strip()
         except Exception:
             pass
     server = server.rstrip('/')
@@ -4217,7 +4352,7 @@ def _client_id_from_cache() -> str | None:
     try:
         cid_path = Path.home() / '.local/share/screentra-client/client-id'
         if cid_path.exists():
-            v = _read_bounded_path(cid_path, 4096).strip()
+            v = _read_real_file(cid_path, 4096).decode('utf-8').strip()
             return v or None
     except Exception:
         pass
@@ -4253,7 +4388,7 @@ def _connector_for_display_index(display_index: int) -> str | None:
                     status_path = d / 'status'
                     if not status_path.exists():
                         continue
-                    if _read_bounded_path(status_path, 128).strip() != 'connected':
+                    if _read_bounded_path(status_path, 64).strip() != 'connected':
                         continue
                     mode_path = d / 'modes'
                     if mode_path.exists():
@@ -4347,9 +4482,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(401, json.dumps({'error': 'auth required', **_auth_source()}), 'application/json')
         if path == '/api/admin/auth/login':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
-                username = str(payload.get('username') or '')
-                password = str(payload.get('password') or '')
+                payload = _parse_request_json(body) if body and body.strip() else {}
+                _require_request_fields(payload, {'username', 'password'})
+                username, password = _validate_login_payload(payload)
                 ok, info = _check_login(username, password)
                 if not ok:
                     return self.send_text(401, json.dumps({'ok': False, **info}), 'application/json')
@@ -4362,7 +4497,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Set-Cookie', 'ripley_admin_session=' + token + '; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200')
                 self.end_headers(); self.wfile.write(data); return
             except Exception as e:
-                return self.send_text(400, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
+                return self.send_text(400, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/admin/auth/logout':
             data = json.dumps({'ok': True}).encode()
             self.send_response(200)
@@ -4375,9 +4510,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(401, json.dumps({'error': 'auth required', **_auth_source()}), 'application/json')
         if path == '/api/touchscreen/select':
             try:
-                payload = json.loads(body)
+                payload = _parse_request_json(body)
+                _require_request_fields(payload, {'path'})
                 selected = payload.get('path')
-                Handler.cache_dir.mkdir(parents=True, exist_ok=True)
+                _validate_touch_device_path(selected)
+                _ensure_real_directory(Handler.cache_dir, create=True)
                 _atomic_write_text(Handler.cache_dir / 'touch-device.json', json.dumps({'path': selected}))
                 # Tell the actor to restart the kiosk so the choice takes effect
                 try:
@@ -4391,17 +4528,17 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 return self.send_text(200, json.dumps({'saved': True, 'path': selected}), 'application/json')
             except Exception as e:
-                return self.send_text(500, json.dumps({'error': str(e)}), 'application/json')
+                return self.send_text(500, json.dumps({'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/touch-calibration.json':
             try:
-                data = json.loads(body) if body and body.strip() else {}
+                data = _parse_request_json(body) if body and body.strip() else {}
                 data.setdefault('received_at', _iso_now())
                 # Tag per-display calibration results so the heartbeat
                 # can attribute intermittent failures to a specific
                 # screen when there are multiple on the same box.
                 data.setdefault('display_index', int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0')))
                 calib_path = Handler.cache_dir / 'touch-calibration.json'
-                calib_path.parent.mkdir(parents=True, exist_ok=True)
+                _ensure_real_directory(calib_path.parent, create=True)
                 history = []
                 if calib_path.exists():
                     try:
@@ -4415,31 +4552,37 @@ class Handler(BaseHTTPRequestHandler):
                 _atomic_write_text(calib_path, json.dumps(history, indent=2))
                 return self.send_text(200, json.dumps({'ok': True, 'history_size': len(history)}), 'application/json')
             except Exception as e:
-                return self.send_text(400, json.dumps({'error': str(e)}), 'application/json')
+                return self.send_text(400, json.dumps({'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/admin/ca/refresh':
             return self.send_text(200, json.dumps(_refresh_ca_from_server()), 'application/json')
         if path == '/api/admin/device/reboot':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
-            except Exception:
-                payload = {}
-            result = _reboot_device(bool(payload.get('confirm')))
+                payload = _parse_request_json(body) if body and body.strip() else {}
+                _require_request_fields(payload, {'confirm'})
+                result = _reboot_device(bool(payload.get('confirm')))
+            except Exception as e:
+                return self.send_text(400, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
             return self.send_text(200 if result.get('ok') else 400, json.dumps(result), 'application/json')
         if path == '/api/admin/display-count':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
+                payload = _parse_request_json(body) if body and body.strip() else {}
+                _require_request_fields(payload, {'max_displays'})
                 value = payload.get('max_displays')
                 result = _write_display_count(None if value in (None, '', 'auto') else int(value))
                 return self.send_text(200, json.dumps(result), 'application/json')
             except Exception as e:
-                return self.send_text(400, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
+                return self.send_text(400, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/admin/touch-binding':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
+                payload = _parse_request_json(body) if body and body.strip() else {}
+                _require_request_fields(payload, {
+                    'device_path', 'path', 'device_name', 'target_display_indexes',
+                    'display_indexes', 'display_index', 'allow_joined_displays', 'requested_by',
+                })
                 result = _write_touch_binding(payload)
                 return self.send_text(200, json.dumps(result), 'application/json')
             except Exception as e:
-                return self.send_text(400, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
+                return self.send_text(400, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         if path == '/api/admin/client-backup':
             result = _create_client_software_backup()
             return self.send_text(200 if result.get('ok') else 500, json.dumps(result), 'application/json')
@@ -4458,7 +4601,7 @@ class Handler(BaseHTTPRequestHandler):
         # Heartbeat reads this on next cycle and sends it to the server.
         if method == 'POST' and path == '/api/client-config.json':
             try:
-                payload = json.loads(body) if body and body.strip() else {}
+                payload = _parse_request_json(body) if body and body.strip() else {}
             except Exception:
                 return self.send_text(400, json.dumps({'ok': False, 'error': 'invalid json'}), 'application/json')
             cfg_path = Handler.cache_dir / 'client-config.json'
@@ -4470,11 +4613,11 @@ class Handler(BaseHTTPRequestHandler):
                 for k in ['theme']:
                     if k in payload:
                         data[k] = payload[k]
-                cfg_path.parent.mkdir(parents=True, exist_ok=True)
+                _ensure_real_directory(cfg_path.parent, create=True)
                 _atomic_write_text(cfg_path, json.dumps(data, indent=2))
                 return self.send_text(200, json.dumps({'ok': True}), 'application/json')
             except Exception as e:
-                return self.send_text(500, json.dumps({'ok': False, 'error': str(e)}), 'application/json')
+                return self.send_text(500, json.dumps({'ok': False, 'error': _bound_text(str(e), MAX_ERROR_BYTES)}), 'application/json')
         return self.send_text(404, json.dumps({'error': 'not found'}), 'application/json')
     def log_message(self, fmt, *args):
         pass
@@ -4521,7 +4664,9 @@ class Handler(BaseHTTPRequestHandler):
             # the touchscreen + pick a layout right from the screen.
             if not layout_target.exists():
                 try:
-                    html = _read_bounded_path(Path(os.path.dirname(os.path.abspath(__file__))) / 'no-layout.html', MAX_STATIC_HTML_BYTES).replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
+                    no_layout_path = Path(__file__).with_name('no-layout.html')
+                    html = _read_real_file(no_layout_path, MAX_STATIC_HTML_BYTES).decode('utf-8')
+                    html = html.replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
                     return self.send_text(200, html, 'text/html; charset=utf-8')
                 except Exception:
                     pass
@@ -4554,14 +4699,22 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             fname = (query.get('file') or [''])[0]
             safe_name = Path(fname).name
-            target = (_client_backup_root() / safe_name).resolve()
+            root = _client_backup_root()
+            candidate = root / safe_name
+            metadata = os.lstat(candidate) if candidate.exists() or candidate.is_symlink() else None
+            if metadata is None or stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                return self.send_text(404, 'backup not found')
+            target = candidate.resolve()
             try:
-                target.relative_to(_client_backup_root().resolve())
+                target.relative_to(root.resolve())
             except Exception:
                 return self.send_text(403, 'forbidden')
-            if not target.exists() or not target.is_file():
-                return self.send_text(404, 'backup not found')
-            data = _read_bounded_bytes(target, MAX_BACKUP_DOWNLOAD_BYTES)
+            try:
+                data = _read_real_file(candidate, maximum=MAX_BACKUP_DOWNLOAD_BYTES)
+            except ValueError as error:
+                if 'exceeds' in str(error) or 'bounded' in str(error):
+                    return self.send_text(413, 'backup too large')
+                return self.send_text(403, 'forbidden')
             self.send_response(200)
             self.send_header('Content-Type', 'application/gzip')
             self.send_header('Content-Length', str(len(data)))
@@ -4574,14 +4727,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(200, json.dumps(_admin_logs(target)), 'application/json')
         if path == '/no-layout.html':
             display_index = int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0'))
-            html = _read_bounded_path(Path(os.path.dirname(os.path.abspath(__file__))) / 'no-layout.html', MAX_STATIC_HTML_BYTES).replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
+            no_layout_path = Path(__file__).with_name('no-layout.html')
+            html = _read_real_file(no_layout_path, MAX_STATIC_HTML_BYTES).decode('utf-8')
+            html = html.replace('<title>Screentra Cast Player display</title>', f'<title>Screentra Cast Player display {display_index}</title>')
             return self.send_text(200, html, 'text/html; charset=utf-8')
         if path == '/touch-calibration.html':
             # Serve the touchscreen calibration test page. Lives next to
             # the renderer script and reads RIPLEY_DISPLAY_INDEX for the
             # results so per-display calibration is recorded separately.
             try:
-                return self.send_text(200, _read_bounded_path(Path(os.path.dirname(os.path.abspath(__file__))) / 'touch-calibration.html', MAX_STATIC_HTML_BYTES), 'text/html; charset=utf-8')
+                calibration_path = Path(__file__).with_name('touch-calibration.html')
+                html = _read_real_file(calibration_path, MAX_STATIC_HTML_BYTES).decode('utf-8')
+                return self.send_text(200, html, 'text/html; charset=utf-8')
             except FileNotFoundError:
                 return self.send_text(404, 'calibration page not installed', 'text/plain')
         if path == '/api/status.json':
@@ -4653,17 +4810,28 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text(200, json.dumps(_read_json_file(target, {})), 'application/json')
         # Optional cached asset serving under cache/assets
         safe = Path(path.lstrip('/'))
-        target = (self.cache_dir / safe).resolve()
+        candidate = self.cache_dir / safe
+        try:
+            candidate_metadata = os.lstat(candidate)
+        except FileNotFoundError:
+            return self.send_text(404, 'not found')
+        if stat.S_ISLNK(candidate_metadata.st_mode) or not stat.S_ISREG(candidate_metadata.st_mode):
+            return self.send_text(403, 'forbidden')
+        target = candidate.resolve()
         try:
             target.relative_to(self.cache_dir.resolve())
         except Exception:
             return self.send_text(403, 'forbidden')
-        if target.exists() and target.is_file():
-            data = _read_bounded_bytes(target, MAX_CACHED_ASSET_BYTES)
-            self.send_response(200)
-            self.send_header('Content-Type', mimetypes.guess_type(str(target))[0] or 'application/octet-stream')
-            self.send_header('Content-Length', str(len(data)))
-            self.end_headers(); self.wfile.write(data); return
+        try:
+            data = _read_real_file(candidate, maximum=MAX_CACHED_ASSET_BYTES)
+        except ValueError as error:
+            if 'exceeds' in str(error) or 'bounded' in str(error):
+                return self.send_text(413, 'asset too large')
+            return self.send_text(403, 'forbidden')
+        self.send_response(200)
+        self.send_header('Content-Type', mimetypes.guess_type(str(target))[0] or 'application/octet-stream')
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers(); self.wfile.write(data); return
         return self.send_text(404, 'not found')
 
 def main():
@@ -4675,7 +4843,7 @@ def main():
     if args.port is None:
         args.port = int(os.environ.get('RIPLEY_RENDER_PORT', str(int(os.environ.get('RIPLEY_RENDER_BASE_PORT','3900')) + int(os.environ.get('RIPLEY_DISPLAY_INDEX','0')))))
     Handler.cache_dir=Path(args.cache_dir)
-    Handler.cache_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_real_directory(Handler.cache_dir, create=True)
     print(f'Screentra Cast cached player renderer listening on http://{args.host}:{args.port}/ using {Handler.cache_dir}', flush=True)
     ThreadingHTTPServer((args.host,args.port), Handler).serve_forever()
 if __name__=='__main__': main()

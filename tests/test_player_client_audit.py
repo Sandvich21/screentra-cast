@@ -100,11 +100,13 @@ class PlayerClientAuditTests(unittest.TestCase):
         body = installer[start:end]
         compile(body, 'embedded-renderer.py', 'exec')
         self.assertIn('_read_bounded_path', body)
-        self.assertIn('_read_bounded_response', body)
+        self.assertIn('response.read(256 * 1024 + 1)', body)
         self.assertNotIn('.read_text()', body)
         self.assertNotIn('target.read_bytes()', body)
         self.assertNotIn('capture_output=True', body)
         self.assertNotIn('_ur.urlopen(url, context=ctx, timeout=10).read()', body)
+        self.assertNotIn("sock.connect(('11.1.1.53', 3000))", body)
+        self.assertIn('def _lan_ip_for_admin(server_url', body)
         namespace = {'__name__': 'embedded_renderer_test'}
         exec(compile(body, 'embedded-renderer.py', 'exec'), namespace)
         with self.assertRaisesRegex(ValueError, 'stdout exceeds its bound'):
@@ -130,6 +132,11 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn('readJsonBounded', source)
         self.assertIn('await reader.cancel()', source)
         self.assertNotIn('await r.json()', source)
+
+    def test_served_player_installer_matches_generated_installer(self):
+        generated = (ROOT / 'player-client/static/install/player-client.sh').read_bytes()
+        served = (ROOT / 'static/install/player-client.sh').read_bytes()
+        self.assertEqual(served, generated)
 
     def test_renderer_admin_route_lookup_uses_configured_server(self):
         source = (ROOT / 'player-client/scripts/screentra-player-renderer.py').read_text()
