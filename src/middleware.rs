@@ -35,6 +35,8 @@ pub const OPEN_ROUTES: &[&str] = &[
     "/api/traffic/map.png",
     // Open download routes for anonymous installer access
     "/install/screentra-cast-installers.tar.gz",
+    "/install/player-client.sh",
+    "/install/player-client.sh.sig",
 ];
 
 /// Method+path prefixes that are always open even though the prefix overlaps
@@ -54,7 +56,7 @@ fn is_open_path(path: &str, method: &str) -> bool {
     if OPEN_ROUTES.contains(&path) {
         let public_method = match path {
             "/api/auth/login" | "/api/setup" | "/api/clients/register" | "/api/log" | "/api/interactive/submit" => method == "POST",
-            "/api/auth/status" | "/api/setup/status" | "/api/system" | "/api/system/time" | "/api/system/liveness" | "/api/system/readiness" | "/metrics" | "/api/ics-proxy" | "/api/weather/forecast" | "/api/traffic/events" | "/api/traffic/map.png" | "/install/screentra-cast-installers.tar.gz" => method == "GET",
+            "/api/auth/status" | "/api/setup/status" | "/api/system" | "/api/system/time" | "/api/system/liveness" | "/api/system/readiness" | "/metrics" | "/api/ics-proxy" | "/api/weather/forecast" | "/api/traffic/events" | "/api/traffic/map.png" | "/install/screentra-cast-installers.tar.gz" | "/install/player-client.sh" | "/install/player-client.sh.sig" => method == "GET",
             _ => false,
         };
         if public_method {
@@ -517,7 +519,9 @@ mod authorization_tests {
         assert!(!is_open_path("/index.html", "POST"));
         assert!(!is_open_path("/js/app.js", "DELETE"));
         assert!(!is_open_path("/api/layouts", "GET"));
-        assert!(!is_open_path("/install/player-client.sh", "GET"));
+        assert!(is_open_path("/install/player-client.sh", "GET"));
+        assert!(is_open_path("/install/player-client.sh.sig", "GET"));
+        assert!(!is_open_path("/install/unknown.sh", "GET"));
     }
 
     #[test]
