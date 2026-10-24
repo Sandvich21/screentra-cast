@@ -4521,11 +4521,15 @@ async fn upload_file(
         let mut tmp = fs::File::create(&tmp_path).map_err(|_| internal_server_error())?;
         let mut total = 0u64;
         let mut field = field;
-        while let Some(chunk) = field
-            .chunk()
-            .await
-            .map_err(|_| (StatusCode::BAD_REQUEST, "Unable to read upload".to_string()))?
-        {
+        loop {
+            let chunk = match field.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(_) => {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err((StatusCode::BAD_REQUEST, "Unable to read upload".to_string()));
+                }
+            };
             total = total.saturating_add(chunk.len() as u64);
             if total > MAX_UPLOAD_BYTES {
                 let _ = fs::remove_file(&tmp_path);
@@ -4534,9 +4538,15 @@ async fn upload_file(
                     "Upload is too large".to_string(),
                 ));
             }
-            tmp.write_all(&chunk).map_err(|_| internal_server_error())?;
+            if tmp.write_all(&chunk).is_err() {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(internal_server_error());
+            }
         }
-        tmp.flush().map_err(|_| internal_server_error())?;
+        if tmp.flush().is_err() {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(internal_server_error());
+        }
         drop(tmp);
 
         let mut image_data: Option<Vec<u8>> = None;
@@ -4549,10 +4559,23 @@ async fn upload_file(
                     "Image upload is too large".to_string(),
                 ));
             }
-            let data = read_bounded_file(&tmp_path, MAX_IMAGE_UPLOAD_BYTES)
-                .map_err(|_| internal_server_error())?;
-            let ext = image_extension_from_upload(&original_name, &data)?;
-            fs::remove_file(&tmp_path).map_err(|_| internal_server_error())?;
+            let data = match read_bounded_file(&tmp_path, MAX_IMAGE_UPLOAD_BYTES) {
+                Ok(data) => data,
+                Err(_) => {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(internal_server_error());
+                }
+            };
+            let ext = match image_extension_from_upload(&original_name, &data) {
+                Ok(ext) => ext,
+                Err(error) => {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(error);
+                }
+            };
+            if fs::remove_file(&tmp_path).is_err() {
+                return Err(internal_server_error());
+            }
             image_data = Some(data);
             format!("{}-{}.{}", Utc::now().timestamp(), Uuid::new_v4(), ext)
         } else {
@@ -4564,7 +4587,10 @@ async fn upload_file(
             fs::write(&dest, image_data.as_deref().unwrap_or_default())
                 .map_err(|_| internal_server_error())?;
         } else {
-            fs::rename(&tmp_path, &dest).map_err(|_| internal_server_error())?;
+            if fs::rename(&tmp_path, &dest).is_err() {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(internal_server_error());
+            }
         }
 
         let url = format!("/uploads/{}/{}", category, safe_name);
