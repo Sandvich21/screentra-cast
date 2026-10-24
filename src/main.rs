@@ -41,6 +41,10 @@ fn parse_listen_addr(value: &str) -> Result<std::net::SocketAddr, String> {
         .map_err(|error| format!("invalid SIGNAGE_LISTEN_ADDR: {error}"))
 }
 
+fn self_signed_certificate_names() -> Vec<String> {
+    vec!["localhost".to_string(), "signage-server".to_string()]
+}
+
 fn ensure_data_dir(path: &std::path::Path) -> Result<(), String> {
     std::fs::create_dir_all(path)
         .map_err(|error| format!("failed to create data directory: {error}"))
@@ -812,12 +816,7 @@ async fn main() {
              reject. To fix: place signage-server.crt + signage-server.key in \
              the binary's install dir, or set SIGNAGE_TLS_CERT/SIGNAGE_TLS_KEY."
         );
-        let cert = match rcgen::generate_simple_self_signed(vec![
-            "11.1.1.53".to_string(),
-            "debian-sign-software".to_string(),
-            "localhost".to_string(),
-            "signage-server".to_string(),
-        ]) {
+        let cert = match rcgen::generate_simple_self_signed(self_signed_certificate_names()) {
             Ok(cert) => cert,
             Err(error) => {
                 eprintln!("FATAL: failed to generate self-signed cert: {error}");
@@ -1060,6 +1059,13 @@ pub(crate) async fn run_maintenance_loop(
 #[cfg(test)]
 mod startup_tests {
     use super::parse_listen_addr;
+
+    #[test]
+    fn generated_certificate_names_do_not_include_deployment_addresses() {
+        let names = super::self_signed_certificate_names();
+        assert!(names.iter().all(|name| name != "11.1.1.53"));
+        assert!(names.iter().any(|name| name == "localhost"));
+    }
 
     #[test]
     fn invalid_listen_addr_is_rejected_without_panicking() {
