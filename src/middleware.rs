@@ -40,6 +40,17 @@ pub const OPEN_ROUTES: &[&str] = &[
 /// Method+path prefixes that are always open even though the prefix overlaps
 /// with the gated namespace (e.g. config fetches by enrolled players).
 fn is_open_path(path: &str, method: &str) -> bool {
+    // The static fallback serves the login page, player pages, stylesheets,
+    // scripts, and bundled assets before a session exists. Keep API, client,
+    // upload, and install namespaces behind their explicit policies.
+    if method == "GET"
+        && !path.starts_with("/api/")
+        && !path.starts_with("/clients/")
+        && !path.starts_with("/uploads/")
+        && !path.starts_with("/install/")
+    {
+        return true;
+    }
     if OPEN_ROUTES.contains(&path) {
         let public_method = match path {
             "/api/auth/login" | "/api/setup" | "/api/clients/register" | "/api/log" | "/api/interactive/submit" => method == "POST",
@@ -495,6 +506,19 @@ pub async fn require_auth(
 #[cfg(test)]
 mod authorization_tests {
     use super::*;
+
+    #[test]
+    fn static_gets_are_open_but_static_mutations_are_not() {
+        assert!(is_open_path("/", "GET"));
+        assert!(is_open_path("/index.html", "GET"));
+        assert!(is_open_path("/player.html", "GET"));
+        assert!(is_open_path("/css/main.css", "GET"));
+        assert!(is_open_path("/js/app.js", "GET"));
+        assert!(!is_open_path("/index.html", "POST"));
+        assert!(!is_open_path("/js/app.js", "DELETE"));
+        assert!(!is_open_path("/api/layouts", "GET"));
+        assert!(!is_open_path("/install/player-client.sh", "GET"));
+    }
 
     #[test]
     fn capabilities_are_scoped_by_operation() {
