@@ -125,6 +125,12 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('await r.json()', browser)
         self.assertNotIn('await c.json()', browser)
 
+    def test_editor_json_reads_are_bounded(self):
+        source = (ROOT / 'static/js/editor.js').read_text()
+        self.assertIn('readEditorJsonBounded', source)
+        self.assertNotIn('await response.json()', source)
+        self.assertNotIn('await r.json()', source)
+
     def test_no_layout_browser_reads_are_bounded(self):
         source = (ROOT / 'player-client/static/no-layout.html').read_text()
         self.assertIn('readTextBounded', source)

@@ -34,6 +34,10 @@ async function readEditorResponseTextBounded(response, maximumBytes) {
   }
 }
 
+async function readEditorJsonBounded(response, maximumBytes = MAX_EDITOR_CALENDAR_BYTES) {
+  return JSON.parse(await readEditorResponseTextBounded(response, maximumBytes));
+}
+
 const Editor = {
   // State
   layouts: [],
@@ -570,7 +574,7 @@ const Editor = {
       try {
         const response = await fetch('/api/widget-presets/default-weather-simple-rows');
         if (response.ok) {
-          const preset = await response.json();
+          const preset = await readEditorJsonBounded(response);
           if (epoch !== this._fetchEpoch) return this.presetCache;
           this.presetCache.weather = [preset];
           this.presetCacheAt = now;
@@ -1003,7 +1007,7 @@ const Editor = {
       try {
         const response = await fetch('/api/weather/forecast?lat=' + encodeURIComponent(p.lat) + '&lon=' + encodeURIComponent(p.lon), {cache: 'no-store'});
         if (!response.ok) throw new Error('Weather request failed');
-        const data = await response.json();
+        const data = await readEditorJsonBounded(response);
         const toDisplayTemp = value => { let n = Number(value); if (unit === 'celsius' && data.source === 'noaa_nws') n = (n - 32) * 5 / 9; return Math.round(n); };
         const toDisplayWind = value => { let n = Number(value) || 0; if (unit === 'celsius') n *= 1.60934; return Math.round(n); };
         const windSuffix = unit === 'fahrenheit' ? 'mph' : 'km/h';
@@ -1066,7 +1070,7 @@ const Editor = {
         const url = '/api/traffic/events?lat=' + encodeURIComponent(p.lat) + '&lon=' + encodeURIComponent(p.lon) + '&radius_miles=' + encodeURIComponent(p.radius_miles || 25);
         const response = await fetch(url, {cache: 'no-store'});
         if (!response.ok) throw new Error('Traffic request failed');
-        const data = await response.json();
+        const data = await readEditorJsonBounded(response);
         const rawEvents = Array.isArray(data.events) ? data.events : [];
         const events = (data.configured !== false && data.available !== false && typeof window.ripleyFilterTrafficEvents === 'function')
           ? window.ripleyFilterTrafficEvents(rawEvents, p, w.id)
@@ -2784,7 +2788,7 @@ const Editor = {
         try {
           const response = await fetch('/api/weather/lookup?q=' + encodeURIComponent(query));
           if (!response.ok) throw new Error('Lookup failed');
-          const data = await response.json();
+          const data = await readEditorJsonBounded(response);
           locationMatches = Array.isArray(data.results) ? data.results : [];
           locationResults.innerHTML = '<option value="">Select a location</option>' + locationMatches.map((place, index) => {
             const label = [place.name, place.admin1, place.country].filter(Boolean).join(', ');
@@ -2825,7 +2829,7 @@ const Editor = {
         try {
           const response = await fetch('/api/weather/lookup?q=' + encodeURIComponent(query));
           if (!response.ok) throw new Error('Lookup failed');
-          const data = await response.json();
+          const data = await readEditorJsonBounded(response);
           trafficMatches = Array.isArray(data.results) ? data.results : [];
           trafficResults.innerHTML = '<option value="">Select an area</option>' + trafficMatches.map((place, index) => {
             const label = [place.name, place.admin1, place.country].filter(Boolean).join(', ');
@@ -2867,7 +2871,7 @@ const Editor = {
           const url = '/api/traffic/events?lat=' + encodeURIComponent(p.lat) + '&lon=' + encodeURIComponent(p.lon) + '&radius_miles=' + encodeURIComponent(p.radius_miles || 25);
           const response = await fetch(url, { cache: 'no-store' });
           if (!response.ok) throw new Error('Traffic request failed');
-          const data = await response.json();
+          const data = await readEditorJsonBounded(response);
           if (data.available === false || data.configured === false) {
             closureManagerList.innerHTML = '';
             closureManagerStatus.textContent = data.message || 'Traffic feed is unavailable.';
@@ -3589,7 +3593,7 @@ const Editor = {
         } catch (_e) {}
         var r = await fetch('/api/fonts/installed', { headers: headers });
         if (!r.ok) throw new Error('HTTP ' + r.status);
-        var list = await r.json();
+        var list = await readEditorJsonBounded(r);
         // Make installed Google Fonts available to the editor canvas itself.
         // The picker iframe has its own @font-face rules, but those do not
         // cross the iframe boundary into the parent editor document.
