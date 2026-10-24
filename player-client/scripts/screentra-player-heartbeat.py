@@ -193,7 +193,7 @@ def _run_bounded_probe(args, maximum=MAX_LOCAL_PROBE_OUTPUT_BYTES, timeout=3):
     except Exception:
         if process is not None and process.poll() is None:
             process.kill()
-            process.wait()
+            process.wait(timeout=1)
         return None, b''
     finally:
         if process is not None and process.stdout is not None:

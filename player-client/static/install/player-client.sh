@@ -1266,7 +1266,7 @@ def _run_bounded_probe(args, maximum=MAX_LOCAL_PROBE_OUTPUT_BYTES, timeout=3):
     except Exception:
         if process is not None and process.poll() is None:
             process.kill()
-            process.wait()
+            process.wait(timeout=1)
         return None, b''
     finally:
         if process is not None and process.stdout is not None:
@@ -1658,7 +1658,7 @@ def _run_bounded_probe(args, maximum=MAX_LOCAL_PROBE_OUTPUT_BYTES, timeout=3):
     except Exception:
         if process is not None and process.poll() is None:
             process.kill()
-            process.wait()
+            process.wait(timeout=1)
         return None, b''
     finally:
         if process is not None and process.stdout is not None:
@@ -5957,7 +5957,7 @@ def _run(args: list[str], timeout: float = 2.0) -> tuple[int, str, str]:
     except Exception as e:
         if process is not None and process.poll() is None:
             process.kill()
-            process.wait()
+            process.wait(timeout=1)
         return 127, '', _bound_subprocess_output(str(e))
     finally:
         if process is not None:

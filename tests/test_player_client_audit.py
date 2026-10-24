@@ -187,6 +187,16 @@ class PlayerClientAuditTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             actor._validate_preview_pid('9' * 20)
 
+    def test_probe_failure_cleanup_uses_bounded_waits(self):
+        for relative in (
+            'player-client/scripts/screentra-player-heartbeat.py',
+            'player-client/scripts/screentra-player-preflight.py',
+            'player-client/scripts/screentra-gpu-health.py',
+        ):
+            source = (ROOT / relative).read_text()
+            self.assertNotIn('process.wait()\\n', source, relative)
+            self.assertIn('process.wait(timeout=1)', source, relative)
+
     def test_preview_process_termination_reaps_child(self):
         process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
         try:
