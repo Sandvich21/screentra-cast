@@ -1376,7 +1376,7 @@ impl Database {
     pub fn list_scene_ids(&self) -> Result<Vec<String>, String> {
         let conn = self.conn()?;
         let mut stmt = conn
-            .prepare("SELECT id FROM scenes ORDER BY updated_at DESC")
+            .prepare("SELECT id FROM scenes ORDER BY updated_at DESC LIMIT 10000")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| row.get(0))
@@ -5255,6 +5255,28 @@ mod tests {
 
         let schedules = db.list_schedules().expect("list schedules");
         assert_eq!(schedules.len(), 10_000);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn list_scene_ids_is_bounded() {
+        let path = unique_temp_path("scene-list-bound");
+        let db = Database::open(&path).expect("open db");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            let tx = conn.unchecked_transaction().expect("begin transaction");
+            for index in 0..10_001 {
+                tx.execute(
+                    "INSERT INTO scenes (id, name, description, created_at, updated_at) VALUES (?1, ?2, NULL, ?3, ?4)",
+                    rusqlite::params![format!("scene-{index:05}"), "bounded scene", "2026-10-01T00:00:00Z", format!("2026-10-01T00:{:02}:00Z", index % 60)],
+                )
+                .expect("insert scene");
+            }
+            tx.commit().expect("commit scenes");
+        }
+
+        let scene_ids = db.list_scene_ids().expect("list scene ids");
+        assert_eq!(scene_ids.len(), 10_000);
         std::fs::remove_file(&path).ok();
     }
 }

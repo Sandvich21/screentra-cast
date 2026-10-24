@@ -854,7 +854,7 @@ impl PostgresStore {
 
     pub async fn list_scene_ids(&self) -> Result<Vec<String>, String> {
         self.client
-            .query("SELECT id FROM scenes ORDER BY updated_at DESC", &[])
+            .query("SELECT id FROM scenes ORDER BY updated_at DESC LIMIT 10000", &[])
             .await
             .map(|rows| rows.into_iter().map(|row| row.get(0)).collect())
             .map_err(|error| format!("list scenes: {error}"))
