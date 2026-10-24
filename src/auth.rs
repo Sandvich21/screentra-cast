@@ -486,7 +486,7 @@ impl AuthState {
     }
 
     pub fn supported_step_up_scope(scope: &str) -> bool {
-        scope == "server-update"
+        matches!(scope, "server-update" | "addon-execution-approval")
     }
 
     pub async fn token_payload(&self, token: &str) -> Option<serde_json::Value> {
@@ -1860,6 +1860,11 @@ mod tests {
         let headers = HeaderMap::new();
         assert_eq!(client_ip(&headers), "unknown");
         std::env::remove_var("SIGNAGE_TRUSTED_PROXY");
+    }
+
+    #[test]
+    fn addon_execution_approval_is_a_supported_step_up_scope() {
+        assert!(AuthState::supported_step_up_scope("addon-execution-approval"));
     }
 
     #[test]
