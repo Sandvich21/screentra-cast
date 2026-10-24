@@ -17,6 +17,8 @@ use uuid::Uuid;
 const MANIFEST_FILE: &str = "manifest.json";
 const STATE_FILE: &str = "state.json";
 const MAX_ADDON_METADATA_BYTES: usize = 512 * 1024;
+const MAX_ADDON_RECORDS: usize = 1_024;
+const MAX_ADDON_DIRECTORY_ENTRIES: usize = 4_096;
 const ROLLBACK_DIR: &str = ".rollback";
 const SUPPORTED_CLIENT_API_VERSION: &str = "1";
 const MAX_ID_LEN: usize = 64;
@@ -1714,7 +1716,12 @@ pub fn list() -> Result<Vec<AddonRecord>, AddonError> {
         return Ok(Vec::new());
     };
     let mut records = Vec::new();
+    let mut scanned_entries = 0usize;
     for entry in fs::read_dir(root).map_err(io_error)? {
+        scanned_entries = scanned_entries.saturating_add(1);
+        if scanned_entries > MAX_ADDON_DIRECTORY_ENTRIES {
+            return Err(AddonError::Invalid("Too many addon directory entries".to_string()));
+        }
         let entry = entry.map_err(io_error)?;
         let file_type = entry.file_type().map_err(io_error)?;
         if file_type.is_symlink() {
@@ -1726,6 +1733,9 @@ pub fn list() -> Result<Vec<AddonRecord>, AddonError> {
             continue;
         }
         if file_type.is_dir() {
+            if records.len() >= MAX_ADDON_RECORDS {
+                return Err(AddonError::Invalid("Too many addon records".to_string()));
+            }
             let metadata = fs::symlink_metadata(entry.path()).map_err(io_error)?;
             validate_private_addon_directory(&metadata)?;
             records.push(read_record(&entry.path())?);
