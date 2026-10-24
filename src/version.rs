@@ -1301,6 +1301,19 @@ fn republish_local_ca(static_dir: &Path) -> Result<bool, String> {
 
 /// Copy a directory and all its contents recursively. Best-effort.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let mut file_count = 0usize;
+    let mut total_bytes = 0u64;
+    copy_dir_recursive_bounded(src, dst, &mut file_count, &mut total_bytes)
+}
+
+fn copy_dir_recursive_bounded(
+    src: &Path,
+    dst: &Path,
+    file_count: &mut usize,
+    total_bytes: &mut u64,
+) -> std::io::Result<()> {
+    const MAX_COPIED_FILES: usize = 100_000;
+    const MAX_COPIED_BYTES: u64 = 1024 * 1024 * 1024;
     if !src.exists() {
         return Ok(());
     }
@@ -1309,10 +1322,30 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         let entry = entry?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
-        if from.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
+        let metadata = fs::symlink_metadata(&from)?;
+        if metadata.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "recursive copy source contains a symlink",
+            ));
+        }
+        if metadata.is_dir() {
+            copy_dir_recursive_bounded(&from, &to, file_count, total_bytes)?;
+        } else if metadata.is_file() {
+            *file_count = file_count.saturating_add(1);
+            *total_bytes = total_bytes.saturating_add(metadata.len());
+            if *file_count > MAX_COPIED_FILES || *total_bytes > MAX_COPIED_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::FileTooLarge,
+                    "recursive copy source exceeds its bounds",
+                ));
+            }
             fs::copy(&from, &to)?;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "recursive copy source contains an unsupported entry",
+            ));
         }
     }
     Ok(())
@@ -1325,6 +1358,20 @@ fn copy_dir_recursive_excluding(
     dst: &Path,
     skip_names: &[&str],
 ) -> std::io::Result<()> {
+    let mut file_count = 0usize;
+    let mut total_bytes = 0u64;
+    copy_dir_recursive_excluding_bounded(src, dst, skip_names, &mut file_count, &mut total_bytes)
+}
+
+fn copy_dir_recursive_excluding_bounded(
+    src: &Path,
+    dst: &Path,
+    skip_names: &[&str],
+    file_count: &mut usize,
+    total_bytes: &mut u64,
+) -> std::io::Result<()> {
+    const MAX_COPIED_FILES: usize = 100_000;
+    const MAX_COPIED_BYTES: u64 = 1024 * 1024 * 1024;
     if !src.exists() {
         return Ok(());
     }
@@ -1338,10 +1385,36 @@ fn copy_dir_recursive_excluding(
         }
         let from = entry.path();
         let to = dst.join(&name);
-        if from.is_dir() {
-            copy_dir_recursive_excluding(&from, &to, skip_names)?;
-        } else {
+        let metadata = fs::symlink_metadata(&from)?;
+        if metadata.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "recursive copy source contains a symlink",
+            ));
+        }
+        if metadata.is_dir() {
+            copy_dir_recursive_excluding_bounded(
+                &from,
+                &to,
+                skip_names,
+                file_count,
+                total_bytes,
+            )?;
+        } else if metadata.is_file() {
+            *file_count = file_count.saturating_add(1);
+            *total_bytes = total_bytes.saturating_add(metadata.len());
+            if *file_count > MAX_COPIED_FILES || *total_bytes > MAX_COPIED_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::FileTooLarge,
+                    "recursive copy source exceeds its bounds",
+                ));
+            }
             fs::copy(&from, &to)?;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "recursive copy source contains an unsupported entry",
+            ));
         }
     }
     Ok(())
