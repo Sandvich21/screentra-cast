@@ -18,6 +18,26 @@ async function readAppTextBounded(response, maximumBytes = MAX_APP_RESPONSE_BYTE
         }
     } finally { reader.releaseLock(); }
 }
+async function readAppBlobBounded(response, maximumBytes = 64 * 1024 * 1024) {
+    const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+    if (!reader) throw new Error('response body is unavailable');
+    const chunks = []; let total = 0;
+    try {
+        while (true) {
+            const part = await reader.read();
+            if (part.done) {
+                return new Blob(chunks, { type: response.headers.get('content-type') || 'application/octet-stream' });
+            }
+            const value = part.value || new Uint8Array();
+            total += value.byteLength;
+            if (total > maximumBytes) {
+                try { await reader.cancel(); } catch (_) {}
+                throw new Error('response exceeds its size limit');
+            }
+            chunks.push(value);
+        }
+    } finally { reader.releaseLock(); }
+}
 async function readAppJsonBounded(response, maximumBytes = MAX_APP_RESPONSE_BYTES) {
     return JSON.parse(await readAppTextBounded(response, maximumBytes));
 }
@@ -1696,7 +1716,7 @@ const App = {
                 try {
                     const res = await fetch(API.exportBundleUrl());
                     if (!res.ok) throw new Error('Export failed: ' + res.status);
-                    const blob = await res.blob();
+                    const blob = await readAppBlobBounded(res, 64 * 1024 * 1024);
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
@@ -7001,7 +7021,7 @@ ${_cmds.oneLiner}`;
           const response = await fetch(url, {cache:'no-store', credentials:'same-origin'});
           if (response.status === 204) { setStatus('Waiting for client capture…'); return; }
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const blob = await response.blob();
+          const blob = await readAppBlobBounded(response, 8 * 1024 * 1024);
           clearFrame();
           liveObjectUrl = URL.createObjectURL(blob);
           let image = preview.querySelector('.client-display-live-frame');

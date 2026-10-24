@@ -142,8 +142,9 @@ class PlayerClientAuditTests(unittest.TestCase):
         source = (ROOT / 'static/js/app.js').read_text()
         self.assertIn('readAppJsonBounded', source)
         self.assertIn('readAppTextBounded', source)
+        self.assertIn('readAppBlobBounded', source)
         self.assertIn('reader.cancel()', source)
-        self.assertNotRegex(source, r'\b(?:response|res|r|fileRes|assetRes)\.(?:json|text)\(\)')
+        self.assertNotRegex(source, r'\b(?:response|res|r|fileRes|assetRes)\.(?:json|text|blob)\(\)')
 
     def test_auth_browser_reads_are_bounded(self):
         source = (ROOT / 'static/js/auth.js').read_text()
