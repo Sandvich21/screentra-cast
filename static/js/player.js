@@ -1,5 +1,29 @@
 
 var rendered = {};
+const MAX_PLAYER_RESPONSE_BYTES = 4 * 1024 * 1024;
+async function readPlayerTextBounded(response, maximumBytes = MAX_PLAYER_RESPONSE_BYTES) {
+  const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+  if (!reader) throw new Error('response body is unavailable');
+  const decoder = new TextDecoder(); let total = 0, text = '';
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) { text += decoder.decode(); return text; }
+      const value = part.value || new Uint8Array();
+      total += value.byteLength;
+      if (total > maximumBytes) {
+        try { await reader.cancel(); } catch (_) {}
+        throw new Error('response exceeds its size limit');
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+async function readPlayerJsonBounded(response, maximumBytes = MAX_PLAYER_RESPONSE_BYTES) {
+  return JSON.parse(await readPlayerTextBounded(response, maximumBytes));
+}
 
 function ripleyTextShadowStyle(p) {
   if (!p || !p.text_shadow_enabled) return '';
@@ -706,7 +730,7 @@ async function ripleyLoadCalendarData(widgetProps) {
   try {
     var response = await fetch('/api/ics-proxy?url=' + encodeURIComponent(url), {cache:'no-store'});
     if (!response.ok) throw new Error('calendar ' + response.status);
-    widgetProps._calendar_events = ripleyParseCalendarText(await response.text(), ripleyCalendarRequiredEventCount(widgetProps), widgetProps.time_format === '24' ? '24' : '12');
+    widgetProps._calendar_events = ripleyParseCalendarText(await readPlayerTextBounded(response), ripleyCalendarRequiredEventCount(widgetProps), widgetProps.time_format === '24' ? '24' : '12');
   } catch (_) { widgetProps._calendar_events = []; }
   return widgetProps._calendar_events;
 }
@@ -740,7 +764,7 @@ async function ripleyLoadWeatherData(widgetProps) {
   try {
     var response = await fetch('/api/weather/forecast?lat=' + encodeURIComponent(lat) + '&lon=' + encodeURIComponent(lon), {cache: 'no-store'});
     if (!response.ok) throw new Error('weather ' + response.status);
-    widgetProps._weather_data = await response.json();
+    widgetProps._weather_data = await readPlayerJsonBounded(response);
     widgetProps._weather_data_source = 'live';
   } catch (e) {
     console.warn('weather provider unavailable', e);
@@ -771,7 +795,7 @@ async function ripleyLoadTrafficData(widgetProps, widgetId) {
     var url = '/api/traffic/events?lat=' + encodeURIComponent(lat) + '&lon=' + encodeURIComponent(lon) + '&radius_miles=' + encodeURIComponent(widgetProps.radius_miles || 25);
     var response = await fetch(url, {cache: 'no-store'});
     if (!response.ok) throw new Error('traffic ' + response.status);
-    widgetProps._traffic_data = await response.json();
+    widgetProps._traffic_data = await readPlayerJsonBounded(response);
     if (typeof ripleyFilterTrafficEvents === 'function' && widgetProps._traffic_data.configured !== false && widgetProps._traffic_data.available !== false) {
       widgetProps._traffic_data.events = ripleyFilterTrafficEvents(widgetProps._traffic_data.events, widgetProps, widgetId);
     }
@@ -792,7 +816,7 @@ async function ripleyHydrateTrafficTemplates(layout) {
     try {
       var response = await fetch('/api/widget-presets/' + encodeURIComponent(widget.props.preset), {cache:'no-store'});
       if (!response.ok) return;
-      var preset = await response.json();
+      var preset = await readPlayerJsonBounded(response);
       var presetProps = preset && preset.props_json;
       if (typeof presetProps === 'string') presetProps = JSON.parse(presetProps || '{}');
       if (!presetProps || !Array.isArray(presetProps.template_elements)) return;
@@ -810,7 +834,7 @@ function injectInstalledFontsIntoIframes(root) {
   root.querySelectorAll('iframe').forEach(function(frame) {
     frame.addEventListener('load', function() {
       try {
-        fetch('/api/fonts/installed').then(function(r){ return r.ok ? r.json() : []; }).then(function(fonts) {
+        fetch('/api/fonts/installed').then(function(r){ return r.ok ? readPlayerJsonBounded(r) : []; }).then(function(fonts) {
           if (!frame.contentDocument || !Array.isArray(fonts)) return;
           var style = frame.contentDocument.createElement('style');
           style.textContent = fonts.map(function(f) {
@@ -1201,7 +1225,7 @@ async function postInteractivePageSubmissions(clientId, layout, widgets, root) {
       collected_at: baseAt,
     };
     var res = await fetch('/api/interactive/submit', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error(await readPlayerTextBounded(res));
   }
 }
 
@@ -1473,7 +1497,7 @@ async function init() {
   try {
     var fontsResp = await fetch('/api/fonts/installed');
     if (fontsResp.ok) {
-      var fontsList = await fontsResp.json();
+      var fontsList = await readPlayerJsonBounded(fontsResp);
       injectInstalledFonts(fontsList);
     }
   } catch (_fe) { /* ignore — fonts are optional */ }
@@ -1485,11 +1509,11 @@ async function init() {
   if (clientId) {
     try {
       var r = await fetch('/api/clients/' + encodeURIComponent(clientId) + '/displays');
-      if (r.ok) displays = await r.json();
+      if (r.ok) displays = await readPlayerJsonBounded(r);
     } catch (_e) { /* fall through */ }
   }
   if (!displays) {
-    displays = await fetch('/api/displays').then(function(r){return r.json();});
+    displays = await fetch('/api/displays').then(function(r){return readPlayerJsonBounded(r);});
   }
   var activeDisplays = displays.filter(function(d){
     var status = String(d.status || 'connected').toLowerCase();
@@ -1528,7 +1552,7 @@ async function init() {
     try {
       var dr = await fetch('/api/clients/' + encodeURIComponent(clientId) + '/displays', {cache:'no-store'});
       if (!dr.ok) return null;
-      var ds = await dr.json();
+      var ds = await readPlayerJsonBounded(dr);
       var selected = ds.find(function(d){ return d.connector === myConnector || Number(d.display_index) === Number(myDisplay.display_index); });
       if (!selected) return null;
       // The display assignment keeps the layout ID stable across publishes.
@@ -1540,7 +1564,7 @@ async function init() {
         try {
           var cr = await fetch('/api/clients/' + encodeURIComponent(clientId) + '/displays/' + index + '/config', {cache:'no-store'});
           if (cr.ok) {
-            var config = await cr.json();
+            var config = await readPlayerJsonBounded(cr);
             selected = Object.assign({}, selected, {active_layout_revision: config.active_layout_revision});
           }
         } catch (_configError) { /* keep the assignment usable during a transient config failure */ }
@@ -1562,7 +1586,7 @@ async function init() {
     try {
       var ly = await fetch('/api/layouts/' + encodeURIComponent(layoutId), {cache:'no-store'}).then(function(r){
         if (!r.ok) throw new Error('layout HTTP ' + r.status);
-        return r.json();
+        return readPlayerJsonBounded(r);
       });
       cacheLayout(ly);
       return ly;
@@ -1683,7 +1707,7 @@ async function init() {
           try {
             var resp = await fetch('/api/news/headlines?url=' + encodeURIComponent(wp.feedUrl));
             if (resp.ok) {
-              var data = await resp.json();
+              var data = await readPlayerJsonBounded(resp);
               (window.__ripleyNewsHeadlines = window.__ripleyNewsHeadlines || {})[ws[j].id] = data.headlines || [];
             }
           } catch (e) { /* ignore: render will show "Loading news..." */ }
@@ -1865,7 +1889,7 @@ async function init() {
       // fallback below.)
       var layoutId = clientDisplay && clientDisplay.assigned_layout_id;
       if (!layoutId) {
-        var state = await fetch('/api/display-state').then(function(r){return r.json();});
+        var state = await fetch('/api/display-state').then(function(r){return readPlayerJsonBounded(r);});
         var a = state.assignments.find(function(x){return x.display === myConnector;});
         layoutId = a && a.layout_id;
       }
