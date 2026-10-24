@@ -64,6 +64,14 @@ fn is_client_addon_package_path(path: &str) -> bool {
         && parts[3] == "package"
 }
 
+fn is_player_screenshot_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/clients/") else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    parts.len() == 2 && !parts[0].is_empty() && parts[1] == "screenshot"
+}
+
 /// Method+path prefixes that are always open even though the prefix overlaps
 /// with the gated namespace (e.g. config fetches by enrolled players).
 fn is_open_path(path: &str, method: &str) -> bool {
@@ -98,18 +106,14 @@ fn is_open_path(path: &str, method: &str) -> bool {
         return true;
     }
 
-    // open so the player UI can mark itself enrolled without a session.
-    if method == "POST" && path.starts_with("/api/clients/") && path.ends_with("/enroll") {
+    if method == "POST" && is_client_resource_path(path, &["enroll"]) {
         return true;
     }
     // OPTIONS pre-flight for that endpoint.
-    if method == "OPTIONS" && path.starts_with("/api/clients/") && path.ends_with("/enroll") {
+    if method == "OPTIONS" && is_client_resource_path(path, &["enroll"]) {
         return true;
     }
-    if method == "POST"
-        && path.starts_with("/clients/")
-        && path.ends_with("/screenshot")
-    {
+    if method == "POST" && is_player_screenshot_path(path) {
         return true;
     }
     // Client command acknowledgements authenticate in the handler with the
@@ -577,6 +581,10 @@ mod authorization_tests {
         assert!(!is_open_path("/api/clients/example/command", "DELETE"));
         assert!(!is_open_path("/api/clients/example/displays/0/command", "DELETE"));
         assert!(is_open_path("/api/clients/example/command/ack", "POST"));
+        assert!(is_open_path("/api/clients/example/enroll", "POST"));
+        assert!(!is_open_path("/api/clients/example/nested/enroll", "POST"));
+        assert!(is_open_path("/clients/example/screenshot", "POST"));
+        assert!(!is_open_path("/clients/example/nested/screenshot", "POST"));
         assert!(!is_open_path("/api/clients/example/command/ack", "GET"));
         assert!(is_open_path("/clients/example/screenshot", "POST"));
         assert!(!is_open_path("/clients/example/screenshot", "GET"));
