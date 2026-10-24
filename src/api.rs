@@ -8967,6 +8967,18 @@ struct BulkCommandRequest {
     requested_by: Option<String>,
 }
 
+const MAX_BULK_COMMAND_CLIENT_IDS: usize = 10_000;
+
+fn validate_bulk_command_client_ids(client_ids: &[String]) -> Result<(), (StatusCode, String)> {
+    if client_ids.len() > MAX_BULK_COMMAND_CLIENT_IDS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "too many client ids".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 struct BulkCommandResult {
     queued: usize,
@@ -8978,6 +8990,7 @@ async fn bulk_command_clients(
     Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
     Json(payload): Json<BulkCommandRequest>,
 ) -> Result<AxumJson<BulkCommandResult>, (StatusCode, String)> {
+    validate_bulk_command_client_ids(&payload.client_ids)?;
     let mut results = Vec::with_capacity(payload.client_ids.len());
     let mut queued = 0usize;
     for cid in &payload.client_ids {
@@ -10449,6 +10462,15 @@ fn reverse_name(ip: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulk_command_client_ids_are_bounded() {
+        let ids = vec!["client".to_string(); MAX_BULK_COMMAND_CLIENT_IDS + 1];
+        let (status, error) = validate_bulk_command_client_ids(&ids)
+            .expect_err("oversized bulk command client list should fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error, "too many client ids");
+    }
 
     #[test]
     fn bounded_file_reader_rejects_oversized_files() {
