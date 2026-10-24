@@ -3016,8 +3016,22 @@ async fn clear_cache() -> Result<AxumJson<serde_json::Value>, (StatusCode, Strin
 
 // ── Player Log ──────────────────────────────────────────────
 
+const MAX_PLAYER_LOG_MESSAGE_BYTES: usize = 4096;
+
+fn bounded_player_log_message(msg: &str) -> String {
+    if msg.len() <= MAX_PLAYER_LOG_MESSAGE_BYTES {
+        return msg.to_string();
+    }
+    let mut end = MAX_PLAYER_LOG_MESSAGE_BYTES;
+    while end > 0 && !msg.is_char_boundary(end) {
+        end -= 1;
+    }
+    msg[..end].to_string()
+}
+
 async fn player_log(AxumJson(body): AxumJson<serde_json::Value>) -> AxumJson<serde_json::Value> {
     let msg = body.get("msg").and_then(|v| v.as_str()).unwrap_or("");
+    let msg = bounded_player_log_message(msg);
     log::info!("[PLAYER] {}", msg);
     AxumJson(serde_json::json!({"ok":true}))
 }
@@ -10499,6 +10513,16 @@ fn reverse_name(ip: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_log_messages_are_bounded_by_bytes() {
+        let message = "x".repeat(MAX_PLAYER_LOG_MESSAGE_BYTES + 1);
+        assert!(bounded_player_log_message(&message).len() <= MAX_PLAYER_LOG_MESSAGE_BYTES);
+        let unicode_message = "é".repeat((MAX_PLAYER_LOG_MESSAGE_BYTES / 2) + 1);
+        let bounded = bounded_player_log_message(&unicode_message);
+        assert!(bounded.len() <= MAX_PLAYER_LOG_MESSAGE_BYTES);
+        assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+    }
 
     #[test]
     fn scene_list_ids_are_bounded() {
