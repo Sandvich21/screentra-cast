@@ -505,6 +505,9 @@ impl Database {
         client_ids: &[String],
         layout_id: Option<&str>,
     ) -> Result<usize, String> {
+        if client_ids.len() > MAX_TABLE_ROWS as usize {
+            return Err("too many client ids".to_string());
+        }
         let conn = self.conn()?;
         let mut stmt = conn
             .prepare("UPDATE clients SET assigned_layout_id = ?1 WHERE id = ?2")
@@ -5010,6 +5013,18 @@ mod tests {
             .delete_table_rows("table_test", &ids)
             .expect_err("oversized table deletion should fail");
         assert!(error.contains("too many table row ids"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn bulk_client_assignment_rejects_oversized_id_lists() {
+        let path = unique_temp_path("bulk-client-assignment-bound");
+        let db = Database::open(&path).expect("open db");
+        let ids = vec!["client".to_string(); 10_001];
+        let error = db
+            .bulk_set_client_assignment(&ids, None)
+            .expect_err("oversized bulk assignment should fail");
+        assert!(error.contains("too many client ids"));
         std::fs::remove_file(&path).ok();
     }
 

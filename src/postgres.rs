@@ -430,6 +430,9 @@ impl PostgresStore {
         client_ids: &[String],
         layout_id: Option<&str>,
     ) -> Result<usize, String> {
+        if client_ids.len() > MAX_TABLE_ROWS as usize {
+            return Err("too many client ids".to_string());
+        }
         let mut transaction_client = connect().await?;
         let transaction = transaction_client
             .transaction()
