@@ -7981,20 +7981,7 @@ async fn get_client_admin_users(
     // This route remains reachable by the player heartbeat, but it is not
     // public: an enrolled client credential or an authenticated admin session
     // is required. The repository intentionally returns metadata only.
-    let authenticated_role = if let Some(token) = crate::auth::extract_token(&headers) {
-        auth.token_payload(&token)
-            .await
-            .and_then(|payload| payload.get("role").and_then(|role| role.as_str()).map(str::to_string))
-    } else {
-        None
-    };
-    if let Some(role) = authenticated_role {
-        if role != "admin" {
-            return Err((StatusCode::FORBIDDEN, "admin authority required".to_string()));
-        }
-    } else {
-        require_client_command_token(&repository, &id, &headers).await?;
-    }
+    require_client_or_admin(&repository, &auth, &id, &headers).await?;
     let Some((enrolled, users)) = repository
         .list_client_admin_users(&id)
         .await
