@@ -8,6 +8,7 @@ use crate::schedule::ScheduleEntry;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{sync::Mutex, time::Duration};
 
+const MAX_TABLE_ROWS: u32 = 10_000;
 
 /// Rebuild the `schedules` table so that `layout_id` is nullable.
 /// SQLite has no `ALTER TABLE ... DROP NOT NULL`, so we:
@@ -1123,6 +1124,7 @@ impl Database {
         limit: u32,
         offset: u32,
     ) -> Result<TableQueryResult, String> {
+        let limit = limit.min(MAX_TABLE_ROWS);
         if !table.chars().all(|c| c.is_alphanumeric() || c == '_') {
             return Err("Invalid table name".into());
         }
@@ -1206,7 +1208,9 @@ impl Database {
             .collect::<Result<Vec<String>, _>>()
             .map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare(&format!("SELECT rowid,* FROM {table} ORDER BY rowid DESC"))
+            .prepare(&format!(
+                "SELECT rowid,* FROM {table} ORDER BY rowid DESC LIMIT {MAX_TABLE_ROWS}"
+            ))
             .map_err(|e| e.to_string())?;
         let mut query_rows = stmt.query([]).map_err(|e| e.to_string())?;
         let mut rows = Vec::new();
@@ -5319,6 +5323,28 @@ mod tests {
 
         let presets = db.list_widget_presets(None).expect("list widget presets");
         assert_eq!(presets.len(), 4_096);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn export_table_rows_is_bounded() {
+        let path = unique_temp_path("table-export-bound");
+        let db = Database::open(&path).expect("open db");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            let tx = conn.unchecked_transaction().expect("begin transaction");
+            for index in 0..10_001 {
+                tx.execute(
+                    "INSERT INTO refresh_state (id, epoch) VALUES (?1, ?2)",
+                    rusqlite::params![index + 100, index],
+                )
+                .expect("insert refresh state row");
+            }
+            tx.commit().expect("commit refresh state rows");
+        }
+
+        let export = db.export_table_rows("refresh_state").expect("export rows");
+        assert_eq!(export.rows.len(), 10_000);
         std::fs::remove_file(&path).ok();
     }
 }
