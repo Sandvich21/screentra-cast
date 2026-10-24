@@ -395,6 +395,47 @@ pub fn uptime_seconds() -> u64 {
 
 // ── State export/import (for migration to a new device) ──
 
+/// Copy backup metadata entries while excluding large archive payloads.
+fn copy_backup_index_entries(src: &Path, dst: &Path) -> Result<(), String> {
+    copy_backup_index_entries_bounded(src, dst, 10_000)
+}
+
+fn copy_backup_index_entries_bounded(
+    src: &Path,
+    dst: &Path,
+    maximum_entries: usize,
+) -> Result<(), String> {
+    let entries = fs::read_dir(src).map_err(|e| format!("read backups: {e}"))?;
+    for (scanned_entries, entry) in entries.enumerate() {
+        if scanned_entries >= maximum_entries {
+            return Err("backup directory contains too many entries".to_string());
+        }
+        let entry = entry.map_err(|e| format!("read backup entry: {e}"))?;
+        let from = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with(".tar.gz") {
+            continue;
+        }
+        let to = dst.join(&name);
+        let metadata = fs::symlink_metadata(&from)
+            .map_err(|e| format!("stat backup entry {}: {e}", from.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!("backup entry is a symlink: {}", from.display()));
+        }
+        if metadata.is_dir() {
+            copy_dir_recursive(&from, &to)
+                .map_err(|e| format!("copy backup directory {}: {e}", from.display()))?;
+        } else if metadata.is_file() {
+            fs::copy(&from, &to)
+                .map_err(|e| format!("copy backup file {}: {e}", from.display()))?;
+        } else {
+            return Err(format!("unsupported backup entry: {}", from.display()));
+        }
+    }
+    Ok(())
+}
+
 /// Bundle the entire app state into a tarball at the given destination path.
 /// Includes: database, uploaded files, backups, static/.
 pub fn export_state_bundle(dest: &Path) -> Result<(), String> {
@@ -424,23 +465,7 @@ pub fn export_state_bundle(dest: &Path) -> Result<(), String> {
     let backups_dst = stage.join("backups");
     fs::create_dir_all(&backups_dst).ok();
     if Path::new(&backups_src).exists() {
-        if let Ok(entries) = fs::read_dir(&backups_src) {
-            for entry in entries.flatten() {
-                let from = entry.path();
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                // Skip large tarball files; they would bloat the bundle and can be re-exported separately.
-                if name_str.ends_with(".tar.gz") {
-                    continue;
-                }
-                let to = backups_dst.join(&name);
-                if from.is_dir() {
-                    copy_dir_recursive(&from, &to).ok();
-                } else {
-                    fs::copy(&from, &to).ok();
-                }
-            }
-        }
+        copy_backup_index_entries(Path::new(&backups_src), &backups_dst)?;
     }
 
     // 4. Add a manifest with version info
@@ -1723,6 +1748,21 @@ mod update_swap_tests {
             .unwrap_err()
             .to_string()
             .contains("recursive copy source exceeds its entry bound"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn backup_index_copy_bounds_scanned_entries() {
+        let root = std::env::temp_dir().join(format!("screentra-backup-entry-limit-{}", Uuid::new_v4()));
+        let src = root.join("src");
+        let dst = root.join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(src.join("a.json"), b"a").unwrap();
+        fs::write(src.join("b.json"), b"b").unwrap();
+        fs::write(src.join("c.json"), b"c").unwrap();
+        let error = copy_backup_index_entries_bounded(&src, &dst, 2).unwrap_err();
+        assert!(error.contains("backup directory contains too many entries"));
         let _ = fs::remove_dir_all(root);
     }
 
