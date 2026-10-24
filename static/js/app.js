@@ -490,7 +490,7 @@ const App = {
         overlay.innerHTML = `
             <div class="fb-modal" style="width:400px">
                 <div class="fb-header">
-                    <h3>Set Display Size: ${connector}</h3>
+                    <h3>Set Display Size: ${esc(connector)}</h3>
                     <button class="fb-close">&times;</button>
                 </div>
                 <div style="padding:1.5rem;">

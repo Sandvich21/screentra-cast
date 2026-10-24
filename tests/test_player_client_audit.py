@@ -152,6 +152,11 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertFalse(renderer._csrf_allows_mutation(cross))
         self.assertTrue(renderer._csrf_allows_mutation({'Host': '127.0.0.1:3910'}))
 
+    def test_display_override_modal_escapes_connector_html(self):
+        source = (ROOT / 'static/js/app.js').read_text()
+        self.assertIn('Set Display Size: ${esc(connector)}', source)
+        self.assertNotIn('Set Display Size: ${connector}', source)
+
     def test_served_player_installer_matches_generated_installer(self):
         generated = (ROOT / 'player-client/static/install/player-client.sh').read_bytes()
         served = (ROOT / 'static/install/player-client.sh').read_bytes()
