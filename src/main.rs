@@ -59,6 +59,15 @@ fn validate_tls_env_pair(cert: Option<&str>, key: Option<&str>) -> Result<(), St
     Ok(())
 }
 
+async fn load_tls_config_from_files(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<axum_server::tls_rustls::RustlsConfig, String> {
+    axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
+        .await
+        .map_err(|error| format!("failed to load TLS cert/key files: {error}"))
+}
+
 fn read_bounded_hostname() -> Result<String, std::io::Error> {
     let file = std::fs::File::open("/etc/hostname")?;
     let mut bytes = Vec::new();
@@ -790,9 +799,12 @@ async fn main() {
             cert_path,
             key_path
         );
-        axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
+        load_tls_config_from_files(cert_path, key_path)
             .await
-            .expect("failed to load TLS cert/key files")
+            .unwrap_or_else(|error| {
+                eprintln!("FATAL: {error}");
+                std::process::exit(1);
+            })
     } else {
         log::warn!(
             "No TLS cert configured and no bundled cert found in any search path. \
@@ -1045,6 +1057,12 @@ mod startup_tests {
         });
         assert!(result.is_ok());
         assert!(result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_tls_files_return_an_error_without_panicking() {
+        let result = super::load_tls_config_from_files("/dev/null", "/dev/null").await;
+        assert!(result.is_err());
     }
 }
 
