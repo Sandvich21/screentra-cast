@@ -2590,6 +2590,10 @@ impl PostgresStore {
             .execute("DELETE FROM client_command_cooldowns WHERE client_id=$1", &[&client_id])
             .await
             .map_err(|error| format!("delete client command cooldowns: {error}"))?;
+        transaction
+            .execute("DELETE FROM client_heartbeats WHERE client_id=$1", &[&client_id])
+            .await
+            .map_err(|error| format!("delete client heartbeats: {error}"))?;
         let deleted = transaction
             .execute("DELETE FROM clients WHERE id=$1", &[&client_id])
             .await

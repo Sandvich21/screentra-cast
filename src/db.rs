@@ -867,6 +867,8 @@ impl Database {
             .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM client_command_cooldowns WHERE client_id = ?1", [client_id])
             .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM client_heartbeats WHERE client_id = ?1", [client_id])
+            .map_err(|e| e.to_string())?;
         let deleted = tx
             .execute("DELETE FROM clients WHERE id = ?1", [client_id])
             .map_err(|e| e.to_string())?
@@ -894,6 +896,8 @@ impl Database {
         tx.execute("DELETE FROM client_commands WHERE client_id = ?1", [client_id])
             .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM client_command_cooldowns WHERE client_id = ?1", [client_id])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM client_heartbeats WHERE client_id = ?1", [client_id])
             .map_err(|e| e.to_string())?;
         let deleted = tx
             .execute("DELETE FROM clients WHERE id = ?1", [client_id])
@@ -5025,6 +5029,40 @@ mod tests {
             .bulk_set_client_assignment(&ids, None)
             .expect_err("oversized bulk assignment should fail");
         assert!(error.contains("too many client ids"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn delete_client_cleans_heartbeat_history() {
+        let path = unique_temp_path("delete-client-cleans-heartbeats");
+        let db = Database::open(&path).expect("open db");
+        let conn = Connection::open(&path).expect("open seeded db");
+        conn.execute(
+            "INSERT INTO clients (id, name, address, last_seen) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["heartbeat-client", "Heartbeat client", "127.0.0.1", "2026-10-24T00:00:00Z"],
+        )
+        .expect("insert client");
+        conn.execute(
+            "INSERT INTO client_heartbeats (client_id, recorded_at) VALUES (?1, ?2), (?1, ?3)",
+            rusqlite::params![
+                "heartbeat-client",
+                "2026-10-24T00:00:00Z",
+                "2026-10-24T00:01:00Z"
+            ],
+        )
+        .expect("insert heartbeat history");
+        drop(conn);
+
+        assert!(db.delete_client("heartbeat-client").expect("delete client"));
+        let conn = Connection::open(&path).expect("reopen db");
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM client_heartbeats WHERE client_id = ?1",
+                ["heartbeat-client"],
+                |row| row.get(0),
+            )
+            .expect("count heartbeat history");
+        assert_eq!(remaining, 0);
         std::fs::remove_file(&path).ok();
     }
 
