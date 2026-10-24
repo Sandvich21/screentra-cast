@@ -3393,6 +3393,9 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         if ids.is_empty() {
             return Ok(0);
         }
+        if ids.len() > MAX_INTERACTIVE_SUBMISSIONS as usize {
+            return Err("too many interactive submission ids".to_string());
+        }
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let synced_at = chrono::Utc::now().to_rfc3339();
         let placeholders = vec!["?"; ids.len()].join(",");
@@ -3469,6 +3472,9 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
     pub fn delete_interactive_submissions(&self, ids: &[i64]) -> Result<usize, String> {
         if ids.is_empty() {
             return Ok(0);
+        }
+        if ids.len() > MAX_INTERACTIVE_SUBMISSIONS as usize {
+            return Err("too many interactive submission ids".to_string());
         }
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let placeholders = std::iter::repeat_n("?", ids.len())
@@ -5431,6 +5437,22 @@ mod tests {
             .expect("list client admin users")
             .expect("client exists");
         assert_eq!(users.len(), 10_000);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn interactive_submission_mutation_ids_are_bounded() {
+        let path = unique_temp_path("interactive-submission-mutation-bound");
+        let db = Database::open(&path).expect("open db");
+        let ids = vec![1_i64; 10_001];
+        let error = db
+            .update_interactive_submission_sync_status(&ids, "synced", None, None)
+            .expect_err("oversized sync update should fail");
+        assert!(error.contains("too many interactive submission ids"));
+        let error = db
+            .delete_interactive_submissions(&ids)
+            .expect_err("oversized deletion should fail");
+        assert!(error.contains("too many interactive submission ids"));
         std::fs::remove_file(&path).ok();
     }
 

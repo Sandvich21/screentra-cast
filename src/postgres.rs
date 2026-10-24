@@ -1545,6 +1545,9 @@ impl PostgresStore {
     }
 
     pub async fn update_interactive_submission_sync_status(&self, ids: &[i64], status: &str, message: Option<&str>, sheet_id: Option<&str>) -> Result<usize, String> {
+        if ids.len() > 10_000 {
+            return Err("too many interactive submission ids".to_string());
+        }
         let mut updated = 0;
         for id in ids { updated += self.client.execute("UPDATE interactive_submissions SET google_sync_status=$1,google_sync_message=$2,google_synced_at=$3,google_sheet_id=$4 WHERE id=$5", &[&status, &message, &chrono::Utc::now().to_rfc3339(), &sheet_id, &id]).await.map_err(|error| format!("update submission sync status: {error}"))? as usize; }
         Ok(updated)
@@ -1555,6 +1558,9 @@ impl PostgresStore {
     }
 
     pub async fn delete_interactive_submissions(&self, ids: &[i64]) -> Result<usize, String> {
+        if ids.len() > 10_000 {
+            return Err("too many interactive submission ids".to_string());
+        }
         let mut deleted = 0; for id in ids { deleted += self.client.execute("DELETE FROM interactive_submissions WHERE id=$1", &[&id]).await.map_err(|error| format!("delete interactive submission: {error}"))? as usize; } Ok(deleted)
     }
 
