@@ -585,6 +585,7 @@ async fn main() {
 
     // Purge trash files older than 14 days on startup
     {
+        const MAX_TRASH_PURGE_ENTRIES: usize = 10_000;
         use std::time::{SystemTime, UNIX_EPOCH};
         let trash_dir = std::path::Path::new("trash");
         if trash_dir.exists() {
@@ -593,7 +594,12 @@ async fn main() {
                 .map(|d| d.as_secs())
                 .unwrap_or(0)
                 .saturating_sub(14 * 24 * 3600);
-            for entry in std::fs::read_dir(trash_dir).into_iter().flatten().flatten() {
+            for entry in std::fs::read_dir(trash_dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .take(MAX_TRASH_PURGE_ENTRIES)
+            {
                 let path = entry.path();
                 if path.is_file() {
                     if let Ok(meta) = std::fs::metadata(&path) {

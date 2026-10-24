@@ -66,6 +66,7 @@ const MAX_FONT_CSS_BYTES: usize = 1024 * 1024;
 const MAX_WOFF2_BYTES: usize = 200_000;
 const MAX_WOFF2_ENTRY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_INSTALLED_FONT_ENTRIES: usize = 4096;
+const MAX_PREVIEW_CACHE_ENTRIES: usize = 100_000;
 
 fn validate_font_archive_limits(entry_count: usize, extracted_bytes: usize) -> Result<(), String> {
     if entry_count > MAX_FONT_ZIP_ENTRIES {
@@ -587,7 +588,7 @@ pub fn preview_cached(family_id: &str, weight: u32) -> Option<std::path::PathBuf
     if let Ok(dir) = preview_cache_dir() {
         let prefix = format!("{}-{}", family_id, weight);
         if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
+            for e in entries.flatten().take(MAX_PREVIEW_CACHE_ENTRIES) {
                 let name = match e.file_name().into_string() {
                     Ok(s) => s,
                     Err(_) => continue,
@@ -614,7 +615,7 @@ pub fn preview_cached(family_id: &str, weight: u32) -> Option<std::path::PathBuf
 pub fn preview_cached_weight(family_id: &str) -> Option<u32> {
     let dir = preview_cache_dir().ok()?;
     let entries = std::fs::read_dir(&dir).ok()?;
-    for e in entries.flatten() {
+    for e in entries.flatten().take(MAX_PREVIEW_CACHE_ENTRIES) {
         let p = e.path();
         if p.extension().and_then(|s| s.to_str()) != Some("woff2") {
             continue;
@@ -803,7 +804,7 @@ pub fn list_cached_subsets(
     let _ = prefix; // prefix not used (we use rsplitn below)
     let mut out: Vec<String> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
-        for e in entries.flatten() {
+        for e in entries.flatten().take(MAX_PREVIEW_CACHE_ENTRIES) {
             let p = e.path();
             if p.extension().and_then(|s| s.to_str()) != Some("woff2") {
                 continue;
@@ -1598,6 +1599,7 @@ pub fn preview_status(families: &[String]) -> Vec<(String, String)> {
         .map(|entries| {
             entries
                 .flatten()
+                .take(MAX_PREVIEW_CACHE_ENTRIES)
                 .filter_map(|e| {
                     let p = e.path();
                     if p.extension().and_then(|s| s.to_str()) != Some("woff2") {
@@ -1690,7 +1692,7 @@ pub fn preview_cache_stats() -> (usize, u64) {
     let mut count = 0usize;
     let mut total_bytes = 0u64;
     if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
+        for entry in entries.flatten().take(MAX_PREVIEW_CACHE_ENTRIES) {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("woff2") {
                 count += 1;
