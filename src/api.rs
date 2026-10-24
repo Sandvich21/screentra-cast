@@ -6603,7 +6603,7 @@ async fn download_player_client_bundle_handler() -> Result<
     ),
     (StatusCode, String),
 > {
-    download_static_install_file("ripley-player-client-bundle.tar.gz", "application/gzip").await
+    download_static_install_file("player-client-bundle.tar.gz", "application/gzip").await
 }
 
 async fn download_player_client_bootstrap_handler() -> Result<
@@ -6614,7 +6614,7 @@ async fn download_player_client_bootstrap_handler() -> Result<
     (StatusCode, String),
 > {
     download_static_install_file(
-        "ripley-player-client-bundle-install.sh",
+        "player-client-bundle-install.sh",
         "text/x-shellscript; charset=utf-8",
     )
     .await
@@ -10516,6 +10516,31 @@ fn reverse_name(ip: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn player_bundle_download_handlers_use_published_filenames() {
+        let source = include_str!("api.rs");
+        let bundle_start = source
+            .find("async fn download_player_client_bundle_handler(")
+            .expect("bundle download handler");
+        let bundle_end = bundle_start
+            + source[bundle_start..]
+                .find("async fn download_player_client_bootstrap_handler(")
+                .expect("bootstrap handler boundary");
+        let bundle_span = &source[bundle_start..bundle_end];
+        assert!(bundle_span.contains("player-client-bundle.tar.gz"));
+        assert!(!bundle_span.contains("ripley-player-client-bundle.tar.gz"));
+
+        let bootstrap_start = bundle_end;
+        let bootstrap_end = bootstrap_start
+            + source[bootstrap_start..]
+                .find("async fn download_screentra_cast_installers_handler(")
+                .expect("installer handler boundary");
+        let bootstrap_span = &source[bootstrap_start..bootstrap_end];
+        assert!(bootstrap_span.contains("player-client-bundle-install.sh"));
+        assert!(!bootstrap_span.contains("ripley-player-client-bundle-install.sh"));
+    }
+
+
     #[test]
     fn scene_mutation_handlers_do_not_unwrap_reload_results() {
         let source = include_str!("api.rs");
