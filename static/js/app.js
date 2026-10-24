@@ -6473,7 +6473,21 @@ ${_cmds.oneLiner}`;
       const mem = hb.map(h => (h.memory_used && h.memory_total) ? (h.memory_used/h.memory_total)*100 : 0);
       const last = hb[hb.length - 1];
       const sampleTimes = hb.map(h => h.recorded_at);
-      const diskUsedPct = last.disk_total ? Math.max(0, Math.min(100, (Number(last.disk_used || 0) / Number(last.disk_total)) * 100)) : 0;
+      const fmtStorage = (bytes) => {
+        const n = Number(bytes);
+        if (!Number.isFinite(n) || n < 0) return '—';
+        if (n >= 1024 ** 4) return `${(n / (1024 ** 4)).toFixed(2)} TB`;
+        if (n >= 1024 ** 3) return `${(n / (1024 ** 3)).toFixed(2)} GB`;
+        if (n >= 1024 ** 2) return `${(n / (1024 ** 2)).toFixed(2)} MB`;
+        if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+        return `${Math.round(n)} B`;
+      };
+      const diskUsedBytes = Number(last.disk_used);
+      const diskTotalBytes = Number(last.disk_total);
+      const diskHasData = Number.isFinite(diskUsedBytes) && diskUsedBytes >= 0 && Number.isFinite(diskTotalBytes) && diskTotalBytes > 0;
+      const diskUsedPct = diskHasData ? Math.max(0, Math.min(100, (diskUsedBytes / diskTotalBytes) * 100)) : 0;
+      const diskUsedLabel = diskHasData ? fmtStorage(diskUsedBytes) : '—';
+      const diskTotalLabel = diskHasData ? fmtStorage(diskTotalBytes) : '—';
       const memUsedGb = Number.isFinite(Number(last.memory_used)) ? (Number(last.memory_used) / (1024 ** 3)) : null;
       const memUsedLabel = memUsedGb === null ? '—' : `${memUsedGb.toFixed(2)} GB used`;
       panel.innerHTML = `
@@ -6489,9 +6503,9 @@ ${_cmds.oneLiner}`;
             <footer>${hb.length} samples</footer>
           </div>
           <div class="client-history-cell client-history-disk-cell">
-            <header><span>Disk</span><b>${diskUsedPct.toFixed(1)}% used</b></header>
-            <div class="client-disk-pie" style="--disk-used:${diskUsedPct};" role="img" aria-label="Disk usage ${diskUsedPct.toFixed(1)} percent used"><span>${diskUsedPct.toFixed(1)}%</span></div>
-            <footer>Used storage · ${hb.length} samples</footer>
+            <header><span>Disk</span><b class="client-disk-summary">${diskHasData ? `${diskUsedLabel} / ${diskTotalLabel}` : 'No data'}</b></header>
+            <div class="client-disk-pie" style="--disk-used:${diskUsedPct};" role="img" aria-label="Disk usage: ${diskHasData ? `${diskUsedLabel} used of ${diskTotalLabel}` : 'data unavailable'} (${diskUsedPct.toFixed(1)} percent)"><span>${diskUsedPct.toFixed(1)}%</span></div>
+            <footer>${diskHasData ? `${diskUsedLabel} used of ${diskTotalLabel}` : 'Disk data unavailable'} · ${hb.length} samples</footer>
           </div>
         </div>
         <div class="client-history-actions">

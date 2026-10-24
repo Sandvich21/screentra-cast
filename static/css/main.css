@@ -674,6 +674,7 @@ html[data-theme="classic"] {
 .client-disk-pie::after { content:""; position:absolute; width:38px; height:38px; border-radius:50%; background:var(--card-bg); }
 .client-disk-pie span { position:relative; z-index:1; color:var(--accent-light); font-size:.68rem; font-weight:800; }
 .client-history-disk-cell { min-width:0; padding-left:.45rem; padding-right:.45rem; }
+.client-history-disk-cell .client-disk-summary { font-size:.72rem; letter-spacing:0; text-transform:none; white-space:nowrap; }
 .client-detail-grid > .client-detail-history-cell { background:var(--card-bg); border:1px solid rgba(148,163,184,.18); border-radius:8px; padding:.5rem .6rem; display:flex; flex-direction:column; gap:.25rem; }
 .client-detail-grid > .client-detail-history-cell .client-disk-pie { width:58px; height:58px; margin:.15rem auto .05rem; display:grid; place-items:center; position:relative; border:0; padding:0; background:conic-gradient(var(--disk-used-color,#fdba74) calc(var(--disk-used) * 1%), var(--disk-free-color,rgba(148,163,184,.2)) 0); }
 .client-history-disk-cell footer { text-align:center; white-space:nowrap; }
