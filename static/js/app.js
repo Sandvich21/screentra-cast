@@ -6935,7 +6935,11 @@ ${_cmds.oneLiner}`;
     if (Array.isArray(App.state.layouts) && App.state.layouts.length) return App.state.layouts;
     if (Array.isArray(App._clientLayouts) && App._clientLayouts.length) { App.state.layouts = App._clientLayouts; return App.state.layouts; }
     if (typeof API.getLayouts === 'function') App.state.layouts = await API.getLayouts();
-    else App.state.layouts = await (await fetch('/api/layouts')).json();
+    else {
+      const layoutsResponse = await fetch('/api/layouts');
+      if (!layoutsResponse.ok) throw new Error(await readAppTextBounded(layoutsResponse, 64 * 1024));
+      App.state.layouts = await readAppJsonBounded(layoutsResponse);
+    }
     return App.state.layouts;
   }
   if (!API.getClientDisplays) {
