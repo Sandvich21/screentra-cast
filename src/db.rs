@@ -4073,6 +4073,9 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         layout_set_id: &str,
         entries: Vec<LayoutSetEntry>,
     ) -> Result<(), String> {
+        if entries.len() > MAX_TABLE_ROWS as usize {
+            return Err("too many layout set entries".to_string());
+        }
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let lsid_ref: &str = layout_set_id;
         conn.execute(
@@ -5078,6 +5081,27 @@ mod tests {
             .get_layout_sets_for_layouts(&ids)
             .expect_err("oversized layout lookup should fail");
         assert!(error.contains("too many layout ids"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn layout_set_entry_replacement_rejects_oversized_entry_lists() {
+        let path = unique_temp_path("layout-set-entry-replacement-bound");
+        let db = Database::open(&path).expect("open db");
+        let entries = (0..10_001)
+            .map(|position| LayoutSetEntry {
+                id: format!("entry-{position}"),
+                layout_set_id: "set".to_string(),
+                layout_id: format!("layout-{position}"),
+                position,
+                interval_secs: Some(30),
+                transition: None,
+            })
+            .collect();
+        let error = db
+            .replace_layout_set_entries("set", entries)
+            .expect_err("oversized layout set replacement should fail");
+        assert!(error.contains("too many layout set entries"));
         std::fs::remove_file(&path).ok();
     }
 
