@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 import importlib.util
+import os
+import socket
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -37,6 +40,70 @@ class DisplaySettingsActorTests(unittest.TestCase):
         wlr_calls = [call for call in calls if call[0][0] == 'wlr-randr']
         self.assertEqual(wlr_calls[0][0], ['wlr-randr', '--output', 'DP-2', '--off'])
         self.assertEqual(wlr_calls[0][1]['env']['WAYLAND_DISPLAY'], 'wayland-1')
+
+    def test_display_power_on_uses_sway_dpms_wake_for_selected_connector(self):
+        calls = []
+        original_connector = actor._preview_connector
+        original_run_list = actor._run_list
+        original_env = actor._preview_wayland_env
+        original_which = actor.shutil.which
+        actor._preview_connector = lambda cache_dir, display_index: 'DP-2'
+        actor._preview_wayland_env = lambda: {
+            'XDG_RUNTIME_DIR': '/run/board',
+            'WAYLAND_DISPLAY': 'wayland-1',
+            'SWAYSOCK': '/run/board/sway-ipc.1000.1820.sock',
+        }
+        actor.shutil.which = lambda name: '/usr/bin/swaymsg' if name == 'swaymsg' else None
+        actor._run_list = lambda argv, **kwargs: (calls.append((argv, kwargs)) or (0, '', ''))
+        try:
+            result = actor.execute(
+                'display_power',
+                {'state': 'on', 'display_index': 0},
+                {'cache_dir': '/tmp/non-hardware-test-cache', 'server': None, 'client_id': 'client-a'},
+            )
+        finally:
+            actor._preview_connector = original_connector
+            actor._run_list = original_run_list
+            actor._preview_wayland_env = original_env
+            actor.shutil.which = original_which
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['details']['method'], 'sway-dpms')
+        self.assertEqual(calls[0][0], [
+            'swaymsg', '-s', '/run/board/sway-ipc.1000.1820.sock',
+            'output', 'DP-2', 'power', 'on',
+        ])
+
+    def test_wayland_env_ignores_stale_sway_ipc_socket(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            stale_path = Path(runtime) / 'sway-ipc.1001.1067.sock'
+            live_path = Path(runtime) / 'sway-ipc.1001.1820.sock'
+            stale = socket.socket(socket.AF_UNIX)
+            live = socket.socket(socket.AF_UNIX)
+            stale.bind(str(stale_path))
+            live.bind(str(live_path))
+            os.utime(stale_path, ns=(2_000_000_000, 2_000_000_000))
+            os.utime(live_path, ns=(1_000_000_000, 1_000_000_000))
+            calls = []
+            original_env = actor.os.environ.copy()
+            original_run_list = actor._run_list
+            original_which = actor.shutil.which
+            try:
+                actor.os.environ.clear()
+                actor.os.environ.update({'XDG_RUNTIME_DIR': runtime})
+                actor.shutil.which = lambda name: '/usr/bin/swaymsg' if name == 'swaymsg' else None
+                actor._run_list = lambda argv, **kwargs: (
+                    calls.append(argv) or (0 if argv[2] == str(live_path) else 1, '', '')
+                )
+                env = actor._preview_wayland_env()
+            finally:
+                actor.os.environ.clear()
+                actor.os.environ.update(original_env)
+                actor._run_list = original_run_list
+                actor.shutil.which = original_which
+                stale.close()
+                live.close()
+        self.assertEqual(env['SWAYSOCK'], str(live_path))
+        self.assertEqual(len(calls), 2)
 
     def test_pending_display_settings_rejects_arbitrary_fields_and_vcp(self):
         valid = {

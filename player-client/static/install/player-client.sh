@@ -8207,6 +8207,34 @@ def _preview_connector(cache_dir: Path, display_index: int) -> str | None:
         return None
 
 
+def _discover_sway_socket(runtime: str, env: dict[str, str]) -> str | None:
+    """Return a live Sway IPC socket, ignoring stale sockets in the runtime dir."""
+    if not shutil.which('swaymsg'):
+        return None
+    candidates = []
+    configured = env.get('SWAYSOCK')
+    if configured:
+        candidates.append(Path(configured))
+    try:
+        discovered = sorted(
+            (p for p in Path(runtime).glob('sway-ipc.*.sock') if p.is_socket()),
+            key=lambda p: p.stat().st_mtime_ns,
+            reverse=True,
+        )
+    except OSError:
+        discovered = []
+    candidates.extend(path for path in discovered if path not in candidates)
+    for socket_path in candidates[:8]:
+        rc, _, _ = _run_list(
+            ['swaymsg', '-s', str(socket_path), '-t', 'get_version'],
+            timeout=3,
+            env=env,
+        )
+        if rc == 0:
+            return str(socket_path)
+    return None
+
+
 def _preview_wayland_env() -> dict[str, str]:
     """Provide Wayland runtime variables when the actor is a system service."""
     env = os.environ.copy()
@@ -8224,6 +8252,10 @@ def _preview_wayland_env() -> dict[str, str]:
         )
         if sockets:
             env['WAYLAND_DISPLAY'] = sockets[0].name
+    if runtime and not env.get('SWAYSOCK'):
+        sway_socket = _discover_sway_socket(runtime, env)
+        if sway_socket:
+            env['SWAYSOCK'] = sway_socket
     return env
 
 
@@ -8238,6 +8270,20 @@ def apply_display_power(cache_dir: Path, display_index: int | None, state: str) 
         return False, f'no connector is recorded for display {display_index}', {'display_index': display_index}
     env = _preview_wayland_env()
     requested = '--on' if state == 'on' else '--off'
+    if state == 'on' and env.get('SWAYSOCK') and shutil.which('swaymsg'):
+        rc, out, err = _run_list(
+            ['swaymsg', '-s', env['SWAYSOCK'], 'output', connector, 'power', 'on'],
+            timeout=10,
+            env=env,
+        )
+        message = out or err or ('display powered on via Sway DPMS' if rc == 0 else 'Sway DPMS wake failed')
+        return rc == 0, message, {
+            'display_index': display_index,
+            'connector': connector,
+            'state': state,
+            'method': 'sway-dpms',
+            'return_code': rc,
+        }
     rc, out, err = _run_list(
         ['wlr-randr', '--output', connector, requested],
         timeout=10,
@@ -8248,6 +8294,7 @@ def apply_display_power(cache_dir: Path, display_index: int | None, state: str) 
         'display_index': display_index,
         'connector': connector,
         'state': state,
+        'method': 'wlr-randr',
         'return_code': rc,
     }
 
