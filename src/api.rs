@@ -9920,10 +9920,23 @@ fn sanitized_command_result(value: &serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(result)
 }
 
+const MAX_CLIENT_REGISTRATION_DISPLAYS: usize = 64;
+
+fn validate_client_registration_display_count(count: usize) -> Result<(), (StatusCode, String)> {
+    if count > MAX_CLIENT_REGISTRATION_DISPLAYS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "too many client displays".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 async fn register_client(
     State(repository): State<ClientRepository>,
     Json(payload): Json<ClientRegisterRequest>,
 ) -> Result<AxumJson<ConnectedClientInfo>, (StatusCode, String)> {
+    validate_client_registration_display_count(payload.displays.len())?;
     let client_auth_token = payload.client_auth_token.as_deref();
     if let Some(token) = client_auth_token {
         if !(32..=256).contains(&token.len()) || !token.is_ascii() {
@@ -10480,6 +10493,20 @@ fn reverse_name(ip: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_registration_display_lists_are_bounded() {
+        assert!(validate_client_registration_display_count(
+            MAX_CLIENT_REGISTRATION_DISPLAYS
+        )
+        .is_ok());
+        let (status, error) = validate_client_registration_display_count(
+            MAX_CLIENT_REGISTRATION_DISPLAYS + 1,
+        )
+        .expect_err("oversized client display list should fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error, "too many client displays");
+    }
 
     #[test]
     fn layout_set_item_lists_are_bounded() {
