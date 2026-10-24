@@ -1368,7 +1368,7 @@ impl PostgresStore {
     }
 
     pub async fn list_users(&self) -> Result<Vec<UserRecord>, String> {
-        self.client.query("SELECT id,username,display_name,role,active,created_at,updated_at,last_login_at FROM users ORDER BY active DESC,role,username", &[]).await.map(|rows| rows.iter().map(Self::user_from_row).collect()).map_err(|error| format!("list users: {error}"))
+        self.client.query("SELECT id,username,display_name,role,active,created_at,updated_at,last_login_at FROM users ORDER BY active DESC,role,username LIMIT 10000", &[]).await.map(|rows| rows.iter().map(Self::user_from_row).collect()).map_err(|error| format!("list users: {error}"))
     }
 
     pub async fn get_user(&self, id: &str) -> Result<Option<UserRecord>, String> {
