@@ -1822,7 +1822,7 @@ impl PostgresStore {
 
 
     pub async fn list_layout_sets(&self) -> Result<Vec<LayoutSetSummary>, String> {
-        self.client.query("SELECT ls.id, ls.name, ls.shuffle, ls.dwell_secs, ls.created_at, ls.updated_at, count(lse.id) FROM layout_sets ls LEFT JOIN layout_set_entries lse ON ls.id=lse.layout_set_id GROUP BY ls.id ORDER BY ls.name", &[]).await.map(|rows| rows.into_iter().map(|row| LayoutSetSummary { id: row.get(0), name: row.get(1), shuffle: row.get(2), dwell_secs: row.get::<_, i32>(3) as u32, item_count: row.get::<_, i64>(6) as u32, created_at: row.get(4), updated_at: row.get(5) }).collect()).map_err(|error| format!("list layout sets: {error}"))
+        self.client.query("SELECT ls.id, ls.name, ls.shuffle, ls.dwell_secs, ls.created_at, ls.updated_at, count(lse.id) FROM layout_sets ls LEFT JOIN layout_set_entries lse ON ls.id=lse.layout_set_id GROUP BY ls.id ORDER BY ls.name LIMIT 4096", &[]).await.map(|rows| rows.into_iter().map(|row| LayoutSetSummary { id: row.get(0), name: row.get(1), shuffle: row.get(2), dwell_secs: row.get::<_, i32>(3) as u32, item_count: row.get::<_, i64>(6) as u32, created_at: row.get(4), updated_at: row.get(5) }).collect()).map_err(|error| format!("list layout sets: {error}"))
     }
 
     pub async fn get_layout_set(&self, id: &str) -> Result<Option<LayoutSetWithItems>, String> {

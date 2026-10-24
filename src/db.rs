@@ -3758,7 +3758,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
     pub fn list_layout_sets(&self) -> Result<Vec<LayoutSetSummary>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT ls.id, ls.name, ls.shuffle, ls.dwell_secs, ls.created_at, ls.updated_at, COUNT(lse.id) as item_count FROM layout_sets ls LEFT JOIN layout_set_entries lse ON ls.id = lse.layout_set_id GROUP BY ls.id ORDER BY ls.name")
+            .prepare("SELECT ls.id, ls.name, ls.shuffle, ls.dwell_secs, ls.created_at, ls.updated_at, COUNT(lse.id) as item_count FROM layout_sets ls LEFT JOIN layout_set_entries lse ON ls.id = lse.layout_set_id GROUP BY ls.id ORDER BY ls.name LIMIT 4096")
             .map_err(|e| e.to_string())?;
         let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
         let mut results = Vec::new();
@@ -5277,6 +5277,28 @@ mod tests {
 
         let scene_ids = db.list_scene_ids().expect("list scene ids");
         assert_eq!(scene_ids.len(), 10_000);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn list_layout_sets_is_bounded() {
+        let path = unique_temp_path("layout-set-list-bound");
+        let db = Database::open(&path).expect("open db");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            let tx = conn.unchecked_transaction().expect("begin transaction");
+            for index in 0..4_097 {
+                tx.execute(
+                    "INSERT INTO layout_sets (id, name, shuffle, dwell_secs, created_at, updated_at) VALUES (?1, ?2, 0, 30, ?3, ?4)",
+                    rusqlite::params![format!("layout-set-{index:04}"), "bounded layout set", "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z"],
+                )
+                .expect("insert layout set");
+            }
+            tx.commit().expect("commit layout sets");
+        }
+
+        let layout_sets = db.list_layout_sets().expect("list layout sets");
+        assert_eq!(layout_sets.len(), 4_096);
         std::fs::remove_file(&path).ok();
     }
 }
