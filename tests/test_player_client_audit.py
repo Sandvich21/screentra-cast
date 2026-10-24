@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import importlib.util
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -185,6 +186,17 @@ class PlayerClientAuditTests(unittest.TestCase):
             actor._validate_preview_pid('0')
         with self.assertRaises(ValueError):
             actor._validate_preview_pid('9' * 20)
+
+    def test_preview_process_termination_reaps_child(self):
+        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        try:
+            self.assertTrue(actor._terminate_preview_process(process.pid, timeout=2))
+            self.assertIsNotNone(process.poll())
+            process.wait(timeout=1)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
 
     def test_display_indexes_are_bounded(self):
         self.assertEqual(actor._validate_display_index(3), 3)

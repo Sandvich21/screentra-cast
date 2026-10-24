@@ -8483,6 +8483,54 @@ def start_display_preview(ctx: dict, display_index: int, payload: dict) -> tuple
         return False, f'display preview could not start: {_bound_hardware_message(str(exc))}', {}
 
 
+def _terminate_preview_process(pid: int, timeout: float = 2.0) -> bool:
+    """Terminate a preview child and reap it before reporting success."""
+    deadline = time.monotonic() + max(0.1, min(timeout, 10.0))
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    while time.monotonic() < deadline:
+        try:
+            waited, _ = os.waitpid(pid, os.WNOHANG)
+            if waited == pid:
+                return True
+        except ChildProcessError:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            except OSError:
+                return False
+        except OSError:
+            return False
+        time.sleep(0.05)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    while time.monotonic() < deadline + 1.0:
+        try:
+            waited, _ = os.waitpid(pid, os.WNOHANG)
+            if waited == pid:
+                return True
+        except ChildProcessError:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            except OSError:
+                return False
+        except OSError:
+            return False
+        time.sleep(0.05)
+    return False
+
+
 def stop_display_preview(ctx: dict, display_index: int) -> tuple[bool, str, dict]:
     cache_dir = Path(ctx['cache_dir'])
     pid_path = _preview_pid_path(cache_dir, display_index)
@@ -8490,13 +8538,8 @@ def stop_display_preview(ctx: dict, display_index: int) -> tuple[bool, str, dict
         pid = _validate_preview_pid(_read_bounded_text(pid_path, 64).strip())
     except Exception:
         pid = None
-    if pid is not None:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        except Exception as exc:
-            return False, f'display preview could not stop: {_bound_hardware_message(str(exc))}', {}
+    if pid is not None and not _terminate_preview_process(pid):
+        return False, 'display preview could not stop before its timeout', {}
     try:
         pid_path.unlink()
     except FileNotFoundError:
