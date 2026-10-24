@@ -131,6 +131,11 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn('await reader.cancel()', source)
         self.assertNotIn('await r.json()', source)
 
+    def test_renderer_admin_route_lookup_uses_configured_server(self):
+        source = (ROOT / 'player-client/scripts/screentra-player-renderer.py').read_text()
+        self.assertIn('def _lan_ip_for_admin(server_url', source)
+        self.assertNotIn("sock.connect(('11.1.1.53', 3000))", source)
+
     def test_editor_json_reads_are_bounded(self):
         source = (ROOT / 'static/js/editor.js').read_text()
         self.assertIn('readEditorJsonBounded', source)

@@ -4403,16 +4403,20 @@ def _nl_detect_touch_devices():
     out.sort(key=lambda x: (not x['recommended'], x['name']))
     return out
 
-def _lan_ip_for_admin() -> str | None:
+def _lan_ip_for_admin(server_url: str | None) -> str | None:
     try:
-        # Prefer a UDP route lookup; it does not send packets but asks the kernel
-        # which local source IP would reach the saved server/LAN.
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(0.5)
-            sock.connect(('11.1.1.53', 3000))
-            ip = sock.getsockname()[0]
-            if ip and not ip.startswith('127.'):
-                return ip
+        parsed = urllib.parse.urlparse(server_url or '')
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == 'https' else 3000)
+        if host:
+            # Prefer a UDP route lookup; it does not send packets but asks the
+            # kernel which local source IP would reach the configured server.
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(0.5)
+                sock.connect((host, port))
+                ip = sock.getsockname()[0]
+                if ip and not ip.startswith('127.'):
+                    return ip
     except Exception:
         pass
     try:
@@ -4483,6 +4487,7 @@ def _nl_status():
             pass
     else:
         last_layout = None
+    lan_ip = _lan_ip_for_admin(server_url)
     return {
         'screentra_client_client': True,
         'client_installed': True,
@@ -4490,9 +4495,9 @@ def _nl_status():
         'identity_source': 'persistent_client_id',
         'server_url': server_url,
         'hostname': socket.gethostname() if 'socket' in dir() else os.uname().nodename,
-        'lan_ip': _lan_ip_for_admin(),
+        'lan_ip': lan_ip,
         'admin_port': 3910,
-        'admin_url': ('http://' + _lan_ip_for_admin() + ':3910/') if _lan_ip_for_admin() else None,
+        'admin_url': ('http://' + lan_ip + ':3910/') if lan_ip else None,
         'role': 'player',
         'port': int(os.environ.get('RIPLEY_RENDER_PORT', str(int(os.environ.get('RIPLEY_RENDER_BASE_PORT','3900')) + int(os.environ.get('RIPLEY_DISPLAY_INDEX','0'))))),
         'display_index': int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0')),
