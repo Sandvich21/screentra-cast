@@ -178,15 +178,20 @@ fn is_open_path(path: &str, method: &str) -> bool {
                 return false;
             }
             if path.starts_with("/api/layouts/") {
-                return true;
+                let rest = &path["/api/layouts/".len()..];
+                if !rest.is_empty() && !rest.contains('/') {
+                    return true;
+                }
             }
             // Widget preset reads — actor pre-fetches /api/widget-presets/<id>
             // for any weather widget that references a preset UUID by its
             // template id, and inlines template_elements into the local
-            // assigned-layout cache. Read-only, returns template geometry +
-            // assets. Writes (POST/PUT/DELETE) stay gated.
+            // assigned-layout cache. Nested assets and exports remain protected.
             if path.starts_with("/api/widget-presets/") {
-                return true;
+                let rest = &path["/api/widget-presets/".len()..];
+                if !rest.is_empty() && !rest.contains('/') {
+                    return true;
+                }
             }
             // Read-only file browsing so the UI file picker can render before login.
             // Writes (POST/DELETE) stay gated.
@@ -522,6 +527,11 @@ mod authorization_tests {
         assert!(!is_open_path("/index.html", "POST"));
         assert!(!is_open_path("/js/app.js", "DELETE"));
         assert!(!is_open_path("/api/layouts", "GET"));
+        assert!(is_open_path("/api/layouts/layout-1", "GET"));
+        assert!(!is_open_path("/api/layouts/layout-1/revisions", "GET"));
+        assert!(!is_open_path("/api/layouts/layout-1/render", "GET"));
+        assert!(is_open_path("/api/widget-presets/preset-1", "GET"));
+        assert!(!is_open_path("/api/widget-presets/preset-1/export", "GET"));
         assert!(is_open_path("/install/player-client.sh", "GET"));
         assert!(is_open_path("/install/player-client.sh.sig", "GET"));
         assert!(is_open_path("/install/player-client-bundle.tar.gz", "GET"));
