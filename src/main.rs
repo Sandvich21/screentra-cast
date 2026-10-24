@@ -812,18 +812,27 @@ async fn main() {
              reject. To fix: place signage-server.crt + signage-server.key in \
              the binary's install dir, or set SIGNAGE_TLS_CERT/SIGNAGE_TLS_KEY."
         );
-        let cert = rcgen::generate_simple_self_signed(vec![
+        let cert = match rcgen::generate_simple_self_signed(vec![
             "11.1.1.53".to_string(),
             "debian-sign-software".to_string(),
             "localhost".to_string(),
             "signage-server".to_string(),
-        ])
-        .expect("failed to generate self-signed cert");
+        ]) {
+            Ok(cert) => cert,
+            Err(error) => {
+                eprintln!("FATAL: failed to generate self-signed cert: {error}");
+                return;
+            }
+        };
         let cert_pem = cert.cert.pem().into_bytes();
         let key_pem = cert.key_pair.serialize_pem().into_bytes();
-        axum_server::tls_rustls::RustlsConfig::from_pem(cert_pem, key_pem)
-            .await
-            .expect("failed to build RustlsConfig from self-signed cert")
+        match axum_server::tls_rustls::RustlsConfig::from_pem(cert_pem, key_pem).await {
+            Ok(config) => config,
+            Err(error) => {
+                eprintln!("FATAL: failed to build RustlsConfig from self-signed cert: {error}");
+                return;
+            }
+        }
     };
 
     // Also serve on port 3005 (TLS terminator for direct browser access
@@ -837,18 +846,28 @@ async fn main() {
     let rustls_config_3005 = rustls_config.clone();
     let router_3005 = router(state_for_3005);
     if !secondary_tls {
-        let listener_3005 = tokio::net::TcpListener::bind(addr_3005).await.unwrap();
+        let listener_3005 = match tokio::net::TcpListener::bind(addr_3005).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!("FATAL: failed to bind secondary server on {addr_3005}: {error}");
+                return;
+            }
+        };
         tokio::spawn(async move {
             log::info!("Secondary HTTP server starting on :3005");
-            axum::serve(listener_3005, router_3005).await.unwrap();
+            if let Err(error) = axum::serve(listener_3005, router_3005).await {
+                log::error!("Secondary HTTP server stopped: {error}");
+            }
         });
     } else {
         tokio::spawn(async move {
             log::info!("Secondary HTTPS server starting on :3005");
-            axum_server::bind_rustls(addr_3005, rustls_config_3005)
+            if let Err(error) = axum_server::bind_rustls(addr_3005, rustls_config_3005)
                 .serve(router_3005.into_make_service())
                 .await
-                .unwrap();
+            {
+                log::error!("Secondary HTTPS server stopped: {error}");
+            }
         });
     }
 
@@ -858,8 +877,16 @@ async fn main() {
             "SIGNAGE_TLS=0 -> starting PLAIN HTTP on {} (dual-stack IPv4+IPv6)",
             addr
         );
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        axum::serve(listener, app_router).await.unwrap();
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!("FATAL: failed to bind HTTP server on {addr}: {error}");
+                return;
+            }
+        };
+        if let Err(error) = axum::serve(listener, app_router).await {
+            eprintln!("FATAL: HTTP server stopped: {error}");
+        }
     } else {
         let tls_mode = if tls_cert_path.is_some() && tls_key_path.is_some() {
             "configured certificate"
@@ -871,10 +898,12 @@ async fn main() {
             addr,
             tls_mode
         );
-        axum_server::bind_rustls(addr, rustls_config)
+        if let Err(error) = axum_server::bind_rustls(addr, rustls_config)
             .serve(app_router.clone().into_make_service())
             .await
-            .unwrap();
+        {
+            eprintln!("FATAL: HTTPS server stopped: {error}");
+        }
     }
 }
 
