@@ -41,6 +41,11 @@ fn parse_listen_addr(value: &str) -> Result<std::net::SocketAddr, String> {
         .map_err(|error| format!("invalid SIGNAGE_LISTEN_ADDR: {error}"))
 }
 
+fn ensure_data_dir(path: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(path)
+        .map_err(|error| format!("failed to create data directory: {error}"))
+}
+
 fn read_bounded_hostname() -> Result<String, std::io::Error> {
     let file = std::fs::File::open("/etc/hostname")?;
     let mut bytes = Vec::new();
@@ -587,7 +592,10 @@ async fn main() {
 
     let data_dir = std::env::var("SIGNAGE_DATA_DIR")
         .unwrap_or_else(|_| "/home/board/data".to_string());
-    std::fs::create_dir_all(&data_dir).expect("Failed to create data directory");
+    ensure_data_dir(std::path::Path::new(&data_dir)).unwrap_or_else(|error| {
+        eprintln!("FATAL: failed to create data directory: {error}");
+        std::process::exit(1);
+    });
 
     // Purge trash files older than 14 days on startup
     {
@@ -986,6 +994,15 @@ mod startup_tests {
     #[test]
     fn invalid_listen_addr_is_rejected_without_panicking() {
         assert!(std::panic::catch_unwind(|| parse_listen_addr("not-a-socket")).is_ok());
+    }
+
+    #[test]
+    fn invalid_data_dir_returns_an_error_without_panicking() {
+        let result = std::panic::catch_unwind(|| {
+            super::ensure_data_dir(std::path::Path::new("/dev/null/screentra-data"))
+        });
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_err());
     }
 }
 
