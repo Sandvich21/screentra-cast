@@ -29,6 +29,12 @@ class ServerSecurityAuditTests(unittest.TestCase):
             self.assertNotIn('StatusCode::INTERNAL_SERVER_ERROR, e', block, marker)
             self.assertNotIn('StatusCode::INTERNAL_SERVER_ERROR, error', block, marker)
 
+    def test_infrastructure_error_responses_do_not_expose_details(self):
+        source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
+        self.assertNotIn('StatusCode::INTERNAL_SERVER_ERROR, format!', source)
+        self.assertNotIn('format!("multipart:', source)
+        self.assertIn('"Invalid multipart request"', source)
+
 
 if __name__ == '__main__':
     unittest.main()

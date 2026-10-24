@@ -4073,7 +4073,7 @@ async fn post_news_refresh(
             .collect::<Vec<_>>()
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")))?;
+    .map_err(|_| internal_server_error())?;
 
     let mut refreshed = 0usize;
     let mut errors = 0usize;
@@ -5757,7 +5757,7 @@ async fn export_state_bundle_handler(
     }
     let bytes = read_bounded_async_file(&dest, MAX_STATE_BUNDLE_BYTES)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("read bundle: {}", e)))?;
+        .map_err(|_| internal_server_error())?;
     let _ = tokio::fs::remove_file(&dest).await;
     let header = [(
         axum::http::header::CONTENT_DISPOSITION,
@@ -5828,7 +5828,7 @@ async fn import_state_bundle_handler(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("multipart: {}", e)))?
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid multipart request".to_string()))?
     {
         let name = field.name().unwrap_or("").to_string();
         if name == "bundle" || name == "file" {
@@ -5837,7 +5837,7 @@ async fn import_state_bundle_handler(
             let import_dest = dest.clone();
             let result = tokio::task::spawn_blocking(move || crate::version::import_state_bundle(&import_dest))
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {}", e)))?
+                .map_err(|_| internal_server_error())?
                 .map_err(|_| internal_server_error());
             let _ = tokio::fs::remove_file(&dest).await;
             result?;
@@ -5858,12 +5858,7 @@ async fn update_preview_handler(
 ) -> Result<AxumJson<crate::version::UpdateManifest>, (StatusCode, String)> {
     // Build an in-memory manifest of what WOULD be exported, without writing a tarball.
     // Useful for the UI to show "this is what's in your update bundle" before exporting.
-    let exe = std::env::current_exe().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("current_exe: {}", e),
-        )
-    })?;
+    let exe = std::env::current_exe().map_err(|_| internal_server_error())?;
     let install_dir = crate::version::install_dir_for_static();
     let static_dir = crate::version::static_dir_path();
     let binary_sha256 =
@@ -5970,12 +5965,9 @@ async fn export_update_bundle_handler(
     }
     let bytes = match read_bounded_async_file(&dest, MAX_STATE_BUNDLE_BYTES).await {
         Ok(bytes) => bytes,
-        Err(error) => {
+        Err(_error) => {
             audit_update_export_failure(&state, &principal, "bundle read failed").await;
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("read bundle: {}", error),
-            ));
+            return Err(internal_server_error());
         }
     };
     let _ = tokio::fs::remove_file(&dest).await;
@@ -6046,11 +6038,11 @@ async fn import_update_bundle_handler(
         let field = match multipart.next_field().await {
             Ok(Some(field)) => field,
             Ok(None) => break,
-            Err(error) => {
+            Err(_error) => {
                 audit_update_import_failure(&state, &principal, "multipart rejected").await;
                 return Err((
                     StatusCode::BAD_REQUEST,
-                    format!("multipart: {}", error),
+                    "Invalid multipart request".to_string(),
                 ));
             }
         };
@@ -6128,7 +6120,7 @@ async fn import_update_bundle_handler(
                 .await;
             return Err((status, error));
         }
-        Err(error) => {
+        Err(_error) => {
             let _ = state
                 .client_repository()
                 .record_audit_event(
@@ -6141,10 +6133,7 @@ async fn import_update_bundle_handler(
                     &Utc::now().to_rfc3339(),
                 )
                 .await;
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("join: {error}"),
-            ));
+            return Err(internal_server_error());
         }
     };
     let (configured_service, _) = crate::version::configured_service();
@@ -6428,15 +6417,12 @@ async fn build_player_client_bundle_handler(
         bounded_command_output(command, 1024 * 1024, Duration::from_secs(30))
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {}", e)))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("run builder: {}", e)))?;
+    .map_err(|_| internal_server_error())?
+    .map_err(|_| internal_server_error())?;
     let (status, stdout_bytes) = output;
     let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
     if !status.success() {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("bundle builder failed: {}", status),
-        ));
+        return Err(internal_server_error());
     }
     let json_line = stdout.lines().last().unwrap_or("{}");
     #[derive(Deserialize)]
@@ -6447,12 +6433,8 @@ async fn build_player_client_bundle_handler(
         size_bytes: u64,
         sha256: String,
     }
-    let raw: RawBundleResult = serde_json::from_str(json_line).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("parse builder output: {} :: {}", e, stdout),
-        )
-    })?;
+    let raw: RawBundleResult = serde_json::from_str(json_line)
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(PlayerClientBundleBuildResult {
         ok: raw.ok,
         path: raw.path,
@@ -6493,18 +6475,12 @@ async fn build_server_bundle_handler(
         bounded_command_output(command, 1024 * 1024, Duration::from_secs(30))
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join: {}", e)))?
-    .map_err(|e| (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!("run server bundle builder: {}", e),
-    ))?;
+    .map_err(|_| internal_server_error())?
+    .map_err(|_| internal_server_error())?;
     let (status, stdout_bytes) = output;
     let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
     if !status.success() {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("server bundle builder failed: {}", status),
-        ));
+        return Err(internal_server_error());
     }
     let json_line = stdout.lines().last().unwrap_or("{}");
     #[derive(Deserialize)]
@@ -6516,12 +6492,8 @@ async fn build_server_bundle_handler(
         size_bytes: u64,
         sha256: String,
     }
-    let raw: RawServerBundleResult = serde_json::from_str(json_line).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("parse server bundle builder output: {} :: {}", e, stdout),
-        )
-    })?;
+    let raw: RawServerBundleResult = serde_json::from_str(json_line)
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(ServerBundleBuildResult {
         ok: raw.ok,
         path: raw.path,
