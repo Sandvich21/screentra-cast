@@ -451,11 +451,14 @@ pub fn export_state_bundle(dest: &Path) -> Result<(), String> {
 
     // 5. Tar it all up
     let mut tar_command = Command::new("tar");
+    let stage_parent = stage
+        .parent()
+        .ok_or_else(|| "staging directory has no parent".to_string())?;
     tar_command
         .arg("-czf")
         .arg(dest)
         .arg("-C")
-        .arg(stage.parent().unwrap_or(Path::new("/tmp")))
+        .arg(stage_parent)
         .arg(stage.file_name().unwrap());
     let tar_status = bounded_command_status(tar_command, Duration::from_secs(10 * 60));
     match tar_status {
@@ -863,11 +866,14 @@ pub fn export_update_bundle(dest: &Path) -> Result<UpdateManifest, String> {
 
     // 5. Tar it up
     let mut tar_command = Command::new("tar");
+    let stage_parent = stage
+        .parent()
+        .ok_or_else(|| "staging directory has no parent".to_string())?;
     tar_command
         .arg("-czf")
         .arg(dest)
         .arg("-C")
-        .arg(stage.parent().unwrap_or(Path::new("/tmp")))
+        .arg(stage_parent)
         .arg(stage.file_name().unwrap());
     let tar_status = bounded_command_status(tar_command, Duration::from_secs(10 * 60));
     match tar_status {
