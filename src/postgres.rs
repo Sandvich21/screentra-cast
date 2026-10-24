@@ -1516,7 +1516,11 @@ impl PostgresStore {
     }
     async fn interactive_submission_rows(&self, id: Option<i64>) -> Result<Vec<serde_json::Value>, String> {
         let sql = "SELECT id,client_id,client_address,interactive_layout_id,interactive_layout_name,widget_id,widget_type,widget_label,payload_json,collected_at,received_at,google_sync_status,google_sync_message,google_synced_at,google_sheet_id FROM interactive_submissions";
-        let rows = match id { Some(id) => self.client.query(&format!("{sql} WHERE id=$1"), &[&id]).await, None => self.client.query(&format!("{sql} ORDER BY id DESC"), &[]).await }.map_err(|error| format!("list interactive submissions: {error}"))?;
+        let rows = match id {
+            Some(id) => self.client.query(&format!("{sql} WHERE id=$1 LIMIT 1"), &[&id]).await,
+            None => self.client.query(&format!("{sql} ORDER BY id DESC LIMIT 10000"), &[]).await,
+        }
+        .map_err(|error| format!("list interactive submissions: {error}"))?;
         Ok(rows.into_iter().map(|row| serde_json::json!({"id": row.get::<_, i64>(0), "client_id": row.get::<_, String>(1), "client_address": row.get::<_, Option<String>>(2), "interactive_layout_id": row.get::<_, Option<String>>(3), "interactive_layout_name": row.get::<_, Option<String>>(4), "widget_id": row.get::<_, String>(5), "widget_type": row.get::<_, String>(6), "widget_label": row.get::<_, Option<String>>(7), "payload_json": row.get::<_, String>(8), "collected_at": row.get::<_, String>(9), "received_at": row.get::<_, String>(10), "google_sync_status": row.get::<_, String>(11), "google_sync_message": row.get::<_, Option<String>>(12), "google_synced_at": row.get::<_, Option<String>>(13), "google_sheet_id": row.get::<_, Option<String>>(14)})).collect())
     }
 
