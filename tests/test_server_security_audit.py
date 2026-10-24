@@ -59,7 +59,19 @@ class ServerSecurityAuditTests(unittest.TestCase):
             for needle in forbidden:
                 self.assertNotIn(needle, source[start:end], marker)
 
-    def test_remaining_operational_error_responses_are_opaque(self):
+    def test_remaining_internal_error_details_are_opaque(self):
+        source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
+        for marker, end_marker, forbidden in (
+            ('fn normalize_widget_preset_props(', 'fn widget_preset_assets_from_export(', ('Invalid widget preset props_json:',)),
+            ('async fn export_update_bundle_handler(', 'fn update_failure_stage(', ('format!("inspect bundle:',)),
+            ('async fn import_update_bundle_handler(', 'struct UpdateLastFailure', ('update applied but', 'format!("update applied but')),
+            ('async fn reset_default_widget_presets(', 'async fn setup_status(', ('read default templates:', 'parse default templates:')),
+        ):
+            start = source.index(marker)
+            end = source.index(end_marker, start + len(marker))
+            for needle in forbidden:
+                self.assertNotIn(needle, source[start:end], marker)
+
         source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
         for marker, end_marker, forbidden in (
             ('async fn apply_github_update_handler(', 'struct PlayerClientBundleBuildResult', ('Err((StatusCode::INTERNAL_SERVER_ERROR, message))', 'StatusCode::BAD_GATEWAY, error')),

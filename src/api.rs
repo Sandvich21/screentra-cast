@@ -5534,10 +5534,10 @@ fn normalize_widget_preset_props(
             if trimmed.is_empty() {
                 serde_json::json!({})
             } else {
-                serde_json::from_str::<serde_json::Value>(trimmed).map_err(|e| {
+                serde_json::from_str::<serde_json::Value>(trimmed).map_err(|_| {
                     (
                         StatusCode::BAD_REQUEST,
-                        format!("Invalid widget preset props_json: {e}"),
+                        "Invalid widget preset props_json".to_string(),
                     )
                 })?
             }
@@ -5942,12 +5942,9 @@ async fn export_update_bundle_handler(
     };
     let bundle_size = match tokio::fs::metadata(&dest).await {
         Ok(metadata) => metadata.len(),
-        Err(error) => {
+        Err(_error) => {
             audit_update_export_failure(&state, &principal, "bundle metadata failed").await;
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("inspect bundle: {}", error),
-            ));
+            return Err(internal_server_error());
         }
     };
     if bundle_size > MAX_STATE_BUNDLE_BYTES {
@@ -6148,7 +6145,7 @@ async fn import_update_bundle_handler(
                 )
                 .await;
         }
-        Ok(Err(error)) => {
+        Ok(Err(_error)) => {
             let _ = state
                 .client_repository()
                 .record_audit_event(
@@ -6173,14 +6170,9 @@ async fn import_update_bundle_handler(
                     &Utc::now().to_rfc3339(),
                 )
                 .await;
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!(
-                    "update applied but {configured_service} restart failed: {error}"
-                ),
-            ));
+            return Err(internal_server_error());
         }
-        Err(e) => {
+        Err(_e) => {
             let _ = state
                 .client_repository()
                 .record_audit_event(
@@ -6205,10 +6197,7 @@ async fn import_update_bundle_handler(
                     &Utc::now().to_rfc3339(),
                 )
                 .await;
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("update applied but could not restart {configured_service}: {e}"),
-            ));
+            return Err(internal_server_error());
         }
     }
     let _ = state
@@ -7167,19 +7156,19 @@ async fn reset_default_widget_presets(
     let raw = String::from_utf8(read_bounded_file(path, 1024 * 1024).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("read default templates: {}", e),
+            "Unable to read default templates".to_string(),
         )
     })?)
     .map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("read default templates: {}", e),
+            "Unable to read default templates".to_string(),
         )
     })?;
     let arr: Vec<serde_json::Value> = serde_json::from_str(&raw).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("parse default templates: {}", e),
+            "Unable to parse default templates".to_string(),
         )
     })?;
 
