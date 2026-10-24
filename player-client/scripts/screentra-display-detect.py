@@ -37,6 +37,19 @@ def _read_float(path: Path) -> Optional[float]:
         return None
 
 
+def _connector_sort_key(connector: Dict[str, Any]) -> tuple[int, str]:
+    """Keep physical connected outputs ahead of disconnected connectors."""
+    status = connector.get('status')
+    enabled = bool(connector.get('enabled'))
+    if status == 'connected' and enabled:
+        priority = 0
+    elif status == 'connected':
+        priority = 1
+    else:
+        priority = 2
+    return priority, str(connector.get('name') or '')
+
+
 def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
     """Return a list of detected DRM connector displays.
 
@@ -60,11 +73,12 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
                 continue
             status = _read(entry / 'status')
             enabled = _read(entry / 'enabled') == 'enabled'
-            # Skip disconnected or disabled unless no other connectors exist
+            # Retain disconnected connectors for stable bounded indexing; the
+            # sort below keeps physical connected outputs first.
             connectors.append({'name': name, 'entry': entry, 'status': status, 'enabled': enabled})
 
-        # Prefer connected+enabled connectors first
-        connectors.sort(key=lambda c: (0 if (c['status'] == 'connected' and c['enabled']) else 1, c['name']))
+        # Prefer connected outputs, with enabled outputs first.
+        connectors.sort(key=_connector_sort_key)
 
         for idx, conn in enumerate(connectors):
             if idx >= display_limit:

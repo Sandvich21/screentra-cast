@@ -18,6 +18,15 @@ class DisplayDetectTests(unittest.TestCase):
             temp.flush()
             self.assertLessEqual(len(detect._read(Path(temp.name)).encode('utf-8')), detect.MAX_SYSFS_VALUE_BYTES)
 
+    def test_connected_disabled_connector_precedes_disconnected_output(self):
+        connectors = [
+            {'name': 'DP-1', 'status': 'disconnected', 'enabled': False},
+            {'name': 'DP-2', 'status': 'connected', 'enabled': False},
+            {'name': 'DP-3', 'status': 'connected', 'enabled': True},
+        ]
+        ordered = sorted(connectors, key=detect._connector_sort_key)
+        self.assertEqual([item['name'] for item in ordered], ['DP-3', 'DP-2', 'DP-1'])
+
     def test_display_limit_is_bounded(self):
         self.assertLessEqual(len(detect.detect_displays(max_displays=10_000)), detect.MAX_DISPLAYS)
         self.assertLessEqual(len(detect.detect_displays(max_displays='invalid')), detect.MAX_DISPLAYS)
