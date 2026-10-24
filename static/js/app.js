@@ -3440,7 +3440,12 @@ ${targetSection}
             importInput.onchange = async () => {
                 if (!importInput.files || !importInput.files[0]) return;
                 try {
-                    const text = await importInput.files[0].text();
+                    const file = importInput.files[0];
+                    const MAX_TEMPLATE_IMPORT_BYTES = 1 * 1024 * 1024;
+                    if (file.size > MAX_TEMPLATE_IMPORT_BYTES) {
+                        throw new Error('Template import is too large');
+                    }
+                    const text = await file.text();
                     await API.importWidgetPreset(text);
                     importInput.value = '';
                     this._tplSidebarCache = null;
