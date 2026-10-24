@@ -1729,7 +1729,11 @@ async function init() {
         await wireInteractiveRuntime(layer, ly, clientId);
       }
     } catch(e) {
-      layer.innerHTML = '<div style="position:absolute;inset:0;display:grid;place-items:center;color:#f87171;font-family:system-ui,sans-serif;text-align:center;">Slideshow error: '+e.message+'</div>';
+      layer.textContent = '';
+      var error = document.createElement('div');
+      error.style.cssText = 'position:absolute;inset:0;display:grid;place-items:center;color:#f87171;font-family:system-ui,sans-serif;text-align:center;';
+      error.textContent = 'Slideshow error: ' + (e && e.message ? e.message : 'unknown error');
+      layer.appendChild(error);
     }
   }
 

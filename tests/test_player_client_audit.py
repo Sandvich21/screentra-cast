@@ -202,6 +202,12 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('.json()', source)
         self.assertNotIn('.text()', source)
 
+    def test_player_slideshow_errors_do_not_use_raw_html(self):
+        source = (ROOT / 'static/js/player.js').read_text()
+        self.assertIn('error.textContent', source)
+        self.assertIn('Slideshow error:', source)
+        self.assertNotIn("'Slideshow error: '+e.message", source)
+
     def test_preview_browser_reads_are_bounded(self):
         source = (ROOT / 'static/js/preview.js').read_text()
         self.assertIn('readPreviewJsonBounded', source)
