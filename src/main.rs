@@ -1083,6 +1083,12 @@ mod startup_tests {
     }
 
     #[test]
+    fn valid_tls_environment_pairs_are_accepted() {
+        assert!(super::validate_tls_env_pair(None, None).is_ok());
+        assert!(super::validate_tls_env_pair(Some("cert.pem"), Some("key.pem")).is_ok());
+    }
+
+    #[test]
     fn mismatched_tls_environment_returns_an_error_without_panicking() {
         let result = std::panic::catch_unwind(|| {
             super::validate_tls_env_pair(Some("cert.pem"), None)
