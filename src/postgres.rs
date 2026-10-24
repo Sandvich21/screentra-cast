@@ -2638,6 +2638,10 @@ impl PostgresStore {
             .execute("DELETE FROM client_command_cooldowns WHERE client_id=$1", &[&client_id])
             .await
             .map_err(|error| format!("delete virtual client command cooldowns: {error}"))?;
+        transaction
+            .execute("DELETE FROM client_heartbeats WHERE client_id=$1", &[&client_id])
+            .await
+            .map_err(|error| format!("delete virtual client heartbeats: {error}"))?;
         let deleted = transaction
             .execute("DELETE FROM clients WHERE id=$1", &[&client_id])
             .await
@@ -3091,6 +3095,23 @@ mod tests {
     fn empty_postgres_schedule_layout_id_is_persisted_as_null() {
         assert_eq!(persisted_layout_id(""), None);
         assert_eq!(persisted_layout_id("layout-1"), Some("layout-1"));
+    }
+
+    #[test]
+    fn virtual_client_delete_includes_heartbeat_cleanup() {
+        let source = include_str!("postgres.rs");
+        let start = source
+            .find("pub async fn delete_virtual_client")
+            .expect("virtual-client deletion method should exist");
+        let end = source[start..]
+            .find("pub async fn client_history_lifecycle_round_trip_probe")
+            .map(|offset| start + offset)
+            .expect("virtual-client deletion method should have a following boundary");
+        let method = &source[start..end];
+        assert!(
+            method.contains("DELETE FROM client_heartbeats"),
+            "virtual-client deletion must remove heartbeat history"
+        );
     }
 
     #[tokio::test]
