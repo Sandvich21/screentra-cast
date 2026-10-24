@@ -67,6 +67,7 @@ const MAX_WOFF2_BYTES: usize = 200_000;
 const MAX_WOFF2_ENTRY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_INSTALLED_FONT_ENTRIES: usize = 4096;
 const MAX_PREVIEW_CACHE_ENTRIES: usize = 100_000;
+const MAX_PREVIEW_STATUS_FAMILIES: usize = 4096;
 
 fn validate_font_archive_limits(entry_count: usize, extracted_bytes: usize) -> Result<(), String> {
     if entry_count > MAX_FONT_ZIP_ENTRIES {
@@ -1621,8 +1622,8 @@ pub fn preview_status(families: &[String]) -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default();
-    let mut out = Vec::with_capacity(families.len());
-    for f in families {
+    let mut out = Vec::with_capacity(families.len().min(MAX_PREVIEW_STATUS_FAMILIES));
+    for f in families.iter().take(MAX_PREVIEW_STATUS_FAMILIES) {
         let lookup = f.to_lowercase();
         // The picker might have sent either the id ("roboto")
         // or the display name ("Roboto" / "Open Sans"). Try both.

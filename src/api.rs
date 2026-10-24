@@ -4796,6 +4796,8 @@ async fn fonts_delete_handler(
 // picker falls back to sans-serif for those. The endpoint is
 // public (no auth) because the font picker iframe is unauthenticated
 // and the URLs it returns are same-origin.
+const MAX_PREVIEW_STATUS_FAMILIES: usize = 4096;
+
 #[derive(serde::Serialize)]
 struct PreviewStatusResponse {
     /// Cached family -> preview woff2 URL.
@@ -4812,7 +4814,12 @@ async fn fonts_preview_status_handler(
 ) -> Result<AxumJson<PreviewStatusResponse>, (StatusCode, String)> {
     let families: Vec<String> = params
         .get("families")
-        .map(|s| s.split(',').map(|p| p.trim().to_string()).collect())
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .take(MAX_PREVIEW_STATUS_FAMILIES)
+                .collect()
+        })
         .unwrap_or_default();
     let pairs = crate::fonts::preview_status(&families);
     let mut cached_map: std::collections::HashMap<String, String> =
