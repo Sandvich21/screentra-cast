@@ -1191,6 +1191,9 @@ impl Database {
         if ids.is_empty() {
             return Ok(0);
         }
+        if ids.len() > MAX_TABLE_ROWS as usize {
+            return Err("too many table row ids".into());
+        }
         let placeholders = std::iter::repeat_n("?", ids.len())
             .collect::<Vec<_>>()
             .join(",");
@@ -4991,6 +4994,22 @@ mod tests {
         assert_eq!(db.delete_table_rows("table_test", &[]), Ok(0));
         assert_eq!(db.query_table_rows("table_test", 100, 0).unwrap().total, 0);
         assert!(db.delete_table_rows("bad-name", &[1]).is_err());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn delete_table_rows_rejects_oversized_id_lists() {
+        let path = unique_temp_path("delete-table-row-bound");
+        let db = Database::open(&path).expect("open db");
+        db.conn()
+            .expect("connection")
+            .execute("CREATE TABLE table_test (id INTEGER PRIMARY KEY)", [])
+            .expect("create table");
+        let ids = vec![1_i64; 10_001];
+        let error = db
+            .delete_table_rows("table_test", &ids)
+            .expect_err("oversized table deletion should fail");
+        assert!(error.contains("too many table row ids"));
         std::fs::remove_file(&path).ok();
     }
 

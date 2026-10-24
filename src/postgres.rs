@@ -1475,6 +1475,9 @@ impl PostgresStore {
 
     pub async fn delete_table_rows(&self, table: &str, ids: &[i64]) -> Result<usize, String> {
         Self::validate_table_name(table)?;
+        if ids.len() > MAX_TABLE_ROWS as usize {
+            return Err("too many table row ids".to_string());
+        }
         let pk = self.client.query_opt("SELECT kcu.column_name FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name=kcu.constraint_name AND tc.table_schema=kcu.table_schema WHERE tc.table_schema='public' AND tc.table_name=$1 AND tc.constraint_type='PRIMARY KEY' ORDER BY kcu.ordinal_position LIMIT 1", &[&table]).await.map_err(|error| format!("table primary key: {error}"))?.ok_or("Table has no primary key")?.get::<_, String>(0);
         let mut deleted = 0; for id in ids { deleted += self.client.execute(&format!("DELETE FROM public.\"{table}\" WHERE \"{pk}\"=$1"), &[id]).await.map_err(|error| format!("delete table row: {error}"))? as usize; } Ok(deleted)
     }
