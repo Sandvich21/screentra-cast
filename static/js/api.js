@@ -1,5 +1,36 @@
 const _origFetch = window.fetch.bind(window);
 let _stepUpInFlight = {};
+const MAX_API_ERROR_BYTES = 64 * 1024;
+
+async function readApiError(response) {
+    if (!response || !response.body || typeof response.body.getReader !== 'function') return '';
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+        while (true) {
+            const result = await reader.read();
+            if (result.done) break;
+            total += result.value.byteLength;
+            if (total > MAX_API_ERROR_BYTES) {
+                await reader.cancel();
+                return '';
+            }
+            chunks.push(result.value);
+        }
+        const bytes = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of chunks) {
+            bytes.set(chunk, offset);
+            offset += chunk.byteLength;
+        }
+        return new TextDecoder().decode(bytes);
+    } catch (_) {
+        return '';
+    } finally {
+        reader.releaseLock();
+    }
+}
 
 function _stepUpScopeForRequest(input, init) {
     const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
@@ -33,7 +64,7 @@ window.fetch = async function(input, init) {
     let response = await _origFetch(input, requestInit);
     const scope = _stepUpScopeForRequest(input, init);
     if (response.status === 403 && scope) {
-        const detail = await response.clone().text().catch(() => '');
+        const detail = await readApiError(response.clone());
         if (/step-up authentication required/i.test(detail)) {
             await _stepUpDialog(scope);
             const retryHeaders = new Headers(requestInit.headers);
@@ -117,7 +148,7 @@ window.API = {
             body: JSON.stringify(folder),
         });
         if (!res.ok) {
-            const detail = await res.text().catch(() => '');
+            const detail = await readApiError(res);
             throw new Error(`Failed to save folder (${res.status})${detail ? ': ' + detail : ''}`);
         }
         return res.json();
@@ -126,7 +157,7 @@ window.API = {
     async deleteLayoutFolder(id) {
         const res = await fetch(`/api/layout-folders/${encodeURIComponent(id)}`, { method: 'DELETE' });
         if (!res.ok) {
-            const detail = await res.text().catch(() => '');
+            const detail = await readApiError(res);
             throw new Error(detail || 'Failed to delete folder');
         }
     },
@@ -140,7 +171,7 @@ window.API = {
             body: JSON.stringify(normalizeLayoutForApi(layout)),
         });
         if (!res.ok) {
-            const detail = await res.text().catch(() => '');
+            const detail = await readApiError(res);
             throw new Error(`Failed to save layout (${res.status})${detail ? ': ' + detail : ''}`);
         }
         return res.json();
@@ -259,7 +290,7 @@ window.API = {
 
     async listAddonExecutionApprovals() {
         const res = await fetch('/api/addons/execution/approvals');
-        if (!res.ok) throw new Error(await res.text() || 'Failed to fetch addon execution approvals');
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to fetch addon execution approvals');
         return res.json();
     },
 
@@ -269,31 +300,31 @@ window.API = {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ approved }),
         });
-        if (!res.ok) throw new Error(await res.text() || 'Failed to save addon capability approvals');
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to save addon capability approvals');
         return res.json();
     },
 
     async approveAddonExecution(id) {
         const res = await fetch(`/api/addons/execution/approvals/${encodeURIComponent(id)}/approve`, { method: 'POST' });
-        if (!res.ok) throw new Error(await res.text() || 'Failed to approve addon execution');
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to approve addon execution');
         return res.json();
     },
 
     async revokeAddonExecution(id) {
         const res = await fetch(`/api/addons/execution/approvals/${encodeURIComponent(id)}/revoke`, { method: 'POST' });
-        if (!res.ok) throw new Error(await res.text() || 'Failed to revoke addon execution');
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to revoke addon execution');
         return res.json();
     },
 
     async approveAddonExecutionTarget(id, target) {
         const res = await fetch(`/api/addons/execution/approvals/${encodeURIComponent(id)}/targets/${encodeURIComponent(target)}/approve`, { method: 'POST' });
-        if (!res.ok) throw new Error(await res.text() || 'Failed to approve addon execution target');
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to approve addon execution target');
         return res.json();
     },
 
     async revokeAddonExecutionTarget(id, target) {
         const res = await fetch(`/api/addons/execution/approvals/${encodeURIComponent(id)}/targets/${encodeURIComponent(target)}/revoke`, { method: 'POST' });
-        if (!res.ok) throw new Error(await res.text() || 'Failed to revoke addon execution target');
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to revoke addon execution target');
         return res.json();
     },
 
@@ -305,7 +336,7 @@ window.API = {
 
     async getClientAddons(id) {
         const res = await fetch(`/api/clients/${encodeURIComponent(id)}/addons`);
-        if (!res.ok) throw new Error(await res.text() || 'Failed to fetch client addon status');
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to fetch client addon status');
         return res.json();
     },
 
@@ -341,7 +372,7 @@ window.API = {
             body: JSON.stringify({ action, payload }),
         });
         if (!res.ok) {
-            const detail = await res.text().catch(() => '');
+            const detail = await readApiError(res);
             throw new Error(detail || `Failed to queue client command (HTTP ${res.status})`);
         }
         return res.json();
@@ -353,7 +384,7 @@ window.API = {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(manifest),
         });
-        if (!res.ok) throw new Error(await res.text() || 'Failed to install addon');
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to install addon');
         return res.json();
     },
 
@@ -363,7 +394,7 @@ window.API = {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(manifest),
         });
-        if (!res.ok) throw new Error(await res.text() || 'Failed to update addon');
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to update addon');
         return res.json();
     },
 
@@ -371,7 +402,7 @@ window.API = {
         const body = new FormData();
         body.append('package', file);
         const res = await fetch('/api/addons/package', { method: 'POST', body });
-        if (!res.ok) throw new Error(await res.text() || 'Failed to install addon package');
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to install addon package');
         return res.json();
     },
 
@@ -379,32 +410,32 @@ window.API = {
         const body = new FormData();
         body.append('package', file);
         const res = await fetch('/api/addons/package', { method: 'PUT', body });
-        if (!res.ok) throw new Error(await res.text() || 'Failed to update addon package');
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to update addon package');
         return res.json();
     },
 
     async rollbackAddon(id) {
         const res = await fetch(`/api/addons/${encodeURIComponent(id)}/rollback`, { method: 'POST' });
-        if (!res.ok) throw new Error(await res.text() || 'Failed to roll back addon');
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to roll back addon');
         return res.json();
     },
 
     async rollbackAddonPackage(id) {
         const res = await fetch(`/api/addons/package/${encodeURIComponent(id)}/rollback`, { method: 'POST' });
-        if (!res.ok) throw new Error(await res.text() || 'Failed to roll back addon package');
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to roll back addon package');
         return res.json();
     },
 
     async setAddonEnabled(id, enabled) {
         const action = enabled ? 'enable' : 'disable';
         const res = await fetch(`/api/addons/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
-        if (!res.ok) throw new Error(await res.text() || `Failed to ${action} addon`);
+        if (!res.ok) throw new Error(await readApiError(res) || `Failed to ${action} addon`);
         return res.json();
     },
 
     async deleteAddon(id) {
         const res = await fetch(`/api/addons/${encodeURIComponent(id)}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error(await res.text() || 'Failed to remove addon');
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to remove addon');
     },
 
     async getCertificateStatus() {
@@ -517,7 +548,7 @@ window.API = {
             body: JSON.stringify({ orientation }),
         });
         if (!res.ok) {
-            const text = await res.text();
+            const text = await readApiError(res);
             throw new Error(`Failed to update display orientation (HTTP ${res.status}): ${text}`);
         }
         return res.json();
@@ -581,7 +612,7 @@ window.API = {
         });
         if (!res.ok) {
             let detail = '';
-            try { detail = (await res.text()).trim(); } catch (_) {}
+            try { detail = (await readApiError(res)).trim(); } catch (_) {}
             throw new Error(detail || `Upload failed (HTTP ${res.status})`);
         }
         return res.json();
@@ -599,7 +630,7 @@ window.API = {
         });
         if (!res.ok && res.status !== 204) {
             let detail = '';
-            try { detail = (await res.text()).trim(); } catch (_) {}
+            try { detail = (await readApiError(res)).trim(); } catch (_) {}
             throw new Error(detail || `Delete failed (HTTP ${res.status})`);
         }
     },
@@ -613,7 +644,7 @@ window.API = {
         const res = await fetch('/api/files/trash', { headers });
         if (!res.ok) {
             let detail = '';
-            try { detail = (await res.text()).trim(); } catch (_) {}
+            try { detail = (await readApiError(res)).trim(); } catch (_) {}
             throw new Error(detail || `Failed to load trash (HTTP ${res.status})`);
         }
         return await res.json();
@@ -632,7 +663,7 @@ window.API = {
         });
         if (!res.ok) {
             let detail = '';
-            try { detail = (await res.text()).trim(); } catch (_) {}
+            try { detail = (await readApiError(res)).trim(); } catch (_) {}
             throw new Error(detail || `Restore failed (HTTP ${res.status})`);
         }
         return await res.json();
@@ -704,7 +735,7 @@ window.API = {
             body: JSON.stringify(schedule),
         });
         if (!res.ok) {
-            const detail = await res.text();
+            const detail = await readApiError(res);
             throw new Error(detail || `Failed to create schedule (HTTP ${res.status})`);
         }
         return res.json();
@@ -799,7 +830,7 @@ window.API = {
     // ── Account ──
     async getAccount() {
         const res = await fetch('/api/account');
-        if (!res.ok) throw new Error(await res.text().catch(() => 'Failed to fetch account'));
+        if (!res.ok) throw new Error((await readApiError(res)) || 'Failed to fetch account');
         return res.json();
     },
     async changeAccountPassword(current_password, new_password) {
@@ -807,22 +838,22 @@ window.API = {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ current_password, new_password }),
         });
-        if (!res.ok) throw new Error(await res.text().catch(() => 'Password update failed'));
+        if (!res.ok) throw new Error((await readApiError(res)) || 'Request failed');
         return res.json();
     },
     async getGoogleLoginUrl() {
         const res = await fetch('/api/auth/google/login-url');
-        if (!res.ok) throw new Error(await res.text().catch(() => 'Google login unavailable'));
+        if (!res.ok) throw new Error((await readApiError(res)) || 'Request failed');
         return res.json();
     },
     async getGoogleBindUrl() {
         const res = await fetch('/api/account/google/bind-url');
-        if (!res.ok) throw new Error(await res.text().catch(() => 'Google bind unavailable'));
+        if (!res.ok) throw new Error((await readApiError(res)) || 'Request failed');
         return res.json();
     },
     async unbindGoogle() {
         const res = await fetch('/api/account/google/unbind', { method: 'POST' });
-        if (!res.ok) throw new Error(await res.text().catch(() => 'Google unbind failed'));
+        if (!res.ok) throw new Error((await readApiError(res)) || 'Request failed');
         return res.json();
     },
 
@@ -838,7 +869,7 @@ window.API = {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(user),
         });
-        if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Failed to create user');
+        if (!res.ok) throw new Error((await readApiError(res)) || 'Failed to create user');
         return res.json();
     },
     async updateUser(id, patch) {
@@ -847,12 +878,12 @@ window.API = {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(patch),
         });
-        if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Failed to update user');
+        if (!res.ok) throw new Error((await readApiError(res)) || 'Failed to update user');
         return res.json();
     },
     async deleteUser(id) {
         const res = await fetch(`/api/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error((await res.text().catch(() => '')) || 'Failed to delete user');
+        if (!res.ok) throw new Error((await readApiError(res)) || 'Failed to delete user');
         return res.json();
     },
 
@@ -886,7 +917,7 @@ window.API = {
         if (forceSkipRollback) url += '?force=true';
         const res = await fetch(url, { method: 'POST', body: form });
         if (!res.ok) {
-            const text = await res.text().catch(() => '');
+            const text = await readApiError(res);
             throw new Error('Update import failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
         return res.json();
@@ -899,7 +930,7 @@ window.API = {
     async checkGithubUpdate() {
         const res = await fetch('/api/version/update/github/check', { method: 'POST' });
         if (!res.ok) {
-            const text = await res.text().catch(() => '');
+            const text = await readApiError(res);
             throw new Error('Update check failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
         return res.json();
@@ -911,7 +942,7 @@ window.API = {
             body: JSON.stringify({ auto_update: !!autoUpdate }),
         });
         if (!res.ok) {
-            const text = await res.text().catch(() => '');
+            const text = await readApiError(res);
             throw new Error('Auto-update setting failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
         return res.json();
@@ -919,7 +950,7 @@ window.API = {
     async applyGithubUpdate() {
         const res = await fetch('/api/version/update/apply', { method: 'POST' });
         if (!res.ok) {
-            const text = await res.text().catch(() => '');
+            const text = await readApiError(res);
             throw new Error('GitHub update failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
         return res.json();
@@ -935,7 +966,7 @@ window.API = {
     async buildPlayerClientBundle() {
         const res = await fetch('/api/version/player-client-bundle/build', { method: 'POST' });
         if (!res.ok) {
-            const text = await res.text().catch(() => '');
+            const text = await readApiError(res);
             throw new Error('Player bundle build failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
         return res.json();
@@ -955,7 +986,7 @@ window.API = {
     async buildServerBundle() {
         const res = await fetch('/api/version/server-bundle/build', { method: 'POST' });
         if (!res.ok) {
-            const text = await res.text().catch(() => '');
+            const text = await readApiError(res);
             throw new Error('Server bundle build failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
         return res.json();
@@ -1029,7 +1060,7 @@ window.API = {
             body: JSON.stringify(payload),
         });
         if (!res.ok) {
-            const err = await res.text();
+            const err = await readApiError(res);
             throw new Error(`Submit failed (${res.status}): ${err}`);
         }
         return res.json();
@@ -1048,7 +1079,7 @@ window.API = {
             body: JSON.stringify({ timezone: tz }),
         });
         if (!res.ok) {
-            const err = await res.text();
+            const err = await readApiError(res);
             throw new Error(err || 'Set timezone failed (' + res.status + ')');
         }
     },
@@ -1059,14 +1090,14 @@ window.API = {
             body: JSON.stringify({ local_datetime: localDatetime }),
         });
         if (!res.ok) {
-            const err = await res.text();
+            const err = await readApiError(res);
             throw new Error(err || 'Set clock failed (' + res.status + ')');
         }
     },
     async syncNtp() {
         const res = await fetch('/api/system/time/sync-ntp', { method: 'POST' });
         if (!res.ok) {
-            const err = await res.text();
+            const err = await readApiError(res);
             throw new Error(err || 'NTP sync failed (' + res.status + ')');
         }
     },
