@@ -9075,6 +9075,12 @@ async fn load_scene(repository: &ClientRepository, scene_id: &str) -> Result<Opt
     }))
 }
 
+const MAX_SCENE_LIST_ENTRIES: usize = 4096;
+
+fn bounded_scene_ids(ids: Vec<String>) -> impl Iterator<Item = String> {
+    ids.into_iter().take(MAX_SCENE_LIST_ENTRIES)
+}
+
 async fn list_scenes(
     State(repository): State<ClientRepository>,
 ) -> Result<AxumJson<Vec<SceneRecord>>, (StatusCode, String)> {
@@ -9083,7 +9089,7 @@ async fn list_scenes(
         .await
         .map_err(|_| internal_server_error())?;
     let mut out = Vec::new();
-    for id in ids {
+    for id in bounded_scene_ids(ids) {
         if let Some(scene) = load_scene(&repository, &id)
             .await
             .map_err(|_| internal_server_error())?
@@ -10493,6 +10499,14 @@ fn reverse_name(ip: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scene_list_ids_are_bounded() {
+        let ids = (0..=MAX_SCENE_LIST_ENTRIES)
+            .map(|index| format!("scene-{index}"))
+            .collect();
+        assert_eq!(bounded_scene_ids(ids).count(), MAX_SCENE_LIST_ENTRIES);
+    }
 
     #[test]
     fn client_registration_display_lists_are_bounded() {
