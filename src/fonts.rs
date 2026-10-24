@@ -65,6 +65,7 @@ const MAX_FONT_EXTRACTED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FONT_CSS_BYTES: usize = 1024 * 1024;
 const MAX_WOFF2_BYTES: usize = 200_000;
 const MAX_WOFF2_ENTRY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_INSTALLED_FONT_ENTRIES: usize = 4096;
 
 fn validate_font_archive_limits(entry_count: usize, extracted_bytes: usize) -> Result<(), String> {
     if entry_count > MAX_FONT_ZIP_ENTRIES {
@@ -421,7 +422,12 @@ pub fn list_installed() -> Result<Vec<InstalledFont>, String> {
     let mut out = Vec::new();
     let entries = std::fs::read_dir(&dir)
         .map_err(|e| format!("read fonts dir failed: {e}"))?;
+    let mut scanned_entries = 0usize;
     for e in entries {
+        scanned_entries = scanned_entries.saturating_add(1);
+        if scanned_entries > MAX_INSTALLED_FONT_ENTRIES {
+            return Err("too many installed font entries".to_string());
+        }
         let e = match e {
             Ok(e) => e,
             Err(_) => continue,
