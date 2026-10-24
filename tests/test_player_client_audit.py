@@ -131,6 +131,13 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('await response.json()', source)
         self.assertNotIn('await r.json()', source)
 
+    def test_api_browser_json_reads_are_bounded(self):
+        source = (ROOT / 'static/js/api.js').read_text()
+        self.assertIn('_readApiJsonBounded', source)
+        self.assertIn('reader.cancel()', source)
+        self.assertNotIn('.json()', source)
+        self.assertNotIn('.text()', source)
+
     def test_calendar_browser_reads_are_bounded(self):
         source = (ROOT / 'static/js/calendar.js').read_text()
         self.assertIn('readCalendarTextBounded', source)

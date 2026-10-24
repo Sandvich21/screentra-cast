@@ -32,6 +32,30 @@ async function readApiError(response) {
     }
 }
 
+async function _readApiJsonBounded(response, maximumBytes = 4 * 1024 * 1024) {
+    if (!response || !response.body || typeof response.body.getReader !== 'function') throw new Error('response body streaming is unavailable');
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+        while (true) {
+            const result = await reader.read();
+            if (result.done) break;
+            total += result.value.byteLength;
+            if (total > maximumBytes) {
+                try { await reader.cancel(); } catch (_) {}
+                throw new Error('response exceeds its size limit');
+            }
+            chunks.push(result.value);
+        }
+        const bytes = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+        return JSON.parse(new TextDecoder().decode(bytes));
+    } finally {
+        reader.releaseLock();
+    }
+}
 function _stepUpScopeForRequest(input, init) {
     const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
     const url = typeof input === 'string' ? input : (input && input.url) || '';
@@ -123,20 +147,20 @@ window.API = {
     async getLayouts() {
         const res = await fetch('/api/layouts');
         if (!res.ok) throw new Error('Failed to fetch layouts');
-        const layouts = await res.json();
+        const layouts = await _readApiJsonBounded(res);
         return Array.isArray(layouts) ? layouts.map(normalizeLayoutFromApi) : layouts;
     },
 
     async getLayout(id) {
         const res = await fetch(`/api/layouts/${id}`);
         if (!res.ok) throw new Error('Failed to fetch layout');
-        return normalizeLayoutFromApi(await res.json());
+        return normalizeLayoutFromApi(await _readApiJsonBounded(res));
     },
 
     async getLayoutFolders() {
         const res = await fetch('/api/layout-folders');
         if (!res.ok) throw new Error('Failed to fetch layout folders');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async saveLayoutFolder(folder) {
@@ -151,7 +175,7 @@ window.API = {
             const detail = await readApiError(res);
             throw new Error(`Failed to save folder (${res.status})${detail ? ': ' + detail : ''}`);
         }
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async deleteLayoutFolder(id) {
@@ -174,7 +198,7 @@ window.API = {
             const detail = await readApiError(res);
             throw new Error(`Failed to save layout (${res.status})${detail ? ': ' + detail : ''}`);
         }
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async deleteLayout(id) {
@@ -184,21 +208,21 @@ window.API = {
 
     async listLayoutRevisions(id) {
         const res = await fetch(`/api/layouts/${encodeURIComponent(id)}/revisions`);
-        const body = await res.json().catch(() => []);
+        const body = await _readApiJsonBounded(res).catch(() => []);
         if (!res.ok) throw new Error(body.error || body.message || `Failed to load layout revisions (HTTP ${res.status})`);
         return body;
     },
 
     async publishLayout(id) {
         const res = await fetch(`/api/layouts/${encodeURIComponent(id)}/publish`, { method: 'POST' });
-        const body = await res.json().catch(() => ({}));
+        const body = await _readApiJsonBounded(res).catch(() => ({}));
         if (!res.ok) throw new Error(body.error || body.message || `Failed to publish layout (HTTP ${res.status})`);
         return body;
     },
 
     async getLayoutPropagationStatus(id) {
         const res = await fetch(`/api/layouts/${encodeURIComponent(id)}/propagation`);
-        const body = await res.json().catch(() => ({}));
+        const body = await _readApiJsonBounded(res).catch(() => ({}));
         if (!res.ok) throw new Error(body.error || body.message || `Failed to load propagation status (HTTP ${res.status})`);
         return body;
     },
@@ -206,13 +230,13 @@ window.API = {
     async getLayoutSets() {
         const res = await fetch('/api/layout-sets');
         if (!res.ok) throw new Error('Failed to fetch layout sets');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async getLayoutSet(id) {
         const res = await fetch(`/api/layout-sets/${encodeURIComponent(id)}`);
         if (!res.ok) throw new Error('Failed to fetch layout set');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async saveLayoutSet(set) {
@@ -226,7 +250,7 @@ window.API = {
             body: JSON.stringify(set),
         });
         if (!res.ok) throw new Error('Failed to save layout set');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async replaceLayoutSetEntries(id, entries) {
@@ -240,7 +264,7 @@ window.API = {
             }))),
         });
         if (!res.ok) throw new Error(`Failed to save layout rotation entries (HTTP ${res.status})`);
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async deleteLayoutSet(id) {
@@ -251,19 +275,19 @@ window.API = {
     async getDisplays() {
         const res = await fetch('/api/displays');
         if (!res.ok) throw new Error('Failed to fetch displays');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async getDisplayState() {
         const res = await fetch('/api/display-state');
         if (!res.ok) throw new Error('Failed to fetch display state');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async getDisplayStateForDisplay(display) {
         const res = await fetch(`/api/display-state/${display}`);
         if (!res.ok) throw new Error('Failed to fetch display state');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async setDisplayState(state) {
@@ -273,25 +297,25 @@ window.API = {
             body: JSON.stringify(state),
         });
         if (!res.ok) throw new Error('Failed to set display state');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async getSystemStatus() {
         const res = await fetch('/api/system');
         if (!res.ok) throw new Error('Failed to fetch system status');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async listAddons() {
         const res = await fetch('/api/addons');
         if (!res.ok) throw new Error('Failed to fetch addons');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async listAddonExecutionApprovals() {
         const res = await fetch('/api/addons/execution/approvals');
         if (!res.ok) throw new Error(await readApiError(res) || 'Failed to fetch addon execution approvals');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async updateAddonExecutionCapabilities(id, approved) {
@@ -301,43 +325,43 @@ window.API = {
             body: JSON.stringify({ approved }),
         });
         if (!res.ok) throw new Error(await readApiError(res) || 'Failed to save addon capability approvals');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async approveAddonExecution(id) {
         const res = await fetch(`/api/addons/execution/approvals/${encodeURIComponent(id)}/approve`, { method: 'POST' });
         if (!res.ok) throw new Error(await readApiError(res) || 'Failed to approve addon execution');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async revokeAddonExecution(id) {
         const res = await fetch(`/api/addons/execution/approvals/${encodeURIComponent(id)}/revoke`, { method: 'POST' });
         if (!res.ok) throw new Error(await readApiError(res) || 'Failed to revoke addon execution');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async approveAddonExecutionTarget(id, target) {
         const res = await fetch(`/api/addons/execution/approvals/${encodeURIComponent(id)}/targets/${encodeURIComponent(target)}/approve`, { method: 'POST' });
         if (!res.ok) throw new Error(await readApiError(res) || 'Failed to approve addon execution target');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async revokeAddonExecutionTarget(id, target) {
         const res = await fetch(`/api/addons/execution/approvals/${encodeURIComponent(id)}/targets/${encodeURIComponent(target)}/revoke`, { method: 'POST' });
         if (!res.ok) throw new Error(await readApiError(res) || 'Failed to revoke addon execution target');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async listAddonWidgetTypes() {
         const res = await fetch('/api/addons/widget-types');
         if (!res.ok) throw new Error('Failed to fetch addon widget types');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async getClientAddons(id) {
         const res = await fetch(`/api/clients/${encodeURIComponent(id)}/addons`);
         if (!res.ok) throw new Error(await readApiError(res) || 'Failed to fetch client addon status');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async sendClientCommand(clientId, action, payload = {}) {
@@ -375,7 +399,7 @@ window.API = {
             const detail = await readApiError(res);
             throw new Error(detail || `Failed to queue client command (HTTP ${res.status})`);
         }
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async installAddon(manifest) {
@@ -385,7 +409,7 @@ window.API = {
             body: JSON.stringify(manifest),
         });
         if (!res.ok) throw new Error(await readApiError(res) || 'Failed to install addon');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async updateAddon(manifest) {
@@ -395,7 +419,7 @@ window.API = {
             body: JSON.stringify(manifest),
         });
         if (!res.ok) throw new Error(await readApiError(res) || 'Failed to update addon');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async installAddonPackage(file) {
@@ -403,7 +427,7 @@ window.API = {
         body.append('package', file);
         const res = await fetch('/api/addons/package', { method: 'POST', body });
         if (!res.ok) throw new Error(await readApiError(res) || 'Failed to install addon package');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async updateAddonPackage(file) {
@@ -411,26 +435,26 @@ window.API = {
         body.append('package', file);
         const res = await fetch('/api/addons/package', { method: 'PUT', body });
         if (!res.ok) throw new Error(await readApiError(res) || 'Failed to update addon package');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async rollbackAddon(id) {
         const res = await fetch(`/api/addons/${encodeURIComponent(id)}/rollback`, { method: 'POST' });
         if (!res.ok) throw new Error(await readApiError(res) || 'Failed to roll back addon');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async rollbackAddonPackage(id) {
         const res = await fetch(`/api/addons/package/${encodeURIComponent(id)}/rollback`, { method: 'POST' });
         if (!res.ok) throw new Error(await readApiError(res) || 'Failed to roll back addon package');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async setAddonEnabled(id, enabled) {
         const action = enabled ? 'enable' : 'disable';
         const res = await fetch(`/api/addons/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
         if (!res.ok) throw new Error(await readApiError(res) || `Failed to ${action} addon`);
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async deleteAddon(id) {
@@ -441,7 +465,7 @@ window.API = {
     async getCertificateStatus() {
         const res = await fetch('/api/system/certificates');
         if (!res.ok) throw new Error('Failed to fetch certificate status');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async uploadClientDiagnostics(payload) {
@@ -451,13 +475,13 @@ window.API = {
             body: JSON.stringify(payload || {}),
         });
         if (!res.ok) throw new Error('Failed to save client diagnostics (HTTP ' + res.status + ')');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async listClientDiagnostics() {
         const res = await fetch('/api/clients/diagnostics');
         if (!res.ok) throw new Error('Failed to list client diagnostics (HTTP ' + res.status + ')');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
 
@@ -465,13 +489,13 @@ window.API = {
     async getClients() {
         const res = await fetch('/api/clients');
         if (!res.ok) throw new Error('Failed to fetch clients');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async getScenes() {
         const res = await fetch('/api/scenes');
         if (!res.ok) throw new Error('Failed to fetch scenes');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async createScene(scene) {
@@ -481,7 +505,7 @@ window.API = {
             body: JSON.stringify(scene),
         });
         if (!res.ok) throw new Error('Failed to create scene');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async updateScene(id, scene) {
@@ -491,31 +515,31 @@ window.API = {
             body: JSON.stringify(scene),
         });
         if (!res.ok) throw new Error('Failed to update scene');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async deleteScene(id) {
         const res = await fetch(`/api/scenes/${encodeURIComponent(id)}`, { method: 'DELETE' });
         if (!res.ok) throw new Error('Failed to delete scene');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async publishSceneToClient(sceneId, clientId) {
         const res = await fetch(`/api/scenes/${encodeURIComponent(sceneId)}/publish/${encodeURIComponent(clientId)}`, { method: 'POST' });
         if (!res.ok) throw new Error('Failed to publish scene');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async getClientDisplays(clientId) {
         const res = await fetch(`/api/clients/${encodeURIComponent(clientId)}/displays`);
         if (!res.ok) throw new Error('Failed to fetch client displays');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     // Adopt a pending physical client (administrator action)
     async adoptClient(clientId) {
         const res = await fetch(`/api/clients/${encodeURIComponent(clientId)}/adopt`, { method: 'POST' });
-        const body = await res.json().catch(() => ({}));
+        const body = await _readApiJsonBounded(res).catch(() => ({}));
         if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
         return body;
     },
@@ -528,7 +552,7 @@ window.API = {
             body: JSON.stringify({ name }),
         });
         if (!res.ok) throw new Error('Failed to create virtual client');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async assignClientDisplayLayout(clientId, displayIndex, layoutId) {
@@ -538,7 +562,7 @@ window.API = {
             body: JSON.stringify({ layout_id: layoutId || null }),
         });
         if (!res.ok) throw new Error('Failed to assign display layout');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async updateDisplayOrientation(clientId, displayIndex, orientation) {
@@ -551,7 +575,7 @@ window.API = {
             const text = await readApiError(res);
             throw new Error(`Failed to update display orientation (HTTP ${res.status}): ${text}`);
         }
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async sendDisplayCommand(clientId, displayIndex, action, payload = {}) {
@@ -561,13 +585,13 @@ window.API = {
             body: JSON.stringify({ action, payload }),
         });
         if (!res.ok) throw new Error('Failed to send display command: ' + res.status);
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async getDisplayControl(clientId, displayIndex) {
         const res = await fetch(`/api/clients/${encodeURIComponent(clientId)}/displays/${displayIndex}/control`);
         if (!res.ok) throw new Error('Failed to get display control info: ' + res.status);
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async setDisplayControlMethod(clientId, displayIndex, method) {
@@ -577,7 +601,7 @@ window.API = {
             body: JSON.stringify({ control_method: method }),
         });
         if (!res.ok) throw new Error('Failed to set control method: ' + res.status);
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async setVirtualClientLayout(clientId, layoutId) {
@@ -587,14 +611,14 @@ window.API = {
             body: JSON.stringify({ layout_id: layoutId || null }),
         });
         if (!res.ok) throw new Error('Failed to set virtual client layout');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     // ── File management ──
     async listFiles(category) {
         const res = await fetch(`/api/files/${category}`);
         if (!res.ok) throw new Error('Failed to list files');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async uploadFile(category, file) {
@@ -615,7 +639,7 @@ window.API = {
             try { detail = (await readApiError(res)).trim(); } catch (_) {}
             throw new Error(detail || `Upload failed (HTTP ${res.status})`);
         }
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async deleteFile(category, name) {
@@ -647,7 +671,7 @@ window.API = {
             try { detail = (await readApiError(res)).trim(); } catch (_) {}
             throw new Error(detail || `Failed to load trash (HTTP ${res.status})`);
         }
-        return await res.json();
+        return await _readApiJsonBounded(res);
     },
 
     async restoreTrash(id) {
@@ -666,20 +690,20 @@ window.API = {
             try { detail = (await readApiError(res)).trim(); } catch (_) {}
             throw new Error(detail || `Restore failed (HTTP ${res.status})`);
         }
-        return await res.json();
+        return await _readApiJsonBounded(res);
     },
 
     // Templates
     async listTemplates() {
         const res = await fetch('/api/templates');
         if (!res.ok) throw new Error('Failed to list templates');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async getTemplate(id) {
         const res = await fetch(`/api/templates/${id}`);
         if (!res.ok) throw new Error('Failed to get template');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async saveTemplate(template) {
@@ -689,7 +713,7 @@ window.API = {
             body: JSON.stringify(template),
         });
         if (!res.ok) throw new Error('Failed to save template');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async deleteTemplate(id) {
@@ -701,19 +725,19 @@ window.API = {
     async listBackups() {
         const res = await fetch('/api/backups');
         if (!res.ok) throw new Error('Failed to fetch backups');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async createBackup() {
         const res = await fetch('/api/backups', { method: 'POST' });
         if (!res.ok) throw new Error('Failed to create backup');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async restoreBackup(id) {
         const res =await fetch(`/api/backups/${id}`, { method: 'PUT' });
         if (!res.ok) throw new Error('Failed to restore backup');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async deleteBackup(id) {
@@ -725,7 +749,7 @@ window.API = {
     async listSchedules() {
         const res = await fetch('/api/schedules');
         if (!res.ok) throw new Error('Failed to fetch schedules');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async createSchedule(schedule) {
@@ -738,7 +762,7 @@ window.API = {
             const detail = await readApiError(res);
             throw new Error(detail || `Failed to create schedule (HTTP ${res.status})`);
         }
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async updateSchedule(id, schedule) {
@@ -748,7 +772,7 @@ window.API = {
             body: JSON.stringify(schedule),
         });
         if (!res.ok) throw new Error('Failed to update schedule');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     async deleteSchedule(id) {
@@ -761,18 +785,18 @@ window.API = {
         const url = widgetType ? `/api/widget-presets?widget_type=${encodeURIComponent(widgetType)}` : '/api/widget-presets';
         const res = await fetch(url);
         if (!res.ok) throw new Error('Failed to list widget presets');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async getWidgetPresetFull(id) {
         // Returns the full preset including props_json, is_builtin, and assets.
         const res = await fetch(`/api/widget-presets/${id}`);
         if (!res.ok) throw new Error('Failed to get widget preset');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async getWidgetPreset(id) {
         const res = await fetch(`/api/widget-presets/${id}`);
         if (!res.ok) throw new Error('Failed to get widget preset');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async createWidgetPreset(data) {
         const res = await fetch('/api/widget-presets', {
@@ -781,7 +805,7 @@ window.API = {
             body: JSON.stringify(data),
         });
         if (!res.ok) throw new Error('Failed to create widget preset');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async updateWidgetPreset(id, data) {
         const res = await fetch(`/api/widget-presets/${id}`, {
@@ -802,7 +826,7 @@ window.API = {
             body: JSON.stringify({ kind, key, url }),
         });
         if (!res.ok) throw new Error('Failed to add asset');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async removeWidgetPresetAsset(presetId, assetId) {
         const res = await fetch(`/api/widget-presets/${presetId}/assets/${assetId}`, { method: 'DELETE' });
@@ -814,7 +838,7 @@ window.API = {
     async resetDefaultWidgetPresets() {
         const res = await fetch('/api/widget-presets/reset-defaults', { method: 'POST' });
         if (!res.ok) throw new Error('Reset failed (status ' + res.status + ')');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async importWidgetPreset(json) {
         const data = typeof json === 'string' ? JSON.parse(json) : json;
@@ -824,14 +848,14 @@ window.API = {
             body: JSON.stringify(data),
         });
         if (!res.ok) throw new Error('Failed to import widget preset');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     // ── Account ──
     async getAccount() {
         const res = await fetch('/api/account');
         if (!res.ok) throw new Error((await readApiError(res)) || 'Failed to fetch account');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async changeAccountPassword(current_password, new_password) {
         const res = await fetch('/api/account/password', {
@@ -839,29 +863,29 @@ window.API = {
             body: JSON.stringify({ current_password, new_password }),
         });
         if (!res.ok) throw new Error((await readApiError(res)) || 'Request failed');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async getGoogleLoginUrl() {
         const res = await fetch('/api/auth/google/login-url');
         if (!res.ok) throw new Error((await readApiError(res)) || 'Request failed');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async getGoogleBindUrl() {
         const res = await fetch('/api/account/google/bind-url');
         if (!res.ok) throw new Error((await readApiError(res)) || 'Request failed');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async unbindGoogle() {
         const res = await fetch('/api/account/google/unbind', { method: 'POST' });
         if (!res.ok) throw new Error((await readApiError(res)) || 'Request failed');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     // ── User Manager ──
     async listUsers() {
         const res = await fetch('/api/users');
         if (!res.ok) throw new Error('Failed to fetch users');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async createUser(user) {
         const res = await fetch('/api/users', {
@@ -870,7 +894,7 @@ window.API = {
             body: JSON.stringify(user),
         });
         if (!res.ok) throw new Error((await readApiError(res)) || 'Failed to create user');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async updateUser(id, patch) {
         const res = await fetch(`/api/users/${encodeURIComponent(id)}`, {
@@ -879,19 +903,19 @@ window.API = {
             body: JSON.stringify(patch),
         });
         if (!res.ok) throw new Error((await readApiError(res)) || 'Failed to update user');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async deleteUser(id) {
         const res = await fetch(`/api/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
         if (!res.ok) throw new Error((await readApiError(res)) || 'Failed to delete user');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     // ── Version Manager ──
     async getVersion() {
         const res = await fetch('/api/version');
         if (!res.ok) throw new Error('Failed to get version info');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     exportBundleUrl() {
         return '/api/version/export';
@@ -905,7 +929,7 @@ window.API = {
     async getUpdatePreview() {
         const res = await fetch('/api/version/update/preview');
         if (!res.ok) throw new Error('Failed to get update preview');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     exportUpdateBundleUrl() {
         return '/api/version/update/export';
@@ -920,12 +944,12 @@ window.API = {
             const text = await readApiError(res);
             throw new Error('Update import failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async getGithubUpdateStatus() {
         const res = await fetch('/api/version/update/github');
         if (!res.ok) throw new Error('Failed to get GitHub update status');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async checkGithubUpdate() {
         const res = await fetch('/api/version/update/github/check', { method: 'POST' });
@@ -933,7 +957,7 @@ window.API = {
             const text = await readApiError(res);
             throw new Error('Update check failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async setGithubAutoUpdate(autoUpdate) {
         const res = await fetch('/api/version/update/github/settings', {
@@ -945,7 +969,7 @@ window.API = {
             const text = await readApiError(res);
             throw new Error('Auto-update setting failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async applyGithubUpdate() {
         const res = await fetch('/api/version/update/apply', { method: 'POST' });
@@ -953,7 +977,7 @@ window.API = {
             const text = await readApiError(res);
             throw new Error('GitHub update failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async getVersionUpdateLastFailure() {
         const res = await fetch('/api/version/update/last-failure');
@@ -961,7 +985,7 @@ window.API = {
             if (res.status === 401 || res.status === 403) return { failed: false };
             throw new Error('Failed to read last-failure marker');
         }
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async buildPlayerClientBundle() {
         const res = await fetch('/api/version/player-client-bundle/build', { method: 'POST' });
@@ -969,7 +993,7 @@ window.API = {
             const text = await readApiError(res);
             throw new Error('Player bundle build failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     playerClientBundleUrl() {
         return '/install/player-client-bundle.tar.gz';
@@ -989,7 +1013,7 @@ window.API = {
             const text = await readApiError(res);
             throw new Error('Server bundle build failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     serverBundleUrl() {
         return '/install/ripley-signage-server-bundle.tar.gz';
@@ -1013,12 +1037,12 @@ window.API = {
         const url = '/api/interactive/submissions' + (q.toString() ? '?' + q.toString() : '');
         const res = await fetch(url);
         if (!res.ok) throw new Error('Failed to fetch interactive submissions');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async getInteractiveSubmissionsStats() {
         const res = await fetch('/api/interactive/submissions/stats');
         if (!res.ok) throw new Error('Failed to fetch interactive submissions stats');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async getInteractiveSubmissionsCsvUrl(params = {}) {
         const q = new URLSearchParams();
@@ -1035,7 +1059,7 @@ window.API = {
             body: JSON.stringify(payload),
         });
         if (!res.ok) throw new Error('Failed to sync interactive submissions');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async deleteInteractiveSubmissions(ids) {
         const res = await fetch('/api/interactive/submissions', {
@@ -1044,7 +1068,7 @@ window.API = {
             body: JSON.stringify({ ids }),
         });
         if (!res.ok) throw new Error('Failed to delete interactive submissions');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     // Player-side submission. Sends client_id via headers so the server can
     // attribute the submission to the right interactive device even if the body
@@ -1063,14 +1087,14 @@ window.API = {
             const err = await readApiError(res);
             throw new Error(`Submit failed (${res.status}): ${err}`);
         }
-        return res.json();
+        return _readApiJsonBounded(res);
     },
 
     // ── System Time ──
     async getSystemTime() {
         const res = await fetch('/api/system/time');
         if (!res.ok) throw new Error('Failed to get system time');
-        return res.json();
+        return _readApiJsonBounded(res);
     },
     async setTimezone(tz) {
         const res = await fetch('/api/system/time/timezone', {
