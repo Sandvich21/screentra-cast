@@ -8677,15 +8677,23 @@ def stop_display_preview(ctx: dict, display_index: int) -> tuple[bool, str, dict
 
 
 def fetch_config(server: str, client_id: str, cache_dir: Path, display_index: int | None = None) -> bool:
+    token = _preview_token(cache_dir)
+    if not token:
+        print('config refresh skipped: client authentication token is unavailable', flush=True)
+        return False
     if display_index is None:
         url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/config'
         target = 'assigned-layout.json'
     else:
-        url = (server.rstrip() + '/api/clients/' + urllib.request.quote(client_id, safe='') +
+        url = (server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') +
                '/displays/' + str(display_index) + '/config')
         target = f'assigned-layout-display-{display_index}.json'
     try:
-        with urlopen_ripley(url, timeout=10, cache_dir=cache_dir) as r:
+        request = urllib.request.Request(
+            url,
+            headers={'X-SCREENTRA-CLIENT-TOKEN': token},
+        )
+        with urlopen_ripley(request, timeout=10, cache_dir=cache_dir) as r:
             data = json.loads(_read_bounded_response(r, MAX_SERVER_RESPONSE_BYTES))
         # The server display-config payload does not include local-admin theme.
         try:

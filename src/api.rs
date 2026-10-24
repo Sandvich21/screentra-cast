@@ -8111,8 +8111,11 @@ async fn get_client_addon_package(
 
 async fn get_client_config(
     State(repository): State<ClientRepository>,
+    Extension(auth): Extension<crate::auth::AuthState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    require_client_or_admin(&repository, &auth, &id, &headers).await?;
     let layout_id = repository
         .get_client_assignment(&id)
         .await
@@ -8740,6 +8743,27 @@ pub(crate) async fn require_client_command_token(
         return Err((StatusCode::UNAUTHORIZED, "invalid client authentication token".to_string()));
     }
     Ok(())
+}
+
+pub(crate) async fn require_client_or_admin(
+    repository: &ClientRepository,
+    auth: &crate::auth::AuthState,
+    client_id: &str,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    if let Some(token) = crate::auth::extract_token(headers) {
+        if let Some(payload) = auth.token_payload(&token).await {
+            let role = payload
+                .get("role")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if role == "admin" {
+                return Ok(());
+            }
+            return Err((StatusCode::FORBIDDEN, "admin authority required".to_string()));
+        }
+    }
+    require_client_command_token(repository, client_id, headers).await
 }
 
 async fn set_client_command(
@@ -9444,8 +9468,11 @@ async fn bulk_assign_displays(
 
 async fn get_client_display_config(
     State(repository): State<ClientRepository>,
+    Extension(auth): Extension<crate::auth::AuthState>,
+    headers: HeaderMap,
     Path((id, index)): Path<(String, i64)>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    require_client_or_admin(&repository, &auth, &id, &headers).await?;
     let (layout_id, orientation) = repository
         .get_display_config(&id, index)
         .await

@@ -48,7 +48,18 @@ class ServerSecurityAuditTests(unittest.TestCase):
             self.assertNotIn('format!("Target approval rejected:', block, marker)
             self.assertNotIn('format!("Target revocation rejected:', block, marker)
             self.assertNotIn('format!("Google Sheets push failed:', block, marker)
-    def test_public_upstream_errors_are_opaque(self):
+    def test_client_config_handlers_require_enrolled_token_or_admin(self):
+        source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
+        self.assertIn('pub(crate) async fn require_client_or_admin(', source)
+        for marker, end_marker in (
+            ('async fn get_client_config(', 'async fn get_client_update_check('),
+            ('async fn get_client_display_config(', 'struct DisplayCommandRequest'),
+        ):
+            start = source.index(marker)
+            end = source.index(end_marker, start)
+            block = source[start:end]
+            self.assertIn('require_client_or_admin(&repository, &auth, &id, &headers).await?', block, marker)
+
         source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
         for marker, end_marker, forbidden in (
             ('async fn github_update_check_handler(', 'async fn github_update_settings_handler(', ('map_err(|error| (StatusCode::BAD_GATEWAY, error))',)),

@@ -25,6 +25,15 @@ renderer = load_module(ROOT / 'player-client/scripts/screentra-player-renderer.p
 
 
 class PlayerClientAuditTests(unittest.TestCase):
+    def test_actor_config_fetch_sends_enrolled_client_token(self):
+        source = (ROOT / 'player-client/scripts/screentra-player-actor.py').read_text(encoding='utf-8')
+        start = source.index('def fetch_config(')
+        end = source.index('\ndef fetch_all_display_configs(', start)
+        block = source[start:end]
+        self.assertIn("token = _preview_token(cache_dir)", block)
+        self.assertIn("'X-SCREENTRA-CLIENT-TOKEN': token", block)
+        self.assertIn('urllib.request.Request(', block)
+
     def test_installer_source_reads_are_bounded(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'oversized-source'
