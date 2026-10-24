@@ -2,6 +2,38 @@
 // A layout with `interactive: true` collects widget submissions on the player runtime.
 // The editor is identical for both — the flag is the only difference.
 
+const MAX_EDITOR_CALENDAR_BYTES = 4 * 1024 * 1024;
+
+async function readEditorResponseTextBounded(response, maximumBytes) {
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    throw new Error('response body streaming is unavailable');
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      total += result.value.byteLength;
+      if (total > maximumBytes) {
+        await reader.cancel();
+        throw new Error('response exceeds its size limit');
+      }
+      chunks.push(result.value);
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(bytes);
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 const Editor = {
   // State
   layouts: [],
@@ -1304,7 +1336,7 @@ const Editor = {
       try {
         const response = await fetch(url);
         if (!response.ok) throw new Error('iCal request failed');
-        const raw = (await response.text()).replace(/\\r?\\n[ \\t]/g, '');
+        const raw = (await readEditorResponseTextBounded(response, MAX_EDITOR_CALENDAR_BYTES)).replace(/\\r?\\n[ \\t]/g, '');
         const events = [...raw.matchAll(/BEGIN:VEVENT([\\s\\S]*?)END:VEVENT/g)].map(m => {
           const block = m[1];
           const date = (block.match(/DTSTART(?:;[^:]+)?:([0-9]{8})/) || [])[1];
