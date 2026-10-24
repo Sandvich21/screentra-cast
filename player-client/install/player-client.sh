@@ -909,6 +909,8 @@ from __future__ import annotations
 
 
 import os
+import select
+import signal
 import shutil
 import time
 import ssl
@@ -994,11 +996,51 @@ def add(name: str, ok: bool, detail: str = "", required: bool = True) -> None:
     CHECKS.append({"name": name, "ok": ok, "detail": detail, "required": required})
 
 
+MAX_RUN_OUTPUT_BYTES = 4096
+MAX_RUN_SECONDS = 5
+
+
 def run(cmd: str) -> str:
+    process = None
     try:
-        return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+        process = subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        output = bytearray()
+        deadline = time.monotonic() + MAX_RUN_SECONDS
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or process.stdout is None:
+                raise subprocess.TimeoutExpired(cmd, MAX_RUN_SECONDS)
+            ready, _, _ = select.select([process.stdout], [], [], remaining)
+            if not ready:
+                raise subprocess.TimeoutExpired(cmd, MAX_RUN_SECONDS)
+            chunk = os.read(process.stdout.fileno(), MAX_RUN_OUTPUT_BYTES + 1 - len(output))
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > MAX_RUN_OUTPUT_BYTES:
+                raise ValueError("command output exceeded its limit")
+        process.wait(timeout=1)
+        return output.decode(errors="replace").strip()
     except Exception:
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except Exception:
+                process.kill()
+            try:
+                process.wait(timeout=1)
+            except Exception:
+                pass
         return ""
+    finally:
+        if process is not None and process.stdout is not None:
+            process.stdout.close()
 
 
 def find_browser() -> str | None:
@@ -1173,6 +1215,8 @@ import argparse
 import json
 import ssl
 import os
+import select
+import signal
 import socket
 import subprocess
 import sys
@@ -1289,11 +1333,51 @@ def _touch_binding():
         return None
 
 
+MAX_RUN_OUTPUT_BYTES = 4096
+MAX_RUN_SECONDS = 5
+
+
 def run(cmd):
+    process = None
     try:
-        return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+        process = subprocess.Popen(
+            cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        output = bytearray()
+        deadline = time.monotonic() + MAX_RUN_SECONDS
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or process.stdout is None:
+                raise subprocess.TimeoutExpired(cmd, MAX_RUN_SECONDS)
+            ready, _, _ = select.select([process.stdout], [], [], remaining)
+            if not ready:
+                raise subprocess.TimeoutExpired(cmd, MAX_RUN_SECONDS)
+            chunk = os.read(process.stdout.fileno(), MAX_RUN_OUTPUT_BYTES + 1 - len(output))
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > MAX_RUN_OUTPUT_BYTES:
+                raise ValueError("command output exceeded its limit")
+        process.wait(timeout=1)
+        return output.decode(errors="replace").strip()
     except Exception:
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except Exception:
+                process.kill()
+            try:
+                process.wait(timeout=1)
+            except Exception:
+                pass
         return ""
+    finally:
+        if process is not None and process.stdout is not None:
+            process.stdout.close()
 
 
 def read_mem():
@@ -3076,11 +3160,13 @@ def _udev_has_touchscreen_property(dev_path: str) -> bool:
     regardless of the device name.
     """
     try:
-        out = _sp.check_output(
+        returncode, output = _bounded_run(
             ['udevadm', 'info', '--query=property', '--name=' + dev_path],
-            stderr=_sp.DEVNULL, timeout=2, text=True,
+            timeout=2, stdout_max=8192, stderr_max=1024,
         )
-        for line in out.splitlines():
+        if returncode != 0:
+            return False
+        for line in output['stdout'].splitlines():
             if line.startswith('ID_INPUT_TOUCHSCREEN=1'):
                 return True
     except Exception:
@@ -3202,7 +3288,12 @@ def _lan_ip_for_admin() -> str | None:
     except Exception:
         pass
     try:
-        out = _sp.check_output(['hostname', '-I'], text=True, timeout=2).split()
+        returncode, output = _bounded_run(
+            ['hostname', '-I'], timeout=2, stdout_max=4096, stderr_max=1024,
+        )
+        if returncode != 0:
+            return ''
+        out = output['stdout'].split()
         for ip in out:
             if ip and not ip.startswith('127.') and ':' not in ip:
                 return ip
@@ -3532,8 +3623,12 @@ def _sysfs_outputs() -> list[dict]:
 def _wlr_outputs() -> list[dict]:
     env = {**os.environ, 'XDG_RUNTIME_DIR': os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'), 'WAYLAND_DISPLAY': os.environ.get('WAYLAND_DISPLAY', 'wayland-0')}
     try:
-        out = _sp.check_output(['wlr-randr', '--json'], text=True, stderr=_sp.DEVNULL, timeout=3, env=env)
-        data = json.loads(out)
+        returncode, output = _bounded_run(
+            ['wlr-randr', '--json'], timeout=3, stdout_max=MAX_JSON_FILE_BYTES, stderr_max=1024, env=env,
+        )
+        if returncode != 0:
+            return []
+        data = json.loads(output['stdout'])
         return [{'name': o.get('name'), 'description': o.get('description'), 'enabled': bool(o.get('enabled')), 'position': o.get('position') or {}, 'current_mode': next((m for m in o.get('modes', []) if m.get('current')), None)} for o in data]
     except Exception:
         return _sysfs_outputs()
@@ -5789,7 +5884,11 @@ def apply_display_count(cache_dir: Path, max_displays) -> tuple[bool, str, dict]
         env = os.environ.copy()
         env.setdefault('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
         env.setdefault('WAYLAND_DISPLAY', 'wayland-0')
-        out = subprocess.check_output(['wlr-randr', '--json'], text=True, stderr=subprocess.DEVNULL, timeout=3, env=env)
+        returncode, out, _err = _run_list(
+            ['wlr-randr', '--json'], timeout=3, env=env,
+        )
+        if returncode != 0:
+            raise RuntimeError('wlr-randr failed')
         data = json.loads(out)
         outputs = [o for o in data if o.get('name')]
         outputs.sort(key=lambda o: o.get('name',''))
