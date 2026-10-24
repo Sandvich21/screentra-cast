@@ -830,7 +830,10 @@ async fn main() {
     // and embedded webviews on player clients) - start in background
     let secondary_addr_str = std::env::var("SIGNAGE_SECONDARY_LISTEN_ADDR")
         .unwrap_or_else(|_| "[::]:3005".to_string());
-    let addr_3005: std::net::SocketAddr = secondary_addr_str.parse().expect("invalid SIGNAGE_SECONDARY_LISTEN_ADDR");
+    let addr_3005 = parse_listen_addr(&secondary_addr_str).unwrap_or_else(|error| {
+        eprintln!("FATAL: {error}");
+        std::process::exit(2);
+    });
     let rustls_config_3005 = rustls_config.clone();
     let router_3005 = router(state_for_3005);
     if !secondary_tls {
