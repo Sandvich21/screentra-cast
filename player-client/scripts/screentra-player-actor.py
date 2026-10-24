@@ -1561,7 +1561,14 @@ def fetch_all_display_configs(server: str, client_id: str, cache_dir: Path) -> b
     """Refresh all known display layout caches after a scene/multi-display publish."""
     try:
         url = server.rstrip('/') + '/api/clients/' + urllib.request.quote(client_id, safe='') + '/displays'
-        with urlopen_ripley(url, timeout=10, cache_dir=cache_dir) as r:
+        token = _preview_token(cache_dir)
+        if not token:
+            raise RuntimeError('client authentication token is unavailable')
+        request = urllib.request.Request(
+            url,
+            headers={'X-SCREENTRA-CLIENT-TOKEN': token},
+        )
+        with urlopen_ripley(request, timeout=10, cache_dir=cache_dir) as r:
             displays = json.loads(_read_bounded_response(r, MAX_SERVER_RESPONSE_BYTES))
         ok = True
         seen = set()

@@ -129,12 +129,6 @@ fn is_open_path(path: &str, method: &str) -> bool {
         if path.starts_with("/api/clients/") && path.ends_with("/admin-users") {
             return true;
         }
-        if path.starts_with("/api/clients/")
-            && path.ends_with("/displays")
-            && !path.contains("/displays/bulk-assign")
-        {
-            return true;
-        }
         if let Some(rest) = path.strip_prefix("/api/clients/") {
             // /api/clients/{id}/displays/{index}/config — display-scoped config fetches
             let parts: Vec<&str> = rest.split('/').collect();
@@ -532,6 +526,7 @@ mod authorization_tests {
         assert!(!is_open_path("/api/layouts/layout-1/render", "GET"));
         assert!(is_open_path("/api/widget-presets/preset-1", "GET"));
         assert!(!is_open_path("/api/widget-presets/preset-1/export", "GET"));
+        assert!(!is_open_path("/api/clients/client-1/displays", "GET"));
         assert!(is_open_path("/install/player-client.sh", "GET"));
         assert!(is_open_path("/install/player-client.sh.sig", "GET"));
         assert!(is_open_path("/install/player-client-bundle.tar.gz", "GET"));

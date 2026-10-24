@@ -17,6 +17,35 @@ SPEC.loader.exec_module(actor)
 
 
 class DisplaySettingsActorTests(unittest.TestCase):
+    def test_multi_display_config_fetch_uses_client_token(self):
+        calls = []
+        original_urlopen = actor.urlopen_ripley
+        original_read = actor._read_bounded_response
+        original_fetch_config = actor.fetch_config
+        class Response:
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / 'cache'
+            cache_dir.mkdir()
+            token = 't' * 32
+            (cache_dir.parent / 'client-auth-token').write_text(token)
+            actor.urlopen_ripley = lambda request, **kwargs: (calls.append(request) or Response())
+            actor._read_bounded_response = lambda response, maximum: '[{"display_index": 0}]'
+            actor.fetch_config = lambda *args, **kwargs: True
+            try:
+                self.assertTrue(actor.fetch_all_display_configs('https://server.example', 'client-a', cache_dir))
+            finally:
+                actor.urlopen_ripley = original_urlopen
+                actor._read_bounded_response = original_read
+                actor.fetch_config = original_fetch_config
+        self.assertEqual(len(calls), 1)
+        headers = {key.lower(): value for key, value in calls[0].header_items()}
+        self.assertEqual(headers.get('x-screentra-client-token'), token)
+
     def test_display_power_uses_wayland_dpms_for_selected_connector(self):
         calls = []
         original_connector = actor._preview_connector
