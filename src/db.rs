@@ -3245,7 +3245,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         let day_bit = 1i32 << day_of_week;
         let previous_day_bit = 1i32 << ((day_of_week + 6) % 7);
         let mut stmt = conn
-            .prepare("SELECT id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, display_name, control_method, display_index, brightness, contrast, end_action FROM schedules WHERE (start_time <= end_time AND (day_of_week = -1 OR (day_of_week & ?1) != 0) AND start_time <= ?3 AND end_time >= ?3) OR (start_time > end_time AND (((day_of_week = -1 OR (day_of_week & ?1) != 0) AND start_time <= ?3) OR ((day_of_week = -1 OR (day_of_week & ?2) != 0) AND end_time >= ?3)))")
+            .prepare("SELECT id, display, layout_id, day_of_week, start_time, end_time, created_at, layout_set_id, action, target_client, power_state, display_name, control_method, display_index, brightness, contrast, end_action FROM schedules WHERE (start_time <= end_time AND (day_of_week = -1 OR (day_of_week & ?1) != 0) AND start_time <= ?3 AND end_time >= ?3) OR (start_time > end_time AND (((day_of_week = -1 OR (day_of_week & ?1) != 0) AND start_time <= ?3) OR ((day_of_week = -1 OR (day_of_week & ?2) != 0) AND end_time >= ?3))) LIMIT 10000")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([day_bit.to_string(), previous_day_bit.to_string(), current_time.to_string()], |row| {

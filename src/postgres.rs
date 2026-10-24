@@ -1626,7 +1626,7 @@ impl PostgresStore {
         let previous_day_bit = 1i32 << ((day_of_week + 6) % 7);
         self.client
             .query(
-                "SELECT id,display,layout_id,day_of_week,start_time,end_time,created_at,layout_set_id,action,target_client,power_state,updated_at,display_name,control_method,display_index,brightness,contrast,end_action FROM schedules WHERE (start_time <= end_time AND (day_of_week=-1 OR (day_of_week & $1) <> 0) AND start_time <= $3 AND end_time >= $3) OR (start_time > end_time AND (((day_of_week=-1 OR (day_of_week & $1) <> 0) AND start_time <= $3) OR ((day_of_week=-1 OR (day_of_week & $2) <> 0) AND end_time >= $3))) ORDER BY start_time,id",
+                "SELECT id,display,layout_id,day_of_week,start_time,end_time,created_at,layout_set_id,action,target_client,power_state,updated_at,display_name,control_method,display_index,brightness,contrast,end_action FROM schedules WHERE (start_time <= end_time AND (day_of_week=-1 OR (day_of_week & $1) <> 0) AND start_time <= $3 AND end_time >= $3) OR (start_time > end_time AND (((day_of_week=-1 OR (day_of_week & $1) <> 0) AND start_time <= $3) OR ((day_of_week=-1 OR (day_of_week & $2) <> 0) AND end_time >= $3))) ORDER BY start_time,id LIMIT 10000",
                 &[&day_bit, &previous_day_bit, &current_time],
             )
             .await
