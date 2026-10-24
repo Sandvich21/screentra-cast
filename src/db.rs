@@ -2966,7 +2966,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
     pub fn list_backups(&self) -> Result<Vec<Backup>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, created_at, file_path, size_bytes FROM backups ORDER BY created_at DESC")
+            .prepare("SELECT id, name, created_at, file_path, size_bytes FROM backups ORDER BY created_at DESC LIMIT 4096")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
@@ -5211,6 +5211,28 @@ mod tests {
 
         let templates = db.list_templates().expect("list templates");
         assert_eq!(templates.len(), 4_096);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn list_backups_is_bounded() {
+        let path = unique_temp_path("backup-list-bound");
+        let db = Database::open(&path).expect("open db");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            let tx = conn.unchecked_transaction().expect("begin transaction");
+            for index in 0..4_097 {
+                tx.execute(
+                    "INSERT INTO backups (id, name, created_at, file_path, size_bytes) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![format!("backup-{index:04}"), "bounded backup", "2026-10-01T00:00:00Z", "/var/lib/screentra/backups/placeholder", 0i64],
+                )
+                .expect("insert backup");
+            }
+            tx.commit().expect("commit backups");
+        }
+
+        let backups = db.list_backups().expect("list backups");
+        assert_eq!(backups.len(), 4_096);
         std::fs::remove_file(&path).ok();
     }
 }

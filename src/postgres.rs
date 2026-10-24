@@ -205,7 +205,7 @@ impl PostgresStore {
         let rows = self
             .client
             .query(
-                "SELECT id, name, created_at, file_path, size_bytes FROM backups ORDER BY created_at DESC",
+                "SELECT id, name, created_at, file_path, size_bytes FROM backups ORDER BY created_at DESC LIMIT 4096",
                 &[],
             )
             .await
