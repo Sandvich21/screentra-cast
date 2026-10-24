@@ -7374,7 +7374,7 @@ async fn create_initial_admin(
             if e.to_ascii_lowercase().contains("unique") {
                 (StatusCode::CONFLICT, "Username already exists".to_string())
             } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e)
+                internal_server_error()
             }
         })?;
     if !created {
