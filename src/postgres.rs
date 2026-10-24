@@ -1342,7 +1342,7 @@ impl PostgresStore {
     }
 
     pub async fn get_display_state(&self) -> Result<DisplayState, String> {
-        self.client.query("SELECT display,layout_id FROM display_state ORDER BY display", &[]).await.map(|rows| DisplayState { assignments: rows.into_iter().map(|row| DisplayAssignment { display: row.get(0), layout_id: row.get(1) }).collect() }).map_err(|error| format!("get display state: {error}"))
+        self.client.query("SELECT display,layout_id FROM display_state ORDER BY display LIMIT 4096", &[]).await.map(|rows| DisplayState { assignments: rows.into_iter().map(|row| DisplayAssignment { display: row.get(0), layout_id: row.get(1) }).collect() }).map_err(|error| format!("get display state: {error}"))
     }
 
     pub async fn get_display_assignment(&self, display: &str) -> Result<Option<DisplayAssignment>, String> {
@@ -1454,7 +1454,7 @@ impl PostgresStore {
     }
 
     pub async fn list_table_names(&self) -> Result<Vec<String>, String> {
-        self.client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name", &[]).await.map(|rows| rows.into_iter().map(|row| row.get(0)).collect()).map_err(|error| format!("list table names: {error}"))
+        self.client.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' ORDER BY table_name LIMIT 4096", &[]).await.map(|rows| rows.into_iter().map(|row| row.get(0)).collect()).map_err(|error| format!("list table names: {error}"))
     }
 
     pub async fn query_table_rows(&self, table: &str, limit: u32, offset: u32) -> Result<TableQueryResult, String> {
@@ -1527,10 +1527,12 @@ impl PostgresStore {
     }
 
     pub async fn list_interactive_submissions(&self, limit: i64, client_filter: Option<&str>, page_filter: Option<&str>, status_filter: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
-        let mut rows = self.interactive_submission_rows(None).await?;
-        rows.retain(|row| client_filter.map(|value| row["client_id"] == value).unwrap_or(true) && page_filter.map(|value| row["interactive_layout_id"] == value).unwrap_or(true) && status_filter.map(|value| row["google_sync_status"] == value).unwrap_or(true));
-        rows.truncate(limit.max(0) as usize);
-        Ok(rows)
+        let limit = limit.clamp(0, 10_000);
+        let rows = self.client.query(
+            "SELECT id,client_id,client_address,interactive_layout_id,interactive_layout_name,widget_id,widget_type,widget_label,payload_json,collected_at,received_at,google_sync_status,google_sync_message,google_synced_at,google_sheet_id FROM interactive_submissions WHERE ($1::text IS NULL OR client_id=$1) AND ($2::text IS NULL OR interactive_layout_id=$2) AND ($3::text IS NULL OR google_sync_status=$3) ORDER BY id DESC LIMIT $4",
+            &[&client_filter, &page_filter, &status_filter, &limit],
+        ).await.map_err(|error| format!("list interactive submissions: {error}"))?;
+        Ok(rows.into_iter().map(|row| serde_json::json!({"id": row.get::<_, i64>(0), "client_id": row.get::<_, String>(1), "client_address": row.get::<_, Option<String>>(2), "interactive_layout_id": row.get::<_, Option<String>>(3), "interactive_layout_name": row.get::<_, Option<String>>(4), "widget_id": row.get::<_, String>(5), "widget_type": row.get::<_, String>(6), "widget_label": row.get::<_, Option<String>>(7), "payload_json": row.get::<_, String>(8), "collected_at": row.get::<_, String>(9), "received_at": row.get::<_, String>(10), "google_sync_status": row.get::<_, String>(11), "google_sync_message": row.get::<_, Option<String>>(12), "google_synced_at": row.get::<_, Option<String>>(13), "google_sheet_id": row.get::<_, Option<String>>(14)})).collect())
     }
 
     pub async fn get_interactive_submission(&self, id: i64) -> Result<Option<serde_json::Value>, String> {
@@ -1719,7 +1721,7 @@ impl PostgresStore {
         Ok(())
     }
     pub async fn list_display_overrides(&self) -> Result<std::collections::HashMap<String, (u32, u32)>, String> {
-        self.client.query("SELECT display,width,height FROM display_overrides", &[]).await.map(|rows| rows.into_iter().map(|row| (row.get(0), (row.get::<_, i32>(1) as u32, row.get::<_, i32>(2) as u32))).collect()).map_err(|error| format!("list display overrides: {error}"))
+        self.client.query("SELECT display,width,height FROM display_overrides LIMIT 4096", &[]).await.map(|rows| rows.into_iter().map(|row| (row.get(0), (row.get::<_, i32>(1) as u32, row.get::<_, i32>(2) as u32))).collect()).map_err(|error| format!("list display overrides: {error}"))
     }
 
     pub async fn get_display_overrides(&self) -> Result<std::collections::HashMap<String, (u32, u32)>, String> {
@@ -1831,7 +1833,7 @@ impl PostgresStore {
     pub async fn get_layout_set(&self, id: &str) -> Result<Option<LayoutSetWithItems>, String> {
         let row = self.client.query_opt("SELECT id,name,shuffle,dwell_secs,created_at,updated_at FROM layout_sets WHERE id=$1", &[&id]).await.map_err(|error| format!("get layout set: {error}"))?;
         let Some(row) = row else { return Ok(None); };
-        let entries = self.client.query("SELECT id,layout_id,order_index,interval_secs FROM layout_set_entries WHERE layout_set_id=$1 ORDER BY order_index", &[&id]).await.map_err(|error| format!("get layout set entries: {error}"))?;
+        let entries = self.client.query("SELECT id,layout_id,order_index,interval_secs FROM layout_set_entries WHERE layout_set_id=$1 ORDER BY order_index LIMIT 4096", &[&id]).await.map_err(|error| format!("get layout set entries: {error}"))?;
         Ok(Some(LayoutSetWithItems { id: row.get(0), name: row.get(1), shuffle: row.get(2), dwell_secs: row.get::<_, i32>(3) as u32, items: entries.into_iter().map(|entry| LayoutSetEntry { id: entry.get(0), layout_set_id: id.to_string(), layout_id: entry.get(1), position: entry.get::<_, i32>(2) as u32, interval_secs: entry.get::<_, Option<i32>>(3).map(|value| value as u32), transition: None }).collect(), created_at: row.get(4), updated_at: row.get(5) }))
     }
 
@@ -2039,7 +2041,7 @@ impl PostgresStore {
         Ok(())
     }
     async fn load_layout_widgets(&self, layout_id: &str) -> Result<Vec<crate::models::Widget>, String> {
-        let rows = self.client.query("SELECT id, widget_type, x, y, w, h, z, props FROM widgets WHERE layout_id=$1 ORDER BY z ASC, id ASC", &[&layout_id]).await.map_err(|error| format!("load layout widgets: {error}"))?;
+        let rows = self.client.query("SELECT id, widget_type, x, y, w, h, z, props FROM widgets WHERE layout_id=$1 ORDER BY z ASC, id ASC LIMIT 10000", &[&layout_id]).await.map_err(|error| format!("load layout widgets: {error}"))?;
         rows.into_iter().map(|row| {
             let widget_type: String = row.get(1);
             let props: serde_json::Value = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(7)).unwrap_or(serde_json::Value::Object(Default::default()));
@@ -2707,7 +2709,7 @@ impl PostgresStore {
         let rows = self
             .client
             .query(
-                "SELECT username, display_name, role FROM users WHERE active=true AND role IN ('admin','layout-manager') ORDER BY role ASC, username ASC",
+                "SELECT username, display_name, role FROM users WHERE active=true AND role IN ('admin','layout-manager') ORDER BY role ASC, username ASC LIMIT 10000",
                 &[],
             )
             .await

@@ -9,6 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::{sync::Mutex, time::Duration};
 
 const MAX_TABLE_ROWS: u32 = 10_000;
+const MAX_INTERACTIVE_SUBMISSIONS: i64 = 10_000;
 
 /// Rebuild the `schedules` table so that `layout_id` is nullable.
 /// SQLite has no `ALTER TABLE ... DROP NOT NULL`, so we:
@@ -1110,7 +1111,7 @@ impl Database {
     pub fn list_table_names(&self) -> Result<Vec<String>, String> {
         let conn = self.conn()?;
         let mut stmt = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 4096")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| row.get(0))
@@ -1317,7 +1318,7 @@ impl Database {
             return Ok(None);
         };
         let mut stmt = conn
-            .prepare("SELECT username, display_name, role FROM users WHERE active=1 AND role IN ('admin','layout-manager') ORDER BY role ASC, username ASC")
+            .prepare("SELECT username, display_name, role FROM users WHERE active=1 AND role IN ('admin','layout-manager') ORDER BY role ASC, username ASC LIMIT 10000")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
@@ -2330,7 +2331,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         layout_id: &str,
     ) -> Result<Vec<Widget>, String> {
         let mut stmt = conn
-            .prepare("SELECT id, widget_type, x, y, w, h, z, props FROM widgets WHERE layout_id = ?1 ORDER BY z ASC")
+            .prepare("SELECT id, widget_type, x, y, w, h, z, props FROM widgets WHERE layout_id = ?1 ORDER BY z ASC LIMIT 10000")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([layout_id], |row| {
@@ -2360,7 +2361,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
     pub fn get_display_state(&self) -> Result<DisplayState, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT display, layout_id FROM display_state")
+            .prepare("SELECT display, layout_id FROM display_state LIMIT 4096")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
@@ -2434,7 +2435,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
     ) -> Result<std::collections::HashMap<String, (u32, u32)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT display, width, height FROM display_overrides")
+            .prepare("SELECT display, width, height FROM display_overrides LIMIT 4096")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
@@ -3325,6 +3326,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
         status_filter: Option<&str>,
     ) -> Result<Vec<serde_json::Value>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let limit = limit.clamp(0, MAX_INTERACTIVE_SUBMISSIONS);
         let mut sql = String::from(
             "SELECT id, client_id, client_address, interactive_layout_id, interactive_layout_name, widget_id, widget_type, widget_label, payload_json, collected_at, received_at, google_sync_status, google_sync_message, google_synced_at, google_sheet_id FROM interactive_submissions WHERE 1=1",
         );
@@ -3806,7 +3808,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
 
         // Get entries
         let mut stmt = conn
-            .prepare("SELECT id, layout_id, order_index, interval_secs FROM layout_set_entries WHERE layout_set_id = ?1 ORDER BY order_index")
+            .prepare("SELECT id, layout_id, order_index, interval_secs FROM layout_set_entries WHERE layout_set_id = ?1 ORDER BY order_index LIMIT 4096")
             .map_err(|e| e.to_string())?;
         let mut entries = stmt.query([id]).map_err(|e| e.to_string())?;
         let mut items = Vec::new();
@@ -5345,6 +5347,60 @@ mod tests {
 
         let export = db.export_table_rows("refresh_state").expect("export rows");
         assert_eq!(export.rows.len(), 10_000);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn list_client_admin_users_is_bounded() {
+        let path = unique_temp_path("client-admin-users-bound");
+        let db = Database::open(&path).expect("open db");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            let tx = conn.unchecked_transaction().expect("begin transaction");
+            tx.execute(
+                "INSERT INTO clients (id, name, address, role, enrolled, last_seen) VALUES ('admin-list-client', 'client', '127.0.0.1', 'player', 1, '2026-10-01T00:00:00Z')",
+                [],
+            )
+            .expect("insert client");
+            for index in 0..10_001 {
+                tx.execute(
+                    "INSERT INTO users (id, username, display_name, role, password_hash, active, created_at, updated_at) VALUES (?1, ?2, ?3, 'admin', 'hash', 1, '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z')",
+                    rusqlite::params![format!("admin-{index:05}"), format!("admin-{index:05}"), "Admin"],
+                )
+                .expect("insert admin user");
+            }
+            tx.commit().expect("commit admin users");
+        }
+
+        let (_, users) = db
+            .list_client_admin_users("admin-list-client")
+            .expect("list client admin users")
+            .expect("client exists");
+        assert_eq!(users.len(), 10_000);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn list_interactive_submissions_is_bounded() {
+        let path = unique_temp_path("interactive-submissions-bound");
+        let db = Database::open(&path).expect("open db");
+        {
+            let conn = db.conn.lock().expect("lock db");
+            let tx = conn.unchecked_transaction().expect("begin transaction");
+            for index in 0..10_001 {
+                tx.execute(
+                    "INSERT INTO interactive_submissions (client_id, widget_id, widget_type, payload_json, collected_at, received_at) VALUES (?1, ?2, 'button', '{}', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z')",
+                    rusqlite::params!["bounded-client", format!("widget-{index:05}")],
+                )
+                .expect("insert interactive submission");
+            }
+            tx.commit().expect("commit interactive submissions");
+        }
+
+        let rows = db
+            .list_interactive_submissions(i64::MAX, None, None, None)
+            .expect("list interactive submissions");
+        assert_eq!(rows.len(), 10_000);
         std::fs::remove_file(&path).ok();
     }
 }
