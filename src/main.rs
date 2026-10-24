@@ -35,6 +35,12 @@ use std::sync::Arc;
 
 const MAX_HOSTNAME_BYTES: usize = 4096;
 
+fn parse_listen_addr(value: &str) -> Result<std::net::SocketAddr, String> {
+    value
+        .parse()
+        .map_err(|error| format!("invalid SIGNAGE_LISTEN_ADDR: {error}"))
+}
+
 fn read_bounded_hostname() -> Result<String, std::io::Error> {
     let file = std::fs::File::open("/etc/hostname")?;
     let mut bytes = Vec::new();
@@ -678,7 +684,10 @@ async fn main() {
     let state_for_3005 = runtime_state.clone();
     let app_router = router(runtime_state);
     let addr_str = std::env::var("SIGNAGE_LISTEN_ADDR").unwrap_or_else(|_| "[::]:3000".to_string());
-    let addr: std::net::SocketAddr = addr_str.parse().expect("invalid SIGNAGE_LISTEN_ADDR");
+    let addr = parse_listen_addr(&addr_str).unwrap_or_else(|error| {
+        eprintln!("FATAL: {error}");
+        std::process::exit(2);
+    });
     let tls_disabled = std::env::var("SIGNAGE_TLS").as_deref() == Ok("0");
     // During a client migration, keep the legacy main HTTP listener while
     // exposing HTTPS on the secondary listener. Fresh installs leave this
@@ -967,6 +976,16 @@ pub(crate) async fn run_maintenance_loop(
                 Err(e) => log::warn!("Maintenance: news refresh failed: {e}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::parse_listen_addr;
+
+    #[test]
+    fn invalid_listen_addr_is_rejected_without_panicking() {
+        assert!(std::panic::catch_unwind(|| parse_listen_addr("not-a-socket")).is_ok());
     }
 }
 
