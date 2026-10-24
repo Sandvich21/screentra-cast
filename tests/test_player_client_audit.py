@@ -157,6 +157,16 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn('Set Display Size: ${esc(connector)}', source)
         self.assertNotIn('Set Display Size: ${connector}', source)
 
+    def test_installer_examples_do_not_use_private_deployment_addresses(self):
+        for path in (
+            ROOT / 'player-client/install/player-client.sh',
+            ROOT / 'player-client/static/install/player-client.sh',
+            ROOT / 'static/install/player-client.sh',
+        ):
+            source = path.read_text(encoding='utf-8')
+            self.assertNotIn('10.1.1.76', source)
+            self.assertIn('https://server.example:3000', source)
+
     def test_served_player_installer_matches_generated_installer(self):
         generated = (ROOT / 'player-client/static/install/player-client.sh').read_bytes()
         served = (ROOT / 'static/install/player-client.sh').read_bytes()

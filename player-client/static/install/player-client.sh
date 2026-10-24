@@ -288,7 +288,7 @@ if [ -z "$SERVER_URL" ]; then
         # Interactive terminal (real TTY or 'ssh -t'): prompt the user.
         echo "Screentra player installer — server URL required."
         echo
-        echo "Enter the Screentra Cast server URL (e.g. https://10.1.1.76:3000):"
+        echo "Enter the Screentra Cast server URL (e.g. https://server.example:3000):"
         read -r SERVER_URL < /dev/tty || SERVER_URL=""
         while [ -z "$SERVER_URL" ]; do
             echo "Server URL cannot be empty. Enter the Screentra Cast server URL:"
