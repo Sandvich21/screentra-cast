@@ -1411,8 +1411,18 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             get(download_client_diagnostics),
         )
         .route("/api/clients/{id}/nudge", post(nudge_client))
-        .route("/api/clients/virtual", post(create_virtual_client))
-        .route("/api/clients/{id}/virtual", get(get_virtual_client).patch(update_virtual_client).put(set_virtual_client_layout).delete(delete_virtual_client))
+        .route(
+            "/api/clients/virtual",
+            post(create_virtual_client).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/api/clients/{id}/virtual",
+            get(get_virtual_client)
+                .patch(update_virtual_client)
+                .put(set_virtual_client_layout)
+                .delete(delete_virtual_client)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/api/clients/{id}", delete(delete_client))
         .route(
             "/api/clients/{id}/history",
@@ -8049,9 +8059,7 @@ async fn adopt_client(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
-    if id.trim().is_empty() || id.len() > 200 {
-        return Err((StatusCode::BAD_REQUEST, "Invalid client id".to_string()));
-    }
+    validate_client_identifier(&id)?;
     let changed = repository
         .set_client_enrolled(&id)
         .await
@@ -10209,6 +10217,7 @@ async fn render_layout(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<LayoutRender>, (StatusCode, String)> {
+    validate_optional_layout_id(Some(&id))?;
     let layout = repository
         .get_layout(&id)
         .await
@@ -10850,6 +10859,9 @@ mod tests {
         assert!(validate_client_identifier("client-1").is_ok());
         assert!(validate_client_identifier("").is_err());
         assert!(validate_client_identifier(&"x".repeat(129)).is_err());
+        assert!(validate_virtual_client_name("Lobby display").is_ok());
+        assert!(validate_virtual_client_name("").is_err());
+        assert!(validate_virtual_client_name(&"x".repeat(257)).is_err());
     }
 
     #[test]
@@ -14811,6 +14823,13 @@ async fn push_submissions_to_google_sheets(
 
 // ─── Virtual client handlers ────────────────────────────────────────────────
 
+fn validate_virtual_client_name(name: &str) -> Result<(), (StatusCode, String)> {
+    if name.trim().is_empty() || name.len() > 256 || name.chars().any(|character| character.is_control()) {
+        return Err((StatusCode::BAD_REQUEST, "invalid virtual client name".to_string()));
+    }
+    Ok(())
+}
+
 async fn create_virtual_client(
     State(repository): State<ClientRepository>,
     Json(req): Json<CreateVirtualClientRequest>,
@@ -14819,6 +14838,7 @@ async fn create_virtual_client(
     let name = req
         .name
         .unwrap_or_else(|| "Virtual Client".to_string());
+    validate_virtual_client_name(&name)?;
     repository
         .create_virtual_client(&id, &name)
         .await
@@ -14831,6 +14851,7 @@ async fn get_virtual_client(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<VirtualClientResponse>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     let (name, is_virtual) = repository
         .get_virtual_client(&id)
         .await
@@ -14852,6 +14873,7 @@ async fn update_virtual_client(
     Path(id): Path<String>,
     Json(req): Json<CreateVirtualClientRequest>,
 ) -> Result<AxumJson<VirtualClientResponse>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     let is_virtual = repository
         .is_virtual_client(&id)
         .await
@@ -14862,6 +14884,7 @@ async fn update_virtual_client(
     let name = req
         .name
         .unwrap_or_else(|| "Virtual Client".to_string());
+    validate_virtual_client_name(&name)?;
     repository
         .update_virtual_client_name(&id, &name)
         .await
@@ -14879,6 +14902,8 @@ async fn set_virtual_client_layout(
     Path(id): Path<String>,
     Json(req): Json<SetVirtualClientLayoutRequest>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
+    validate_optional_layout_id(req.layout_id.as_deref())?;
     let is_virtual = repository
         .is_virtual_client(&id)
         .await
