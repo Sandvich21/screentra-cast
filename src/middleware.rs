@@ -166,10 +166,8 @@ fn is_open_path(path: &str, method: &str) -> bool {
                 return true;
             }
         }
-        if is_client_resource_path(path, &["virtual"]) {
-            return true;
-        }
-        // Player heartbeat reads (no such endpoint yet; placeholder).
+        // Virtual-client metadata is dashboard state and remains protected by
+        // the normal viewer capability; the player only needs display config.
 
         // Player command poll (read-only — clients pull to see if they have
         // a pending nudge/layout-assignment/etc. The handler still requires
@@ -638,6 +636,7 @@ mod authorization_tests {
         assert!(is_open_path("/api/system/time", "GET"));
         assert!(is_open_path("/api/display-state/display-1", "GET"));
         assert!(!is_open_path("/api/display-state/display-1/extra", "GET"));
+        assert!(!is_open_path("/api/clients/example/virtual", "GET"));
         assert!(!is_open_path("/api/clients/virtual", "POST"));
     }
 
