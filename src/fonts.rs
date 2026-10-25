@@ -763,6 +763,8 @@ fn is_allowed_google_font_asset_url(value: &str) -> bool {
         && !value.chars().any(|character| character.is_control())
 }
 
+/// Build the on-disk path for a specific subset's woff2.
+/// <preview_cache_dir>/<id>-<weight>-<subset>.woff2
 pub fn preview_subset_path(
     family_id: &str,
     weight: u32,
@@ -1871,6 +1873,20 @@ mod tests {
     // Preview cache parser tests
     // ============================================================
 
+    #[test]
+    fn google_font_asset_urls_are_restricted_to_cdn() {
+        assert!(is_allowed_google_font_asset_url(
+            "https://fonts.gstatic.com/s/roboto/v1/foo.woff2"
+        ));
+        assert!(!is_allowed_google_font_asset_url("http://fonts.gstatic.com/foo.woff2"));
+        assert!(!is_allowed_google_font_asset_url("https://example.com/foo.woff2"));
+        assert!(!is_allowed_google_font_asset_url(
+            "https://user:password@fonts.gstatic.com/foo.woff2"
+        ));
+        assert!(!is_allowed_google_font_asset_url(
+            "https://fonts.gstatic.com/foo.woff2\n"
+        ));
+    }
     #[test]
     fn extract_first_woff2_finds_url() {
         let css = "src: url(https://fonts.gstatic.com/s/roboto/v1/foo.woff2) format('woff2');";
