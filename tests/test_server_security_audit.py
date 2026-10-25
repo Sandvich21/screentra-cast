@@ -99,6 +99,15 @@ class ServerSecurityAuditTests(unittest.TestCase):
         self.assertNotIn('format!("multipart:', source)
         self.assertIn('"Invalid multipart request"', source)
 
+    def test_news_refresh_does_not_return_upstream_or_feed_errors(self):
+        source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
+        start = source.index('async fn post_news_refresh(')
+        end = source.index('// ── Template handlers', start)
+        block = source[start:end]
+        self.assertIn('"feed refresh failed"', block)
+        self.assertNotIn('"url": feed.url', block)
+        self.assertNotIn('"error": error', block)
+
 
 if __name__ == '__main__':
     unittest.main()

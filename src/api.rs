@@ -4120,14 +4120,16 @@ async fn post_news_refresh(
                     }
                     Err(error) => {
                         errors += 1;
-                        error_details.push(serde_json::json!({ "url": feed.url, "error": error }));
+                        log::error!("news feed refresh persistence failed for configured feed: {error}");
+                        error_details.push(serde_json::json!({ "error": "feed refresh failed" }));
                     }
                 }
             }
             Err(error) => {
                 errors += 1;
                 let _ = repository.record_news_feed_error(&feed.url, &error).await;
-                error_details.push(serde_json::json!({ "url": feed.url, "error": error }));
+                log::error!("news feed refresh failed for configured feed: {error}");
+                error_details.push(serde_json::json!({ "error": "feed refresh failed" }));
             }
         }
     }
