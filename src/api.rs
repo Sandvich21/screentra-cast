@@ -1398,11 +1398,17 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         )
         .route(
             "/api/clients/{id}/touch-binding",
-            post(set_client_touch_binding),
+            post(set_client_touch_binding).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route("/api/clients/{id}/admin-users", get(get_client_admin_users))
-        .route("/api/clients/assign-bulk", post(bulk_assign_clients))
-        .route("/api/clients/command-bulk", post(bulk_command_clients))
+        .route(
+            "/api/clients/assign-bulk",
+            post(bulk_assign_clients).layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
+        .route(
+            "/api/clients/command-bulk",
+            post(bulk_command_clients).layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
         .route(
             "/api/clients/diagnostics",
             get(list_client_diagnostics)
@@ -9272,6 +9278,9 @@ fn validate_bulk_command_client_ids(client_ids: &[String]) -> Result<(), (Status
             "too many client ids".to_string(),
         ));
     }
+    for client_id in client_ids {
+        validate_client_identifier(client_id)?;
+    }
     Ok(())
 }
 
@@ -11246,6 +11255,10 @@ mod tests {
             .expect_err("oversized bulk command client list should fail");
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(error, "too many client ids");
+        let invalid = vec!["".to_string()];
+        assert!(validate_bulk_command_client_ids(&invalid).is_err());
+        let oversized = vec!["x".repeat(129)];
+        assert!(validate_bulk_command_client_ids(&oversized).is_err());
     }
 
     #[test]
