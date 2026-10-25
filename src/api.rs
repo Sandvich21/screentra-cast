@@ -7490,6 +7490,13 @@ fn normalize_display_name(display_name: &str) -> Result<String, (StatusCode, Str
     Ok(value)
 }
 
+fn validate_user_id(id: &str) -> Result<(), (StatusCode, String)> {
+    if id.trim().is_empty() || id.len() > 128 {
+        return Err((StatusCode::BAD_REQUEST, "Invalid user identifier".to_string()));
+    }
+    Ok(())
+}
+
 fn normalize_username(username: &str) -> Result<String, (StatusCode, String)> {
     let u = username.trim().to_lowercase();
     if u.len() < 2 || u.len() > 48 {
@@ -7573,6 +7580,7 @@ async fn get_user(
     Path(id): Path<String>,
 ) -> Result<AxumJson<UserInfo>, (StatusCode, String)> {
     require_admin_user_manager(&state.auth, &headers).await?;
+    validate_user_id(&id)?;
     let user = state
         .repository
         .get_user(&id)
@@ -7634,6 +7642,7 @@ async fn update_user(
     Json(payload): Json<UpdateUserRequest>,
 ) -> Result<AxumJson<UserInfo>, (StatusCode, String)> {
     require_admin_user_manager(&state.auth, &headers).await?;
+    validate_user_id(&id)?;
     let current = state
         .repository
         .get_user(&id)
@@ -7713,6 +7722,7 @@ async fn delete_user(
     Path(id): Path<String>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
     require_admin_user_manager(&state.auth, &headers).await?;
+    validate_user_id(&id)?;
     let current = state
         .repository
         .get_user(&id)
@@ -10616,6 +10626,8 @@ mod tests {
         assert!(normalize_display_name(&"x".repeat(MAX_USER_DISPLAY_NAME_BYTES + 1)).is_err());
         assert!(validate_password("short").is_err());
         assert!(validate_password(&"x".repeat(MAX_USER_PASSWORD_BYTES + 1)).is_err());
+        assert!(validate_user_id("").is_err());
+        assert!(validate_user_id(&"x".repeat(129)).is_err());
     }
 
     #[test]
