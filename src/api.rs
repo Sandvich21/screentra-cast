@@ -1373,7 +1373,10 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             post(publish_scene_to_client),
         )
         .route("/api/clients", get(connected_clients))
-        .route("/api/clients/register", post(register_client))
+        .route(
+            "/api/clients/register",
+            post(register_client).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
         .route("/api/clients/{id}/adopt", post(adopt_client))
         .route(
             "/api/clients/{id}/assignment",
@@ -10288,11 +10291,61 @@ fn validate_client_registration_display_count(count: usize) -> Result<(), (Statu
     Ok(())
 }
 
+fn validate_client_registration_text(
+    value: Option<&str>,
+    max_bytes: usize,
+    field: &str,
+) -> Result<(), (StatusCode, String)> {
+    if value.is_some_and(|text| text.len() > max_bytes || text.chars().any(|character| character.is_control())) {
+        return Err((StatusCode::BAD_REQUEST, format!("invalid {field}")));
+    }
+    Ok(())
+}
+
+fn validate_client_registration_payload(
+    payload: &ClientRegisterRequest,
+) -> Result<(), (StatusCode, String)> {
+    if let Some(client_id) = payload.client_id.as_deref() {
+        validate_client_identifier(client_id)?;
+    }
+    validate_client_registration_text(payload.hostname.as_deref(), 256, "hostname")?;
+    validate_client_registration_text(payload.address.as_deref(), 256, "address")?;
+    validate_client_registration_text(payload.role.as_deref(), 64, "role")?;
+    validate_client_registration_text(payload.version.as_deref(), 128, "version")?;
+    validate_client_registration_text(payload.identity_source.as_deref(), 64, "identity source")?;
+    validate_client_registration_text(payload.last_command_at.as_deref(), 64, "command timestamp")?;
+    validate_optional_layout_id(payload.active_layout_id.as_deref())?;
+    if let Some(theme) = payload.theme.as_deref() {
+        validate_client_theme(theme)?;
+    }
+    if let Some(binding) = payload.touch_binding.as_ref() {
+        let size = serde_json::to_vec(binding)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "invalid touch binding".to_string()))?
+            .len();
+        if size > 64 * 1024 {
+            return Err((StatusCode::PAYLOAD_TOO_LARGE, "touch binding is too large".to_string()));
+        }
+    }
+    for display in &payload.displays {
+        if !(0..=63).contains(&display.display_index)
+            || display.width.is_some_and(|width| width == 0 || width > 16_384)
+            || display.height.is_some_and(|height| height == 0 || height > 16_384)
+        {
+            return Err((StatusCode::BAD_REQUEST, "invalid display report".to_string()));
+        }
+        validate_client_registration_text(display.connector.as_deref(), 256, "display connector")?;
+        validate_client_registration_text(display.label.as_deref(), 256, "display label")?;
+        validate_client_registration_text(display.last_error.as_deref(), 512, "display error")?;
+    }
+    Ok(())
+}
+
 async fn register_client(
     State(repository): State<ClientRepository>,
     Json(payload): Json<ClientRegisterRequest>,
 ) -> Result<AxumJson<ConnectedClientInfo>, (StatusCode, String)> {
     validate_client_registration_display_count(payload.displays.len())?;
+    validate_client_registration_payload(&payload)?;
     let client_auth_token = payload.client_auth_token.as_deref();
     if let Some(token) = client_auth_token {
         if !(32..=256).contains(&token.len()) || !token.is_ascii() {
@@ -10987,6 +11040,9 @@ mod tests {
         .expect_err("oversized client display list should fail");
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(error, "too many client displays");
+        assert!(validate_client_registration_text(Some("player-1"), 256, "hostname").is_ok());
+        assert!(validate_client_registration_text(Some(&"x".repeat(257)), 256, "hostname").is_err());
+        assert!(validate_client_registration_text(Some("bad\nname"), 256, "hostname").is_err());
     }
 
     #[test]
