@@ -2040,10 +2040,31 @@ async fn get_display_state_for_display(
     }
 }
 
+const MAX_DISPLAY_STATE_ASSIGNMENTS: usize = 4096;
+const MAX_DISPLAY_NAME_BYTES: usize = 256;
+
+fn validate_display_state(state: &DisplayState) -> Result<(), StatusCode> {
+    if state.assignments.len() > MAX_DISPLAY_STATE_ASSIGNMENTS {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if state.assignments.iter().any(|assignment| {
+        assignment.display.trim().is_empty()
+            || assignment.display.len() > MAX_DISPLAY_NAME_BYTES
+            || assignment
+                .layout_id
+                .as_deref()
+                .is_some_and(|layout_id| layout_id.len() > 128)
+    }) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
 async fn set_display_state(
     State(repository): State<ClientRepository>,
     AxumJson(state): AxumJson<DisplayState>,
 ) -> Result<AxumJson<DisplayState>, (StatusCode, String)> {
+    validate_display_state(&state).map_err(|status| (status, "Invalid display state".to_string()))?;
     for assignment in &state.assignments {
         repository
             .set_display_assignment(&assignment.display, assignment.layout_id.as_deref())
@@ -10507,6 +10528,36 @@ mod tests {
     }
 
     #[test]
+    fn display_state_assignments_are_bounded_before_persistence() {
+        assert!(validate_display_state(&DisplayState {
+            assignments: vec![DisplayAssignment {
+                display: "DP-1".to_string(),
+                layout_id: Some("layout-1".to_string()),
+            }],
+        })
+        .is_ok());
+        assert_eq!(
+            validate_display_state(&DisplayState {
+                assignments: (0..=MAX_DISPLAY_STATE_ASSIGNMENTS)
+                    .map(|index| DisplayAssignment {
+                        display: format!("display-{index}"),
+                        layout_id: None,
+                    })
+                    .collect(),
+            }),
+            Err(StatusCode::BAD_REQUEST),
+        );
+        assert_eq!(
+            validate_display_state(&DisplayState {
+                assignments: vec![DisplayAssignment {
+                    display: " ".to_string(),
+                    layout_id: None,
+                }],
+            }),
+            Err(StatusCode::BAD_REQUEST),
+        );
+    }
+
     fn layout_set_item_lists_are_bounded() {
         assert_eq!(validate_layout_set_item_count(MAX_LAYOUT_SET_ITEMS).is_ok(), true);
         assert_eq!(
