@@ -3279,6 +3279,9 @@ fn disallowed_proxy_ip(ip: std::net::IpAddr) -> bool {
 }
 
 fn validate_proxy_url(url: &str) -> Result<(String, u16, std::net::IpAddr), String> {
+    if url.len() > 2048 || url.chars().any(|character| character.is_control()) {
+        return Err("Invalid url".to_string());
+    }
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid url: {}", e))?;
     match parsed.scheme() {
         "http" | "https" => {}
@@ -12603,6 +12606,11 @@ fn validate_proxy_url_rejects_malformed() {
     }
 }
 
+#[test]
+fn validate_proxy_url_rejects_oversized_and_control_input() {
+    assert!(validate_proxy_url(&format!("https://example.com/{}", "x".repeat(2048))).is_err());
+    assert!(validate_proxy_url("https://example.com/cal.ics\n").is_err());
+}
 #[test]
 fn validate_proxy_url_accepts_public_http_https() {
     // These must not resolve to private/loopback ranges. Use example.com.
