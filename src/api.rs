@@ -9218,6 +9218,13 @@ fn validate_scene_upsert(payload: &SceneUpsertRequest) -> Result<(), (StatusCode
     Ok(())
 }
 
+fn validate_scene_id(id: &str) -> Result<(), (StatusCode, String)> {
+    if id.trim().is_empty() || id.len() > 128 {
+        return Err((StatusCode::BAD_REQUEST, "invalid scene identifier".to_string()));
+    }
+    Ok(())
+}
+
 async fn load_scene(repository: &ClientRepository, scene_id: &str) -> Result<Option<SceneRecord>, String> {
     let Some((id, name, description, created_at, updated_at, rows)) = repository.get_scene(scene_id).await? else {
         return Ok(None);
@@ -9264,6 +9271,7 @@ async fn get_scene(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<SceneRecord>, (StatusCode, String)> {
+    validate_scene_id(&id)?;
     load_scene(&repository, &id)
         .await
         .map_err(|_| internal_server_error())?
@@ -9305,6 +9313,7 @@ async fn update_scene(
     Path(id): Path<String>,
     Json(payload): Json<SceneUpsertRequest>,
 ) -> Result<AxumJson<SceneRecord>, (StatusCode, String)> {
+    validate_scene_id(&id)?;
     validate_scene_upsert(&payload)?;
     let now = Utc::now().to_rfc3339();
     let assignments = payload
@@ -9333,6 +9342,7 @@ async fn delete_scene(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_scene_id(&id)?;
     let deleted = repository
         .delete_scene(&id)
         .await
@@ -9344,6 +9354,7 @@ async fn publish_scene_to_client(
     State(repository): State<ClientRepository>,
     Path((id, client_id)): Path<(String, String)>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_scene_id(&id)?;
     let scene = load_scene(&repository, &id)
         .await
         .map_err(|_| internal_server_error())?
@@ -10901,6 +10912,13 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn scene_route_identifiers_are_bounded() {
+        assert!(validate_scene_id("scene-1").is_ok());
+        assert!(validate_scene_id("").is_err());
+        assert!(validate_scene_id(&"x".repeat(129)).is_err());
+    }
 
     #[test]
     fn scene_assignments_are_bounded_before_persistence() {
