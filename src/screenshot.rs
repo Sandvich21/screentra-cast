@@ -127,6 +127,9 @@ pub(crate) async fn post_screenshot(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> StatusCode {
+    if crate::api::validate_client_identifier(&client_id).is_err() {
+        return StatusCode::BAD_REQUEST;
+    }
     if crate::api::require_client_command_token(&repository, &client_id, &headers).await.is_err() {
         return StatusCode::UNAUTHORIZED;
     }
@@ -159,6 +162,9 @@ pub(crate) async fn get_screenshot(
     Path(client_id): Path<String>,
     Query(q): Query<ScreenshotQuery>,
 ) -> Result<Response, StatusCode> {
+    if crate::api::validate_client_identifier(&client_id).is_err() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let store = SCREENSHOT_STORE.get().unwrap();
     let display = q.display.unwrap_or(0);
     match store.get(&client_id, display).await {

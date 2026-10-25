@@ -9145,7 +9145,7 @@ pub(crate) async fn require_client_command_token(
     Ok(())
 }
 
-fn validate_client_identifier(client_id: &str) -> Result<(), (StatusCode, String)> {
+pub(crate) fn validate_client_identifier(client_id: &str) -> Result<(), (StatusCode, String)> {
     if client_id.trim().is_empty() || client_id.len() > 128 {
         return Err((StatusCode::BAD_REQUEST, "invalid client identifier".to_string()));
     }
