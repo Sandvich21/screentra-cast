@@ -344,7 +344,13 @@ pub fn fetch_feed(
 ) -> Result<FetchResult, String> {
     // Validate the URL is http(s) and not pointing at a private address
     // — we don't want a feed URL to be used as a SSRF probe.
+    if url.len() > 2048 || url.chars().any(|character| character.is_control()) {
+        return Err("invalid url".to_string());
+    }
     let parsed = url::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("url credentials are not allowed".to_string());
+    }
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
         return Err(format!("unsupported scheme: {scheme}"));
@@ -749,6 +755,11 @@ mod tests {
   </entry>
 </feed>"#;
 
+    #[test]
+    fn fetch_feed_rejects_oversized_and_credential_urls() {
+        assert!(fetch_feed(&format!("https://example.com/{}", "x".repeat(2048)), None, None).is_err());
+        assert!(fetch_feed("https://user:password@example.com/feed", None, None).is_err());
+    }
     #[test]
     fn collect_news_feed_urls_extracts_news_widgets() {
         use crate::models::{Layout, Widget, WidgetType};
