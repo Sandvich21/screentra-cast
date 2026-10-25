@@ -1278,7 +1278,9 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route("/api/displays", get(list_displays))
         .route(
             "/api/display-state",
-            get(get_display_state).put(set_display_state),
+            get(get_display_state)
+                .put(set_display_state)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
         )
         .route(
             "/api/display-state/{display}",
@@ -1363,10 +1365,18 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route("/api/addons/{id}/enable", post(enable_addon))
         .route("/api/addons/{id}/disable", post(disable_addon))
         .route("/api/addons/{id}", put(update_addon).delete(delete_addon))
-        .route("/api/scenes", get(list_scenes).post(create_scene))
+        .route(
+            "/api/scenes",
+            get(list_scenes)
+                .post(create_scene)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
+        )
         .route(
             "/api/scenes/{id}",
-            get(get_scene).put(update_scene).delete(delete_scene),
+            get(get_scene)
+                .put(update_scene)
+                .delete(delete_scene)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
         )
         .route(
             "/api/scenes/{id}/publish/{client_id}",
@@ -1456,7 +1466,7 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route("/api/clients/{id}/displays", get(list_client_displays))
         .route(
             "/api/clients/{id}/displays/bulk-assign",
-            post(bulk_assign_displays),
+            post(bulk_assign_displays).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route(
             "/api/clients/{id}/displays/{index}/control",
@@ -1556,25 +1566,37 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             "/api/backups/download/{id}",
             get(backup_api::download_backup),
         )
-        .route("/api/schedules", get(list_schedules).post(create_schedule))
+        .route(
+            "/api/schedules",
+            get(list_schedules)
+                .post(create_schedule)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
+        )
         .route(
             "/api/schedules/{id}",
             get(get_schedule)
                 .put(update_schedule)
-                .delete(delete_schedule),
+                .delete(delete_schedule)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
         )
         // ── Layout Sets ──────────────────────────────────────────
         .route(
             "/api/layout-sets",
-            get(list_layout_sets).post(create_layout_set),
+            get(list_layout_sets)
+                .post(create_layout_set)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
         )
         .route(
             "/api/layout-sets/{id}",
             get(get_layout_set)
                 .put(update_layout_set)
-                .delete(delete_layout_set),
+                .delete(delete_layout_set)
+                .layer(DefaultBodyLimit::max(256 * 1024)),
         )
-        .route("/api/layout-sets/{id}/entries", put(replace_layout_set_entries))
+        .route(
+            "/api/layout-sets/{id}/entries",
+            put(replace_layout_set_entries).layer(DefaultBodyLimit::max(256 * 1024)),
+        )
         // ── Widget Presets ──
         .route(
             "/api/widget-presets",
