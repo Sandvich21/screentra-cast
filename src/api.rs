@@ -8993,8 +8993,9 @@ async fn bulk_command_clients(
                 queued += 1;
                 results.push(serde_json::json!({"client_id": cid, "ok": true, "action": rec.action, "requested_at": rec.requested_at}));
             }
-            Err(e) => {
-                results.push(serde_json::json!({"client_id": cid, "ok": false, "error": e}));
+            Err(error) => {
+                let (_, safe_error) = command_queue_http_error(error);
+                results.push(serde_json::json!({"client_id": cid, "ok": false, "error": safe_error}));
             }
         }
     }
@@ -10600,6 +10601,14 @@ mod tests {
         assert_eq!(error, "invalid client theme");
     }
 
+
+    #[test]
+    fn bulk_command_errors_are_opaque() {
+        let (_, message) = command_queue_http_error("database path leaked".to_string());
+        assert_eq!(message, "Internal server error");
+        let (_, message) = command_queue_http_error("command_pending".to_string());
+        assert_eq!(message, "A client command is already pending");
+    }
 
     #[test]
     fn layout_set_item_lists_are_bounded() {
