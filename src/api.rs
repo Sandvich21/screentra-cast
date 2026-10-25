@@ -1746,13 +1746,34 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .nest(
             "/api/users",
             axum::Router::new()
-                .route("/", get(list_users).post(create_user))
-                .route("/{id}", get(get_user).put(update_user).delete(delete_user))
+                .route(
+                    "/",
+                    get(list_users)
+                        .post(create_user)
+                        .layer(DefaultBodyLimit::max(64 * 1024)),
+                )
+                .route(
+                    "/{id}",
+                    get(get_user)
+                        .put(update_user)
+                        .delete(delete_user)
+                        .layer(DefaultBodyLimit::max(64 * 1024)),
+                )
                 .with_state(auth_app.clone()),
         )
         // Serve uploaded files (icons, images, videos, music, etc.)
-        .route("/api/setup", post(create_initial_admin).with_state(auth_app.clone()))
-        .route("/api/setup/", post(create_initial_admin).with_state(auth_app.clone()))
+        .route(
+            "/api/setup",
+            post(create_initial_admin)
+                .layer(DefaultBodyLimit::max(64 * 1024))
+                .with_state(auth_app.clone()),
+        )
+        .route(
+            "/api/setup/",
+            post(create_initial_admin)
+                .layer(DefaultBodyLimit::max(64 * 1024))
+                .with_state(auth_app.clone()),
+        )
         .nest(
             "/api/setup",
             axum::Router::new()
@@ -1762,8 +1783,14 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .nest(
             "/api/auth",
             axum::Router::new()
-                .route("/login", post(crate::auth::login))
-                .route("/step-up", post(crate::auth::step_up))
+                .route(
+                    "/login",
+                    post(crate::auth::login).layer(DefaultBodyLimit::max(16 * 1024)),
+                )
+                .route(
+                    "/step-up",
+                    post(crate::auth::step_up).layer(DefaultBodyLimit::max(16 * 1024)),
+                )
                 .route("/step-up/clear", post(crate::auth::clear_step_up))
                 .route("/logout", post(crate::auth::logout))
                 .route("/status", get(crate::auth::status))
@@ -1781,7 +1808,11 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             "/api/account",
             axum::Router::new()
                 .route("/", get(crate::auth::account_status))
-                .route("/password", post(crate::auth::change_password))
+                .route(
+                    "/password",
+                    post(crate::auth::change_password)
+                        .layer(DefaultBodyLimit::max(16 * 1024)),
+                )
                 .route("/google/bind-url", get(crate::auth::google_bind_url))
                 .route("/google/unbind", post(crate::auth::google_unbind))
                 .with_state(auth_app.clone()),
