@@ -479,6 +479,18 @@ fn checked_backup_dir(create: bool) -> Result<PathBuf, String> {
     }
 }
 
+const MAX_BACKUP_ID_BYTES: usize = 128;
+
+fn validate_backup_id(id: &str) -> Result<(), (StatusCode, String)> {
+    if id.is_empty()
+        || id.len() > MAX_BACKUP_ID_BYTES
+        || id.chars().any(|character| character.is_control())
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid backup identifier".to_string()));
+    }
+    Ok(())
+}
+
 fn checked_backup_file(path: &str) -> Result<bool, String> {
     let backup_dir = checked_backup_dir(false)?;
     let candidate = StdPath::new(path);
@@ -654,6 +666,7 @@ pub async fn restore_backup(
     Path(id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<axum::http::Response<axum::body::Body>, (StatusCode, String)> {
+    validate_backup_id(&id)?;
     use axum::body::Body;
     use axum::http::{header, StatusCode as SC};
     let backup_file_path = db
@@ -1008,6 +1021,7 @@ pub async fn delete_backup(
     State(db): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<axum::http::StatusCode, (StatusCode, String)> {
+    validate_backup_id(&id)?;
     let file_path = db
         .get_backup_file_path(&id)
         .await
@@ -1174,6 +1188,7 @@ pub async fn download_backup(
     Path(id): Path<String>,
     State(db): State<AppState>,
 ) -> Result<Response<axum::body::Body>, (StatusCode, String)> {
+    validate_backup_id(&id)?;
     let file_path = db
         .get_backup_file_path(&id)
         .await
@@ -1267,6 +1282,13 @@ mod tests {
         assert!(!configured_service_target_allowed("signage.service", "SYSTEM"));
     }
 
+    #[test]
+    fn backup_identifiers_are_bounded_and_control_free() {
+        assert!(validate_backup_id("backup-1").is_ok());
+        assert!(validate_backup_id("").is_err());
+        assert!(validate_backup_id(&"x".repeat(MAX_BACKUP_ID_BYTES + 1)).is_err());
+        assert!(validate_backup_id("backup\n1").is_err());
+    }
     #[cfg(unix)]
     #[test]
     fn checked_backup_file_rejects_symlinks_and_outside_paths() {
