@@ -1380,7 +1380,9 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route("/api/clients/{id}/adopt", post(adopt_client))
         .route(
             "/api/clients/{id}/assignment",
-            get(get_client_assignment).put(set_client_assignment),
+            get(get_client_assignment)
+                .put(set_client_assignment)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route("/api/clients/{id}/config", get(get_client_config))
         .route("/api/clients/{id}/addons", get(get_client_addons))
@@ -1391,10 +1393,13 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         )
         .route("/api/clients/{id}/addons/{addon_id}/package", get(get_client_addon_package))
         .route("/api/clients/{id}/update-check", get(get_client_update_check))
-        .route("/api/clients/{id}/theme", patch(set_client_theme))
+        .route(
+            "/api/clients/{id}/theme",
+            patch(set_client_theme).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route(
             "/api/clients/{id}/display-count",
-            post(set_client_display_count),
+            post(set_client_display_count).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route(
             "/api/clients/{id}/touch-binding",
@@ -1456,11 +1461,12 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route(
             "/api/clients/{id}/displays/{index}/control",
             get(get_client_display_control)
-                .patch(set_client_display_control_method),
+                .patch(set_client_display_control_method)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route(
             "/api/clients/{id}/displays/{index}/orientation",
-            patch(set_client_display_orientation),
+            patch(set_client_display_orientation).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route(
             "/api/clients/{id}/displays/{index}/config",
@@ -1468,11 +1474,13 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         )
         .route(
             "/api/clients/{id}/displays/{index}/layout",
-            post(set_client_display_layout),
+            post(set_client_display_layout).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
             "/api/clients/{id}/displays/{index}/command",
-            post(set_client_display_command).delete(clear_client_display_command),
+            post(set_client_display_command)
+                .delete(clear_client_display_command)
+                .layer(DefaultBodyLimit::max(MAX_CLIENT_COMMAND_PAYLOAD_BYTES)),
         )
         .route("/api/clients/search", get(search_connected_clients))
         .route("/api/refresh", get(get_refresh).post(bump_refresh))
