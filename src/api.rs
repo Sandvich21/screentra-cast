@@ -5123,6 +5123,13 @@ async fn list_schedules(
         .map_err(|_| internal_server_error())
 }
 
+fn validate_schedule_id(id: &str) -> Result<(), (StatusCode, String)> {
+    if id.trim().is_empty() || id.len() > 128 {
+        return Err((StatusCode::BAD_REQUEST, "Invalid schedule identifier".to_string()));
+    }
+    Ok(())
+}
+
 async fn validate_schedule_references(
     repository: &ClientRepository,
     entry: &ScheduleEntry,
@@ -5175,6 +5182,7 @@ async fn get_schedule(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<ScheduleEntry>, (StatusCode, String)> {
+    validate_schedule_id(&id)?;
     repository
         .get_schedule(&id)
         .await
@@ -5202,6 +5210,7 @@ async fn delete_schedule(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    validate_schedule_id(&id)?;
     repository
         .delete_schedule(&id)
         .await
@@ -12846,6 +12855,8 @@ mod audit_validation_tests {
         entry = layout_schedule();
         entry.created_at = "x".repeat(65);
         assert!(validate_schedule_entry(&entry).is_err());
+        assert!(validate_schedule_id(" ").is_err());
+        assert!(validate_schedule_id(&"x".repeat(129)).is_err());
     }
 
 
