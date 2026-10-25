@@ -9044,6 +9044,26 @@ struct SceneUpsertRequest {
     assignments: Vec<SceneDisplayAssignment>,
 }
 
+const MAX_SCENE_ASSIGNMENTS: usize = 64;
+
+fn validate_scene_upsert(payload: &SceneUpsertRequest) -> Result<(), (StatusCode, String)> {
+    if payload.assignments.len() > MAX_SCENE_ASSIGNMENTS
+        || payload
+            .assignments
+            .iter()
+            .any(|assignment| {
+                !(0..=63).contains(&assignment.display_index)
+                    || assignment
+                        .layout_id
+                        .as_deref()
+                        .is_some_and(|layout_id| layout_id.len() > 256)
+            })
+    {
+        return Err((StatusCode::BAD_REQUEST, "invalid scene assignments".to_string()));
+    }
+    Ok(())
+}
+
 async fn load_scene(repository: &ClientRepository, scene_id: &str) -> Result<Option<SceneRecord>, String> {
     let Some((id, name, description, created_at, updated_at, rows)) = repository.get_scene(scene_id).await? else {
         return Ok(None);
@@ -9101,6 +9121,7 @@ async fn create_scene(
     State(repository): State<ClientRepository>,
     Json(payload): Json<SceneUpsertRequest>,
 ) -> Result<AxumJson<SceneRecord>, (StatusCode, String)> {
+    validate_scene_upsert(&payload)?;
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let assignments = payload
@@ -9130,6 +9151,7 @@ async fn update_scene(
     Path(id): Path<String>,
     Json(payload): Json<SceneUpsertRequest>,
 ) -> Result<AxumJson<SceneRecord>, (StatusCode, String)> {
+    validate_scene_upsert(&payload)?;
     let now = Utc::now().to_rfc3339();
     let assignments = payload
         .assignments
@@ -10641,6 +10663,34 @@ mod tests {
         assert_eq!(
             validate_font_download_request(&oversized),
             Err((StatusCode::BAD_REQUEST, "invalid font download request".to_string()))
+        );
+    }
+
+
+    #[test]
+    fn scene_assignments_are_bounded_before_persistence() {
+        let valid = SceneUpsertRequest {
+            name: "scene".to_string(),
+            description: None,
+            assignments: vec![SceneDisplayAssignment {
+                display_index: 0,
+                layout_id: Some("layout-1".to_string()),
+            }],
+        };
+        assert!(validate_scene_upsert(&valid).is_ok());
+        let oversized = SceneUpsertRequest {
+            name: "scene".to_string(),
+            description: None,
+            assignments: (0..=MAX_SCENE_ASSIGNMENTS)
+                .map(|index| SceneDisplayAssignment {
+                    display_index: (index % 64) as i64,
+                    layout_id: None,
+                })
+                .collect(),
+        };
+        assert_eq!(
+            validate_scene_upsert(&oversized),
+            Err((StatusCode::BAD_REQUEST, "invalid scene assignments".to_string()))
         );
     }
 
