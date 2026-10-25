@@ -9477,6 +9477,20 @@ struct BulkAssignDisplaysRequest {
     layout_id: Option<String>,
 }
 
+fn validate_client_display_index(index: i64) -> Result<(), (StatusCode, String)> {
+    if !(0..=63).contains(&index) {
+        return Err((StatusCode::BAD_REQUEST, "invalid display index".to_string()));
+    }
+    Ok(())
+}
+
+fn validate_optional_layout_id(layout_id: Option<&str>) -> Result<(), (StatusCode, String)> {
+    if layout_id.is_some_and(|value| value.len() > 256) {
+        return Err((StatusCode::BAD_REQUEST, "invalid layout id".to_string()));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 struct BulkAssignDisplaysResult {
     updated: usize,
@@ -9488,6 +9502,7 @@ async fn bulk_assign_displays(
     Path(id): Path<String>,
     Json(payload): Json<BulkAssignDisplaysRequest>,
 ) -> Result<AxumJson<BulkAssignDisplaysResult>, (StatusCode, String)> {
+    validate_optional_layout_id(payload.layout_id.as_deref())?;
     let updated = repository
         .bulk_set_display_layout(&id, payload.layout_id.as_deref())
         .await
@@ -9504,6 +9519,7 @@ async fn get_client_display_config(
     headers: HeaderMap,
     Path((id, index)): Path<(String, i64)>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_display_index(index)?;
     require_client_or_admin(&repository, &auth, &id, &headers).await?;
     let (layout_id, orientation) = repository
         .get_display_config(&id, index)
@@ -9562,6 +9578,7 @@ async fn set_client_display_command(
     Path((id, index)): Path<(String, i64)>,
     Json(payload): Json<DisplayCommandRequest>,
 ) -> Result<AxumJson<CommandRecord>, (StatusCode, String)> {
+    validate_client_display_index(index)?;
     let mut command_payload = payload
         .payload
         .clone()
@@ -9624,6 +9641,8 @@ async fn set_client_display_layout(
     Path((id, index)): Path<(String, i64)>,
     Json(payload): Json<DisplayLayoutRequest>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_display_index(index)?;
+    validate_optional_layout_id(payload.layout_id.as_deref())?;
     let updated = repository
         .set_display_layout(&id, index, payload.layout_id.as_deref())
         .await
@@ -9664,6 +9683,7 @@ async fn get_client_display_control(
     State(repository): State<ClientRepository>,
     Path((id, index)): Path<(String, i64)>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_display_index(index)?;
     let row = repository
         .get_display_control(&id, index)
         .await
@@ -9691,6 +9711,7 @@ async fn set_client_display_control_method(
     Path((id, index)): Path<(String, i64)>,
     Json(payload): Json<DisplayControlMethodRequest>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_display_index(index)?;
     let method = match payload.control_method.as_str() {
         "ddc" | "cec" | "ir" | "dpms" | "auto" => payload.control_method.clone(),
         other => {
@@ -9720,6 +9741,7 @@ async fn set_client_display_orientation(
     Path((id, index)): Path<(String, i64)>,
     Json(payload): Json<DisplayOrientationRequest>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_display_index(index)?;
     let orientation = match payload.orientation.as_str() {
         "normal" | "flipped" | "rotated_left" | "rotated_right" => payload.orientation.clone(),
         other => {
@@ -9759,6 +9781,7 @@ async fn clear_client_display_command(
     State(repository): State<ClientRepository>,
     Path((id, index)): Path<(String, i64)>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_display_index(index)?;
     // Real clearing: delete only when the queued command targets this display_index,
     // otherwise fall back to deleting the client-wide command so callers can be sure
     // a stale command is not blocking their next queued action.
@@ -10691,6 +10714,22 @@ mod tests {
         assert_eq!(
             validate_scene_upsert(&oversized),
             Err((StatusCode::BAD_REQUEST, "invalid scene assignments".to_string()))
+        );
+    }
+
+
+    #[test]
+    fn client_display_paths_validate_indexes_and_layout_ids() {
+        assert!(validate_client_display_index(0).is_ok());
+        assert!(validate_client_display_index(63).is_ok());
+        assert_eq!(
+            validate_client_display_index(64),
+            Err((StatusCode::BAD_REQUEST, "invalid display index".to_string()))
+        );
+        assert!(validate_optional_layout_id(Some("layout-1")).is_ok());
+        assert_eq!(
+            validate_optional_layout_id(Some(&"x".repeat(257))),
+            Err((StatusCode::BAD_REQUEST, "invalid layout id".to_string()))
         );
     }
 
