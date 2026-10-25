@@ -7988,11 +7988,20 @@ async fn set_client_touch_binding(
 }
 
 
+fn validate_client_theme(theme: &str) -> Result<(), (StatusCode, String)> {
+    if matches!(theme, "default" | "light" | "classic") {
+        Ok(())
+    } else {
+        Err((StatusCode::BAD_REQUEST, "invalid client theme".to_string()))
+    }
+}
+
 async fn set_client_theme(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
     Json(payload): Json<ClientThemeRequest>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_theme(&payload.theme)?;
     let updated = repository
         .set_client_theme(&id, &payload.theme)
         .await
@@ -10579,6 +10588,17 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(error, "too many touch target displays");
     }
+
+    #[test]
+    fn client_themes_are_allowlisted() {
+        for theme in ["default", "light", "classic"] {
+            assert!(validate_client_theme(theme).is_ok());
+        }
+        let (status, error) = validate_client_theme("custom").expect_err("unknown theme should fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error, "invalid client theme");
+    }
+
 
     #[test]
     fn layout_set_item_lists_are_bounded() {
