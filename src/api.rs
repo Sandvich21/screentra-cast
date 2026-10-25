@@ -3650,7 +3650,7 @@ async fn weather_forecast(
 
     // NWS is authoritative for U.S. points. The points response supplies the
     // correct forecast office/grid URL; never construct that URL ourselves.
-    let points_url = format!("https://api.weather.gov/points/{:.5},{:.5}", lat, lon);
+    let points_url = format!("https://api.weather.gov/points/{:.4},{:.4}", lat, lon);
     if let Some(points) = curl_json(&points_url) {
         if let Some(url) = points.pointer("/properties/forecast").and_then(|v| v.as_str()) {
             if let Some(body) = curl_json(url) {
@@ -3660,7 +3660,7 @@ async fn weather_forecast(
                     .and_then(curl_json)
                     .and_then(|v| v.pointer("/properties/periods").and_then(|p| p.as_array().cloned()))
                     .unwrap_or_default();
-                let active_alerts = curl_json(&format!("https://api.weather.gov/alerts/active?point={:.5},{:.5}", lat, lon))
+                let active_alerts = curl_json(&format!("https://api.weather.gov/alerts/active?point={:.4},{:.4}", lat, lon))
                     .and_then(|v| v.get("features").and_then(|features| features.as_array().cloned()))
                     .unwrap_or_default();
                 let mut dates = Vec::new();
@@ -9233,7 +9233,7 @@ async fn issue_player_capability(
     require_client_or_admin(&repository, &auth, &id, &headers).await?;
     Ok(AxumJson(serde_json::json!({
         "capability": auth.issue_player_capability(&id, index),
-        "expires_in": 300,
+        "expires_in": 3600,
     })))
 }
 
