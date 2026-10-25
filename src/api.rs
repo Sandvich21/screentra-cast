@@ -14134,7 +14134,8 @@ async fn export_interactive_submissions_csv_handler(
     ),
     (StatusCode, String),
 > {
-    let limit = q.limit.unwrap_or(10000).clamp(1, 50000);
+    validate_interactive_submissions_query(&q)?;
+    let limit = q.limit.unwrap_or(10_000).clamp(1, 10_000);
     let submissions = repository
         .list_interactive_submissions(
             limit,
