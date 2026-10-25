@@ -4447,6 +4447,15 @@ fn validate_preset_type(widget_type: &str) -> Result<(), (StatusCode, String)> {
     Ok(())
 }
 
+const MAX_WIDGET_PRESET_ASSETS: usize = 256;
+
+fn validate_widget_preset_asset_count(count: usize) -> Result<(), (StatusCode, String)> {
+    if count > MAX_WIDGET_PRESET_ASSETS {
+        return Err((StatusCode::BAD_REQUEST, "too many widget preset assets".to_string()));
+    }
+    Ok(())
+}
+
 fn validate_widget_preset_asset(
     kind: &str,
     key: &str,
@@ -5664,6 +5673,7 @@ async fn import_widget_preset(
             .or_else(|| preset_obj.get("props_json").cloned()),
     )?;
     let assets = widget_preset_assets_from_export(preset_obj.get("assets").cloned(), &props);
+    validate_widget_preset_asset_count(assets.as_array().map_or(0, Vec::len))?;
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -10730,6 +10740,16 @@ mod tests {
         assert_eq!(
             validate_optional_layout_id(Some(&"x".repeat(257))),
             Err((StatusCode::BAD_REQUEST, "invalid layout id".to_string()))
+        );
+    }
+
+
+    #[test]
+    fn widget_preset_asset_lists_are_bounded() {
+        assert!(validate_widget_preset_asset_count(MAX_WIDGET_PRESET_ASSETS).is_ok());
+        assert_eq!(
+            validate_widget_preset_asset_count(MAX_WIDGET_PRESET_ASSETS + 1),
+            Err((StatusCode::BAD_REQUEST, "too many widget preset assets".to_string()))
         );
     }
 
