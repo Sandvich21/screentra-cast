@@ -1561,7 +1561,7 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         )
         .route(
             "/api/widget-presets/{id}/assets",
-            post(add_widget_preset_asset),
+            post(add_widget_preset_asset).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
             "/api/widget-presets/{id}/assets/{asset_id}",
@@ -4557,6 +4557,13 @@ fn validate_preset_type(widget_type: &str) -> Result<(), (StatusCode, String)> {
 
 const MAX_WIDGET_PRESET_PROPS_BYTES: usize = 256 * 1024;
 
+fn validate_widget_preset_id(id: &str) -> Result<(), (StatusCode, String)> {
+    if id.trim().is_empty() || id.len() > 128 || id.chars().any(|character| character.is_control()) {
+        return Err((StatusCode::BAD_REQUEST, "Invalid widget preset identifier".to_string()));
+    }
+    Ok(())
+}
+
 fn validate_widget_preset_fields(
     name: &str,
     widget_type: &str,
@@ -5587,6 +5594,9 @@ async fn list_widget_presets(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<AxumJson<Vec<WidgetPresetMeta>>, (StatusCode, String)> {
     let widget_type = params.get("widget_type").map(|s| s.as_str());
+    if let Some(widget_type) = widget_type {
+        validate_preset_type(widget_type)?;
+    }
     repository
         .list_widget_presets(widget_type)
         .await
@@ -5598,6 +5608,7 @@ async fn get_widget_preset(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<WidgetPreset>, (StatusCode, String)> {
+    validate_widget_preset_id(&id)?;
     repository
         .get_widget_preset(&id)
         .await
@@ -5634,6 +5645,7 @@ async fn update_widget_preset(
     Path(id): Path<String>,
     Json(body): Json<UpdateWidgetPresetBody>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    validate_widget_preset_id(&id)?;
     validate_widget_preset_fields(&body.name, &body.widget_type, &body.props)?;
     let now = chrono::Utc::now().to_rfc3339();
     let props_json = serde_json::to_string(&body.props).unwrap_or_else(|_| "{}".to_string());
@@ -5648,6 +5660,7 @@ async fn delete_widget_preset(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    validate_widget_preset_id(&id)?;
     repository
         .delete_widget_preset(&id)
         .await
@@ -5660,6 +5673,7 @@ async fn add_widget_preset_asset(
     Path(id): Path<String>,
     Json(body): Json<WidgetPresetAssetBody>,
 ) -> Result<AxumJson<WidgetPresetAsset>, (StatusCode, String)> {
+    validate_widget_preset_id(&id)?;
     validate_widget_preset_asset(&body.kind, &body.key, &body.url)?;
     let asset = WidgetPresetAsset {
         id: uuid::Uuid::new_v4().to_string(),
@@ -5679,6 +5693,8 @@ async fn remove_widget_preset_asset(
     State(repository): State<ClientRepository>,
     Path((preset_id, asset_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    validate_widget_preset_id(&preset_id)?;
+    validate_widget_preset_id(&asset_id)?;
     let deleted = repository
         .delete_widget_preset_asset(&preset_id, &asset_id)
         .await
@@ -5703,6 +5719,7 @@ async fn export_widget_preset(
     ),
     (StatusCode, String),
 > {
+    validate_widget_preset_id(&id)?;
     let preset = repository
         .get_widget_preset(&id)
         .await
@@ -12054,6 +12071,10 @@ mod tests {
             ),
             Err((StatusCode::PAYLOAD_TOO_LARGE, "widget preset properties are too large".to_string()))
         );
+        assert!(validate_widget_preset_id("preset-1").is_ok());
+        assert!(validate_widget_preset_id("").is_err());
+        assert!(validate_widget_preset_id(&"x".repeat(129)).is_err());
+        assert!(validate_widget_preset_id("preset\n1").is_err());
     }
 
 
