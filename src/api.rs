@@ -12324,6 +12324,29 @@ fn interactive_resolve_client_id_strips_control_chars_and_caps() {
 }
 
 #[test]
+fn interactive_metadata_and_query_filters_are_bounded() {
+    assert!(normalize_field("192.0.2.1", MAX_CLIENT_ADDRESS_LEN).is_ok());
+    assert!(normalize_field(&"x".repeat(MAX_CLIENT_ADDRESS_LEN + 1), MAX_CLIENT_ADDRESS_LEN).is_err());
+    assert!(validate_interactive_submissions_query(&InteractiveSubmissionsQuery {
+        limit: Some(100),
+        client_id: Some("client-1".to_string()),
+        page_id: Some("layout-1".to_string()),
+        status: Some("pending".to_string()),
+    })
+    .is_ok());
+    assert!(validate_interactive_submissions_query(&InteractiveSubmissionsQuery {
+        status: Some("unexpected".to_string()),
+        ..Default::default()
+    })
+    .is_err());
+    assert!(validate_interactive_submissions_query(&InteractiveSubmissionsQuery {
+        client_id: Some("x".repeat(MAX_CLIENT_ID_LEN + 1)),
+        ..Default::default()
+    })
+    .is_err());
+}
+
+#[test]
 fn interactive_validate_collected_at_accepts_valid_and_rejects_invalid() {
     assert!(validate_collected_at(Some("2026-08-01T20:14:33-04:00")).is_ok());
     assert!(validate_collected_at(Some("2026-08-01T20:14:33Z")).is_ok());
@@ -13919,6 +13942,8 @@ fn validate_collected_at(raw: Option<&str>) -> Result<String, String> {
     }
 }
 
+const MAX_CLIENT_ADDRESS_LEN: usize = 128;
+
 async fn post_interactive_submission_handler(
     State(repository): State<ClientRepository>,
     headers: axum::http::HeaderMap,
@@ -13985,8 +14010,9 @@ async fn post_interactive_submission_handler(
     let client_address = headers
         .get("x-ripley-client-address")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .or(payload.client_address.clone());
+        .or(payload.client_address.as_deref())
+        .map(|s| normalize_field(s, MAX_CLIENT_ADDRESS_LEN).map_err(|e| (StatusCode::BAD_REQUEST, e)))
+        .transpose()?;
     let collected_at = validate_collected_at(payload.collected_at.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
@@ -14029,10 +14055,32 @@ struct InteractiveSubmissionsQuery {
     status: Option<String>,
 }
 
+fn validate_interactive_submissions_query(
+    query: &InteractiveSubmissionsQuery,
+) -> Result<(), (StatusCode, String)> {
+    for value in [query.client_id.as_deref(), query.page_id.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if value.trim().is_empty() || value.len() > MAX_CLIENT_ID_LEN || value.chars().any(|c| c.is_control()) {
+            return Err((StatusCode::BAD_REQUEST, "invalid interactive submission filter".to_string()));
+        }
+    }
+    if query
+        .status
+        .as_deref()
+        .is_some_and(|status| !matches!(status, "pending" | "success" | "failed" | "skipped"))
+    {
+        return Err((StatusCode::BAD_REQUEST, "invalid interactive submission status".to_string()));
+    }
+    Ok(())
+}
+
 async fn get_interactive_submissions_handler(
     State(repository): State<ClientRepository>,
     Query(q): Query<InteractiveSubmissionsQuery>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_interactive_submissions_query(&q)?;
     let limit = q.limit.unwrap_or(500).clamp(1, 5000);
     let submissions = repository
         .list_interactive_submissions(
