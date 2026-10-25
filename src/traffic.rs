@@ -1964,12 +1964,8 @@ async fn fetch_public_511_events(client: &reqwest::Client, query: &TrafficQuery)
     ];
     let layer_requests = layers.iter().map(|(layer, kind)| async move {
         let url = format!("https://www.511pa.com/map/mapIcons/{layer}");
-        let body = client
-            .get(url)
-            .send()
-            .await
-            .ok()?
-            .json::<Value>()
+        let response = client.get(url).send().await.ok()?;
+        let body: Value = read_traffic_response_json(response, "Pennsylvania 511 map response")
             .await
             .ok()?;
         let items = body.get("item2")?.as_array()?;
