@@ -13901,15 +13901,17 @@ fn resolve_client_id(header_val: Option<&str>, body_val: Option<&str>) -> String
     raw
 }
 
+const MAX_COLLECTED_AT_BYTES: usize = 64;
+
 /// Validate `collected_at` is a valid RFC 3339 string, or return the fallback.
 fn validate_collected_at(raw: Option<&str>) -> Result<String, String> {
     match raw {
         Some(s) if !s.is_empty() => {
-            // Try to parse; on failure, reject.
-            if chrono::DateTime::parse_from_rfc3339(s).is_err() {
-                return Err(format!(
-                    "collected_at must be RFC 3339 (e.g. 2026-08-01T20:14:33-04:00), got: {s}"
-                ));
+            if s.len() > MAX_COLLECTED_AT_BYTES
+                || s.chars().any(|character| character.is_control())
+                || chrono::DateTime::parse_from_rfc3339(s).is_err()
+            {
+                return Err("collected_at is invalid or exceeds its bound".to_string());
             }
             Ok(s.to_string())
         }
@@ -13951,10 +13953,7 @@ async fn post_interactive_submission_handler(
     if !ALLOWED_WIDGET_TYPES.contains(&widget_type) {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!(
-                "widget_type must be one of {:?}, got {:?}",
-                ALLOWED_WIDGET_TYPES, widget_type
-            ),
+            "invalid widget type".to_string(),
         ));
     }
 
