@@ -4445,10 +4445,13 @@ fn uploads_dir(category: &str) -> Result<PathBuf, (StatusCode, String)> {
     Ok(dir)
 }
 
+const MAX_UPLOAD_FILENAME_BYTES: usize = 256;
+
 fn safe_filename(name: &str) -> Result<String, (StatusCode, String)> {
     let last = name.rsplit('/').next().unwrap_or(name);
     let last = last.rsplit('\\').next().unwrap_or(last);
     if last.is_empty()
+        || last.len() > MAX_UPLOAD_FILENAME_BYTES
         || last == "."
         || last == ".."
         || last.contains('/')
@@ -4456,10 +4459,7 @@ fn safe_filename(name: &str) -> Result<String, (StatusCode, String)> {
         || last.contains('\0')
         || last.chars().any(|c| c.is_control())
     {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Invalid filename: {}", name),
-        ));
+        return Err((StatusCode::BAD_REQUEST, "Invalid filename".to_string()));
     }
     Ok(last.to_string())
 }
@@ -12171,6 +12171,11 @@ mod tests {
         for bad in ["", ".", "..", "/", "\\", "\u{0010}"] {
             assert!(safe_filename(bad).is_err(), "should reject {:?}", bad);
         }
+    }
+
+    #[test]
+    fn safe_filename_rejects_oversized_names() {
+        assert!(safe_filename(&"x".repeat(MAX_UPLOAD_FILENAME_BYTES + 1)).is_err());
     }
 
     #[test]
