@@ -1753,6 +1753,25 @@ async fn list_layout_folders(
         .map_err(|_| internal_server_error())
 }
 
+fn validate_layout_folder(folder: &LayoutFolder) -> Result<(), (StatusCode, String)> {
+    if folder.id.trim().is_empty()
+        || folder.id.len() > 128
+        || folder.name.trim().is_empty()
+        || folder.name.len() > 256
+        || folder.parent_id.as_deref().is_some_and(|parent| parent.len() > 128)
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid layout folder".to_string()));
+    }
+    Ok(())
+}
+
+fn validate_layout_folder_id(id: &str) -> Result<(), (StatusCode, String)> {
+    if id.trim().is_empty() || id.len() > 128 {
+        return Err((StatusCode::BAD_REQUEST, "Invalid layout folder identifier".to_string()));
+    }
+    Ok(())
+}
+
 async fn create_layout_folder(
     State(repository): State<ClientRepository>,
     AxumJson(mut folder): AxumJson<LayoutFolder>,
@@ -1764,6 +1783,7 @@ async fn create_layout_folder(
     folder.created_at = now.clone();
     folder.updated_at = now;
     folder.name = folder.name.trim().to_string();
+    validate_layout_folder(&folder)?;
     repository
         .save_layout_folder(&folder)
         .await
@@ -1776,6 +1796,7 @@ async fn update_layout_folder(
     Path(id): Path<String>,
     AxumJson(mut folder): AxumJson<LayoutFolder>,
 ) -> Result<AxumJson<LayoutFolder>, (StatusCode, String)> {
+    validate_layout_folder_id(&id)?;
     let existing = repository
         .get_layout_folder(&id)
         .await
@@ -1785,6 +1806,7 @@ async fn update_layout_folder(
     folder.created_at = existing.created_at;
     folder.updated_at = Utc::now().to_rfc3339();
     folder.name = folder.name.trim().to_string();
+    validate_layout_folder(&folder)?;
     repository
         .save_layout_folder(&folder)
         .await
@@ -1796,6 +1818,7 @@ async fn delete_layout_folder(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    validate_layout_folder_id(&id)?;
     repository
         .delete_layout_folder(&id)
         .await
@@ -10634,6 +10657,22 @@ mod tests {
         assert!(validate_password(&"x".repeat(MAX_USER_PASSWORD_BYTES + 1)).is_err());
         assert!(validate_user_id("").is_err());
         assert!(validate_user_id(&"x".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn layout_folder_fields_are_bounded() {
+        let valid = LayoutFolder {
+            id: "folder-1".to_string(),
+            name: "Operations".to_string(),
+            parent_id: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        assert!(validate_layout_folder(&valid).is_ok());
+        assert!(validate_layout_folder_id(&"x".repeat(129)).is_err());
+        let mut oversized = valid;
+        oversized.name = "x".repeat(257);
+        assert!(validate_layout_folder(&oversized).is_err());
     }
 
     #[test]
