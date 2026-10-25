@@ -1568,7 +1568,10 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             delete(remove_widget_preset_asset),
         )
         .route("/api/widget-presets/{id}/export", get(export_widget_preset))
-        .route("/api/widget-presets/import", post(import_widget_preset))
+        .route(
+            "/api/widget-presets/import",
+            post(import_widget_preset).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         .route(
             "/api/widget-presets/reset-defaults",
             post(reset_default_widget_presets),
@@ -5861,6 +5864,23 @@ async fn import_widget_preset(
     validate_widget_preset_fields(&name, &widget_type, &props)?;
     let assets = widget_preset_assets_from_export(preset_obj.get("assets").cloned(), &props);
     validate_widget_preset_asset_count(assets.as_array().map_or(0, Vec::len))?;
+    if let Some(arr) = assets.as_array() {
+        for asset in arr {
+            let kind = asset
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("weather_icon");
+            let key = asset
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0");
+            let url = asset
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            validate_widget_preset_asset(kind, key, url)?;
+        }
+    }
 
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
