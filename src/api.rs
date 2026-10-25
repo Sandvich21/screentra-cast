@@ -1472,6 +1472,10 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         )
         .route("/api/clients/{id}/displays", get(list_client_displays))
         .route(
+            "/api/clients/{id}/player-capability/{index}",
+            get(issue_player_capability),
+        )
+        .route(
             "/api/clients/{id}/displays/bulk-assign",
             post(bulk_assign_displays).layer(DefaultBodyLimit::max(16 * 1024)),
         )
@@ -9199,6 +9203,40 @@ pub(crate) async fn require_client_or_admin(
     require_client_command_token(repository, client_id, headers).await
 }
 
+async fn require_client_or_admin_or_player(
+    repository: &ClientRepository,
+    auth: &crate::auth::AuthState,
+    client_id: &str,
+    display_index: Option<i64>,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, String)> {
+    validate_client_identifier(client_id)?;
+    if let Some(capability) = headers
+        .get("X-SCREENTRA-PLAYER-CAPABILITY")
+        .and_then(|value| value.to_str().ok())
+    {
+        if auth.verify_player_capability(capability, client_id, display_index) {
+            return Ok(());
+        }
+        return Err((StatusCode::UNAUTHORIZED, "invalid player capability".to_string()));
+    }
+    require_client_or_admin(repository, auth, client_id, headers).await
+}
+
+async fn issue_player_capability(
+    State(repository): State<ClientRepository>,
+    Extension(auth): Extension<crate::auth::AuthState>,
+    headers: HeaderMap,
+    Path((id, index)): Path<(String, i64)>,
+) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_display_index(index)?;
+    require_client_or_admin(&repository, &auth, &id, &headers).await?;
+    Ok(AxumJson(serde_json::json!({
+        "capability": auth.issue_player_capability(&id, index),
+        "expires_in": 300,
+    })))
+}
+
 async fn set_client_command(
     State(repository): State<ClientRepository>,
     Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
@@ -9864,9 +9902,15 @@ async fn layout_propagation_status(
 
 async fn list_client_displays(
     State(repository): State<ClientRepository>,
+    Extension(auth): Extension<crate::auth::AuthState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<AxumJson<Vec<ClientDisplayInfo>>, (StatusCode, String)> {
-    validate_client_identifier(&id)?;
+    require_client_or_admin_or_player(&repository, &auth, &id, None, &headers).await?;
+    let player_display_index = headers
+        .get("X-SCREENTRA-PLAYER-CAPABILITY")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|token| auth.player_capability_display_index(token, &id));
     let (is_virtual, _client_layout_id, records) = repository
         .list_client_displays(&id)
         .await
@@ -9874,6 +9918,9 @@ async fn list_client_displays(
     let mut out = Vec::<ClientDisplayInfo>::new();
     for record in records {
         let display_index = record.display_index;
+        if player_display_index.is_some_and(|allowed| allowed != display_index as i64) {
+            continue;
+        }
         let enabled = record.enabled;
         let last_seen = record.last_seen.clone();
         let assigned_layout_id = record.assigned_layout_id.clone();
@@ -9969,7 +10016,7 @@ async fn get_client_display_config(
     Path((id, index)): Path<(String, i64)>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
     validate_client_display_index(index)?;
-    require_client_or_admin(&repository, &auth, &id, &headers).await?;
+    require_client_or_admin_or_player(&repository, &auth, &id, Some(index), &headers).await?;
     let (layout_id, orientation) = repository
         .get_display_config(&id, index)
         .await

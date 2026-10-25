@@ -82,7 +82,11 @@ class ServerSecurityAuditTests(unittest.TestCase):
             start = source.index(marker)
             end = source.index(end_marker, start)
             block = source[start:end]
-            self.assertIn('require_client_or_admin(&repository, &auth, &id, &headers).await?', block, marker)
+            self.assertTrue(
+                'require_client_or_admin(&repository, &auth, &id, &headers).await?' in block
+                or 'require_client_or_admin_or_player(&repository, &auth, &id' in block,
+                marker,
+            )
 
         source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
         for marker, end_marker, forbidden in (

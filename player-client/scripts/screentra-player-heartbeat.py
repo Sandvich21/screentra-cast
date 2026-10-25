@@ -1304,9 +1304,12 @@ def main():
         # Restart kiosk on layout assignment change (e.g. after server nudge or editor assign).
         if cfg and current_layout_id and current_layout_id != previous_layout_id:
             try:
+                # Persist the observed assignment before restarting the kiosk.
+                # The kiosk restart can restart this heartbeat service too; writing
+                # afterward caused the same assignment to trigger repeatedly.
+                _atomic_write_text(prev_layout_path, current_layout_id)
                 subprocess.run(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'], check=True, timeout=15)
                 print(f'layout changed {previous_layout_id} -> {current_layout_id}; kiosk restarted', flush=True)
-                _atomic_write_text(prev_layout_path, current_layout_id or '')
             except Exception as e:
                 print(f'layout-change restart failed: {e}', flush=True)
         elif cfg and current_layout_id:

@@ -1,5 +1,15 @@
 
 var rendered = {};
+const PLAYER_URL_PARAMS = new URLSearchParams(window.location.search);
+const PLAYER_HASH_PARAMS = new URLSearchParams(window.location.hash.slice(1));
+const PLAYER_CAPABILITY = PLAYER_HASH_PARAMS.get('player_capability') || PLAYER_URL_PARAMS.get('player_capability') || '';
+function playerFetch(url, options) {
+  options = options || {};
+  const headers = new Headers(options.headers || {});
+  if (PLAYER_CAPABILITY) headers.set('X-SCREENTRA-PLAYER-CAPABILITY', PLAYER_CAPABILITY);
+  options.headers = headers;
+  return window.fetch(url, options);
+}
 const MAX_PLAYER_RESPONSE_BYTES = 4 * 1024 * 1024;
 async function readPlayerTextBounded(response, maximumBytes = MAX_PLAYER_RESPONSE_BYTES) {
   const reader = response.body && response.body.getReader ? response.body.getReader() : null;
@@ -678,7 +688,7 @@ function ripleyFitTrafficTemplateText(root) {
   }
   requestAnimationFrame(run);
 }
-function lg(m){fetch('/api/log',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({msg:m})}).catch(function(){});}
+function lg(m){playerFetch('/api/log',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({msg:m})}).catch(function(){});}
 
 
 function ripleyCalendarRequiredEventCount(widgetProps) {
@@ -728,7 +738,7 @@ async function ripleyLoadCalendarData(widgetProps) {
   var url = widgetProps.ics_url || widgetProps.ical_url || widgetProps.ical || widgetProps.calendar_url || '';
   if (!url || !Array.isArray(widgetProps.template_elements) || !widgetProps.template_elements.length) return [];
   try {
-    var response = await fetch('/api/ics-proxy?url=' + encodeURIComponent(url), {cache:'no-store'});
+    var response = await playerFetch('/api/ics-proxy?url=' + encodeURIComponent(url), {cache:'no-store'});
     if (!response.ok) throw new Error('calendar ' + response.status);
     widgetProps._calendar_events = ripleyParseCalendarText(await readPlayerTextBounded(response), ripleyCalendarRequiredEventCount(widgetProps), widgetProps.time_format === '24' ? '24' : '12');
   } catch (_) { widgetProps._calendar_events = []; }
@@ -762,7 +772,7 @@ async function ripleyLoadWeatherData(widgetProps) {
     return widgetProps._weather_data;
   }
   try {
-    var response = await fetch('/api/weather/forecast?lat=' + encodeURIComponent(lat) + '&lon=' + encodeURIComponent(lon), {cache: 'no-store'});
+    var response = await playerFetch('/api/weather/forecast?lat=' + encodeURIComponent(lat) + '&lon=' + encodeURIComponent(lon), {cache: 'no-store'});
     if (!response.ok) throw new Error('weather ' + response.status);
     widgetProps._weather_data = await readPlayerJsonBounded(response);
     widgetProps._weather_data_source = 'live';
@@ -793,7 +803,7 @@ async function ripleyLoadTrafficData(widgetProps, widgetId) {
   }
   try {
     var url = '/api/traffic/events?lat=' + encodeURIComponent(lat) + '&lon=' + encodeURIComponent(lon) + '&radius_miles=' + encodeURIComponent(widgetProps.radius_miles || 25);
-    var response = await fetch(url, {cache: 'no-store'});
+    var response = await playerFetch(url, {cache: 'no-store'});
     if (!response.ok) throw new Error('traffic ' + response.status);
     widgetProps._traffic_data = await readPlayerJsonBounded(response);
     if (typeof ripleyFilterTrafficEvents === 'function' && widgetProps._traffic_data.configured !== false && widgetProps._traffic_data.available !== false) {
@@ -814,7 +824,7 @@ async function ripleyHydrateTrafficTemplates(layout) {
     return widget && String(widget.widget_type || widget.type || '').toLowerCase() === 'traffic' && widget.props && widget.props.preset;
   }).map(async function(widget) {
     try {
-      var response = await fetch('/api/widget-presets/' + encodeURIComponent(widget.props.preset), {cache:'no-store'});
+      var response = await playerFetch('/api/widget-presets/' + encodeURIComponent(widget.props.preset), {cache:'no-store'});
       if (!response.ok) return;
       var preset = await readPlayerJsonBounded(response);
       var presetProps = preset && preset.props_json;
@@ -834,7 +844,7 @@ function injectInstalledFontsIntoIframes(root) {
   root.querySelectorAll('iframe').forEach(function(frame) {
     frame.addEventListener('load', function() {
       try {
-        fetch('/api/fonts/installed').then(function(r){ return r.ok ? readPlayerJsonBounded(r) : []; }).then(function(fonts) {
+        playerFetch('/api/fonts/installed').then(function(r){ return r.ok ? readPlayerJsonBounded(r) : []; }).then(function(fonts) {
           if (!frame.contentDocument || !Array.isArray(fonts)) return;
           var style = frame.contentDocument.createElement('style');
           style.textContent = fonts.map(function(f) {
@@ -1224,7 +1234,7 @@ async function postInteractivePageSubmissions(clientId, layout, widgets, root) {
       payload: interactiveWidgetValue(w, node),
       collected_at: baseAt,
     };
-    var res = await fetch('/api/interactive/submit', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+    var res = await playerFetch('/api/interactive/submit', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
     if (!res.ok) throw new Error(await readPlayerTextBounded(res));
   }
 }
@@ -1495,7 +1505,7 @@ async function init() {
   // player until reload (acceptable — admin rarely installs fonts
   // on a live screen).
   try {
-    var fontsResp = await fetch('/api/fonts/installed');
+    var fontsResp = await playerFetch('/api/fonts/installed');
     if (fontsResp.ok) {
       var fontsList = await readPlayerJsonBounded(fontsResp);
       injectInstalledFonts(fontsList);
@@ -1508,12 +1518,12 @@ async function init() {
   var displays = null;
   if (clientId) {
     try {
-      var r = await fetch('/api/clients/' + encodeURIComponent(clientId) + '/displays');
+      var r = await playerFetch('/api/clients/' + encodeURIComponent(clientId) + '/displays');
       if (r.ok) displays = await readPlayerJsonBounded(r);
     } catch (_e) { /* fall through */ }
   }
   if (!displays) {
-    displays = await fetch('/api/displays').then(function(r){return readPlayerJsonBounded(r);});
+    displays = await playerFetch('/api/displays').then(function(r){return readPlayerJsonBounded(r);});
   }
   var activeDisplays = displays.filter(function(d){
     var status = String(d.status || 'connected').toLowerCase();
@@ -1550,7 +1560,7 @@ async function init() {
   async function fetchClientDisplayAssignment() {
     if (!clientId) return null;
     try {
-      var dr = await fetch('/api/clients/' + encodeURIComponent(clientId) + '/displays', {cache:'no-store'});
+      var dr = await playerFetch('/api/clients/' + encodeURIComponent(clientId) + '/displays', {cache:'no-store'});
       if (!dr.ok) return null;
       var ds = await readPlayerJsonBounded(dr);
       var selected = ds.find(function(d){ return d.connector === myConnector || Number(d.display_index) === Number(myDisplay.display_index); });
@@ -1562,7 +1572,7 @@ async function init() {
       var index = Number(selected.display_index);
       if (Number.isFinite(index)) {
         try {
-          var cr = await fetch('/api/clients/' + encodeURIComponent(clientId) + '/displays/' + index + '/config', {cache:'no-store'});
+          var cr = await playerFetch('/api/clients/' + encodeURIComponent(clientId) + '/displays/' + index + '/config', {cache:'no-store'});
           if (cr.ok) {
             var config = await readPlayerJsonBounded(cr);
             selected = Object.assign({}, selected, {active_layout_revision: config.active_layout_revision});
@@ -1584,7 +1594,7 @@ async function init() {
   async function fetchAndCacheLayout(layoutId, forceFetch) {
     if (!forceFetch && layoutCache[layoutId]) return layoutCache[layoutId];
     try {
-      var ly = await fetch('/api/layouts/' + encodeURIComponent(layoutId), {cache:'no-store'}).then(function(r){
+      var ly = await playerFetch('/api/layouts/' + encodeURIComponent(layoutId), {cache:'no-store'}).then(function(r){
         if (!r.ok) throw new Error('layout HTTP ' + r.status);
         return readPlayerJsonBounded(r);
       });
@@ -1705,7 +1715,7 @@ async function init() {
         // basic marquee picks it up at render time.
         if (ws[j].widget_type === 'news' && !wp.preset && wp.feedUrl) {
           try {
-            var resp = await fetch('/api/news/headlines?url=' + encodeURIComponent(wp.feedUrl));
+            var resp = await playerFetch('/api/news/headlines?url=' + encodeURIComponent(wp.feedUrl));
             if (resp.ok) {
               var data = await readPlayerJsonBounded(resp);
               (window.__ripleyNewsHeadlines = window.__ripleyNewsHeadlines || {})[ws[j].id] = data.headlines || [];
@@ -1893,7 +1903,7 @@ async function init() {
       // fallback below.)
       var layoutId = clientDisplay && clientDisplay.assigned_layout_id;
       if (!layoutId) {
-        var state = await fetch('/api/display-state').then(function(r){return readPlayerJsonBounded(r);});
+        var state = await playerFetch('/api/display-state').then(function(r){return readPlayerJsonBounded(r);});
         var a = state.assignments.find(function(x){return x.display === myConnector;});
         layoutId = a && a.layout_id;
       }

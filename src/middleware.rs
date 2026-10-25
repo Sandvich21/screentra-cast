@@ -143,6 +143,20 @@ fn is_open_path(path: &str, method: &str) -> bool {
         if is_client_resource_path(path, &["config"]) {
             return true;
         }
+        // The renderer exchanges the enrolled client token for a short-lived
+        // browser-player capability. The handler verifies the token before
+        // returning it; middleware only lets the request reach that handler.
+        if let Some(rest) = path.strip_prefix("/api/clients/") {
+            let parts: Vec<&str> = rest.split('/').collect();
+            if parts.len() == 4 && parts[1] == "player-capability" {
+                return true;
+            }
+            // The browser player uses this client-scoped read with its
+            // short-lived capability; the handler performs the real check.
+            if parts.len() == 3 && parts[1] == "displays" {
+                return true;
+            }
+        }
         // The addon inventory is read by enrolled players; the handler still
         // requires the per-client credential or an admin session.
         if is_client_resource_path(path, &["addons"]) {

@@ -161,6 +161,22 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertFalse(renderer._csrf_allows_mutation(cross))
         self.assertTrue(renderer._csrf_allows_mutation({'Host': '127.0.0.1:3910'}))
 
+    def test_player_capability_redirect_uses_fragment_not_query(self):
+        html = renderer._live_player_redirect_html(
+            'https://server.example:3000', 0, 'DP-2', 'client-1', 'A' * 128
+        )
+        self.assertIn('#player_capability=', html)
+        self.assertNotIn('?player_capability=', html)
+
+    def test_layout_change_marker_is_written_before_kiosk_restart(self):
+        source = (ROOT / 'player-client/scripts/screentra-player-heartbeat.py').read_text()
+        marker = source.index("if cfg and current_layout_id and current_layout_id != previous_layout_id:")
+        block = source[marker:source.index('        elif cfg and current_layout_id:', marker)]
+        self.assertLess(
+            block.index('_atomic_write_text(prev_layout_path'),
+            block.index('subprocess.run'),
+        )
+
     def test_display_override_modal_escapes_connector_html(self):
         source = (ROOT / 'static/js/app.js').read_text()
         self.assertIn('Set Display Size: ${esc(connector)}', source)

@@ -732,18 +732,27 @@ pub fn load_client_status(client_id: &str) -> Result<Option<serde_json::Value>, 
         }
     }
     let bytes = read_bounded_addon_file(&path, MAX_CLIENT_STATUS_BYTES, "stored addon status")?;
-    let payload: StoredClientStatusPayload = serde_json::from_slice(&bytes)
-        .map_err(|error| AddonError::Io(format!("Invalid stored addon status: {error}")))?;
+    let payload: StoredClientStatusPayload = match serde_json::from_slice(&bytes) {
+        Ok(payload) => payload,
+        Err(_) => return Ok(None),
+    };
     if payload.client_id != client_id {
-        return Err(AddonError::Invalid(
-            "Stored addon status client identity mismatch".to_string(),
-        ));
+        return Ok(None);
     }
-    validate_client_status_timestamp(
+    if validate_client_status_timestamp(
         Some(&payload.received_at),
         "stored addon status timestamp",
-    )?;
-    validate_client_status_report(&payload.report)?;
+    )
+    .is_err()
+    {
+        // A stale or partially-written local cache must not turn a read-only
+        // inventory request into a server error. The next authenticated client
+        // heartbeat will replace it with a fresh payload.
+        return Ok(None);
+    }
+    if validate_client_status_report(&payload.report).is_err() {
+        return Ok(None);
+    }
     serde_json::to_value(payload)
         .map(Some)
         .map_err(|error| AddonError::Io(format!("Invalid stored addon status: {error}")))
@@ -5830,7 +5839,7 @@ mod tests {
         );
         assert_ne!(duplicated_client_id, raw_saved);
         fs::write(entries[0].path(), duplicated_client_id).unwrap();
-        assert!(load_client_status("client-1").is_err());
+        assert!(load_client_status("client-1").unwrap().is_none());
         let duplicated_received_at = raw_saved.replacen(
             "  \"received_at\": ",
             "  \"received_at\": \"2026-10-19T12:00:00Z\",\n  \"received_at\": ",
@@ -5838,16 +5847,16 @@ mod tests {
         );
         assert_ne!(duplicated_received_at, raw_saved);
         fs::write(entries[0].path(), duplicated_received_at).unwrap();
-        assert!(load_client_status("client-1").is_err());
+        assert!(load_client_status("client-1").unwrap().is_none());
         let mut tampered = saved.clone();
         tampered["report"]["capabilities"][0]["detail"] =
             serde_json::Value::String("password=redacted".to_string());
         fs::write(entries[0].path(), serde_json::to_vec(&tampered).unwrap()).unwrap();
-        assert!(load_client_status("client-1").is_err());
+        assert!(load_client_status("client-1").unwrap().is_none());
         let mut unknown_field = saved.clone();
         unknown_field["report"]["unexpected"] = serde_json::Value::Bool(true);
         fs::write(entries[0].path(), serde_json::to_vec(&unknown_field).unwrap()).unwrap();
-        assert!(load_client_status("client-1").is_err());
+        assert!(load_client_status("client-1").unwrap().is_none());
         let mut invalid_timestamp = saved.clone();
         invalid_timestamp["received_at"] =
             serde_json::Value::String("not-a-rfc3339-timestamp".to_string());
@@ -5856,7 +5865,7 @@ mod tests {
             serde_json::to_vec(&invalid_timestamp).unwrap(),
         )
         .unwrap();
-        assert!(load_client_status("client-1").is_err());
+        assert!(load_client_status("client-1").unwrap().is_none());
         let mut duplicate_addons = saved.clone();
         duplicate_addons["report"]["addons"] = serde_json::json!([
             {"id": "weather", "state": "verified"},
@@ -5867,11 +5876,11 @@ mod tests {
             serde_json::to_vec(&duplicate_addons).unwrap(),
         )
         .unwrap();
-        assert!(load_client_status("client-1").is_err());
+        assert!(load_client_status("client-1").unwrap().is_none());
         let mut wrong_identity = saved;
         wrong_identity["client_id"] = serde_json::Value::String("client-2".to_string());
         fs::write(entries[0].path(), serde_json::to_vec(&wrong_identity).unwrap()).unwrap();
-        assert!(load_client_status("client-1").is_err());
+        assert!(load_client_status("client-1").unwrap().is_none());
         #[cfg(unix)]
         {
             let outside = root.join("outside-status.json");

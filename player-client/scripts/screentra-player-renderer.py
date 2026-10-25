@@ -1416,7 +1416,52 @@ def _server_reachable(server_url: str, timeout: float) -> bool:
         return False
 
 
-def _live_player_redirect_html(server_url: str, display_index: int, connector: str | None = None, client_id: str | None = None) -> str:
+def _client_auth_token(cache_dir: Path) -> str:
+    try:
+        return _read_real_file(cache_dir.parent / 'client-auth-token', 4096).decode('utf-8').strip()
+    except Exception:
+        return ''
+
+
+def _fetch_player_capability(server_url: str, client_id: str, display_index: int, cache_dir: Path) -> str | None:
+    """Exchange the local client credential for a short-lived browser token."""
+    token = _client_auth_token(cache_dir)
+    if not token:
+        return None
+    import ssl as _ssl
+    import urllib.request as _ur
+    try:
+        parsed = urllib.parse.urlparse(server_url)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+            return None
+        base = server_url.rstrip('/')
+        endpoint = f'{base}/api/clients/{urllib.parse.quote(client_id, safe="")}/player-capability/{display_index}'
+        req = _ur.Request(endpoint, headers={'X-SCREENTRA-CLIENT-TOKEN': token}, method='GET')
+        ctx = None
+        if parsed.scheme == 'https':
+            for cafile in (
+                os.environ.get('RIPLEY_CA_CERT', ''),
+                str(Path.home() / '.local/share/screentra-client/screentra-cast-signage-ca.crt'),
+            ):
+                if cafile and Path(cafile).exists():
+                    try:
+                        ctx = _ssl.create_default_context(cafile=cafile)
+                        break
+                    except Exception:
+                        pass
+            if ctx is None:
+                return None
+        with _ur.urlopen(req, timeout=LIVE_PROBE_TIMEOUT_SECS, context=ctx) as response:
+            raw = response.read(32 * 1024 + 1)
+            if len(raw) > 32 * 1024:
+                return None
+        value = json.loads(raw.decode('utf-8')).get('capability')
+        return value if isinstance(value, str) and 64 <= len(value) <= 16 * 1024 else None
+    except Exception:
+        return None
+
+
+def _live_player_redirect_html(server_url: str, display_index: int, connector: str | None = None, client_id: str | None = None, capability: str | None = None) -> str:
     """Return a redirect to the live server for a physical connector."""
     if not connector or connector == 'virtual-0':
         raise ValueError('physical display connector is required')
@@ -1424,6 +1469,8 @@ def _live_player_redirect_html(server_url: str, display_index: int, connector: s
     target = f'{safe_server.rstrip("/")}/player.html?display={urllib.parse.quote(connector)}'
     if client_id:
         target += f'&client_id={urllib.parse.quote(client_id, safe="")}'
+    if capability:
+        target += f'#player_capability={urllib.parse.quote(capability, safe="")}'
     return (
         '<!doctype html><html><head>'
         f'<meta http-equiv="refresh" content="0; url={target}">'
@@ -1654,7 +1701,10 @@ class Handler(BaseHTTPRequestHandler):
             if live_url and _server_reachable(live_url, LIVE_PROBE_TIMEOUT_SECS):
                 connector = _connector_for_display_index(display_index)
                 if connector:
-                    return self.send_text(200, _live_player_redirect_html(live_url, display_index, connector, _client_id_from_env() or _client_id_from_cache()), 'text/html; charset=utf-8')
+                    client_id = _client_id_from_env() or _client_id_from_cache()
+                    capability = _fetch_player_capability(live_url, client_id, display_index, self.cache_dir) if client_id else None
+                    if capability:
+                        return self.send_text(200, _live_player_redirect_html(live_url, display_index, connector, client_id, capability), 'text/html; charset=utf-8')
 
             # No live server reachable (offline mode). Render the offline
             # cached layout from the renderer script's PLAYER_HTML constant.

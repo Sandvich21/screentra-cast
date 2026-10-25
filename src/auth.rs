@@ -419,6 +419,53 @@ impl AuthState {
         format!("{}.{}", body, sig)
     }
 
+    /// Issue a short-lived, client-scoped capability for the browser player.
+    /// It contains no client credential and is only useful for the named client.
+    pub fn issue_player_capability(&self, client_id: &str, display_index: i64) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs();
+        let payload = serde_json::json!({
+            "typ": "player",
+            "client_id": client_id,
+            "display_index": display_index,
+            "exp": now + 300,
+            "iat": now,
+        })
+        .to_string();
+        let mut mac = HmacSha256::new_from_slice(&self.key).expect("HMAC accepts any key length");
+        mac.update(payload.as_bytes());
+        let sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        let body = URL_SAFE_NO_PAD.encode(payload.as_bytes());
+        format!("{}.{}", body, sig)
+    }
+
+    pub fn player_capability_display_index(&self, token: &str, client_id: &str) -> Option<i64> {
+        let payload = self.decode_signed_payload(token)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs();
+        if payload.get("typ").and_then(|v| v.as_str()) != Some("player")
+            || payload.get("client_id").and_then(|v| v.as_str()) != Some(client_id)
+            || !payload.get("exp").and_then(|v| v.as_u64()).is_some_and(|exp| exp > now)
+        {
+            return None;
+        }
+        payload.get("display_index").and_then(|v| v.as_i64())
+    }
+
+    pub fn verify_player_capability(
+        &self,
+        token: &str,
+        client_id: &str,
+        display_index: Option<i64>,
+    ) -> bool {
+        self.player_capability_display_index(token, client_id)
+            .is_some_and(|capability_index| display_index.is_none_or(|index| capability_index == index))
+    }
+
     fn decode_signed_payload(&self, token: &str) -> Option<serde_json::Value> {
         if token.len() > MAX_SIGNED_TOKEN_BYTES {
             return None;
@@ -1721,6 +1768,18 @@ mod tests {
         let s = test_state();
         let tok = s.issue_for("admin", "admin");
         assert!(s.verify(&tok), "freshly-issued token should verify");
+    }
+
+    #[test]
+    fn player_capability_is_client_and_display_bound() {
+        let state = test_state();
+        let token = state.issue_player_capability("client-1", 0);
+        assert!(state.verify_player_capability(&token, "client-1", Some(0)));
+        assert_eq!(state.player_capability_display_index(&token, "client-1"), Some(0));
+        assert!(state.verify_player_capability(&token, "client-1", None));
+        assert!(!state.verify_player_capability(&token, "client-2", Some(0)));
+        assert!(!state.verify_player_capability(&token, "client-1", Some(1)));
+        assert!(!state.verify_player_capability("tampered", "client-1", Some(0)));
     }
 
     #[test]
