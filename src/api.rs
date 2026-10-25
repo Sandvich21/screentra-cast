@@ -5297,6 +5297,13 @@ async fn delete_schedule(
 }
 // ── Layout Set handlers ─────────────────────────────────────
 
+fn validate_layout_set_id(id: &str) -> Result<(), StatusCode> {
+    if id.trim().is_empty() || id.len() > 128 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
 async fn list_layout_sets(
     State(repository): State<ClientRepository>,
 ) -> Result<Json<Vec<LayoutSetSummary>>, StatusCode> {
@@ -5356,6 +5363,7 @@ async fn get_layout_set(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<Json<LayoutSetWithItems>, StatusCode> {
+    validate_layout_set_id(&id)?;
     match repository.get_layout_set(&id).await {
         Ok(Some(s)) => Ok(Json(s)),
         Ok(None) => Err(StatusCode::NOT_FOUND),
@@ -5371,6 +5379,7 @@ async fn update_layout_set(
     Path(id): Path<String>,
     Json(payload): Json<UpdateLayoutSet>,
 ) -> Result<Json<LayoutSetWithItems>, StatusCode> {
+    validate_layout_set_id(&id)?;
     let existing = match repository.get_layout_set(&id).await {
         Ok(Some(s)) => s,
         Ok(None) => return Err(StatusCode::NOT_FOUND),
@@ -5402,6 +5411,9 @@ async fn delete_layout_set(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> StatusCode {
+    if validate_layout_set_id(&id).is_err() {
+        return StatusCode::BAD_REQUEST;
+    }
     if repository.delete_layout_set(&id).await.is_ok() {
         StatusCode::NO_CONTENT
     } else {
@@ -5414,7 +5426,8 @@ async fn add_layout_set_entry(
     Path(layout_set_id): Path<String>,
     Json(payload): Json<AddLayoutSetEntry>,
 ) -> Result<Json<LayoutSetWithItems>, StatusCode> {
-    if layout_set_id.trim().is_empty() || payload.layout_id.trim().is_empty() {
+    validate_layout_set_id(&layout_set_id)?;
+    if payload.layout_id.trim().is_empty() || payload.layout_id.len() > 128 {
         return Err(StatusCode::BAD_REQUEST);
     }
     if payload.interval_secs.is_some_and(|seconds| seconds == 0 || seconds > 86_400) {
@@ -5439,9 +5452,14 @@ async fn add_layout_set_entry(
 
 async fn update_layout_set_entry(
     State(repository): State<ClientRepository>,
-    Path((_layout_set_id, entry_id)): Path<(String, String)>,
+    Path((layout_set_id, entry_id)): Path<(String, String)>,
     Json(payload): Json<UpdateLayoutSetEntry>,
 ) -> StatusCode {
+    if validate_layout_set_id(&layout_set_id).is_err()
+        || validate_layout_set_id(&entry_id).is_err()
+    {
+        return StatusCode::BAD_REQUEST;
+    }
     match repository.update_layout_set_entry(&entry_id, &payload).await {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(e) => {
@@ -5453,8 +5471,13 @@ async fn update_layout_set_entry(
 
 async fn delete_layout_set_entry(
     State(repository): State<ClientRepository>,
-    Path((_layout_set_id, entry_id)): Path<(String, String)>,
+    Path((layout_set_id, entry_id)): Path<(String, String)>,
 ) -> StatusCode {
+    if validate_layout_set_id(&layout_set_id).is_err()
+        || validate_layout_set_id(&entry_id).is_err()
+    {
+        return StatusCode::BAD_REQUEST;
+    }
     if repository.delete_layout_set_entry(&entry_id).await.is_ok() {
         StatusCode::NO_CONTENT
     } else {
@@ -5467,9 +5490,7 @@ async fn replace_layout_set_entries(
     Path(layout_set_id): Path<String>,
     Json(entries): Json<Vec<CreateLayoutSetItem>>,
 ) -> Result<Json<LayoutSetWithItems>, StatusCode> {
-    if layout_set_id.trim().is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    validate_layout_set_id(&layout_set_id)?;
     validate_layout_set_item_count(entries.len())?;
     let entries: Vec<LayoutSetEntry> = entries
         .into_iter()
@@ -11032,6 +11053,9 @@ mod tests {
             validate_layout_set_item_count(MAX_LAYOUT_SET_ITEMS + 1),
             Err(StatusCode::BAD_REQUEST)
         );
+        assert!(validate_layout_set_id("set-1").is_ok());
+        assert!(validate_layout_set_id("").is_err());
+        assert!(validate_layout_set_id(&"x".repeat(129)).is_err());
     }
 
     #[test]
