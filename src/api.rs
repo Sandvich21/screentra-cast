@@ -3593,9 +3593,19 @@ fn weather_response_with_meta(mut value: serde_json::Value, fetched_at: &str) ->
 
 fn curl_json(url: &str) -> Option<serde_json::Value> {
     const MAX_WEATHER_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+    let parsed = url::Url::parse(url).ok()?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("api.weather.gov")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || url.len() > 2048
+        || url.chars().any(|character| character.is_control())
+    {
+        return None;
+    }
     let mut command = Command::new("curl");
     command.args([
-        "-fsSL",
+        "-fsS",
         "--max-time",
         "12",
         "-A",
@@ -11389,6 +11399,13 @@ mod tests {
         assert!(validate_bulk_command_client_ids(&oversized).is_err());
     }
 
+    #[test]
+    fn weather_curl_rejects_untrusted_urls() {
+        assert!(curl_json("http://api.weather.gov/points/1,2").is_none());
+        assert!(curl_json("https://example.com/weather").is_none());
+        assert!(curl_json("https://user:password@api.weather.gov/weather").is_none());
+        assert!(curl_json("https://api.weather.gov/{}\n").is_none());
+    }
     #[test]
     fn bounded_file_reader_rejects_oversized_files() {
         let path = std::env::temp_dir().join(format!("screentra-api-bound-{}", Uuid::new_v4()));
