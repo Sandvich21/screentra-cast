@@ -678,6 +678,7 @@ pub async fn ensure_preview_cached(
     );
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36              (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         )
@@ -710,6 +711,9 @@ pub async fn ensure_preview_cached(
                 family_id
             )
         })?;
+    if !is_allowed_google_font_asset_url(&woff2_url) {
+        return Err("invalid Google Fonts asset URL".to_string());
+    }
     let woff2_resp = client
         .get(&woff2_url)
         .send()
@@ -747,8 +751,18 @@ pub async fn ensure_preview_cached(
     Ok(preview_cache_url(family_id, weight))
 }
 
-/// Build the on-disk path for a specific subset's woff2.
-/// <preview_cache_dir>/<id>-<weight>-<subset>.woff2
+fn is_allowed_google_font_asset_url(value: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(value) else {
+        return false;
+    };
+    parsed.scheme() == "https"
+        && parsed.host_str() == Some("fonts.gstatic.com")
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && value.len() <= 2048
+        && !value.chars().any(|character| character.is_control())
+}
+
 pub fn preview_subset_path(
     family_id: &str,
     weight: u32,
@@ -915,6 +929,7 @@ pub async fn ensure_full_preview_cached(
     );
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
              (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -959,6 +974,13 @@ pub async fn ensure_full_preview_cached(
         // Skip subsets whose woff2 is implausibly large (icon
         // fonts like Material Symbols can be 300+ KB). We
         // keep them in the catalog but don't cache the bytes.
+        if !is_allowed_google_font_asset_url(woff2_url) {
+            log::debug!(
+                "preview cache: {} {} rejected untrusted asset URL",
+                family_id, subset
+            );
+            continue;
+        }
         let woff2_resp = match client.get(woff2_url).send().await {
             Ok(r) => r,
             Err(e) => {
