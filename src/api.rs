@@ -13814,12 +13814,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
     });
     let body_bytes = serde_json::to_vec_pretty(&payload)
         .map_err(|_| internal_server_error())?;
-    std::fs::write(&dest, &body_bytes).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("write {}: {}", dest.display(), e),
-        )
-    })?;
+    std::fs::write(&dest, &body_bytes).map_err(|_| internal_server_error())?;
     let size = body_bytes.len() as u64;
     // Best-effort DB linkage: log to a diagnostics table if present, otherwise just keep the file.
     let client_count = body
@@ -13861,12 +13856,7 @@ async fn list_client_diagnostics(
     let dir = client_diagnostics_dir();
     let mut entries: Vec<ClientDiagnosticsSummary> = Vec::new();
     let mut scanned_entries = 0usize;
-    let read_dir = std::fs::read_dir(&dir).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("read {}: {}", dir.display(), e),
-        )
-    })?;
+    let read_dir = std::fs::read_dir(&dir).map_err(|_| internal_server_error())?;
     for e in read_dir.flatten() {
         scanned_entries = scanned_entries.saturating_add(1);
         if scanned_entries > MAX_DIAGNOSTIC_ENTRIES {
@@ -13965,15 +13955,15 @@ async fn download_client_diagnostics(
             "Diagnostics file not found".to_string(),
         ));
     }
-    let bytes = read_bounded_file(&path, 16 * 1024 * 1024).map_err(|e| {
-        (
-            if e == "file exceeds its bound" {
-                StatusCode::PAYLOAD_TOO_LARGE
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            },
-            format!("read {}: {}", path.display(), e),
-        )
+    let bytes = read_bounded_file(&path, 16 * 1024 * 1024).map_err(|error| {
+        if error == "file exceeds its bound" {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Diagnostics file is too large".to_string(),
+            )
+        } else {
+            internal_server_error()
+        }
     })?;
     use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
     let cd = format!("attachment; filename=\"{}\"", safe);
