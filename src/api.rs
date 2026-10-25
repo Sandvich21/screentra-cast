@@ -4447,6 +4447,25 @@ fn validate_preset_type(widget_type: &str) -> Result<(), (StatusCode, String)> {
     Ok(())
 }
 
+const MAX_WIDGET_PRESET_PROPS_BYTES: usize = 256 * 1024;
+
+fn validate_widget_preset_fields(
+    name: &str,
+    widget_type: &str,
+    props: &serde_json::Value,
+) -> Result<(), (StatusCode, String)> {
+    if name.trim().is_empty() || name.len() > 256 {
+        return Err((StatusCode::BAD_REQUEST, "invalid widget preset name".to_string()));
+    }
+    validate_preset_type(widget_type)?;
+    let props_bytes = serde_json::to_vec(props)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid widget preset properties".to_string()))?;
+    if props_bytes.len() > MAX_WIDGET_PRESET_PROPS_BYTES {
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, "widget preset properties are too large".to_string()));
+    }
+    Ok(())
+}
+
 const MAX_WIDGET_PRESET_ASSETS: usize = 256;
 
 fn validate_widget_preset_asset_count(count: usize) -> Result<(), (StatusCode, String)> {
@@ -5441,7 +5460,7 @@ async fn create_widget_preset(
     State(repository): State<ClientRepository>,
     Json(body): Json<CreateWidgetPresetBody>,
 ) -> Result<AxumJson<WidgetPreset>, (StatusCode, String)> {
-    validate_preset_type(&body.widget_type)?;
+    validate_widget_preset_fields(&body.name, &body.widget_type, &body.props)?;
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let props_json = serde_json::to_string(&body.props).unwrap_or_else(|_| "{}".to_string());
@@ -5465,7 +5484,7 @@ async fn update_widget_preset(
     Path(id): Path<String>,
     Json(body): Json<UpdateWidgetPresetBody>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    validate_preset_type(&body.widget_type)?;
+    validate_widget_preset_fields(&body.name, &body.widget_type, &body.props)?;
     let now = chrono::Utc::now().to_rfc3339();
     let props_json = serde_json::to_string(&body.props).unwrap_or_else(|_| "{}".to_string());
     repository
@@ -5672,6 +5691,7 @@ async fn import_widget_preset(
             .cloned()
             .or_else(|| preset_obj.get("props_json").cloned()),
     )?;
+    validate_widget_preset_fields(&name, &widget_type, &props)?;
     let assets = widget_preset_assets_from_export(preset_obj.get("assets").cloned(), &props);
     validate_widget_preset_asset_count(assets.as_array().map_or(0, Vec::len))?;
 
@@ -11705,6 +11725,29 @@ mod tests {
         assert_eq!(nws_hourly_code_for_date(&periods, "2026-09-29", false, 22), Some(2));
         assert_eq!(nws_morning_transition_for_date(&periods, "2026-09-29", 2), Some((45, "2026-09-29T08:00:00-04:00".to_string())));
     }
+
+    #[test]
+    fn widget_preset_fields_are_bounded() {
+        assert!(validate_widget_preset_fields(
+            "Weather defaults",
+            "weather",
+            &serde_json::json!({"rows": 2}),
+        )
+        .is_ok());
+        assert_eq!(
+            validate_widget_preset_fields(" ", "weather", &serde_json::json!({})),
+            Err((StatusCode::BAD_REQUEST, "invalid widget preset name".to_string()))
+        );
+        assert_eq!(
+            validate_widget_preset_fields(
+                "Weather defaults",
+                "weather",
+                &serde_json::json!({"data": "x".repeat(MAX_WIDGET_PRESET_PROPS_BYTES)}),
+            ),
+            Err((StatusCode::PAYLOAD_TOO_LARGE, "widget preset properties are too large".to_string()))
+        );
+    }
+
 
     /// Widget templates are allowed for the "complex" widget types
     /// (weather, calendar, news, webpage/embed) and forbidden for the
