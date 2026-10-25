@@ -4888,6 +4888,7 @@ async fn list_trash() -> Result<Json<Vec<TrashEntry>>, (StatusCode, String)> {
 
 async fn restore_trash(Path(id): Path<String>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     if id.is_empty()
+        || id.len() > MAX_UPLOAD_FILENAME_BYTES
         || id.contains("..")
         || StdPath::new(&id).file_name().and_then(|name| name.to_str()) != Some(id.as_str())
     {
