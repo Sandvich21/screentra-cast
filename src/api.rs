@@ -9058,7 +9058,13 @@ struct SceneUpsertRequest {
 const MAX_SCENE_ASSIGNMENTS: usize = 64;
 
 fn validate_scene_upsert(payload: &SceneUpsertRequest) -> Result<(), (StatusCode, String)> {
-    if payload.assignments.len() > MAX_SCENE_ASSIGNMENTS
+    if payload.name.trim().is_empty()
+        || payload.name.len() > 256
+        || payload
+            .description
+            .as_deref()
+            .is_some_and(|description| description.len() > 4_096)
+        || payload.assignments.len() > MAX_SCENE_ASSIGNMENTS
         || payload
             .assignments
             .iter()
@@ -10724,6 +10730,14 @@ mod tests {
         };
         assert_eq!(
             validate_scene_upsert(&oversized),
+            Err((StatusCode::BAD_REQUEST, "invalid scene assignments".to_string()))
+        );
+        assert_eq!(
+            validate_scene_upsert(&SceneUpsertRequest {
+                name: " ".to_string(),
+                description: None,
+                assignments: Vec::new(),
+            }),
             Err((StatusCode::BAD_REQUEST, "invalid scene assignments".to_string()))
         );
     }
