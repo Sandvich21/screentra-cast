@@ -1471,7 +1471,10 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route("/api/clients/search", get(search_connected_clients))
         .route("/api/refresh", get(get_refresh).post(bump_refresh))
         .route("/api/clear-cache", post(clear_cache))
-        .route("/api/log", post(player_log))
+        .route(
+            "/api/log",
+            post(player_log).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/api/ics-proxy", get(ics_proxy))
         .route("/api/weather/lookup", get(weather_location_lookup))
         .route("/api/weather/forecast", get(weather_forecast))
