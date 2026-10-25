@@ -1716,8 +1716,14 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         )
         // System time
         .route("/api/system/time", get(get_system_time))
-        .route("/api/system/time/timezone", post(set_timezone))
-        .route("/api/system/time/clock", post(set_clock))
+        .route(
+            "/api/system/time/timezone",
+            post(set_timezone).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/system/time/clock",
+            post(set_clock).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route("/api/system/time/sync-ntp", post(sync_ntp))
         .route("/api/system/maintenance/vacuum", post(vacuum_database))
         .route("/api/system/health", get(get_system_health))
@@ -7252,16 +7258,29 @@ async fn get_system_time() -> Result<AxumJson<SystemTimeInfo>, (StatusCode, Stri
     }))
 }
 
+fn validate_timezone_identifier(timezone: &str) -> Result<(), (StatusCode, String)> {
+    let path = std::path::Path::new(timezone);
+    if timezone.is_empty()
+        || timezone.len() > 128
+        || timezone.chars().any(|character| character.is_control())
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid timezone".to_string()));
+    }
+    Ok(())
+}
+
 async fn set_timezone(
     AxumJson(body): AxumJson<SetTimezoneBody>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let tz = body.timezone.trim();
-    if tz.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "timezone cannot be empty".to_string(),
-        ));
-    }
+    validate_timezone_identifier(tz)?;
     // Verify the timezone exists in the zoneinfo database
     let zoneinfo_path = format!("/usr/share/zoneinfo/{}", tz);
     if !std::path::Path::new(&zoneinfo_path).exists() {
@@ -7273,6 +7292,16 @@ async fn set_timezone(
     Ok(StatusCode::NO_CONTENT)
 }
 
+fn validate_local_datetime(value: &str) -> Result<(), (StatusCode, String)> {
+    if value.len() > 32
+        || value.chars().any(|character| character.is_control())
+        || chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").is_err()
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid local datetime".to_string()));
+    }
+    Ok(())
+}
+
 async fn set_clock(
     AxumJson(body): AxumJson<SetClockBody>,
 ) -> Result<StatusCode, (StatusCode, String)> {
@@ -7281,12 +7310,7 @@ async fn set_clock(
     // it in the system timezone. Because NTP may be enabled (which prevents manual
     // time changes), we temporarily disable NTP, set the time, then re-enable NTP.
     let s = body.local_datetime.trim();
-    if s.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "local_datetime cannot be empty".to_string(),
-        ));
-    }
+    validate_local_datetime(s)?;
     log::info!("Setting system clock to {}", s);
     // Disable NTP
     let _ = run_sudo(&["timedatectl", "set-ntp", "false"]);
@@ -10964,6 +10988,12 @@ mod tests {
         assert!(validate_optional_layout_id(Some("layout-1")).is_ok());
         assert!(validate_optional_layout_id(Some("bad\nlayout")).is_err());
         assert!(validate_optional_layout_id(Some(&"x".repeat(257))).is_err());
+        assert!(validate_timezone_identifier("America/New_York").is_ok());
+        assert!(validate_timezone_identifier("../etc/passwd").is_err());
+        assert!(validate_timezone_identifier(&"x".repeat(129)).is_err());
+        assert!(validate_local_datetime("2026-10-25 12:34:56").is_ok());
+        assert!(validate_local_datetime("2026-10-25 12:34:56\n").is_err());
+        assert!(validate_local_datetime("not-a-date").is_err());
         assert!(validate_virtual_client_name("Lobby display").is_ok());
         assert!(validate_virtual_client_name("").is_err());
         assert!(validate_virtual_client_name(&"x".repeat(257)).is_err());
