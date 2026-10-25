@@ -7466,6 +7466,30 @@ fn default_true() -> bool {
     true
 }
 
+const MAX_USER_DISPLAY_NAME_BYTES: usize = 256;
+const MAX_USER_PASSWORD_BYTES: usize = 1024;
+
+fn validate_password(password: &str) -> Result<(), (StatusCode, String)> {
+    if password.len() < 8 || password.len() > MAX_USER_PASSWORD_BYTES {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Password must be 8-1024 bytes".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_display_name(display_name: &str) -> Result<String, (StatusCode, String)> {
+    let value = display_name.trim().to_string();
+    if value.len() > MAX_USER_DISPLAY_NAME_BYTES {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Display name is too long".to_string(),
+        ));
+    }
+    Ok(value)
+}
+
 fn normalize_username(username: &str) -> Result<String, (StatusCode, String)> {
     let u = username.trim().to_lowercase();
     if u.len() < 2 || u.len() > 48 {
@@ -7566,17 +7590,12 @@ async fn create_user(
     require_admin_user_manager(&state.auth, &headers).await?;
     let username = normalize_username(&payload.username)?;
     let role = normalize_role(&payload.role)?;
-    if payload.password.len() < 8 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Password must be at least 8 characters".to_string(),
-        ));
-    }
-    let display_name = payload
-        .display_name
-        .unwrap_or_else(|| username.clone())
-        .trim()
-        .to_string();
+    validate_password(&payload.password)?;
+    let display_name = normalize_display_name(
+        &payload
+            .display_name
+            .unwrap_or_else(|| username.clone()),
+    )?;
     let now = Utc::now().to_rfc3339();
     let id = Uuid::new_v4().to_string();
     let hash = crate::auth::hash_password(&payload.password);
@@ -7625,11 +7644,11 @@ async fn update_user(
         Some(v) => normalize_username(&v)?,
         None => current.username.clone(),
     };
-    let display_name = payload
-        .display_name
-        .unwrap_or_else(|| current.display_name.clone())
-        .trim()
-        .to_string();
+    let display_name = normalize_display_name(
+        &payload
+            .display_name
+            .unwrap_or_else(|| current.display_name.clone()),
+    )?;
     let role = match payload.role {
         Some(v) => normalize_role(&v)?,
         None => current.role.clone(),
@@ -7652,9 +7671,7 @@ async fn update_user(
     }
     let now = Utc::now().to_rfc3339();
     let password_hash = if let Some(password) = payload.password {
-        if password.len() < 8 {
-            return Err((StatusCode::BAD_REQUEST, "Password must be at least 8 characters".to_string()));
-        }
+        validate_password(&password)?;
         Some(crate::auth::hash_password(&password))
     } else {
         None
@@ -10593,6 +10610,14 @@ fn reverse_name(ip: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn user_fields_are_bounded() {
+        assert!(normalize_display_name("Operator").is_ok());
+        assert!(normalize_display_name(&"x".repeat(MAX_USER_DISPLAY_NAME_BYTES + 1)).is_err());
+        assert!(validate_password("short").is_err());
+        assert!(validate_password(&"x".repeat(MAX_USER_PASSWORD_BYTES + 1)).is_err());
+    }
+
     #[test]
     fn player_bundle_download_handlers_use_published_filenames() {
         let source = include_str!("api.rs");
