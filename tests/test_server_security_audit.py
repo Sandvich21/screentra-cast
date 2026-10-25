@@ -23,6 +23,14 @@ class ServerSecurityAuditTests(unittest.TestCase):
         self.assertIn('std::fs::write(&dest, &body_bytes).map_err(|_| internal_server_error())?', block)
         self.assertNotIn('dest.display()', block)
 
+    def test_layout_folder_repository_errors_are_opaque(self):
+        source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
+        start = source.index('async fn create_layout_folder(')
+        end = source.index('async fn list_layouts(', start)
+        block = source[start:end]
+        self.assertNotIn('map_err(|e| (StatusCode::BAD_REQUEST, e))?', block)
+        self.assertNotIn('map_err(|e| (StatusCode::CONFLICT, e))?', block)
+
     def test_privileged_and_player_error_responses_are_opaque(self):
         source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
         for marker, end_marker in (

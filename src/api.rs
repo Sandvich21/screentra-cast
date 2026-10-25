@@ -1853,7 +1853,7 @@ async fn create_layout_folder(
     repository
         .save_layout_folder(&folder)
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(folder))
 }
 
@@ -1876,7 +1876,7 @@ async fn update_layout_folder(
     repository
         .save_layout_folder(&folder)
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|_| internal_server_error())?;
     Ok(AxumJson(folder))
 }
 
@@ -1888,7 +1888,7 @@ async fn delete_layout_folder(
     repository
         .delete_layout_folder(&id)
         .await
-        .map_err(|e| (StatusCode::CONFLICT, e))?;
+        .map_err(|_| (StatusCode::CONFLICT, "Layout folder cannot be deleted".to_string()))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
