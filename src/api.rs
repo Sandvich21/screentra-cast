@@ -4480,6 +4480,12 @@ fn validate_widget_preset_asset(
     key: &str,
     url: &str,
 ) -> Result<(), (StatusCode, String)> {
+    if kind.len() > 64 || key.len() > 64 || url.len() > 1_024 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Widget preset asset fields are too large".to_string(),
+        ));
+    }
     if kind != "weather_icon" {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -10785,6 +10791,17 @@ mod tests {
         assert_eq!(
             validate_widget_preset_asset_count(MAX_WIDGET_PRESET_ASSETS + 1),
             Err((StatusCode::BAD_REQUEST, "too many widget preset assets".to_string()))
+        );
+    }
+
+
+    #[test]
+    fn widget_preset_asset_fields_are_bounded() {
+        assert!(validate_widget_preset_asset("weather_icon", "0", "/uploads/icons/0.png").is_ok());
+        let oversized_url = format!("/uploads/{}", "x".repeat(1_025));
+        assert_eq!(
+            validate_widget_preset_asset("weather_icon", "0", &oversized_url),
+            Err((StatusCode::BAD_REQUEST, "Widget preset asset fields are too large".to_string()))
         );
     }
 
