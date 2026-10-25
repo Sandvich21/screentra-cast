@@ -4219,6 +4219,15 @@ async fn get_news_headlines(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> AxumJson<serde_json::Value> {
     let url = params.get("url").cloned().unwrap_or_default();
+    if url.len() > 2048 || url.chars().any(|character| character.is_control()) {
+        return AxumJson(serde_json::json!({
+            "url": "",
+            "title": "",
+            "headlines": [],
+            "last_fetched_at": "",
+            "last_error": null,
+        }));
+    }
     let empty = serde_json::json!({
         "url": url,
         "title": "",
