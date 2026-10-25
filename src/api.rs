@@ -1544,7 +1544,10 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route("/api/fonts/preview-status", get(fonts_preview_status_handler))
         .route("/api/fonts/full-preview-css", get(fonts_full_preview_css_handler))
         .route("/api/fonts/installed", get(fonts_installed_handler))
-        .route("/api/fonts/download", post(fonts_download_handler))
+        .route(
+            "/api/fonts/download",
+            post(fonts_download_handler).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
         .route(
             "/api/fonts/{filename}",
             delete(fonts_delete_handler),
@@ -1673,7 +1676,8 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         )
         .route(
             "/api/interactive/submissions/sync-to-google",
-            post(sync_interactive_submissions_to_google_handler),
+            post(sync_interactive_submissions_to_google_handler)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
             "/api/version/update/export",
@@ -1697,7 +1701,7 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         )
         .route(
             "/api/version/update/github/settings",
-            post(github_update_settings_handler),
+            post(github_update_settings_handler).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
             "/api/version/update/apply",
