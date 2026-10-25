@@ -2095,6 +2095,7 @@ async fn get_display_state_for_display(
     State(repository): State<ClientRepository>,
     Path(display): Path<String>,
 ) -> Result<AxumJson<DisplayState>, (StatusCode, String)> {
+    validate_display_identifier(&display).map_err(|status| (status, "invalid display identifier".to_string()))?;
     if let Some(assignment) = repository
         .get_display_assignment(&display)
         .await
@@ -2112,6 +2113,13 @@ async fn get_display_state_for_display(
 
 const MAX_DISPLAY_STATE_ASSIGNMENTS: usize = 4096;
 const MAX_DISPLAY_NAME_BYTES: usize = 256;
+
+fn validate_display_identifier(display: &str) -> Result<(), StatusCode> {
+    if display.trim().is_empty() || display.len() > MAX_DISPLAY_NAME_BYTES {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
 
 fn validate_display_state(state: &DisplayState) -> Result<(), StatusCode> {
     if state.assignments.len() > MAX_DISPLAY_STATE_ASSIGNMENTS {
@@ -10863,6 +10871,12 @@ mod tests {
                     layout_id: None,
                 }],
             }),
+            Err(StatusCode::BAD_REQUEST),
+        );
+        assert!(validate_display_identifier("DP-1").is_ok());
+        assert_eq!(validate_display_identifier(""), Err(StatusCode::BAD_REQUEST));
+        assert_eq!(
+            validate_display_identifier(&"x".repeat(MAX_DISPLAY_NAME_BYTES + 1)),
             Err(StatusCode::BAD_REQUEST),
         );
     }
