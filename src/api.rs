@@ -3186,14 +3186,15 @@ async fn clear_cache() -> Result<AxumJson<serde_json::Value>, (StatusCode, Strin
 const MAX_PLAYER_LOG_MESSAGE_BYTES: usize = 4096;
 
 fn bounded_player_log_message(msg: &str) -> String {
-    if msg.len() <= MAX_PLAYER_LOG_MESSAGE_BYTES {
-        return msg.to_string();
+    let sanitized: String = msg.chars().filter(|character| !character.is_control()).collect();
+    if sanitized.len() <= MAX_PLAYER_LOG_MESSAGE_BYTES {
+        return sanitized;
     }
     let mut end = MAX_PLAYER_LOG_MESSAGE_BYTES;
-    while end > 0 && !msg.is_char_boundary(end) {
+    while end > 0 && !sanitized.is_char_boundary(end) {
         end -= 1;
     }
-    msg[..end].to_string()
+    sanitized[..end].to_string()
 }
 
 async fn player_log(AxumJson(body): AxumJson<serde_json::Value>) -> AxumJson<serde_json::Value> {
@@ -11069,6 +11070,7 @@ mod tests {
         let bounded = bounded_player_log_message(&unicode_message);
         assert!(bounded.len() <= MAX_PLAYER_LOG_MESSAGE_BYTES);
         assert!(std::str::from_utf8(bounded.as_bytes()).is_ok());
+        assert_eq!(bounded_player_log_message("before\nafter\t").as_str(), "beforeafter");
     }
 
     #[test]
