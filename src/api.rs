@@ -4987,7 +4987,12 @@ async fn fonts_full_preview_css_handler(
 
 fn validate_schedule_entry(entry: &ScheduleEntry) -> Result<(), (StatusCode, String)> {
     let bad = |message: &'static str| (StatusCode::BAD_REQUEST, message.to_string());
-    if entry.display.len() > 256
+    if entry.id.len() > 128
+        || entry.created_at.len() > 64
+        || entry.display.len() > 256
+        || entry.layout_id.len() > 128
+        || entry.layout_set_id.as_deref().is_some_and(|value| value.len() > 128)
+        || entry.target_client.as_deref().is_some_and(|value| value.len() > 128)
         || (entry.action == "switch_layout" && entry.display.trim().is_empty())
     {
         return Err(bad("Invalid schedule display"));
@@ -12832,6 +12837,17 @@ mod audit_validation_tests {
         entry.layout_set_id = Some("set-1".into());
         assert!(validate_schedule_entry(&entry).is_err());
     }
+
+    #[test]
+    fn schedule_validation_rejects_oversized_identifiers() {
+        let mut entry = layout_schedule();
+        entry.target_client = Some("x".repeat(129));
+        assert!(validate_schedule_entry(&entry).is_err());
+        entry = layout_schedule();
+        entry.created_at = "x".repeat(65);
+        assert!(validate_schedule_entry(&entry).is_err());
+    }
+
 
     #[test]
     fn schedule_validation_accepts_client_targeted_power_schedule_without_legacy_display() {
