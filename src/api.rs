@@ -12210,6 +12210,9 @@ mod tests {
             ..Default::default()
         })
         .is_err());
+        assert!(validate_interactive_submission_ids(&[1, 2]).is_ok());
+        assert!(validate_interactive_submission_ids(&[0]).is_err());
+        assert!(validate_interactive_submission_ids(&[-1]).is_err());
     }
 }
 
@@ -14163,11 +14166,19 @@ fn validate_mutation_id_count<T>(ids: &[T], error_message: &str) -> Result<(), (
     Ok(())
 }
 
+fn validate_interactive_submission_ids(ids: &[i64]) -> Result<(), (StatusCode, String)> {
+    validate_mutation_id_count(ids, "too many interactive submission ids")?;
+    if ids.iter().any(|id| *id <= 0) {
+        return Err((StatusCode::BAD_REQUEST, "invalid interactive submission id".to_string()));
+    }
+    Ok(())
+}
+
 async fn delete_interactive_submissions_handler(
     State(repository): State<ClientRepository>,
     AxumJson(payload): AxumJson<DeleteInteractiveSubmissionsPayload>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
-    validate_mutation_id_count(&payload.ids, "too many interactive submission ids")?;
+    validate_interactive_submission_ids(&payload.ids)?;
     let n = repository
         .delete_interactive_submissions(&payload.ids)
         .await
@@ -14224,7 +14235,7 @@ async fn sync_interactive_submissions_to_google_handler(
     validate_sync_to_google_payload(&payload)?;
     // Resolve which submission IDs to sync.
     if let Some(specific) = payload.ids.as_deref() {
-        validate_mutation_id_count(specific, "too many interactive submission ids")?;
+        validate_interactive_submission_ids(specific)?;
     }
     let ids: Vec<i64> = if let Some(specific) = payload.ids.clone() {
         specific
@@ -14254,7 +14265,7 @@ async fn sync_interactive_submissions_to_google_handler(
             }
         }
     };
-    validate_mutation_id_count(&ids, "too many interactive submission ids")?;
+    validate_interactive_submission_ids(&ids)?;
 
     if ids.is_empty() {
         return Ok(AxumJson(serde_json::json!({
@@ -14270,6 +14281,12 @@ async fn sync_interactive_submissions_to_google_handler(
         .spreadsheet_id
         .clone()
         .or_else(|| std::env::var("SIGNAGE_GOOGLE_SHEETS_DEFAULT_ID").ok());
+    if spreadsheet_id
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty() || value.len() > MAX_SYNC_SPREADSHEET_ID_BYTES)
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid spreadsheet identifier".to_string()));
+    }
 
     if !google_configured {
         let n = repository
