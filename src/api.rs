@@ -8910,12 +8910,20 @@ pub(crate) async fn require_client_command_token(
     Ok(())
 }
 
+fn validate_client_identifier(client_id: &str) -> Result<(), (StatusCode, String)> {
+    if client_id.trim().is_empty() || client_id.len() > 128 {
+        return Err((StatusCode::BAD_REQUEST, "invalid client identifier".to_string()));
+    }
+    Ok(())
+}
+
 pub(crate) async fn require_client_or_admin(
     repository: &ClientRepository,
     auth: &crate::auth::AuthState,
     client_id: &str,
     headers: &HeaderMap,
 ) -> Result<(), (StatusCode, String)> {
+    validate_client_identifier(client_id)?;
     if let Some(token) = crate::auth::extract_token(headers) {
         if let Some(payload) = auth.token_payload(&token).await {
             let role = payload
@@ -10717,6 +10725,9 @@ mod tests {
         assert!(validate_password(&"x".repeat(MAX_USER_PASSWORD_BYTES + 1)).is_err());
         assert!(validate_user_id("").is_err());
         assert!(validate_user_id(&"x".repeat(129)).is_err());
+        assert!(validate_client_identifier("client-1").is_ok());
+        assert!(validate_client_identifier("").is_err());
+        assert!(validate_client_identifier(&"x".repeat(129)).is_err());
     }
 
     #[test]
