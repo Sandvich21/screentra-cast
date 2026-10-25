@@ -4043,12 +4043,13 @@ async fn get_news_headlines(
     // it's empty or malformed, surface an empty array.
     let headlines: serde_json::Value = serde_json::from_str(&row.headlines_json)
         .unwrap_or_else(|_| serde_json::json!([]));
+    let last_error = row.last_error.as_ref().map(|_| "Feed unavailable");
     AxumJson(serde_json::json!({
         "url": row.url,
         "title": row.title,
         "headlines": headlines,
         "last_fetched_at": row.last_fetched_at,
-        "last_error": row.last_error,
+        "last_error": last_error,
     }))
 }
 

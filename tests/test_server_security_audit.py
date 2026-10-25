@@ -107,6 +107,13 @@ class ServerSecurityAuditTests(unittest.TestCase):
         self.assertIn('"feed refresh failed"', block)
         self.assertNotIn('"url": feed.url', block)
         self.assertNotIn('"error": error', block)
+    def test_news_headlines_do_not_return_stored_feed_errors(self):
+        source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
+        start = source.index('async fn get_news_headlines(')
+        end = source.index('// Admin-only manual refresh', start)
+        block = source[start:end]
+        self.assertIn('"Feed unavailable"', block)
+        self.assertNotIn('"last_error": row.last_error', block)
 
 
 if __name__ == '__main__':
