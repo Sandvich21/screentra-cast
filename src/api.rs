@@ -1817,6 +1817,7 @@ async fn get_layout(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<Layout>, (StatusCode, String)> {
+    validate_optional_layout_id(Some(&id))?;
     repository
         .get_layout(&id)
         .await
@@ -1832,6 +1833,7 @@ async fn create_layout(
     if layout.id.is_empty() {
         layout.id = Uuid::new_v4().to_string();
     }
+    validate_optional_layout_id(Some(&layout.id))?;
     let now = Utc::now().to_rfc3339();
     if layout.page_type.is_empty() {
         layout.page_type = "single".to_string();
@@ -1869,6 +1871,7 @@ async fn update_layout(
     Path(id): Path<String>,
     AxumJson(mut layout): AxumJson<Layout>,
 ) -> Result<AxumJson<Layout>, (StatusCode, String)> {
+    validate_optional_layout_id(Some(&id))?;
     layout.id = id;
     if layout.page_type.is_empty() {
         layout.page_type = "single".to_string();
@@ -1896,6 +1899,7 @@ async fn list_layout_revisions(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<Vec<crate::models::LayoutRevision>>, (StatusCode, String)> {
+    validate_optional_layout_id(Some(&id))?;
     let revisions = repository
         .list_layout_revisions(&id)
         .await
@@ -1907,6 +1911,7 @@ async fn publish_layout(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_optional_layout_id(Some(&id))?;
     let layout = repository
         .get_layout(&id)
         .await
@@ -1973,6 +1978,7 @@ async fn delete_layout(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    validate_optional_layout_id(Some(&id))?;
     repository
         .delete_layout(&id)
         .await
