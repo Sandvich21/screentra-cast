@@ -8231,6 +8231,7 @@ async fn bulk_assign_clients(
     State(repository): State<ClientRepository>,
     Json(payload): Json<BulkAssignRequest>,
 ) -> Result<AxumJson<BulkAssignResult>, (StatusCode, String)> {
+    validate_bulk_command_client_ids(&payload.client_ids)?;
     let updated = repository
         .bulk_set_client_assignment(&payload.client_ids, payload.layout_id.as_deref())
         .await
