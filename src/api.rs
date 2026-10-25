@@ -9799,6 +9799,7 @@ async fn bulk_assign_displays(
     Path(id): Path<String>,
     Json(payload): Json<BulkAssignDisplaysRequest>,
 ) -> Result<AxumJson<BulkAssignDisplaysResult>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     validate_optional_layout_id(payload.layout_id.as_deref())?;
     let updated = repository
         .bulk_set_display_layout(&id, payload.layout_id.as_deref())
