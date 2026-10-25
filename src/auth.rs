@@ -31,6 +31,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 const MAX_SIGNED_TOKEN_BYTES: usize = 16 * 1024;
 const MAX_SIGNED_PAYLOAD_BYTES: usize = 8 * 1024;
+const PLAYER_CAPABILITY_TTL_SECS: u64 = 3600;
 const MAX_GOOGLE_RESPONSE_BYTES: usize = 64 * 1024;
 
 async fn read_google_json<T: serde::de::DeserializeOwned>(
@@ -430,7 +431,7 @@ impl AuthState {
             "typ": "player",
             "client_id": client_id,
             "display_index": display_index,
-            "exp": now + 300,
+            "exp": now + PLAYER_CAPABILITY_TTL_SECS,
             "iat": now,
         })
         .to_string();

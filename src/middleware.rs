@@ -148,12 +148,12 @@ fn is_open_path(path: &str, method: &str) -> bool {
         // returning it; middleware only lets the request reach that handler.
         if let Some(rest) = path.strip_prefix("/api/clients/") {
             let parts: Vec<&str> = rest.split('/').collect();
-            if parts.len() == 4 && parts[1] == "player-capability" {
+            if parts.len() == 3 && parts[1] == "player-capability" {
                 return true;
             }
             // The browser player uses this client-scoped read with its
             // short-lived capability; the handler performs the real check.
-            if parts.len() == 3 && parts[1] == "displays" {
+            if parts.len() == 2 && parts[1] == "displays" {
                 return true;
             }
         }
@@ -563,7 +563,10 @@ mod authorization_tests {
         assert!(!is_open_path("/api/layouts/layout-1/render", "GET"));
         assert!(is_open_path("/api/widget-presets/preset-1", "GET"));
         assert!(!is_open_path("/api/widget-presets/preset-1/export", "GET"));
-        assert!(!is_open_path("/api/clients/client-1/displays", "GET"));
+        assert!(is_open_path("/api/clients/client-1/displays", "GET"));
+        assert!(!is_open_path("/api/clients/client-1/displays/0/extra", "GET"));
+        assert!(is_open_path("/api/clients/client-1/player-capability/0", "GET"));
+        assert!(!is_open_path("/api/clients/client-1/player-capability/0/extra", "GET"));
         assert!(is_open_path("/install/player-client.sh", "GET"));
         assert!(is_open_path("/install/player-client.sh.sig", "GET"));
         assert!(is_open_path("/install/player-client-bundle.tar.gz", "GET"));

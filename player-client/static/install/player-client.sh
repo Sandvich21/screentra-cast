@@ -2753,9 +2753,10 @@ def main():
         # Track previous layout assignment to detect changes.
         prev_layout_path = Path(args.cache_dir) / 'previous-layout-id.txt'
         try:
-            previous_layout_id = _read_bounded_text(prev_layout_path, 4096).strip() or None
+            previous_layout_id = _read_real_file(prev_layout_path, 4096).decode('utf-8').strip() or None
         except Exception:
-            previous_layout_id = None
+            cached_previous = _read_json_file(Path(args.cache_dir) / 'client-config.json', {})
+            previous_layout_id = cached_previous.get('assigned_layout_id') or None
         cfg = fetch_config(args.server, data['client_id'], args.cache_dir, display_index=0, config_pattern=args.display_config_pattern)
         if cfg is None:
             # A transient 429/network failure must not turn a valid cached
@@ -5496,6 +5497,11 @@ def _server_reachable(server_url: str, timeout: float) -> bool:
         req = _ur.Request((u.scheme + '://' + (host if not u.port else f'{host}:{port}') + path), method='GET')
         with _ur.urlopen(req, timeout=timeout, context=ctx) as r:
             return 200 <= r.status < 500
+    except _ur.HTTPError as exc:
+        # /api/version is authenticated; a 401 still proves the server and
+        # pinned TLS connection are reachable, so let the caller continue to
+        # the client-token capability exchange.
+        return 200 <= exc.code < 500
     except Exception:
         return False
 
@@ -9554,20 +9560,16 @@ while IFS='|' read -r idx connector port; do
     LIVE_READY=0
     for i in $(seq 1 40); do
         if curl -fsS --max-time 2 "http://127.0.0.1:${port}/" | head -c 65537 | \
-            python3 -c 'import sys; data=sys.stdin.buffer.read(65537); raise SystemExit(0 if len(data) <= 65536 and b"Screentra Cast Display" in data else 1)'; then
+            python3 -c 'import sys; data=sys.stdin.buffer.read(65537); raise SystemExit(0 if (b"Screentra Cast Display" in data or b"Connecting to live player" in data) else 1)'; then
             LIVE_READY=1
             break
         fi
         sleep 0.5
     done
+    # Always open the local renderer. It performs the client-credential
+    # capability exchange before redirecting Chromium to the live server;
+    # launching /player.html directly would bypass that exchange.
     BROWSER_URL="http://127.0.0.1:${port}/"
-    if [ "$LIVE_READY" -eq 1 ]; then
-        SERVER_URL="$(head -c 2049 "$CLIENT_DIR/server" 2>/dev/null || true)"
-        CLIENT_ID="$(head -c 257 "$CLIENT_DIR/client-id" 2>/dev/null || true)"
-        if [ -n "$SERVER_URL" ] && [ -n "$CLIENT_ID" ]; then
-            BROWSER_URL="${SERVER_URL%/}/player.html?display=${connector}&client_id=${CLIENT_ID}"
-        fi
-    fi
     CHROMIUM_USER_DATA="${XDG_RUNTIME_DIR}/chromium-display-${idx}"
     mkdir -p "$CHROMIUM_USER_DATA" "$BOARD_HOME/.config/chromium/Crash Reports"
     chown -R "$BOARD_USER:$BOARD_USER" "$CHROMIUM_USER_DATA" "$BOARD_HOME/.config/chromium"

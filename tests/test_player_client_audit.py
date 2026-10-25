@@ -85,9 +85,10 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('python3 -c \'import sys; raise SystemExit(0 if "Screentra Cast Display" in sys.stdin.read()', kiosk)
         self.assertIn('head -c 1048577', kiosk)
         self.assertIn('head -c 65537', kiosk)
-        self.assertIn('head -c 2049 "$CLIENT_DIR/server"', kiosk)
+        self.assertNotIn('head -c 2049 "$CLIENT_DIR/server"', kiosk)
+        self.assertIn('BROWSER_URL="http://127.0.0.1:${port}/"', kiosk)
+        self.assertIn('capability exchange before redirecting Chromium', kiosk)
         self.assertIn('--max-filesize 65536 "$RENDERER_URL/health"', installer)
-        self.assertIn('head -c 257 "$CLIENT_DIR/client-id"', kiosk)
         self.assertNotIn('python3 -c \'import sys; raise SystemExit(0 if "Screentra Cast Live Player" in sys.stdin.read()', installer)
         self.assertIn('head -c 65537', installer)
 
@@ -176,6 +177,9 @@ class PlayerClientAuditTests(unittest.TestCase):
             block.index('_atomic_write_text(prev_layout_path'),
             block.index('subprocess.run'),
         )
+        self.assertIn('_read_real_file(prev_layout_path, 4096)', source)
+        self.assertIn("cached_previous = _read_json_file(Path(args.cache_dir) / 'client-config.json', {})", source)
+        self.assertNotIn('_read_bounded_text(prev_layout_path', source)
 
     def test_display_override_modal_escapes_connector_html(self):
         source = (ROOT / 'static/js/app.js').read_text()

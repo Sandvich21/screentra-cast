@@ -1412,6 +1412,11 @@ def _server_reachable(server_url: str, timeout: float) -> bool:
         req = _ur.Request((u.scheme + '://' + (host if not u.port else f'{host}:{port}') + path), method='GET')
         with _ur.urlopen(req, timeout=timeout, context=ctx) as r:
             return 200 <= r.status < 500
+    except _ur.HTTPError as exc:
+        # /api/version is authenticated; a 401 still proves the server and
+        # pinned TLS connection are reachable, so let the caller continue to
+        # the client-token capability exchange.
+        return 200 <= exc.code < 500
     except Exception:
         return False
 

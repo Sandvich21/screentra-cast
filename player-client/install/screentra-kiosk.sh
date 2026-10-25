@@ -200,20 +200,16 @@ while IFS='|' read -r idx connector port; do
     LIVE_READY=0
     for i in $(seq 1 40); do
         if curl -fsS --max-time 2 "http://127.0.0.1:${port}/" | head -c 65537 | \
-            python3 -c 'import sys; data=sys.stdin.buffer.read(65537); raise SystemExit(0 if len(data) <= 65536 and b"Screentra Cast Display" in data else 1)'; then
+            python3 -c 'import sys; data=sys.stdin.buffer.read(65537); raise SystemExit(0 if (b"Screentra Cast Display" in data or b"Connecting to live player" in data) else 1)'; then
             LIVE_READY=1
             break
         fi
         sleep 0.5
     done
+    # Always open the local renderer. It performs the client-credential
+    # capability exchange before redirecting Chromium to the live server;
+    # launching /player.html directly would bypass that exchange.
     BROWSER_URL="http://127.0.0.1:${port}/"
-    if [ "$LIVE_READY" -eq 1 ]; then
-        SERVER_URL="$(head -c 2049 "$CLIENT_DIR/server" 2>/dev/null || true)"
-        CLIENT_ID="$(head -c 257 "$CLIENT_DIR/client-id" 2>/dev/null || true)"
-        if [ -n "$SERVER_URL" ] && [ -n "$CLIENT_ID" ]; then
-            BROWSER_URL="${SERVER_URL%/}/player.html?display=${connector}&client_id=${CLIENT_ID}"
-        fi
-    fi
     CHROMIUM_USER_DATA="${XDG_RUNTIME_DIR}/chromium-display-${idx}"
     mkdir -p "$CHROMIUM_USER_DATA" "$BOARD_HOME/.config/chromium/Crash Reports"
     chown -R "$BOARD_USER:$BOARD_USER" "$CHROMIUM_USER_DATA" "$BOARD_HOME/.config/chromium"
