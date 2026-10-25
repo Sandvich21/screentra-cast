@@ -1849,6 +1849,45 @@ async fn get_layout(
         .ok_or((StatusCode::NOT_FOUND, "Layout not found".to_string()))
 }
 
+const MAX_LAYOUT_WIDGETS: usize = 4_096;
+const MAX_LAYOUT_ITEMS: usize = 256;
+const MAX_WIDGET_PROPS_BYTES: usize = 256 * 1024;
+
+fn validate_layout_payload(layout: &Layout) -> Result<(), (StatusCode, String)> {
+    if layout.id.trim().is_empty()
+        || layout.id.len() > 256
+        || layout.name.trim().is_empty()
+        || layout.name.len() > 256
+        || layout.folder_id.as_deref().is_some_and(|folder| folder.len() > 128)
+        || !matches!(layout.page_type.as_str(), "single" | "interactive" | "set")
+        || !matches!(layout.timing_mode.as_str(), "global" | "per_layout")
+        || !matches!(layout.canvas_orientation.as_str(), "landscape" | "portrait")
+        || layout.widgets.len() > MAX_LAYOUT_WIDGETS
+        || layout.items.len() > MAX_LAYOUT_ITEMS
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid layout".to_string()));
+    }
+    for widget in &layout.widgets {
+        if widget.id.trim().is_empty() || widget.id.len() > 128 {
+            return Err((StatusCode::BAD_REQUEST, "Invalid layout widget".to_string()));
+        }
+        let props_bytes = serde_json::to_vec(&widget.props)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid layout widget".to_string()))?;
+        if props_bytes.len() > MAX_WIDGET_PROPS_BYTES {
+            return Err((StatusCode::PAYLOAD_TOO_LARGE, "Layout widget properties are too large".to_string()));
+        }
+    }
+    for item in &layout.items {
+        if item.layout_id.trim().is_empty()
+            || item.layout_id.len() > 256
+            || item.duration.is_some_and(|duration| duration <= 0 || duration > 86_400)
+        {
+            return Err((StatusCode::BAD_REQUEST, "Invalid layout set item".to_string()));
+        }
+    }
+    Ok(())
+}
+
 async fn create_layout(
     State(repository): State<ClientRepository>,
     AxumJson(mut layout): AxumJson<Layout>,
@@ -1871,6 +1910,7 @@ async fn create_layout(
         layout.created_at = now.clone();
     }
     layout.updated_at = now;
+    validate_layout_payload(&layout)?;
 
     repository
         .save_layout(&layout)
@@ -1906,6 +1946,7 @@ async fn update_layout(
         layout.duration = 15;
     }
     layout.updated_at = Utc::now().to_rfc3339();
+    validate_layout_payload(&layout)?;
     repository
         .save_layout(&layout)
         .await
@@ -10673,6 +10714,38 @@ mod tests {
         let mut oversized = valid;
         oversized.name = "x".repeat(257);
         assert!(validate_layout_folder(&oversized).is_err());
+    }
+
+    #[test]
+    fn layout_payload_fields_are_bounded() {
+        let valid = Layout {
+            id: "layout-1".to_string(),
+            name: "Lobby".to_string(),
+            widgets: vec![crate::models::Widget {
+                id: "widget-1".to_string(),
+                widget_type: crate::models::WidgetType::Text,
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+                z: 0,
+                props: serde_json::json!({"text": "Hello"}),
+            }],
+            interactive: false,
+            canvas_orientation: "landscape".to_string(),
+            folder_id: None,
+            page_type: "single".to_string(),
+            timing_mode: "global".to_string(),
+            duration: 15,
+            shuffle: false,
+            items: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        assert!(validate_layout_payload(&valid).is_ok());
+        let mut oversized = valid;
+        oversized.name = "x".repeat(257);
+        assert!(validate_layout_payload(&oversized).is_err());
     }
 
     #[test]
