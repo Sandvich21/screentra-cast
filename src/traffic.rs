@@ -2009,6 +2009,8 @@ async fn fetch_public_511_events(client: &reqwest::Client, query: &TrafficQuery)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    nearby.truncate(512);
+
     let tooltip_requests = nearby.into_iter().map(|event| async move {
         let layer = event.get("layer").and_then(|v| v.as_str()).unwrap_or("");
         let id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
