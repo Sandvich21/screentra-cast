@@ -9805,7 +9805,9 @@ fn validate_client_display_index(index: i64) -> Result<(), (StatusCode, String)>
 }
 
 fn validate_optional_layout_id(layout_id: Option<&str>) -> Result<(), (StatusCode, String)> {
-    if layout_id.is_some_and(|value| value.len() > 256) {
+    if layout_id.is_some_and(|value| {
+        value.len() > 256 || value.chars().any(|character| character.is_control())
+    }) {
         return Err((StatusCode::BAD_REQUEST, "invalid layout id".to_string()));
     }
     Ok(())
@@ -10924,6 +10926,9 @@ mod tests {
         assert!(validate_client_identifier("client-1").is_ok());
         assert!(validate_client_identifier("").is_err());
         assert!(validate_client_identifier(&"x".repeat(129)).is_err());
+        assert!(validate_optional_layout_id(Some("layout-1")).is_ok());
+        assert!(validate_optional_layout_id(Some("bad\nlayout")).is_err());
+        assert!(validate_optional_layout_id(Some(&"x".repeat(257))).is_err());
         assert!(validate_virtual_client_name("Lobby display").is_ok());
         assert!(validate_virtual_client_name("").is_err());
         assert!(validate_virtual_client_name(&"x".repeat(257)).is_err());
