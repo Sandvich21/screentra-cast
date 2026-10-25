@@ -1616,7 +1616,11 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route("/api/version/import", post(import_state_bundle_handler).layer(DefaultBodyLimit::max(1024 * 1024 * 1024)))
         .route("/api/version/restart", post(restart_service_handler))
         // Interactive submissions — POST is unauthenticated (player-side data collection)
-        .route("/api/interactive/submit", post(post_interactive_submission_handler))
+        .route(
+            "/api/interactive/submit",
+            post(post_interactive_submission_handler)
+                .layer(DefaultBodyLimit::max(MAX_INTERACTIVE_BODY_BYTES as usize)),
+        )
         .route(
             "/api/interactive/submissions",
             get(get_interactive_submissions_handler)
