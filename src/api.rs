@@ -1262,10 +1262,17 @@ pub fn router(runtime_state: RuntimeState) -> Router {
 
     Router::new()
         .route("/api/layouts", get(list_layouts).post(create_layout))
-        .route("/api/layout-folders", get(list_layout_folders).post(create_layout_folder))
+        .route(
+            "/api/layout-folders",
+            get(list_layout_folders)
+                .post(create_layout_folder)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route(
             "/api/layout-folders/{id}",
-            put(update_layout_folder).delete(delete_layout_folder),
+            put(update_layout_folder)
+                .delete(delete_layout_folder)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route("/api/layouts/{id}/render", get(render_layout))
         .route("/api/layouts/{id}/publish", post(publish_layout))
