@@ -4805,9 +4805,23 @@ struct FontDownloadRequest {
     weights: Vec<u32>,
 }
 
+const MAX_FONT_DOWNLOAD_WEIGHTS: usize = 64;
+
+fn validate_font_download_request(req: &FontDownloadRequest) -> Result<(), (StatusCode, String)> {
+    if req.family.trim().is_empty()
+        || req.family.len() > 256
+        || req.weights.len() > MAX_FONT_DOWNLOAD_WEIGHTS
+        || req.weights.iter().any(|weight| *weight == 0 || *weight > 1_000)
+    {
+        return Err((StatusCode::BAD_REQUEST, "invalid font download request".to_string()));
+    }
+    Ok(())
+}
+
 async fn fonts_download_handler(
     AxumJson(req): AxumJson<FontDownloadRequest>,
 ) -> Result<AxumJson<Vec<crate::fonts::InstalledFont>>, (StatusCode, String)> {
+    validate_font_download_request(&req)?;
     let weights = if req.weights.is_empty() { vec![400, 700] } else { req.weights };
     let installed = crate::fonts::download_family(&req.family, &weights).await
         .map_err(|_| (StatusCode::BAD_GATEWAY, "Font download unavailable".to_string()))?;
@@ -10612,6 +10626,24 @@ mod tests {
         let (_, message) = command_queue_http_error("command_pending".to_string());
         assert_eq!(message, "A client command is already pending");
     }
+
+    #[test]
+    fn font_download_requests_are_bounded() {
+        let valid = FontDownloadRequest {
+            family: "Roboto".to_string(),
+            weights: vec![400, 700],
+        };
+        assert!(validate_font_download_request(&valid).is_ok());
+        let oversized = FontDownloadRequest {
+            family: "Roboto".to_string(),
+            weights: vec![400; MAX_FONT_DOWNLOAD_WEIGHTS + 1],
+        };
+        assert_eq!(
+            validate_font_download_request(&oversized),
+            Err((StatusCode::BAD_REQUEST, "invalid font download request".to_string()))
+        );
+    }
+
 
     #[test]
     fn layout_set_item_lists_are_bounded() {
