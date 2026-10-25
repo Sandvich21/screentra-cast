@@ -8110,6 +8110,7 @@ async fn set_client_assignment(
     Json(payload): Json<ClientAssignmentRequest>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
     validate_client_identifier(&id)?;
+    validate_optional_layout_id(payload.layout_id.as_deref())?;
     repository
         .set_client_assignment(&id, payload.layout_id.as_deref())
         .await
@@ -8179,6 +8180,16 @@ struct ClientTouchBindingRequest {
 
 const MAX_CLIENT_TOUCH_TARGET_INDEXES: usize = 64;
 
+fn validate_client_touch_text(
+    value: Option<&str>,
+    max_bytes: usize,
+) -> Result<(), (StatusCode, String)> {
+    if value.is_some_and(|text| text.len() > max_bytes || text.chars().any(|character| character.is_control())) {
+        return Err((StatusCode::BAD_REQUEST, "invalid touch binding text".to_string()));
+    }
+    Ok(())
+}
+
 fn validate_client_touch_target_count(count: usize) -> Result<(), (StatusCode, String)> {
     if count > MAX_CLIENT_TOUCH_TARGET_INDEXES {
         return Err((
@@ -8195,6 +8206,8 @@ async fn set_client_touch_binding(
     Json(payload): Json<ClientTouchBindingRequest>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
     validate_client_identifier(&id)?;
+    validate_client_touch_text(payload.device_path.as_deref(), 4_096)?;
+    validate_client_touch_text(payload.device_name.as_deref(), 256)?;
     validate_client_touch_target_count(payload.target_display_indexes.len())?;
     let mut indexes: Vec<i64> = payload
         .target_display_indexes
@@ -11007,6 +11020,9 @@ mod tests {
             .expect_err("oversized touch target list should fail");
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(error, "too many touch target displays");
+        assert!(validate_client_touch_text(Some("/dev/input/event0"), 4_096).is_ok());
+        assert!(validate_client_touch_text(Some(&"x".repeat(4_097)), 4_096).is_err());
+        assert!(validate_client_touch_text(Some("touch\nname"), 256).is_err());
     }
 
     #[test]
