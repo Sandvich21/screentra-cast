@@ -12184,6 +12184,33 @@ mod tests {
             assert!(safe_filename(bad).is_err(), "should reject {:?}", bad);
         }
     }
+    #[test]
+    fn google_sync_payload_fields_are_bounded_and_allowlisted() {
+        let valid = SyncToGooglePayload {
+            ids: Some(vec![1, 2]),
+            layout_id: Some("layout-1".to_string()),
+            action: "sync_specific".to_string(),
+            spreadsheet_id: Some("sheet-1".to_string()),
+        };
+        assert!(validate_sync_to_google_payload(&valid).is_ok());
+        assert!(validate_sync_to_google_payload(&SyncToGooglePayload {
+            action: "unexpected".to_string(),
+            ..valid
+        })
+        .is_err());
+        assert!(validate_sync_to_google_payload(&SyncToGooglePayload {
+            action: "sync_specific".to_string(),
+            layout_id: Some("x".repeat(257)),
+            ..Default::default()
+        })
+        .is_err());
+        assert!(validate_sync_to_google_payload(&SyncToGooglePayload {
+            action: "sync_specific".to_string(),
+            spreadsheet_id: Some("x".repeat(MAX_SYNC_SPREADSHEET_ID_BYTES + 1)),
+            ..Default::default()
+        })
+        .is_err());
+    }
 }
 
 #[test]
@@ -14148,7 +14175,7 @@ async fn delete_interactive_submissions_handler(
     Ok(AxumJson(serde_json::json!({"deleted": n})))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Default)]
 struct SyncToGooglePayload {
     #[serde(default)]
     ids: Option<Vec<i64>>,
@@ -14164,10 +14191,37 @@ fn default_sync_action() -> String {
     "sync_all_pending".to_string()
 }
 
+const MAX_SYNC_SPREADSHEET_ID_BYTES: usize = 256;
+
+fn validate_sync_to_google_payload(payload: &SyncToGooglePayload) -> Result<(), (StatusCode, String)> {
+    if !matches!(
+        payload.action.as_str(),
+        "sync_all_pending" | "sync_pending_for_layout" | "sync_specific"
+    ) {
+        return Err((StatusCode::BAD_REQUEST, "Invalid sync action".to_string()));
+    }
+    if payload
+        .layout_id
+        .as_deref()
+        .is_some_and(|layout_id| layout_id.trim().is_empty() || layout_id.len() > 256)
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid layout identifier".to_string()));
+    }
+    if payload
+        .spreadsheet_id
+        .as_deref()
+        .is_some_and(|spreadsheet_id| spreadsheet_id.trim().is_empty() || spreadsheet_id.len() > MAX_SYNC_SPREADSHEET_ID_BYTES)
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid spreadsheet identifier".to_string()));
+    }
+    Ok(())
+}
+
 async fn sync_interactive_submissions_to_google_handler(
     State(repository): State<ClientRepository>,
     AxumJson(payload): AxumJson<SyncToGooglePayload>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_sync_to_google_payload(&payload)?;
     // Resolve which submission IDs to sync.
     if let Some(specific) = payload.ids.as_deref() {
         validate_mutation_id_count(specific, "too many interactive submission ids")?;
@@ -14200,6 +14254,7 @@ async fn sync_interactive_submissions_to_google_handler(
             }
         }
     };
+    validate_mutation_id_count(&ids, "too many interactive submission ids")?;
 
     if ids.is_empty() {
         return Ok(AxumJson(serde_json::json!({
