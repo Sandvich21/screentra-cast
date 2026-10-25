@@ -1466,7 +1466,12 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route("/api/traffic/map.png", get(traffic_map_image))
         .route("/api/news/headlines", get(get_news_headlines))
         .route("/api/news/refresh", post(post_news_refresh))
-        .route("/api/templates", get(list_templates).post(create_template))
+        .route(
+            "/api/templates",
+            get(list_templates)
+                .post(create_template)
+                .layer(DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
         .route(
             "/api/templates/{id}",
             get(get_template).delete(delete_template),
@@ -4224,6 +4229,18 @@ async fn post_news_refresh(
 
 // ── Template handlers ───────────────────────────────────────
 
+const MAX_TEMPLATE_ID_BYTES: usize = 128;
+
+fn validate_template_id(id: &str) -> Result<(), (StatusCode, String)> {
+    if id.trim().is_empty()
+        || id.len() > MAX_TEMPLATE_ID_BYTES
+        || id.chars().any(|character| character.is_control())
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid template identifier".to_string()));
+    }
+    Ok(())
+}
+
 async fn list_templates(
     State(repository): State<ClientRepository>,
 ) -> Result<AxumJson<Vec<TemplateMeta>>, (StatusCode, String)> {
@@ -4236,6 +4253,7 @@ async fn get_template(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_template_id(&id)?;
     let json: Option<String> = repository
         .get_template(&id)
         .await
@@ -4278,6 +4296,7 @@ async fn create_template(
     } else {
         id
     };
+    validate_template_id(&final_id)?;
     let now = Utc::now().to_rfc3339();
 
     repository.save_template(&final_id, &name, &category, false, &layout_json, &now)
@@ -4293,6 +4312,7 @@ async fn delete_template(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    validate_template_id(&id)?;
     repository.delete_template(&id)
         .await
         .map_err(|_| internal_server_error())?;
@@ -11070,6 +11090,10 @@ mod tests {
         assert!(validate_layout_set_id("set-1").is_ok());
         assert!(validate_layout_set_id("").is_err());
         assert!(validate_layout_set_id(&"x".repeat(129)).is_err());
+        assert!(validate_template_id("template-1").is_ok());
+        assert!(validate_template_id("").is_err());
+        assert!(validate_template_id(&"x".repeat(129)).is_err());
+        assert!(validate_template_id("template\n1").is_err());
     }
 
     #[test]
