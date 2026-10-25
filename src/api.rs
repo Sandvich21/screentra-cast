@@ -1478,7 +1478,9 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         )
         .route(
             "/api/display-overrides",
-            get(get_overrides).put(set_override),
+            get(get_overrides)
+                .put(set_override)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
             "/api/display-overrides/{display}",
@@ -4343,14 +4345,18 @@ async fn set_override(
         .get("display")
         .and_then(|v| v.as_str())
         .ok_or((StatusCode::BAD_REQUEST, "Missing display".to_string()))?;
+    validate_display_identifier(display)
+        .map_err(|status| (status, "Invalid display identifier".to_string()))?;
     let width = body
         .get("width")
         .and_then(|v| v.as_u64())
-        .ok_or((StatusCode::BAD_REQUEST, "Missing width".to_string()))? as u32;
+        .filter(|value| (1..=16_384).contains(value))
+        .ok_or((StatusCode::BAD_REQUEST, "Invalid width".to_string()))? as u32;
     let height = body
         .get("height")
         .and_then(|v| v.as_u64())
-        .ok_or((StatusCode::BAD_REQUEST, "Missing height".to_string()))? as u32;
+        .filter(|value| (1..=16_384).contains(value))
+        .ok_or((StatusCode::BAD_REQUEST, "Invalid height".to_string()))? as u32;
 
     repository
         .set_display_override(display, width, height)
@@ -4365,6 +4371,8 @@ async fn clear_override(
     State(repository): State<ClientRepository>,
     Path(display): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    validate_display_identifier(&display)
+        .map_err(|status| (status, "Invalid display identifier".to_string()))?;
     repository
         .clear_display_override(&display)
         .await
