@@ -2162,6 +2162,8 @@ async fn delete_display_state(
     State(repository): State<ClientRepository>,
     Path(display): Path<String>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_display_identifier(&display)
+        .map_err(|status| (status, "Invalid display identifier".to_string()))?;
     let rows = repository
         .delete_display_assignment(&display)
         .await
@@ -8026,6 +8028,7 @@ async fn get_client_assignment(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     let layout_id = repository
         .get_client_assignment(&id)
         .await
@@ -8040,6 +8043,7 @@ async fn set_client_assignment(
     Path(id): Path<String>,
     Json(payload): Json<ClientAssignmentRequest>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     repository
         .set_client_assignment(&id, payload.layout_id.as_deref())
         .await
@@ -8063,6 +8067,7 @@ async fn set_client_display_count(
     Path(id): Path<String>,
     Json(payload): Json<ClientDisplayCountRequest>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     let Some((installer, active)) = repository
         .set_client_display_count(&id, payload.max_displays)
         .await
@@ -8123,6 +8128,7 @@ async fn set_client_touch_binding(
     Path(id): Path<String>,
     Json(payload): Json<ClientTouchBindingRequest>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     validate_client_touch_target_count(payload.target_display_indexes.len())?;
     let mut indexes: Vec<i64> = payload
         .target_display_indexes
@@ -8194,6 +8200,7 @@ async fn set_client_theme(
     Path(id): Path<String>,
     Json(payload): Json<ClientThemeRequest>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     validate_client_theme(&payload.theme)?;
     let updated = repository
         .set_client_theme(&id, &payload.theme)
@@ -9079,6 +9086,7 @@ async fn clear_client_command(
     Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     let rows = match repository.clear_client_command(&id).await {
         Ok(rows) => rows,
         Err(_error) => {
@@ -9630,6 +9638,7 @@ async fn list_client_displays(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<Vec<ClientDisplayInfo>>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     let (is_virtual, _client_layout_id, records) = repository
         .list_client_displays(&id)
         .await
@@ -10009,6 +10018,7 @@ async fn delete_client_history(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     let rows = repository
         .delete_client_history(&id)
         .await
@@ -10023,6 +10033,7 @@ async fn get_client_history(
     Path(id): Path<String>,
     axum::extract::Query(q): axum::extract::Query<ClientHistoryQuery>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     let limit = q.limit.unwrap_or(50).clamp(1, 1000);
     let mut records = repository
         .list_client_heartbeats(&id, limit as i64)
@@ -10051,6 +10062,7 @@ async fn delete_virtual_client(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<DeleteClientResponse>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     let deleted = repository
         .delete_virtual_client(&id)
         .await
@@ -10067,6 +10079,7 @@ async fn delete_client(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<DeleteClientResponse>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     let deleted = repository
         .delete_client(&id)
         .await
@@ -10083,6 +10096,7 @@ async fn nudge_client(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<NudgeResponse>, (StatusCode, String)> {
+    validate_client_identifier(&id)?;
     let layout_id = repository
         .get_client_assignment(&id)
         .await
