@@ -7913,11 +7913,24 @@ struct ClientTouchBindingRequest {
     allow_joined_displays: bool,
 }
 
+const MAX_CLIENT_TOUCH_TARGET_INDEXES: usize = 64;
+
+fn validate_client_touch_target_count(count: usize) -> Result<(), (StatusCode, String)> {
+    if count > MAX_CLIENT_TOUCH_TARGET_INDEXES {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "too many touch target displays".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 async fn set_client_touch_binding(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
     Json(payload): Json<ClientTouchBindingRequest>,
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
+    validate_client_touch_target_count(payload.target_display_indexes.len())?;
     let mut indexes: Vec<i64> = payload
         .target_display_indexes
         .iter()
@@ -10558,6 +10571,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn client_touch_target_lists_are_bounded_before_filtering() {
+        assert!(validate_client_touch_target_count(MAX_CLIENT_TOUCH_TARGET_INDEXES).is_ok());
+        let (status, error) = validate_client_touch_target_count(MAX_CLIENT_TOUCH_TARGET_INDEXES + 1)
+            .expect_err("oversized touch target list should fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error, "too many touch target displays");
+    }
+
+    #[test]
     fn layout_set_item_lists_are_bounded() {
         assert_eq!(validate_layout_set_item_count(MAX_LAYOUT_SET_ITEMS).is_ok(), true);
         assert_eq!(
