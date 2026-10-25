@@ -3283,6 +3283,9 @@ fn validate_proxy_url(url: &str) -> Result<(String, u16, std::net::IpAddr), Stri
         return Err("Invalid url".to_string());
     }
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid url: {}", e))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Disallowed url credentials".to_string());
+    }
     match parsed.scheme() {
         "http" | "https" => {}
         other => return Err(format!("Disallowed url scheme: {}", other)),
@@ -12561,6 +12564,7 @@ fn validate_proxy_url_rejects_disallowed_schemes() {
         "ftp://example.com/foo",
         "gopher://example.com/",
         "javascript:alert(1)",
+        "https://user:password@example.com/cal.ics",
     ] {
         assert!(validate_proxy_url(bad).is_err(), "should reject {:?}", bad);
     }
