@@ -8669,14 +8669,22 @@ fn validate_client_service_payload(
     Ok(())
 }
 
+fn validate_client_command_action(action: &str) -> Result<(), String> {
+    if action.len() > 64 {
+        return Err("unsupported client command action".to_string());
+    }
+    if !ALLOWED_CLIENT_COMMAND_ACTIONS.contains(&action) {
+        return Err(format!("unsupported client command action: {action}"));
+    }
+    Ok(())
+}
+
 fn validate_client_command_for_client(
     client_id: &str,
     action: &str,
     payload: Option<&serde_json::Value>,
 ) -> Result<(), String> {
-    if !ALLOWED_CLIENT_COMMAND_ACTIONS.contains(&action) {
-        return Err(format!("unsupported client command action: {action}"));
-    }
+    validate_client_command_action(action)?;
     if client_id.is_empty() || client_id.len() > 200 || client_id.chars().any(|character| character.is_control()) {
         return Err("client command client identity is invalid".to_string());
     }
@@ -8704,9 +8712,7 @@ fn validate_client_command(
     action: &str,
     payload: Option<&serde_json::Value>,
 ) -> Result<(), String> {
-    if !ALLOWED_CLIENT_COMMAND_ACTIONS.contains(&action) {
-        return Err(format!("unsupported client command action: {action}"));
-    }
+    validate_client_command_action(action)?;
     if let Some(value) = payload {
         if !value.is_object() {
             return Err("client command payload must be a JSON object".to_string());
@@ -8893,6 +8899,7 @@ pub(crate) async fn require_client_command_token(
     client_id: &str,
     headers: &HeaderMap,
 ) -> Result<(), (StatusCode, String)> {
+    validate_client_identifier(client_id)?;
     let expected_hash = repository
         .get_client_auth_token_hash(client_id)
         .await
@@ -11493,6 +11500,7 @@ mod tests {
         .is_err());
         let oversized = serde_json::json!({"data": "x".repeat(70_000)});
         assert!(validate_client_command("refresh_cache", Some(&oversized)).is_err());
+        assert!(validate_client_command(&"x".repeat(65), None).is_err());
     }
 
     #[test]
