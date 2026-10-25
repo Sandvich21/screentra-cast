@@ -2044,7 +2044,9 @@ async fn fetch_public_511_events(client: &reqwest::Client, query: &TrafficQuery)
             "detour": ""
         }))
     });
-    futures_util::future::join_all(tooltip_requests)
+    futures_util::stream::iter(tooltip_requests)
+        .buffer_unordered(16)
+        .collect::<Vec<_>>()
         .await
         .into_iter()
         .flatten()
