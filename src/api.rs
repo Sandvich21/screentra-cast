@@ -14263,7 +14263,7 @@ async fn post_interactive_submission_handler(
     // Re-serialize the payload through validation; we never trust the client's
     // raw JSON (whitespace normalization + shape enforcement).
     let payload_json = validate_payload(widget_type, &payload.payload)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid payload".to_string()))?;
 
     let id = repository
         .insert_interactive_submission(

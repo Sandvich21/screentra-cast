@@ -37,6 +37,14 @@ class ServerSecurityAuditTests(unittest.TestCase):
             self.assertNotIn('StatusCode::INTERNAL_SERVER_ERROR, e', block, marker)
             self.assertNotIn('StatusCode::INTERNAL_SERVER_ERROR, error', block, marker)
 
+    def test_interactive_submission_payload_errors_are_opaque(self):
+        source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
+        start = source.index('async fn post_interactive_submission_handler(')
+        end = source.index('\n\n#[derive(serde::Deserialize, Default)]', start)
+        block = source[start:end]
+        self.assertIn('validate_payload(widget_type, &payload.payload)\n        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid payload".to_string()))?', block)
+        self.assertNotIn('validate_payload(widget_type, &payload.payload)\n        .map_err(|e| (StatusCode::BAD_REQUEST, e))?', block)
+
     def test_approval_and_external_command_errors_are_opaque(self):
         source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
         for marker, end_marker in (
