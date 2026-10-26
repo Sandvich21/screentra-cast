@@ -5551,7 +5551,7 @@ def _fetch_player_capability(server_url: str, client_id: str, display_index: int
         return None
 
 
-def _live_player_redirect_html(server_url: str, display_index: int, connector: str | None = None, client_id: str | None = None, capability: str | None = None) -> str:
+def _live_player_redirect_html(server_url: str, display_index: int, connector: str | None = None, client_id: str | None = None, capability: str | None = None, renderer_url: str | None = None) -> str:
     """Return a redirect to the live server for a physical connector."""
     if not connector or connector == 'virtual-0':
         raise ValueError('physical display connector is required')
@@ -5561,6 +5561,8 @@ def _live_player_redirect_html(server_url: str, display_index: int, connector: s
         target += f'&client_id={urllib.parse.quote(client_id, safe="")}'
     if capability:
         target += f'#player_capability={urllib.parse.quote(capability, safe="")}'
+        if renderer_url:
+            target += f'&renderer_url={urllib.parse.quote(renderer_url, safe="")}'
     return (
         '<!doctype html><html><head>'
         f'<meta http-equiv="refresh" content="0; url={target}">'
@@ -5794,7 +5796,7 @@ class Handler(BaseHTTPRequestHandler):
                     client_id = _client_id_from_env() or _client_id_from_cache()
                     capability = _fetch_player_capability(live_url, client_id, display_index, self.cache_dir) if client_id else None
                     if capability:
-                        return self.send_text(200, _live_player_redirect_html(live_url, display_index, connector, client_id, capability), 'text/html; charset=utf-8')
+                        return self.send_text(200, _live_player_redirect_html(live_url, display_index, connector, client_id, capability, f'http://127.0.0.1:{self.server.server_port}/'), 'text/html; charset=utf-8')
 
             # No live server reachable (offline mode). Render the offline
             # cached layout from the renderer script's PLAYER_HTML constant.

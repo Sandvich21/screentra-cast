@@ -164,10 +164,19 @@ class PlayerClientAuditTests(unittest.TestCase):
 
     def test_player_capability_redirect_uses_fragment_not_query(self):
         html = renderer._live_player_redirect_html(
-            'https://server.example:3000', 0, 'DP-2', 'client-1', 'A' * 128
+            'https://server.example:3000', 0, 'DP-2', 'client-1', 'A' * 128,
+            'http://127.0.0.1:3900/'
         )
         self.assertIn('#player_capability=', html)
+        self.assertIn('renderer_url=', html)
         self.assertNotIn('?player_capability=', html)
+
+    def test_player_refreshes_expired_capability_through_local_renderer(self):
+        source = (ROOT / 'static/js/player.js').read_text()
+        self.assertIn("const PLAYER_RENDERER_URL = PLAYER_HASH_PARAMS.get('renderer_url')", source)
+        self.assertIn("response.status === 401", source)
+        self.assertIn("screentra-capability-refresh", source)
+        self.assertIn("window.location.replace(PLAYER_RENDERER_URL)", source)
 
     def test_layout_change_marker_is_written_before_kiosk_restart(self):
         source = (ROOT / 'player-client/scripts/screentra-player-heartbeat.py').read_text()

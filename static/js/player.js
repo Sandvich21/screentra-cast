@@ -3,12 +3,29 @@ var rendered = {};
 const PLAYER_URL_PARAMS = new URLSearchParams(window.location.search);
 const PLAYER_HASH_PARAMS = new URLSearchParams(window.location.hash.slice(1));
 const PLAYER_CAPABILITY = PLAYER_HASH_PARAMS.get('player_capability') || PLAYER_URL_PARAMS.get('player_capability') || '';
+const PLAYER_RENDERER_URL = PLAYER_HASH_PARAMS.get('renderer_url') || '';
 function playerFetch(url, options) {
   options = options || {};
   const headers = new Headers(options.headers || {});
   if (PLAYER_CAPABILITY) headers.set('X-SCREENTRA-PLAYER-CAPABILITY', PLAYER_CAPABILITY);
   options.headers = headers;
-  return window.fetch(url, options);
+  return window.fetch(url, options).then(function(response) {
+    // The capability is intentionally short-lived. If the browser tab has
+    // outlived it, return to the local renderer for a fresh exchange instead
+    // of falling back to the misleading "No layout assigned" screen.
+    const path = String(url).split('?', 1)[0];
+    if (response.status === 401 && PLAYER_RENDERER_URL && /\/api\/clients\/[^/]+\/displays$/.test(path)) {
+      try {
+        if (window.sessionStorage.getItem('screentra-capability-refresh') !== '1') {
+          window.sessionStorage.setItem('screentra-capability-refresh', '1');
+          window.location.replace(PLAYER_RENDERER_URL);
+        }
+      } catch (_) {}
+    } else if (response.ok) {
+      try { window.sessionStorage.removeItem('screentra-capability-refresh'); } catch (_) {}
+    }
+    return response;
+  });
 }
 const MAX_PLAYER_RESPONSE_BYTES = 4 * 1024 * 1024;
 async function readPlayerTextBounded(response, maximumBytes = MAX_PLAYER_RESPONSE_BYTES) {
