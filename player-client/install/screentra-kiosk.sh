@@ -108,7 +108,9 @@ log "Active displays: $(printf '%s' "$DISPLAY_SPEC" | tr '\n' ' ')"
 SWAY_TRANSFORM="normal"
 ORIENTATION_FILE="$CACHE_DIR/client-config.json"
 if [ -f "$ORIENTATION_FILE" ]; then
-    ORIENTATION_VALUE="$(head -c 1048577 "$ORIENTATION_FILE" | python3 -c 'import json,sys; raw=sys.stdin.buffer.read(1048577); raise SystemExit(2) if len(raw) > 1048576 else print(json.loads(raw.decode("utf-8")).get("orientation","normal"))' 2>/dev/null || echo normal)"
+    ORIENTATION_VALUE="$(head -c 1048577 "$ORIENTATION_FILE" | python3 -c 'import json,sys; raw=sys.stdin.buffer.read(1048577)
+if len(raw) > 1048576: raise SystemExit(2)
+print(json.loads(raw.decode("utf-8")).get("orientation","normal"))' 2>/dev/null || echo normal)"
     case "$ORIENTATION_VALUE" in
         normal) SWAY_TRANSFORM="normal" ;;
         flipped) SWAY_TRANSFORM="180" ;;

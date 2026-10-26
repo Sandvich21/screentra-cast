@@ -1244,6 +1244,11 @@ def main():
         ap.error(str(error))
 
     while True:
+        previous_orientation = 'normal'
+        try:
+            previous_orientation = _read_json_file(Path(args.cache_dir) / 'client-config.json', {}).get('orientation', 'normal')
+        except Exception:
+            pass
         # Refresh configuration before building the registration payload so the
         # heartbeat acknowledges the revision the player has just fetched.
         probe = payload(args)
@@ -1280,11 +1285,6 @@ def main():
                 print('command-result.json uploaded and cleared', flush=True)
             except Exception:
                 pass
-        previous_orientation = 'normal'
-        try:
-            previous_orientation = _read_json_file(Path(args.cache_dir) / 'client-config.json', {}).get('orientation', 'normal')
-        except Exception:
-            pass
         # Track previous layout assignment to detect changes.
         prev_layout_path = Path(args.cache_dir) / 'previous-layout-id.txt'
         try:

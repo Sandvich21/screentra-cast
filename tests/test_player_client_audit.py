@@ -84,6 +84,8 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('json.load(open(sys.argv[1]))', installer)
         self.assertNotIn('python3 -c \'import sys; raise SystemExit(0 if "Screentra Cast Display" in sys.stdin.read()', kiosk)
         self.assertIn('head -c 1048577', kiosk)
+        self.assertIn('if len(raw) > 1048576: raise SystemExit(2)', kiosk)
+        self.assertNotIn('raise SystemExit(2) if len(raw) > 1048576 else', kiosk)
         self.assertIn('head -c 65537', kiosk)
         self.assertNotIn('head -c 2049 "$CLIENT_DIR/server"', kiosk)
         self.assertIn('BROWSER_URL="http://127.0.0.1:${port}/"', kiosk)
@@ -189,6 +191,10 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn('_read_real_file(prev_layout_path, 4096)', source)
         self.assertIn("cached_previous = _read_json_file(Path(args.cache_dir) / 'client-config.json', {})", source)
         self.assertNotIn('_read_bounded_text(prev_layout_path', source)
+        self.assertLess(
+            source.index("previous_orientation = 'normal'"),
+            source.index("fetch_config(args.server, probe['client_id']"),
+        )
 
     def test_display_override_modal_escapes_connector_html(self):
         source = (ROOT / 'static/js/app.js').read_text()
