@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import json
 import stat
 import subprocess
 import sys
@@ -507,6 +508,19 @@ class PlayerClientAuditTests(unittest.TestCase):
             actor._validate_display_connector('../../etc/passwd')
         with self.assertRaises(ValueError):
             actor._validate_display_connector('x' * 129)
+
+    def test_display_power_on_restarts_kiosk_after_wake(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp)
+            (cache / 'display-0.json').write_text(json.dumps({'connector': 'DP-2'}))
+            with mock.patch.object(actor, '_preview_wayland_env', return_value={'SWAYSOCK': '/run/board/sway.sock'}), \
+                    mock.patch.object(actor.shutil, 'which', return_value='/usr/bin/swaymsg'), \
+                    mock.patch.object(actor, '_run_list', side_effect=[(0, '', ''), (0, 'ok', '')]), \
+                    mock.patch.object(actor, 'restart_system_kiosk', return_value=(True, 'restarted')) as restart:
+                ok, message, details = actor.apply_display_power(cache, 0, 'on')
+        self.assertTrue(ok)
+        self.assertEqual(details['kiosk_restart'], True)
+        restart.assert_called_once_with()
 
     def test_display_power_rejects_non_string_state(self):
         result = actor.execute('display_power', {'display_index': 0, 'state': ['on']}, {'cache_dir': '/tmp/cache', 'client_id': 'client-1', 'server': 'https://example.test'})

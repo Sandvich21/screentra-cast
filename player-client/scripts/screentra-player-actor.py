@@ -1168,7 +1168,7 @@ def apply_display_power(cache_dir: Path, display_index: int | None, state: str) 
         message = _bound_hardware_message(
             out or err or ('display powered on via Sway DPMS' if rc == 0 else 'Sway DPMS wake failed')
         )
-        return rc == 0, message, {
+        details = {
             'display_index': display_index,
             'connector': connector,
             'state': state,
@@ -1176,6 +1176,16 @@ def apply_display_power(cache_dir: Path, display_index: int | None, state: str) 
             'enable_return_code': enable_rc,
             'return_code': rc,
         }
+        if rc != 0:
+            return False, message, details
+        kiosk_ok, kiosk_message = restart_system_kiosk()
+        details['kiosk_restart'] = kiosk_ok
+        details['kiosk_restart_message'] = kiosk_message
+        if not kiosk_ok:
+            return False, _bound_hardware_message(
+                f'{message}; kiosk refresh failed: {kiosk_message}'
+            ), details
+        return True, _bound_hardware_message(f'{message}; kiosk refreshed'), details
     rc, out, err = _run_list(
         ['wlr-randr', '--output', connector, requested],
         timeout=10,
