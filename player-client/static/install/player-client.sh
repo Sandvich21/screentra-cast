@@ -9492,12 +9492,11 @@ fi
 # outputs. During boot, DRM connectors can take several seconds to appear, so
 # retry governance/config reads before refusing to start without a physical display.
 read_display_spec() {
-    python3 - "$CONFIG_JSON" "$BASE_PORT" "$CACHE_DIR" <<'PY'
-import json, math, sys
+    python3 - "$CONFIG_JSON" "$BASE_PORT" <<'PY'
+import json, sys
 from pathlib import Path
 path = Path(sys.argv[1])
 base = int(sys.argv[2])
-cache_dir = Path(sys.argv[3])
 try:
     if path.exists():
         with path.open('rb') as stream:
@@ -9517,29 +9516,10 @@ try:
     cap = max(1, int(override)) if override is not None else len(displays)
 except (TypeError, ValueError):
     cap = len(displays)
-
-def output_scale(display_index):
-    config_name = 'client-config.json' if display_index == 0 else f'display-config-{display_index}.json'
-    try:
-        config_path = cache_dir / config_name
-        with config_path.open('rb') as stream:
-            raw = stream.read((1 << 20) + 1)
-        if len(raw) > (1 << 20):
-            raise ValueError('display config too large')
-        value = json.loads(raw.decode('utf-8')).get('output_scale', 1.0)
-        if isinstance(value, bool):
-            raise ValueError('boolean output scale')
-        value = float(value)
-        if not math.isfinite(value) or not 0.5 <= value <= 4.0:
-            raise ValueError('output scale out of range')
-        return format(value, '.6g')
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        return '1'
-
 for d in displays[:cap]:
     idx = int(d.get('display_index', 0))
     connector = str(d['connector'])
-    print(f'{idx}|{connector}|{base + idx}|{output_scale(idx)}')
+    print(f'{idx}|{connector}|{base + idx}')
 PY
 }
 
@@ -9579,9 +9559,8 @@ fi
 {
     printf 'seat * {\n    hide_cursor 3000\n}\n'
     printf 'output * {\n    transform %s\n}\n' "$SWAY_TRANSFORM"
-    while IFS='|' read -r idx connector port output_scale; do
+    while IFS='|' read -r idx connector port; do
         [ -n "$idx" ] || continue
-        printf 'output %s scale %s\n' "$connector" "$output_scale"
         printf 'for_window [app_id="screentra-cast-display-%s"] move container to output %s\n' "$idx" "$connector"
         printf 'for_window [title="^Screentra Cast Display %s"] move container to output %s\n' "$idx" "$connector"
         printf 'for_window [app_id="screentra-cast-display-%s"] fullscreen enable\n' "$idx"
@@ -9609,7 +9588,7 @@ trap cleanup EXIT INT TERM
 
 # Start one renderer per display. RIPLEY_DISPLAY_INDEX is what the renderer
 # uses for its display cache, assignment, connector, and port.
-while IFS='|' read -r idx connector port output_scale; do
+while IFS='|' read -r idx connector port; do
     [ -n "$idx" ] || continue
     log "Starting renderer display $idx ($connector) on :$port..."
     sudo -u "$BOARD_USER" env \
@@ -9653,7 +9632,7 @@ log "Wayland socket: $WAYLAND_DISPLAY"
 
 # Start one fullscreen Chromium window per display. Each window has a unique
 # app_id so Sway can place it on the matching physical connector.
-while IFS='|' read -r idx connector port output_scale; do
+while IFS='|' read -r idx connector port; do
     [ -n "$idx" ] || continue
     LIVE_READY=0
     for i in $(seq 1 40); do

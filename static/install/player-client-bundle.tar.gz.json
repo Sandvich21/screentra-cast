@@ -1,7 +1,7 @@
 {
   "ok": true,
-  "path": "/home/tech/screentra-cast/static/install/player-client-bundle.tar.gz",
+  "path": "/home/tech/screentra-cast/player-client/static/install/player-client-bundle.tar.gz",
   "url": "/install/player-client-bundle.tar.gz",
-  "size_bytes": 119368,
-  "sha256": "95fef451ac590406a857bf901c596990bef183aad1e3b5c42f57810a1d822515"
+  "size_bytes": 119158,
+  "sha256": "45e2d05eea7c3f8e12f532f362b74f7a3ce7df5419b38f0554b098a2ef5f1d03"
 }
