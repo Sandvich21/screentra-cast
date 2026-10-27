@@ -7238,6 +7238,7 @@ import argparse
 import datetime
 import datetime as _d
 import importlib.util
+import math
 import json
 import os
 import re
@@ -7416,6 +7417,15 @@ def validate_pending_command(spec, expected_client_id):
             raise ValueError(f'client command payload exceeds {MAX_COMMAND_PAYLOAD_BYTES} bytes')
         if 'client_id' in payload:
             raise ValueError('client identity is bound to the command envelope')
+    if action == 'reload_layout':
+        if not isinstance(payload, dict):
+            raise ValueError('reload_layout payload must be a JSON object')
+        allowed = {'display_index', 'orientation', 'all_displays', 'output_scale'}
+        if set(payload) - allowed:
+            raise ValueError('reload_layout payload contains an unsupported field')
+        if 'output_scale' in payload:
+            _validate_output_scale(payload['output_scale'])
+
     if action == 'display_settings':
         if not isinstance(payload, dict):
             raise ValueError('display_settings payload must be a JSON object')
@@ -7547,6 +7557,8 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
 
 MAX_SUBPROCESS_OUTPUT_BYTES = 64 * 1024
 MAX_HARDWARE_MESSAGE_BYTES = 512
+MIN_OUTPUT_SCALE = 0.5
+MAX_OUTPUT_SCALE = 4.0
 
 
 def _bound_subprocess_output(value: str) -> str:
@@ -8155,6 +8167,15 @@ def _resolve_touch_name(device_path: str | None, device_name: str | None = None)
 _DISPLAY_CONNECTOR_RE = re.compile(r'^[A-Za-z0-9_.:-]{1,128}$')
 
 
+def _validate_output_scale(value) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError('output scale must be numeric')
+    value = float(value)
+    if not math.isfinite(value) or not MIN_OUTPUT_SCALE <= value <= MAX_OUTPUT_SCALE:
+        raise ValueError(f'output scale must be between {MIN_OUTPUT_SCALE} and {MAX_OUTPUT_SCALE}')
+    return value
+
+
 def _validate_display_connector(value: str) -> str:
     if not isinstance(value, str) or len(value.encode('utf-8')) > 128 or _DISPLAY_CONNECTOR_RE.fullmatch(value) is None:
         raise ValueError('display connector is not allowlisted')
@@ -8355,6 +8376,41 @@ def _preview_wayland_env() -> dict[str, str]:
         if sway_socket:
             env['SWAYSOCK'] = sway_socket
     return env
+
+
+def apply_display_scale(cache_dir: Path, display_index: int | None, output_scale) -> tuple[bool, str, dict]:
+    """Apply a bounded wlroots output scale to one validated Wayland output."""
+    if display_index is None or display_index < 0 or display_index > 3:
+        return False, 'a display index from 0 to 3 is required', {}
+    try:
+        scale = _validate_output_scale(output_scale)
+    except ValueError as exc:
+        return False, str(exc), {}
+    connector = _preview_connector(cache_dir, display_index)
+    if not connector:
+        return False, f'no connector is recorded for display {display_index}', {'display_index': display_index}
+    env = _preview_wayland_env()
+    scale_text = format(scale, '.6g')
+    rc, out, err = _run_list(
+        ['wlr-randr', '--output', connector, '--scale', scale_text],
+        timeout=10,
+        env=env,
+    )
+    details = {
+        'display_index': display_index,
+        'connector': connector,
+        'output_scale': scale,
+        'method': 'wlr-randr',
+        'return_code': rc,
+    }
+    if rc != 0:
+        return False, _bound_hardware_message(out or err or 'output scale failed'), details
+    restarted, restart_message = restart_system_kiosk()
+    details['kiosk_restart'] = restarted
+    details['kiosk_restart_message'] = _bound_hardware_message(restart_message)
+    if not restarted:
+        return False, _bound_hardware_message(f'output scale applied; kiosk restart failed: {restart_message}'), details
+    return True, _bound_hardware_message(f'output scale set to {scale_text} on {connector}; kiosk refreshed'), details
 
 
 def apply_display_power(cache_dir: Path, display_index: int | None, state: str) -> tuple[bool, str, dict]:
@@ -8747,7 +8803,7 @@ def stop_display_preview(ctx: dict, display_index: int) -> tuple[bool, str, dict
     return True, 'display preview stopped', {'display_index': display_index}
 
 
-def fetch_config(server: str, client_id: str, cache_dir: Path, display_index: int | None = None) -> bool:
+def fetch_config(server: str, client_id: str, cache_dir: Path, display_index: int | None = None, return_data: bool = False):
     token = _preview_token(cache_dir)
     if not token:
         print('config refresh skipped: client authentication token is unavailable', flush=True)
@@ -8795,7 +8851,7 @@ def fetch_config(server: str, client_id: str, cache_dir: Path, display_index: in
                     stale.unlink()
                 except FileNotFoundError:
                     pass
-        return True
+        return data if return_data else True
     except Exception as e:
         print(f'config refresh failed: {e}', flush=True)
         return False
@@ -8995,25 +9051,27 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
                 'details': {'scope': 'client_kiosk_service', 'systemd_message': msg}, 'started_at': started}
 
     if action == 'reload_layout':
-        cache_path = Path(ctx['cache_dir']) / 'client-config.json'
+        config_path = Path(ctx['cache_dir']) / ('client-config.json' if display_index in (None, 0) else f'display-config-{display_index}.json')
         requested_orientation = payload.get('orientation')
+        requested_output_scale = payload.get('output_scale')
         try:
             if requested_orientation is not None and not isinstance(requested_orientation, str):
                 raise ValueError('orientation must be a string')
+            if requested_output_scale is not None:
+                requested_output_scale = _validate_output_scale(requested_output_scale)
             all_displays = _validate_optional_bool(payload.get('all_displays', False), 'all_displays')
         except ValueError as exc:
             return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
         if requested_orientation is not None and requested_orientation not in {'normal', 'flipped', 'rotated_left', 'rotated_right'}:
             return {'action': action, 'display_index': display_index, 'ok': False, 'message': 'invalid orientation', 'started_at': started}
-        try:
-            before_orientation = _read_json_file(cache_path, {}).get('orientation', 'normal')
-        except Exception:
-            before_orientation = 'normal'
+        before_cfg = _read_json_file(config_path, {})
+        before_orientation = before_cfg.get('orientation', 'normal')
+        before_output_scale = before_cfg.get('output_scale', 1.0)
         if all_displays or display_index is None:
             ok = fetch_all_display_configs(ctx['server'], ctx['client_id'], Path(ctx['cache_dir']))
             after_orientation = before_orientation
             try:
-                after_orientation = _read_json_file(cache_path, {}).get('orientation', 'normal')
+                after_orientation = _read_json_file(config_path, {}).get('orientation', 'normal')
             except Exception:
                 pass
             restarted = False
@@ -9023,20 +9081,25 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
                 restarted = rc == 0
                 restart_message = _bound_hardware_message(out or err)
             return {'action': action, 'display_index': display_index, 'all_displays': True, 'ok': ok and (restarted or (after_orientation == before_orientation and requested_orientation is None)), 'orientation_changed': after_orientation != before_orientation or requested_orientation is not None, 'kiosk_restarted': restarted, 'message': 'all display configs re-fetched' + ('; kiosk restarted for orientation change' if restarted else (': ' + restart_message if restart_message else '')), 'started_at': started}
-        ok = fetch_config(ctx['server'], ctx['client_id'], Path(ctx['cache_dir']), display_index=display_index)
-        after_orientation = before_orientation
-        try:
-            after_orientation = _read_json_file(cache_path, {}).get('orientation', 'normal')
-        except Exception:
-            pass
-        restarted = False
-        restart_message = ''
-        if ok and (after_orientation != before_orientation or (requested_orientation is not None and after_orientation == requested_orientation)):
+        fetched_cfg = fetch_config(ctx['server'], ctx['client_id'], Path(ctx['cache_dir']), display_index=display_index, return_data=True)
+        ok = fetched_cfg is not False
+        after_cfg = fetched_cfg if isinstance(fetched_cfg, dict) else _read_json_file(config_path, {})
+        after_orientation = after_cfg.get('orientation', before_orientation)
+        after_output_scale = after_cfg.get('output_scale', before_output_scale)
+        scale_changed = requested_output_scale is not None or after_output_scale != before_output_scale
+        scale_result = None
+        if ok and scale_changed:
+            scale_result = apply_display_scale(Path(ctx['cache_dir']), display_index, after_output_scale)
+            if not scale_result[0]:
+                return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'output_scale_failed', 'message': scale_result[1], 'details': scale_result[2], 'started_at': started}
+        restarted = bool(scale_result and scale_result[2].get('kiosk_restart'))
+        restart_message = scale_result[1] if scale_result else ''
+        if ok and not scale_changed and (after_orientation != before_orientation or (requested_orientation is not None and after_orientation == requested_orientation)):
             restart_index = display_index if display_index is not None else 0
             rc, out, err = _run_list(['sudo', '-n', 'systemctl', 'restart', f'screentra-cast-kiosk@{restart_index}.service'])
             restarted = rc == 0
             restart_message = _bound_hardware_message(out or err)
-        return {'action': action, 'display_index': display_index, 'ok': ok and (restarted or (after_orientation == before_orientation and requested_orientation is None)), 'orientation_changed': after_orientation != before_orientation or requested_orientation is not None, 'kiosk_restarted': restarted, 'message': 'config re-fetched' + ('; kiosk restarted for orientation change' if restarted else (': ' + restart_message if restart_message else '')), 'started_at': started}
+        return {'action': action, 'display_index': display_index, 'ok': ok and (restarted or (not scale_changed and after_orientation == before_orientation and requested_orientation is None)), 'orientation_changed': after_orientation != before_orientation or requested_orientation is not None, 'output_scale_changed': scale_changed, 'output_scale': after_output_scale, 'kiosk_restarted': restarted, 'message': 'config re-fetched' + ('; output scale applied and kiosk refreshed' if scale_result and scale_result[0] else ('; kiosk restarted for orientation change' if restarted else (': ' + restart_message if restart_message else ''))), 'started_at': started}
 
     if action == 'refresh_cache':
         try:

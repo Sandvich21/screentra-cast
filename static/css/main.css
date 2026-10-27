@@ -792,6 +792,9 @@ html[data-theme="classic"] {
 .client-display-tile-title b { color:var(--btn-ghost-text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .client-display-tile-sub { color:var(--accent-muted); font-size:.74rem; margin:.25rem 0; }
 .client-display-tile-row { display:flex; justify-content:space-between; gap:.5rem; align-items:center; }
+.client-display-compact-scale { display:flex; gap:.35rem; align-items:center; padding:.35rem .4rem .05rem; }
+.client-display-compact-scale label { display:flex; align-items:center; gap:.35rem; color:var(--accent-muted); font-size:.74rem; flex:1; }
+.client-display-compact-scale input { width:4.6rem; padding:.25rem .35rem; font-size:.76rem; }
 .client-display-tile-row em { color:var(--status-not-enrolled-text); font-style:normal; font-size:.76rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .client-display-tile.compact .client-display-tile-preview { aspect-ratio:16/10; }
 .client-display-tile.compact .client-display-tile-meta { padding:.4rem; }

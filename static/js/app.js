@@ -6910,6 +6910,22 @@ ${_cmds.oneLiner}`;
     if (!r.ok) throw new Error(await readAppTextBounded(r, 64 * 1024));
     return readAppJsonBounded(r);
   };
+  API.updateDisplayOrientation = async function(id, idx, orientation){
+    const r = await fetch(`/api/clients/${encodeURIComponent(id)}/displays/${idx}/orientation`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({orientation}),
+    });
+    if (!r.ok) throw new Error(await readAppTextBounded(r, 64 * 1024));
+    return readAppJsonBounded(r);
+  };
+  API.setDisplayOutputScale = async function(id, idx, outputScale){
+    const r = await fetch(`/api/clients/${encodeURIComponent(id)}/displays/${idx}/scale`, {
+      method:'PATCH', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({output_scale: outputScale}),
+    });
+    if (!r.ok) throw new Error(await readAppTextBounded(r, 64 * 1024));
+    return readAppJsonBounded(r);
+  };
 
   function layoutOptionsHtml(selectedId, includeClear=true){
     const layouts = (App.state && App.state.layouts) || [];
@@ -7007,6 +7023,7 @@ ${_cmds.oneLiner}`;
         <div class="client-display-tile-sub">:${esc(d.port)} · ${esc(modeText(d))}</div>
         <div class="client-display-tile-row"><span class="client-display-status client-display-status-${esc(statusClass(d))}">${esc(d.status || 'unknown')}</span><em>${esc(layoutName(d.assigned_layout_id))}</em></div>
       </div>
+      ${compact ? `<div class="client-display-compact-scale"><label>Scale <input class="input client-display-output-scale" type="number" min="0.5" max="4" step="0.05" value="${esc(Number.isFinite(Number(d.output_scale)) ? Number(d.output_scale) : 1)}"></label><button class="btn btn-secondary btn-sm client-display-output-scale-save" type="button">Apply</button></div>` : ''}
     </article>`;
   }
   function wireLiveView(container, client){
@@ -7078,6 +7095,35 @@ ${_cmds.oneLiner}`;
       };
     });
   }
+  function wireCompactScale(container, client){
+    container.querySelectorAll('.client-display-output-scale-save').forEach(button => {
+      if (button.dataset.scaleWired === '1') return;
+      button.dataset.scaleWired = '1';
+      button.onclick = async () => {
+        const tile = button.closest('.client-display-tile');
+        const input = tile?.querySelector('.client-display-output-scale');
+        const index = Number(tile?.dataset.displayIndex);
+        if (!input || !Number.isInteger(index)) return;
+        const value = Number(input.value);
+        if (!Number.isFinite(value) || value < 0.5 || value > 4) {
+          input.setCustomValidity('Scale must be between 0.5 and 4');
+          input.reportValidity();
+          return;
+        }
+        input.setCustomValidity('');
+        button.disabled = true;
+        try {
+          await API.setDisplayOutputScale(client.id, index, value);
+          input.value = String(value);
+          button.textContent = 'Queued';
+          setTimeout(() => { button.textContent = 'Apply'; }, 1200);
+        } catch (error) {
+          input.setCustomValidity(`Scale update failed: ${error.message}`);
+          input.reportValidity();
+        } finally { button.disabled = false; }
+      };
+    });
+  }
   function layoutOptionsHtml(selectedId){
     const layouts = (App.state && App.state.layouts) || App._clientLayouts || [];
     return `<option value="">— No layout —</option>` + layouts.map(l => `<option value="${esc(l.id)}" ${selectedId===l.id?'selected':''}>${esc(l.name || l.id)}</option>`).join('');
@@ -7108,6 +7154,7 @@ ${_cmds.oneLiner}`;
       root.classList.toggle('client-card-display-focus', active.length === 1 && inactive.length > 0);
       root.innerHTML = activeVisible.map(d => tileHtml(d, true)).join('') + activeOverflow + inactiveHtml;
       wireLiveView(root, client);
+      wireCompactScale(root, client);
     } catch(e) {
       root.innerHTML = `<span class="client-card-display-loading">Display load failed</span>`;
     }
@@ -7142,6 +7189,11 @@ ${_cmds.oneLiner}`;
               <option value="rotated_left" ${orientation === 'rotated_left' ? 'selected' : ''}>Portrait (rotate left)</option>
               <option value="flipped" ${orientation === 'flipped' ? 'selected' : ''}>Flipped (180°)</option>
             </select>
+          </div>
+          <div style="display:flex;align-items:center;gap:.5rem;padding:.25rem 0;font-size:.78rem;">
+            <span style="color:var(--text-dim,#888);white-space:nowrap;">Output scale</span>
+            <input class="input client-display-output-scale" type="number" min="0.5" max="4" step="0.05" value="${esc(Number.isFinite(Number(d.output_scale)) ? Number(d.output_scale) : 1)}" style="font-size:.78rem;flex:1;min-width:5rem;">
+            <button class="btn btn-secondary btn-sm client-display-output-scale-save" type="button">Apply</button>
           </div>
         </div>
         <div class="client-display-tile-publish">
@@ -7204,6 +7256,30 @@ ${_cmds.oneLiner}`;
             st.textContent = 'Orientation update failed: '+e.message;
             st.style.color = '#fca5a5';
           }
+        };
+      });
+      grid.querySelectorAll('.client-display-output-scale-save').forEach(btn => {
+        btn.onclick = async () => {
+          const wrap = btn.closest('.client-display-tile-wrap');
+          const idx = Number(wrap.dataset.displayIndex);
+          const input = wrap.querySelector('.client-display-output-scale');
+          const st = wrap.querySelector('.client-display-tile-action-status');
+          const value = Number(input.value);
+          if (!Number.isFinite(value) || value < 0.5 || value > 4) {
+            st.textContent = 'Output scale must be between 0.5 and 4.';
+            st.style.color = '#fca5a5';
+            return;
+          }
+          btn.disabled = true;
+          try {
+            await API.setDisplayOutputScale(client.id, idx, value);
+            input.value = String(value);
+            st.textContent = `Output scale set to ${value} for display ${idx}; refresh queued.`;
+            st.style.color = '#86efac';
+          } catch(e) {
+            st.textContent = 'Output scale update failed: '+e.message;
+            st.style.color = '#fca5a5';
+          } finally { btn.disabled = false; }
         };
       });
     } catch(e) {
