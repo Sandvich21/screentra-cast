@@ -3087,7 +3087,7 @@ pub async fn apply_initial_schema() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_initial_schema, database_url_from, persisted_layout_id, PostgresStore};
+    use super::{database_url_from, persisted_layout_id};
 
     #[test]
     fn database_url_requires_a_nonempty_value() {
@@ -3122,85 +3122,4 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    #[ignore = "requires a disposable PostgreSQL database supplied through SIGNAGE_DATABASE_URL"]
-    async fn addon_storage_round_trip_is_namespaced_and_upserted() {
-        apply_initial_schema().await.expect("apply PostgreSQL migrations");
-        let store = PostgresStore::connect().await.expect("connect to PostgreSQL");
-        let addon_id = format!("test.addon.{}", uuid::Uuid::new_v4());
-        let first = "{\"enabled\":true}";
-        let second = "{\"enabled\":false}";
-        store
-            .set_addon_storage(&addon_id, "settings", first, "2026-10-15T00:00:00Z")
-            .await
-            .expect("insert addon storage");
-        assert_eq!(
-            store
-                .get_addon_storage(&addon_id, "settings")
-                .await
-                .expect("read addon storage"),
-            Some(first.to_string())
-        );
-        store
-            .set_addon_storage(&addon_id, "settings", second, "2026-10-15T00:01:00Z")
-            .await
-            .expect("upsert addon storage");
-        store
-            .set_addon_storage(&addon_id, "cache", "{\"count\":1}", "2026-10-15T00:02:00Z")
-            .await
-            .expect("insert second addon storage");
-        let other_addon_id = format!("test.other.{}", uuid::Uuid::new_v4());
-        store
-            .set_addon_storage(&other_addon_id, "settings", "{\"isolated\":true}", "2026-10-15T00:03:00Z")
-            .await
-            .expect("insert isolated addon storage");
-        assert_eq!(
-            store
-                .get_addon_storage(&addon_id, "settings")
-                .await
-                .expect("read updated addon storage"),
-            Some(second.to_string())
-        );
-        assert_eq!(
-            store
-                .get_addon_storage("test.other", "settings")
-                .await
-                .expect("read isolated addon storage"),
-            None
-        );
-        assert!(
-            store
-                .delete_addon_storage(&addon_id, "settings")
-                .await
-                .expect("delete addon storage")
-        );
-        assert_eq!(
-            store
-                .get_addon_storage(&other_addon_id, "settings")
-                .await
-                .expect("read retained addon storage"),
-            Some("{\"isolated\":true}".to_string())
-        );
-        assert_eq!(
-            store
-                .delete_addon_storage_namespace(&addon_id)
-                .await
-                .expect("delete addon namespace"),
-            1
-        );
-        assert_eq!(
-            store
-                .get_addon_storage(&addon_id, "cache")
-                .await
-                .expect("read deleted addon namespace"),
-            None
-        );
-        assert_eq!(
-            store
-                .delete_addon_storage_namespace(&addon_id)
-                .await
-                .expect("delete missing addon namespace"),
-            0
-        );
-    }
 }

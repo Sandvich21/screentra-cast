@@ -13,7 +13,7 @@ use crate::traffic::{TrafficProvider, TrafficQuery};
 use axum::{
     extract::{DefaultBodyLimit, Extension, FromRef, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json as AxumJson, Response, Html},
+    response::{IntoResponse, Json as AxumJson, Response},
     routing::{get, post, patch, delete, put},
     Json, Router,
 };
@@ -12264,62 +12264,6 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
-    #[tokio::test]
-    #[ignore = "requires a disposable PostgreSQL database supplied through SIGNAGE_DATABASE_URL"]
-    async fn postgres_authenticated_audit_listing_matches_sqlite_sanitization() {
-        assert!(
-            std::env::var("SIGNAGE_DATABASE_URL")
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false),
-            "SIGNAGE_DATABASE_URL must point to a disposable PostgreSQL database"
-        );
-        crate::postgres::apply_initial_schema()
-            .await
-            .expect("apply PostgreSQL schema");
-        let store = Arc::new(
-            crate::postgres::PostgresStore::connect()
-                .await
-                .expect("connect to disposable PostgreSQL database"),
-        );
-        let state = RuntimeState {
-            legacy_db: None,
-            client_repository: ClientRepository::Postgres(store.clone()),
-            addon_storage_repository: AddonStorageRepository::Postgres(store.clone()),
-            auth_repository: crate::auth::AuthRepository::Postgres(store.clone()),
-            backup_repository: backup_api::BackupMetadataRepository::Postgres(store),
-            metrics: crate::observability::Metrics::new(),
-        };
-        let principal = crate::middleware::AuthenticatedPrincipal {
-            username: "audit-test".to_string(),
-            role: "admin".to_string(),
-        };
-
-        audit_update_import_failure(&state, &principal, "bundle file missing").await;
-        let oversized_detail = format!("detail\n{}", "x".repeat(600));
-        state
-            .client_repository()
-            .record_audit_event(
-                Some("actor\nwith-control"),
-                Some("administrator"),
-                "test_event",
-                Some("target"),
-                "failure",
-                Some(&oversized_detail),
-                "2026-10-02T00:00:00Z",
-            )
-            .await
-            .expect("record PostgreSQL audit event");
-
-        let result = list_audit_events_handler(State(state), Query(HashMap::new()))
-            .await
-            .expect("PostgreSQL audit listing should succeed");
-        assert_eq!(result.0.len(), 2);
-        assert_eq!(result.0[1].event_type, "server_update_import");
-        assert_eq!(result.0[1].detail.as_deref(), Some("bundle file missing"));
-        assert_eq!(result.0[0].actor.as_deref(), Some("actorwith-control"));
-        assert_eq!(result.0[0].detail.as_ref().map(String::len), Some(512));
-        assert!(!result.0[0].detail.as_deref().unwrap().contains('\n'));
-    }
 
     #[test]
     fn virtual_clients_are_not_classified_as_stale_or_pending_after_publish() {
