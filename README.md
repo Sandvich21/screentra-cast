@@ -69,11 +69,75 @@ directory (normally `/home/board/server/uploads`), not only in
 
 ## Install a physical display client
 
-After the server is running:
+The supported client-install path is the signed bundle bootstrap served by a
+running Screentra Cast server. It downloads the player bundle, verifies the
+installer signature with the pinned client-update public key, and then runs the
+canonical installer. Use a physical-display Debian device with `sudo`, Python 3,
+`curl`, OpenSSL, and a supported Wayland/DRM stack.
 
-1. Install the signed player-client installer supplied by the server or release
-   on a supported Debian physical-display device.
-2. Adopt the client in the dashboard.
+Obtain the server's published CA certificate through a trusted transfer first.
+Do not use `curl -k` or disable TLS verification. Then run the following on the
+new client as the target installation user (normally `board`):
+
+```bash
+SERVER_URL=https://server.example:3000
+CA_CERT=/path/to/screentra-cast-signage-ca.crt
+
+# Use --cacert when the server uses its Screentra local CA. Omit it when the
+# server certificate is already trusted by the client OS.
+curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+  --cacert "$CA_CERT" \
+  -o /tmp/screentra-cast-player-client-bundle-install.sh \
+  "$SERVER_URL/install/player-client-bundle-install.sh"
+chmod 0755 /tmp/screentra-cast-player-client-bundle-install.sh
+
+sudo env \
+  RIPLEY_SERVER_URL="$SERVER_URL" \
+  RIPLEY_CA_CERT="$CA_CERT" \
+  RIPLEY_MAX_DISPLAYS=1 \
+  bash /tmp/screentra-cast-player-client-bundle-install.sh
+```
+
+For a GitHub release that publishes `screentra-cast-player-client-bundle.tar.gz`,
+download and verify the bundle before extracting it:
+
+```bash
+RELEASE=v0.1.5-rc.3
+BASE="https://github.com/Sandvich21/screentra-cast/releases/download/$RELEASE"
+WORK_DIR=/tmp/screentra-cast-player-client
+mkdir -p "$WORK_DIR"
+
+curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+  -o "$WORK_DIR/screentra-cast-player-client-bundle.tar.gz" \
+  "$BASE/screentra-cast-player-client-bundle.tar.gz"
+curl --fail --show-error --location --proto '=https' --tlsv1.2 \
+  -o "$WORK_DIR/screentra-cast-player-client-bundle.tar.gz.sha256" \
+  "$BASE/screentra-cast-player-client-bundle.tar.gz.sha256"
+(cd "$WORK_DIR" && sha256sum -c screentra-cast-player-client-bundle.tar.gz.sha256)
+tar -xzf "$WORK_DIR/screentra-cast-player-client-bundle.tar.gz" -C "$WORK_DIR"
+
+BUNDLE="$WORK_DIR/ripley-player-client-bundle/payload/install"
+openssl pkeyutl -verify -rawin -pubin \
+  -inkey "$BUNDLE/screentra-cast-client-update.pub" \
+  -sigfile "$BUNDLE/player-client.sh.sig" \
+  -in "$BUNDLE/player-client.sh"
+
+sudo env \
+  RIPLEY_SERVER_URL="$SERVER_URL" \
+  RIPLEY_CA_CERT="$CA_CERT" \
+  RIPLEY_MAX_DISPLAYS=1 \
+  bash "$BUNDLE/player-client.sh"
+```
+
+`SERVER_URL` and `CA_CERT` in this release example use the values defined in
+the server-served example above. Release bundles may be prerelease-only; the
+server-served bootstrap is the recommended path for the current stable server.
+
+After installation:
+
+1. Adopt the pending client in **Connected Clients**.
+2. Confirm that the six-digit pairing code on the physical display matches the
+   code shown by the server before clicking **Adopt Client**.
 3. Assign a layout to the physical display.
 4. Verify the client's heartbeat and physical output before production use.
 
