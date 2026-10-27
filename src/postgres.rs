@@ -22,6 +22,8 @@ const RUNTIME_COLUMNS_MIGRATION: &str = include_str!("../migrations/postgres/000
 const ADDON_STORAGE_MIGRATION: &str = include_str!("../migrations/postgres/0003_addon_storage.sql");
 const DISPLAY_SETTINGS_MIGRATION: &str = include_str!("../migrations/postgres/0004_schedule_display_settings.sql");
 const SCHEDULE_END_ACTION_MIGRATION: &str = include_str!("../migrations/postgres/0005_schedule_end_action.sql");
+const CLIENT_HEARTBEAT_CPU_TEMP_MIGRATION: &str =
+    include_str!("../migrations/postgres/0007_client_heartbeat_cpu_temp.sql");
 
 pub fn configured_database_url() -> Result<String, String> {
     database_url_from(std::env::var(DATABASE_URL_ENV).ok())
@@ -749,6 +751,7 @@ impl PostgresStore {
             version: None,
             uptime_seconds: None,
             cpu_usage: None,
+            cpu_temp: None,
             memory_used: None,
             memory_total: None,
             disk_used: None,
@@ -977,7 +980,7 @@ impl PostgresStore {
         let client_id = format!("__postgres_scene_client_{}", Uuid::new_v4());
         let client = ClientRegistration {
             id: client_id.clone(), name: "Scene probe client".into(), address: "127.0.0.1".into(), role: "player".into(),
-            version: None, uptime_seconds: None, cpu_usage: None, memory_used: None, memory_total: None,
+            version: None, uptime_seconds: None, cpu_usage: None, cpu_temp: None, memory_used: None, memory_total: None,
             disk_used: None, disk_total: None, active_layout_id: None, last_seen: "1970-01-01T00:00:00Z".into(),
             last_command_result: None, last_command_at: None, installer_detected_max_displays: None,
             touch_binding: None, theme: None, max_displays: None,
@@ -1169,6 +1172,7 @@ impl PostgresStore {
             version: None,
             uptime_seconds: None,
             cpu_usage: None,
+            cpu_temp: None,
             memory_used: None,
             memory_total: None,
             disk_used: None,
@@ -1301,6 +1305,7 @@ impl PostgresStore {
             version: None,
             uptime_seconds: None,
             cpu_usage: None,
+            cpu_temp: None,
             memory_used: None,
             memory_total: None,
             disk_used: None,
@@ -2366,7 +2371,7 @@ impl PostgresStore {
         let id = format!("__postgres_registered_clients_probe_{}", Uuid::new_v4());
         let client = ClientRegistration {
             id: id.clone(), name: "PostgreSQL registered clients probe".into(), address: "127.0.0.1".into(), role: "player".into(),
-            version: Some("probe".into()), uptime_seconds: Some(7), cpu_usage: Some(3.5), memory_used: Some(10), memory_total: Some(20),
+            version: Some("probe".into()), uptime_seconds: Some(7), cpu_usage: Some(3.5), cpu_temp: None, memory_used: Some(10), memory_total: Some(20),
             disk_used: Some(30), disk_total: Some(40), active_layout_id: Some("active-layout".into()), last_seen: "2026-01-01T00:00:00Z".into(),
             last_command_result: Some("ok".into()), last_command_at: Some("2026-01-01T00:00:00Z".into()), installer_detected_max_displays: Some(2),
             touch_binding: Some("{}".into()), theme: Some("dark".into()), max_displays: Some(2),
@@ -2469,7 +2474,7 @@ impl PostgresStore {
         let id = format!("__postgres_display_control_probe_{}", Uuid::new_v4());
         let client = ClientRegistration {
             id: id.clone(), name: "PostgreSQL display control probe".into(), address: "127.0.0.1".into(), role: "player".into(),
-            version: None, uptime_seconds: None, cpu_usage: None, memory_used: None, memory_total: None,
+            version: None, uptime_seconds: None, cpu_usage: None, cpu_temp: None, memory_used: None, memory_total: None,
             disk_used: None, disk_total: None, active_layout_id: None, last_seen: "1970-01-01T00:00:00Z".into(),
             last_command_result: None, last_command_at: None, installer_detected_max_displays: None,
             touch_binding: None, theme: None, max_displays: None,
@@ -2555,11 +2560,11 @@ impl PostgresStore {
         &self,
         client_id: &str,
         limit: i64,
-    ) -> Result<Vec<(String, Option<f64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)>, String> {
+    ) -> Result<Vec<(String, Option<f64>, Option<f64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)>, String> {
         let limit = limit.clamp(0, 1_000);
         self.client
             .query(
-                "SELECT recorded_at, cpu_usage, memory_used, memory_total, disk_used, disk_total, uptime_seconds FROM client_heartbeats WHERE client_id=$1 ORDER BY recorded_at DESC LIMIT $2",
+                "SELECT recorded_at, cpu_usage, cpu_temp, memory_used, memory_total, disk_used, disk_total, uptime_seconds FROM client_heartbeats WHERE client_id=$1 ORDER BY recorded_at DESC LIMIT $2",
                 &[&client_id, &limit],
             )
             .await
@@ -2567,7 +2572,7 @@ impl PostgresStore {
                 rows.into_iter()
                     .map(|row| {
                         (
-                            row.get(0), row.get(1), row.get(2), row.get(3), row.get(4), row.get(5), row.get(6),
+                            row.get(0), row.get(1), row.get(2), row.get(3), row.get(4), row.get(5), row.get(6), row.get(7),
                         )
                     })
                     .collect()
@@ -2657,7 +2662,7 @@ impl PostgresStore {
         let id = format!("__postgres_history_probe_{}", Uuid::new_v4());
         let make_client = |last_seen: &str, cpu: f64| ClientRegistration {
             id: id.clone(), name: "PostgreSQL history probe".into(), address: "127.0.0.1".into(), role: "player".into(),
-            version: None, uptime_seconds: Some(1), cpu_usage: Some(cpu), memory_used: Some(10), memory_total: Some(20),
+            version: None, uptime_seconds: Some(1), cpu_usage: Some(cpu), cpu_temp: None, memory_used: Some(10), memory_total: Some(20),
             disk_used: Some(30), disk_total: Some(40), active_layout_id: None, last_seen: last_seen.into(),
             last_command_result: None, last_command_at: None, installer_detected_max_displays: None,
             touch_binding: None, theme: None, max_displays: None,
@@ -2760,7 +2765,7 @@ impl PostgresStore {
         let username = format!("__postgres_admin_probe_{}", Uuid::new_v4());
         let client = ClientRegistration {
             id: client_id.clone(), name: "PostgreSQL admin probe".into(), address: "127.0.0.1".into(), role: "player".into(),
-            version: None, uptime_seconds: None, cpu_usage: None, memory_used: None, memory_total: None,
+            version: None, uptime_seconds: None, cpu_usage: None, cpu_temp: None, memory_used: None, memory_total: None,
             disk_used: None, disk_total: None, active_layout_id: None, last_seen: "1970-01-01T00:00:00Z".into(),
             last_command_result: None, last_command_at: None, installer_detected_max_displays: None,
             touch_binding: None, theme: None, max_displays: None,
@@ -2799,7 +2804,7 @@ impl PostgresStore {
         let id = format!("__postgres_display_listing_probe_{}", Uuid::new_v4());
         let client = ClientRegistration {
             id: id.clone(), name: "PostgreSQL display listing probe".into(), address: "127.0.0.1".into(), role: "player".into(),
-            version: None, uptime_seconds: None, cpu_usage: None, memory_used: None, memory_total: None,
+            version: None, uptime_seconds: None, cpu_usage: None, cpu_temp: None, memory_used: None, memory_total: None,
             disk_used: None, disk_total: None, active_layout_id: Some("client-layout".into()), last_seen: "1970-01-01T00:00:00Z".into(),
             last_command_result: None, last_command_at: None, installer_detected_max_displays: None,
             touch_binding: None, theme: None, max_displays: None,
@@ -2885,10 +2890,11 @@ impl PostgresStore {
                 .await
                 .map_err(|error| format!("preserve client display limit: {error}"))?;
         }
-        let heartbeat_params: [&(dyn ToSql + Sync); 8] = [
+        let heartbeat_params: [&(dyn ToSql + Sync); 9] = [
             &client.id,
             &client.last_seen,
             &client.cpu_usage,
+            &client.cpu_temp,
             &client.memory_used,
             &client.memory_total,
             &client.disk_used,
@@ -2897,7 +2903,7 @@ impl PostgresStore {
         ];
         transaction
             .execute(
-                "INSERT INTO client_heartbeats (client_id, recorded_at, cpu_usage, memory_used, memory_total, disk_used, disk_total, uptime_seconds) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                "INSERT INTO client_heartbeats (client_id, recorded_at, cpu_usage, cpu_temp, memory_used, memory_total, disk_used, disk_total, uptime_seconds) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
                 &heartbeat_params,
             )
             .await
@@ -2951,6 +2957,7 @@ impl PostgresStore {
             version: Some("probe".into()),
             uptime_seconds: Some(42),
             cpu_usage: Some(12.5),
+            cpu_temp: None,
             memory_used: Some(100),
             memory_total: Some(200),
             disk_used: Some(300),
@@ -3052,6 +3059,7 @@ pub async fn apply_initial_schema() -> Result<(), String> {
         ("0003_addon_storage", ADDON_STORAGE_MIGRATION),
         ("0004_schedule_display_settings", DISPLAY_SETTINGS_MIGRATION),
         ("0005_schedule_end_action", SCHEDULE_END_ACTION_MIGRATION),
+        ("0007_client_heartbeat_cpu_temp", CLIENT_HEARTBEAT_CPU_TEMP_MIGRATION),
     ] {
         let applied = transaction
             .query_opt("SELECT 1 FROM schema_migrations WHERE version=$1", &[&version])

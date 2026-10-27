@@ -669,7 +669,12 @@ html[data-theme="classic"] {
 .client-history-cell header b { color:var(--accent-light); font-size:.95rem; }
 .client-history-cell footer { color:var(--accent-dim); font-size:.68rem; }
 .client-sparkline { width:100%; height:56px; display:block; }
-.client-spark-point { cursor:crosshair; pointer-events:all; }
+.client-spark-point { cursor:crosshair; pointer-events:none; }
+.client-spark-hover-point { cursor:crosshair; pointer-events:all; }
+.client-history-legend { display:inline-flex; align-items:center; gap:.2rem; }
+.client-history-legend i { display:inline-block; width:.45rem; height:.45rem; border-radius:50%; margin-left:.25rem; }
+.client-history-legend-usage { background:#86efac; }
+.client-history-legend-temp { background:#fb923c; }
 .client-disk-pie { width:58px; height:58px; margin:.15rem auto .05rem; border-radius:50%; display:grid; place-items:center; position:relative; background:conic-gradient(var(--disk-used-color,#fdba74) calc(var(--disk-used) * 1%), var(--disk-free-color,rgba(148,163,184,.2)) 0); }
 .client-disk-pie::after { content:""; position:absolute; width:38px; height:38px; border-radius:50%; background:var(--card-bg); }
 .client-disk-pie span { position:relative; z-index:1; color:var(--accent-light); font-size:.68rem; font-weight:800; }

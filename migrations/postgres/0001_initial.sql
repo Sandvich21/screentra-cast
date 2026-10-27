@@ -190,6 +190,7 @@ CREATE TABLE IF NOT EXISTS client_heartbeats (
     client_id text NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     recorded_at text NOT NULL,
     cpu_usage double precision,
+    cpu_temp double precision,
     memory_used bigint,
     memory_total bigint,
     disk_used bigint,

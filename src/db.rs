@@ -171,6 +171,7 @@ pub struct ClientRegistration {
     pub version: Option<String>,
     pub uptime_seconds: Option<i64>,
     pub cpu_usage: Option<f64>,
+    pub cpu_temp: Option<f64>,
     pub memory_used: Option<i64>,
     pub memory_total: Option<i64>,
     pub disk_used: Option<i64>,
@@ -834,12 +835,12 @@ impl Database {
         &self,
         client_id: &str,
         limit: i64,
-    ) -> Result<Vec<(String, Option<f64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)>, String> {
+    ) -> Result<Vec<(String, Option<f64>, Option<f64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)>, String> {
         let limit = limit.clamp(0, MAX_CLIENT_HEARTBEATS);
         let conn = self.conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT recorded_at, cpu_usage, memory_used, memory_total, disk_used, disk_total, uptime_seconds FROM client_heartbeats WHERE client_id = ?1 ORDER BY recorded_at DESC LIMIT ?2",
+                "SELECT recorded_at, cpu_usage, cpu_temp, memory_used, memory_total, disk_used, disk_total, uptime_seconds FROM client_heartbeats WHERE client_id = ?1 ORDER BY recorded_at DESC LIMIT ?2",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
@@ -852,6 +853,7 @@ impl Database {
                     row.get(4)?,
                     row.get(5)?,
                     row.get(6)?,
+                    row.get(7)?,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -1086,8 +1088,8 @@ impl Database {
             .map_err(|e| e.to_string())?;
         }
         tx.execute(
-            "INSERT INTO client_heartbeats (client_id, recorded_at, cpu_usage, memory_used, memory_total, disk_used, disk_total, uptime_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![client.id, client.last_seen, client.cpu_usage, client.memory_used, client.memory_total, client.disk_used, client.disk_total, client.uptime_seconds],
+            "INSERT INTO client_heartbeats (client_id, recorded_at, cpu_usage, cpu_temp, memory_used, memory_total, disk_used, disk_total, uptime_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![client.id, client.last_seen, client.cpu_usage, client.cpu_temp, client.memory_used, client.memory_total, client.disk_used, client.disk_total, client.uptime_seconds],
         )
         .map_err(|e| e.to_string())?;
         tx.execute(
@@ -1747,6 +1749,7 @@ CREATE TABLE IF NOT EXISTS client_heartbeats (
                 client_id     TEXT NOT NULL,
                 recorded_at   TEXT NOT NULL,
                 cpu_usage     REAL,
+                cpu_temp      REAL,
                 memory_used   INTEGER,
                 memory_total  INTEGER,
                 disk_used     INTEGER,
@@ -1935,6 +1938,7 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
             "ALTER TABLE client_command_cooldowns ADD COLUMN burst_started_at TEXT",
             "ALTER TABLE client_command_cooldowns ADD COLUMN burst_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE client_command_cooldowns ADD COLUMN cooldown_until TEXT",
+            "ALTER TABLE client_heartbeats ADD COLUMN cpu_temp REAL",
             "ALTER TABLE schedules ADD COLUMN updated_at TEXT",
             "ALTER TABLE schedules ADD COLUMN display_name TEXT",
             "ALTER TABLE schedules ADD COLUMN control_method TEXT NOT NULL DEFAULT 'auto'",

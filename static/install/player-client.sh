@@ -1733,6 +1733,35 @@ def read_cpu_usage(interval=0.25):
         return None
 
 
+def read_cpu_temp():
+    candidates = []
+    try:
+        for path in Path('/sys/class/thermal').glob('thermal_zone*/temp'):
+            type_path = path.parent / 'type'
+            typ = _read_bounded_local_text(str(type_path), 256).strip().lower() if type_path.exists() else ''
+            score = 0 if any(key in typ for key in ('cpu', 'x86_pkg_temp', 'k10temp', 'tctl', 'soc')) else 1
+            candidates.append((score, path))
+    except Exception:
+        pass
+    try:
+        for path in Path('/sys/class/hwmon').glob('hwmon*/temp*_input'):
+            label_path = path.with_name(path.name.replace('_input', '_label'))
+            label = _read_bounded_local_text(str(label_path), 256).strip().lower() if label_path.exists() else ''
+            score = 0 if any(key in label for key in ('cpu', 'tctl', 'tdie', 'package', 'soc')) else 2
+            candidates.append((score, path))
+    except Exception:
+        pass
+    for _, path in sorted(candidates, key=lambda item: item[0]):
+        try:
+            raw = int(_read_bounded_local_text(str(path), 128).strip())
+            celsius = raw / 1000.0 if raw > 1000 else float(raw)
+            if -20.0 < celsius < 130.0:
+                return round(celsius, 1)
+        except Exception:
+            continue
+    return None
+
+
 def local_ip():
     ip = run("hostname -I | awk '{print $1}'")
     if ip:
@@ -1793,6 +1822,7 @@ def payload(args):
         'version': args.version,
         'uptime_seconds': read_uptime(),
         'cpu_usage': read_cpu_usage(),
+        'cpu_temp': read_cpu_temp(),
         'memory_used': mem_used,
         'memory_total': mem_total,
         'disk_used': disk_used,

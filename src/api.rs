@@ -574,7 +574,7 @@ impl ClientRepository {
         &self,
         client_id: &str,
         limit: i64,
-    ) -> Result<Vec<(String, Option<f64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)>, String> {
+    ) -> Result<Vec<(String, Option<f64>, Option<f64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)>, String> {
         match self {
             Self::Sqlite(db) => db.list_client_heartbeats(client_id, limit),
             Self::Postgres(db) => db.list_client_heartbeats(client_id, limit).await,
@@ -8133,6 +8133,8 @@ struct ClientRegisterRequest {
     version: Option<String>,
     uptime_seconds: Option<u64>,
     cpu_usage: Option<f32>,
+    #[serde(default)]
+    cpu_temp: Option<f32>,
     memory_used: Option<u64>,
     memory_total: Option<u64>,
     disk_used: Option<u64>,
@@ -8682,6 +8684,7 @@ struct DeleteClientResponse {
 struct HeartbeatRecord {
     recorded_at: String,
     cpu_usage: Option<f64>,
+    cpu_temp: Option<f64>,
     memory_used: Option<i64>,
     memory_total: Option<i64>,
     disk_used: Option<i64>,
@@ -10318,10 +10321,11 @@ async fn get_client_history(
         .await
         .map_err(|_| internal_server_error())?
         .into_iter()
-        .map(|(recorded_at, cpu_usage, memory_used, memory_total, disk_used, disk_total, uptime_seconds)| {
+        .map(|(recorded_at, cpu_usage, cpu_temp, memory_used, memory_total, disk_used, disk_total, uptime_seconds)| {
             HeartbeatRecord {
                 recorded_at,
                 cpu_usage,
+                cpu_temp,
                 memory_used,
                 memory_total,
                 disk_used,
@@ -10617,6 +10621,7 @@ async fn register_client(
         version: payload.version,
         uptime_seconds: payload.uptime_seconds.map(|v| v as i64),
         cpu_usage: payload.cpu_usage.map(|v| v as f64),
+        cpu_temp: payload.cpu_temp.map(|v| v as f64),
         memory_used: payload.memory_used.map(|v| v as i64),
         memory_total: payload.memory_total.map(|v| v as i64),
         disk_used: payload.disk_used.map(|v| v as i64),

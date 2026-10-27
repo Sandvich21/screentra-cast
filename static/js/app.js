@@ -6430,33 +6430,56 @@ ${_cmds.oneLiner}`;
     const w = opts.width || 320;
     const h = opts.height || 56;
     const pad = 4;
-    if (!values || values.length < 2) return `<svg class="${opts.className||'client-sparkline'}" viewBox="0 0 ${w} ${h}"><text x="${w/2}" y="${h/2}" fill="#64748b" font-size="11" text-anchor="middle">no data</text></svg>`;
-    const max = Math.max(...values, 1);
-    const min = Math.min(...values, 0);
+    const series = opts.series || [{values, color: opts.color || '#7dd3fc', label: opts.label || 'Usage', unit: opts.unit || '%'}];
+    const count = Math.max(...series.map(s => (s.values || []).length), 0);
+    if (count < 2) return `<svg class="${opts.className||'client-sparkline'}" viewBox="0 0 ${w} ${h}"><text x="${w/2}" y="${h/2}" fill="#64748b" font-size="11" text-anchor="middle">no data</text></svg>`;
+    const valid = series.flatMap(s => (s.values || []).filter(v => v !== null && v !== undefined && Number.isFinite(Number(v))).map(Number));
+    if (!valid.length) return `<svg class="${opts.className||'client-sparkline'}" viewBox="0 0 ${w} ${h}"><text x="${w/2}" y="${h/2}" fill="#64748b" font-size="11" text-anchor="middle">no data</text></svg>`;
+    const observedMin = Math.min(...valid);
+    const observedMax = Math.max(...valid);
+    const autoScale = opts.scale === 'auto';
+    const observedRange = Math.max(observedMax - observedMin, opts.percentage ? 0.5 : 1);
+    const margin = Math.max(observedRange * 0.15, opts.percentage ? 0.25 : 1);
+    const max = autoScale
+      ? (opts.percentage ? Math.min(100, observedMax + margin) : observedMax + margin)
+      : (opts.percentage ? 100 : Math.max(observedMax, 1));
+    const min = autoScale
+      ? (opts.percentage ? Math.max(0, observedMin - margin) : observedMin - margin)
+      : (opts.percentage ? 0 : Math.min(observedMin, 0));
     const range = (max - min) || 1;
-    const step = (w - pad*2) / (values.length - 1);
-    const pts = values.map((v,i) => [pad + i*step, h - pad - ((v - min) / range) * (h - pad*2)]);
-    const path = pts.map((p,i) => (i===0?'M':'L') + p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ');
-    const area = path + ` L ${pts[pts.length-1][0].toFixed(1)},${h-pad} L ${pad},${h-pad} Z`;
-    const last = values[values.length-1];
-    const threshold = opts.threshold || 80;
-    const stroke = (opts.percentage && last > threshold) ? '#fca5a5' : (opts.color || '#7dd3fc');
+    const step = (w - pad*2) / (count - 1);
+    const point = (value, index) => [pad + index*step, h - pad - ((Number(value) - min) / range) * (h - pad*2)];
+    const makePath = vals => (vals || []).reduce((result, value, index) => {
+      if (value === null || value === undefined || !Number.isFinite(Number(value))) return result;
+      const p = point(value, index);
+      result.push((result.length ? 'L' : 'M') + p[0].toFixed(1) + ',' + p[1].toFixed(1));
+      return result;
+    }, []).join(' ');
     const grid = [0.25, 0.5, 0.75].map(f => `<line x1="${pad}" y1="${(h-pad-f*(h-pad*2)).toFixed(1)}" x2="${w-pad}" y2="${(h-pad-f*(h-pad*2)).toFixed(1)}" stroke="rgba(148,163,184,.18)" stroke-width=".7"/>`).join('')
       + [0.25, 0.5, 0.75].map(f => `<line x1="${(pad+f*(w-pad*2)).toFixed(1)}" y1="${pad}" x2="${(pad+f*(w-pad*2)).toFixed(1)}" y2="${h-pad}" stroke="rgba(148,163,184,.12)" stroke-width=".7"/>`).join('');
-    const points = pts.map((p,i) => {
-      const value = Number(values[i] || 0).toFixed(1);
-      const timestamp = opts.timestamps && opts.timestamps[i] ? opts.timestamps[i] : 'unknown time';
-      return `<circle class="client-spark-point" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="4" fill="${stroke}" fill-opacity=".01" stroke="${stroke}" stroke-width="1"><title>${esc(opts.label || 'Usage')}: ${value}${esc(opts.unit || '%')} — recorded ${esc(timestamp)}</title></circle>`;
+    const paths = series.map((s, index) => {
+      const stroke = s.color || '#7dd3fc';
+      const path = makePath(s.values);
+      if (!path) return '';
+      const area = index === 0 && series.length === 1 ? `${path} L ${w-pad},${h-pad} L ${pad},${h-pad} Z` : '';
+      return `${area ? `<path d="${area}" fill="${stroke}" fill-opacity="0.15"/>` : ''}<path d="${path}" fill="none" stroke="${stroke}" stroke-width="2"/>`;
     }).join('');
-    return `
-      <svg class="${opts.className||'client-sparkline'}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${esc(opts.label || 'Usage')} history">
-        ${grid}
-        ${opts.percentage ? `<line x1="${pad}" y1="${h-pad-((threshold-min)/range)*(h-pad*2)}" x2="${w-pad}" y2="${h-pad-((threshold-min)/range)*(h-pad*2)}" stroke="#fca5a5" stroke-dasharray="3 3" stroke-width="1" opacity="0.6"/>` : ''}
-        <path d="${area}" fill="${stroke}" fill-opacity="0.15"/>
-        <path d="${path}" fill="none" stroke="${stroke}" stroke-width="2"/>
-        ${points}
-      </svg>
-    `;
+    const points = series.map(s => (s.values || []).map((value, i) => {
+      if (value === null || value === undefined || !Number.isFinite(Number(value))) return '';
+      const p = point(value, i);
+      return `<circle class="client-spark-point" cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3" fill="${s.color || '#7dd3fc'}" fill-opacity=".12" stroke="${s.color || '#7dd3fc'}" stroke-width="1"/>`;
+    }).join('')).join('');
+    const hoverPoints = Array.from({length: count}, (_, i) => {
+      const timestamp = opts.timestamps && opts.timestamps[i] ? opts.timestamps[i] : 'unknown time';
+      const details = series.map(s => {
+        const value = s.values && s.values[i];
+        return value === null || value === undefined || !Number.isFinite(Number(value)) ? `${s.label}: unavailable` : `${s.label}: ${Number(value).toFixed(1)}${s.unit}`;
+      }).join(' · ');
+      return `<rect class="client-spark-hover-point" x="${(pad + i*step - Math.max(5, step/2)).toFixed(1)}" y="${pad}" width="${Math.max(10, step).toFixed(1)}" height="${h-pad*2}" fill="transparent"><title>${esc(details)} — recorded ${esc(timestamp)}</title></rect>`;
+    }).join('');
+    const threshold = opts.threshold || 80;
+    const thresholdLine = opts.percentage && !autoScale ? `<line x1="${pad}" y1="${h-pad-(threshold/100)*(h-pad*2)}" x2="${w-pad}" y2="${h-pad-(threshold/100)*(h-pad*2)}" stroke="#fca5a5" stroke-dasharray="3 3" stroke-width="1" opacity="0.6"/>` : '';
+    return `<svg class="${opts.className||'client-sparkline'}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${esc(opts.ariaLabel || opts.label || 'Usage')} history">${grid}${thresholdLine}${paths}${points}${hoverPoints}</svg>`;
   }
 
   async function loadHistory(modal, clientId){
@@ -6466,14 +6489,29 @@ ${_cmds.oneLiner}`;
     panel.innerHTML = '<p class="client-history-loading">Loading heartbeat history…</p>';
     try {
       const data = await API.getClientHistory(clientId, 50);
-      const hb = data.heartbeats || [];
+      const parseNumber = value => {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : null;
+      };
+      const hb = (data.heartbeats || []).slice().sort((a, b) => {
+        const at = Date.parse(a.recorded_at || '');
+        const bt = Date.parse(b.recorded_at || '');
+        return (Number.isFinite(at) ? at : 0) - (Number.isFinite(bt) ? bt : 0);
+      });
       if (hb.length < 2) {
         panel.innerHTML = `<p class="client-history-loading">Need ≥2 heartbeats to chart. Got ${hb.length}. Wait for another heartbeat.</p>`;
         return;
       }
-      const cpu = hb.map(h => Number(h.cpu_usage || 0));
-      const mem = hb.map(h => (h.memory_used && h.memory_total) ? (h.memory_used/h.memory_total)*100 : 0);
-      const last = hb[hb.length - 1];
+      const cpu = hb.map(h => parseNumber(h.cpu_usage));
+      const cpuTemp = hb.map(h => parseNumber(h.cpu_temp));
+      const mem = hb.map(h => {
+        const used = parseNumber(h.memory_used);
+        const total = parseNumber(h.memory_total);
+        return used !== null && total !== null && total > 0 ? (used / total) * 100 : null;
+      });
+      const latestWith = (field) => [...hb].reverse().find(h => parseNumber(h[field]) !== null) || hb[hb.length - 1];
+      const last = latestWith('cpu_usage');
+      const latestMemory = latestWith('memory_used');
       const sampleTimes = hb.map(h => h.recorded_at);
       const fmtStorage = (bytes) => {
         const n = Number(bytes);
@@ -6484,24 +6522,29 @@ ${_cmds.oneLiner}`;
         if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
         return `${Math.round(n)} B`;
       };
-      const diskUsedBytes = Number(last.disk_used);
-      const diskTotalBytes = Number(last.disk_total);
-      const diskHasData = Number.isFinite(diskUsedBytes) && diskUsedBytes >= 0 && Number.isFinite(diskTotalBytes) && diskTotalBytes > 0;
+      const diskUsedBytes = parseNumber(last.disk_used);
+      const diskTotalBytes = parseNumber(last.disk_total);
+      const diskHasData = diskUsedBytes !== null && diskUsedBytes >= 0 && diskTotalBytes !== null && diskTotalBytes > 0;
       const diskUsedPct = diskHasData ? Math.max(0, Math.min(100, (diskUsedBytes / diskTotalBytes) * 100)) : 0;
       const diskUsedLabel = diskHasData ? fmtStorage(diskUsedBytes) : '—';
       const diskTotalLabel = diskHasData ? fmtStorage(diskTotalBytes) : '—';
-      const memUsedGb = Number.isFinite(Number(last.memory_used)) ? (Number(last.memory_used) / (1024 ** 3)) : null;
+      const memUsedBytes = parseNumber(latestMemory.memory_used);
+      const memTotalBytes = parseNumber(latestMemory.memory_total);
+      const memUsedGb = memUsedBytes === null ? null : (memUsedBytes / (1024 ** 3));
       const memUsedLabel = memUsedGb === null ? '—' : `${memUsedGb.toFixed(2)} GB used`;
+      const latestMemPct = memUsedBytes !== null && memTotalBytes !== null && memTotalBytes > 0 ? (memUsedBytes / memTotalBytes) * 100 : null;
+      const latestCpu = parseNumber(last.cpu_usage);
+      const latestCpuTemp = parseNumber(last.cpu_temp);
       panel.innerHTML = `
         <div class="client-history-grid">
           <div class="client-history-cell">
-            <header><span>CPU</span><b>${Number(last.cpu_usage||0).toFixed(1)}%</b></header>
-            ${buildSparkline(cpu, {percentage: true, threshold: 80, color: '#86efac', label: 'CPU', unit: '%', timestamps: sampleTimes})}
-            <footer>${hb.length} samples · last ${esc(last.recorded_at)}</footer>
+            <header><span>CPU</span><b>${latestCpu === null ? '—' : `${latestCpu.toFixed(1)}%`}${latestCpuTemp === null ? '' : ` · ${latestCpuTemp.toFixed(1)}°C`}</b></header>
+            ${buildSparkline(cpu, {percentage: true, threshold: 80, series: [{values: cpu, color: '#86efac', label: 'CPU usage', unit: '%'}, {values: cpuTemp, color: '#fb923c', label: 'CPU temp', unit: '°C'}], ariaLabel: 'CPU usage and temperature history', timestamps: sampleTimes})}
+            <footer><span class="client-history-legend"><i class="client-history-legend-usage"></i>usage <i class="client-history-legend-temp"></i>temp</span> · ${hb.length} samples · last ${esc(last.recorded_at)}</footer>
           </div>
           <div class="client-history-cell">
-            <header><span>Memory</span><b>${mem[mem.length-1].toFixed(1)}% · ${memUsedLabel}</b></header>
-            ${buildSparkline(mem, {percentage: true, threshold: 90, color: '#bae6fd', label: 'Memory', unit: '%', timestamps: sampleTimes})}
+            <header><span>Memory</span><b>${latestMemPct === null ? '—' : `${latestMemPct.toFixed(1)}%`} · ${memUsedLabel}</b></header>
+            ${buildSparkline(mem, {percentage: true, scale: 'auto', color: '#bae6fd', label: 'Memory', unit: '%', timestamps: sampleTimes})}
             <footer>${hb.length} samples</footer>
           </div>
           <div class="client-history-cell client-history-disk-cell">
