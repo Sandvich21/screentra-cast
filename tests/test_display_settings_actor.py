@@ -103,37 +103,6 @@ class DisplaySettingsActorTests(unittest.TestCase):
             'output', 'DP-2', 'power', 'on',
         ])
 
-    def test_output_scale_uses_selected_connector_and_restarts_kiosk(self):
-        calls = []
-        original_connector = actor._preview_connector
-        original_env = actor._preview_wayland_env
-        original_run_list = actor._run_list
-        original_restart = actor.restart_system_kiosk
-        actor._preview_connector = lambda cache_dir, display_index: 'HDMI-A-1'
-        actor._preview_wayland_env = lambda: {
-            'XDG_RUNTIME_DIR': '/run/board',
-            'WAYLAND_DISPLAY': 'wayland-1',
-        }
-        actor._run_list = lambda argv, **kwargs: (calls.append((argv, kwargs)) or (0, '', ''))
-        actor.restart_system_kiosk = lambda: (True, 'restarted')
-        try:
-            result = actor.apply_display_scale(Path('/tmp/cache'), 0, 1.25)
-        finally:
-            actor._preview_connector = original_connector
-            actor._preview_wayland_env = original_env
-            actor._run_list = original_run_list
-            actor.restart_system_kiosk = original_restart
-        self.assertTrue(result[0])
-        self.assertEqual(calls[0][0], ['wlr-randr', '--output', 'HDMI-A-1', '--scale', '1.25'])
-        self.assertTrue(result[2]['kiosk_restart'])
-
-    def test_output_scale_rejects_values_outside_safe_range(self):
-        for value in (0.49, 4.01, float('nan'), True, '1.25'):
-            with self.subTest(value=value):
-                ok, _message, details = actor.apply_display_scale(Path('/tmp/cache'), 0, value)
-                self.assertFalse(ok)
-                self.assertEqual(details, {})
-
     def test_wayland_env_ignores_stale_sway_ipc_socket(self):
         with tempfile.TemporaryDirectory() as runtime:
             stale_path = Path(runtime) / 'sway-ipc.1001.1067.sock'

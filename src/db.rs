@@ -222,7 +222,6 @@ pub struct ClientDisplayRecord {
     pub last_error: Option<String>,
     pub orientation: String,
     pub control_method: String,
-    pub output_scale: f64,
 }
 
 impl Database {
@@ -579,25 +578,21 @@ impl Database {
         &self,
         client_id: &str,
         display_index: i64,
-    ) -> Result<(Option<String>, String, f64), String> {
+    ) -> Result<(Option<String>, String), String> {
         let conn = self.conn()?;
-        let row: Option<(Option<String>, Option<String>, Option<f64>)> = conn
+        let row: Option<(Option<String>, Option<String>)> = conn
             .query_row(
-                "SELECT assigned_layout_id, orientation, output_scale FROM client_displays WHERE client_id = ?1 AND display_index = ?2",
+                "SELECT assigned_layout_id, orientation FROM client_displays WHERE client_id = ?1 AND display_index = ?2",
                 params![client_id, display_index],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        let (display_layout, orientation, output_scale) = row
-            .map(|(layout, orientation, output_scale)| (
-                layout,
-                orientation.unwrap_or_else(|| "normal".to_string()),
-                output_scale.unwrap_or(1.0),
-            ))
-            .unwrap_or((None, "normal".to_string(), 1.0));
+        let (display_layout, orientation) = row
+            .map(|(layout, orientation)| (layout, orientation.unwrap_or_else(|| "normal".to_string())))
+            .unwrap_or((None, "normal".to_string()));
         if display_layout.is_some() {
-            return Ok((display_layout, orientation, output_scale));
+            return Ok((display_layout, orientation));
         }
         let client_layout = conn
             .query_row(
@@ -607,7 +602,7 @@ impl Database {
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        Ok((client_layout, orientation, output_scale))
+        Ok((client_layout, orientation))
     }
 
     pub fn set_display_layout(
@@ -674,23 +669,6 @@ impl Database {
         conn.execute(
             "UPDATE client_displays SET orientation = ?1 WHERE client_id = ?2 AND display_index = ?3",
             params![orientation, client_id, display_index],
-        )
-        .map_err(|e| e.to_string())
-    }
-
-    pub fn set_display_output_scale(
-        &self,
-        client_id: &str,
-        display_index: i64,
-        output_scale: f64,
-    ) -> Result<usize, String> {
-        if !output_scale.is_finite() || !(0.5..=4.0).contains(&output_scale) {
-            return Err("output scale must be a finite number between 0.5 and 4.0".to_string());
-        }
-        let conn = self.conn()?;
-        conn.execute(
-            "UPDATE client_displays SET output_scale = ?1 WHERE client_id = ?2 AND display_index = ?3",
-            params![output_scale, client_id, display_index],
         )
         .map_err(|e| e.to_string())
     }
@@ -1318,7 +1296,7 @@ impl Database {
             )
             .unwrap_or((false, None));
         let mut stmt = conn
-            .prepare("SELECT client_id, display_index, connector, label, width, height, refresh_rate, enabled, assigned_layout_id, active_layout_id, last_seen, last_error, orientation, control_method, output_scale FROM client_displays WHERE client_id = ?1 ORDER BY display_index ASC LIMIT 4096")
+            .prepare("SELECT client_id, display_index, connector, label, width, height, refresh_rate, enabled, assigned_layout_id, active_layout_id, last_seen, last_error, orientation, control_method FROM client_displays WHERE client_id = ?1 ORDER BY display_index ASC LIMIT 4096")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([client_id], |row| {
@@ -1337,7 +1315,6 @@ impl Database {
                     last_error: row.get(11)?,
                     orientation: row.get(12).unwrap_or_else(|_| "normal".to_string()),
                     control_method: row.get(13).unwrap_or_else(|_| "auto".to_string()),
-                    output_scale: row.get(14).unwrap_or(1.0),
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -1812,7 +1789,6 @@ CREATE TABLE IF NOT EXISTS client_displays (
                 last_error         TEXT,
                 orientation        TEXT NOT NULL DEFAULT 'normal',
                 control_method      TEXT NOT NULL DEFAULT 'auto',
-                output_scale        REAL NOT NULL DEFAULT 1.0,
                 PRIMARY KEY (client_id, display_index)
             );
 CREATE INDEX IF NOT EXISTS idx_client_displays_client ON client_displays(client_id);
@@ -1968,7 +1944,6 @@ CREATE INDEX IF NOT EXISTS idx_scene_display_layouts_scene ON scene_display_layo
             "ALTER TABLE layout_sets ADD COLUMN dwell_secs INTEGER NOT NULL DEFAULT 30",
             "ALTER TABLE layouts ADD COLUMN canvas_orientation TEXT NOT NULL DEFAULT 'landscape'",
             "ALTER TABLE layouts ADD COLUMN folder_id TEXT REFERENCES layout_folders(id) ON DELETE SET NULL",
-            "ALTER TABLE client_displays ADD COLUMN output_scale REAL NOT NULL DEFAULT 1.0",
             // (Phase 5: kiosk → interactive rename moved to the top of
             // `open()` so it runs before `CREATE TABLE IF NOT EXISTS
             // interactive_submissions` below.)

@@ -563,18 +563,6 @@ impl ClientRepository {
         }
     }
 
-    async fn set_display_output_scale(
-        &self,
-        client_id: &str,
-        display_index: i64,
-        output_scale: f64,
-    ) -> Result<usize, String> {
-        match self {
-            Self::Sqlite(db) => db.set_display_output_scale(client_id, display_index, output_scale),
-            Self::Postgres(db) => db.set_display_output_scale(client_id, display_index, output_scale).await,
-        }
-    }
-
     async fn clear_client_display_command(&self, client_id: &str, display_index: i64) -> Result<usize, String> {
         match self {
             Self::Sqlite(db) => db.clear_client_display_command(client_id, display_index),
@@ -1008,7 +996,7 @@ impl ClientRepository {
         &self,
         client_id: &str,
         display_index: i64,
-    ) -> Result<(Option<String>, String, f64), String> {
+    ) -> Result<(Option<String>, String), String> {
         match self {
             Self::Sqlite(db) => db.get_display_config(client_id, display_index),
             Self::Postgres(db) => db.get_display_config(client_id, display_index).await,
@@ -1500,10 +1488,6 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route(
             "/api/clients/{id}/displays/{index}/orientation",
             patch(set_client_display_orientation).layer(DefaultBodyLimit::max(16 * 1024)),
-        )
-        .route(
-            "/api/clients/{id}/displays/{index}/scale",
-            patch(set_client_display_output_scale).layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route(
             "/api/clients/{id}/displays/{index}/config",
@@ -9745,7 +9729,6 @@ struct ClientDisplayInfo {
     port: i64,
     orientation: String,
     control_method: String,
-    output_scale: f64,
     /// Present when the assigned layout is a set page
     #[serde(skip_serializing_if = "Option::is_none")]
     layout_set: Option<LayoutSetWithItems>,
@@ -9958,7 +9941,6 @@ async fn list_client_displays(
             port: 3900 + display_index,
             orientation: record.orientation,
             control_method: record.control_method,
-            output_scale: record.output_scale,
             layout_set: None,
         });
     }
@@ -10035,7 +10017,7 @@ async fn get_client_display_config(
 ) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
     validate_client_display_index(index)?;
     require_client_or_admin_or_player(&repository, &auth, &id, Some(index), &headers).await?;
-    let (layout_id, orientation, output_scale) = repository
+    let (layout_id, orientation) = repository
         .get_display_config(&id, index)
         .await
         .map_err(|_| internal_server_error())?;
@@ -10075,7 +10057,6 @@ async fn get_client_display_config(
         "server_time": Utc::now().to_rfc3339(),
         "sync_interval_seconds": 30,
         "orientation": orientation,
-        "output_scale": output_scale,
     })))
 }
 
@@ -10190,11 +10171,6 @@ struct DisplayOrientationRequest {
 }
 
 #[derive(Debug, Deserialize)]
-struct DisplayOutputScaleRequest {
-    output_scale: f64,
-}
-
-#[derive(Debug, Deserialize)]
 struct DisplayControlMethodRequest {
     control_method: String,
 }
@@ -10293,47 +10269,6 @@ async fn set_client_display_orientation(
         "client_id": id,
         "display_index": index,
         "orientation": orientation,
-        "queued_command": queued,
-    })))
-}
-
-async fn set_client_display_output_scale(
-    State(repository): State<ClientRepository>,
-    Path((id, index)): Path<(String, i64)>,
-    Json(payload): Json<DisplayOutputScaleRequest>,
-) -> Result<AxumJson<serde_json::Value>, (StatusCode, String)> {
-    validate_client_display_index(index)?;
-    if !payload.output_scale.is_finite() || !(0.5..=4.0).contains(&payload.output_scale) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "output_scale must be a finite number between 0.5 and 4.0".to_string(),
-        ));
-    }
-    let updated = repository
-        .set_display_output_scale(&id, index, payload.output_scale)
-        .await
-        .map_err(|_| internal_server_error())?;
-    if updated == 0 {
-        return Err((StatusCode::NOT_FOUND, "Display not found".to_string()));
-    }
-    let command_payload = serde_json::json!({
-        "display_index": index,
-        "output_scale": payload.output_scale,
-    });
-    let queued = queue_repository_command(
-        &repository,
-        &id,
-        "reload_layout",
-        Some(&command_payload),
-        Some("web-ui"),
-    )
-    .await
-    .map_err(command_queue_http_error)?;
-    Ok(AxumJson(serde_json::json!({
-        "updated": updated,
-        "client_id": id,
-        "display_index": index,
-        "output_scale": payload.output_scale,
         "queued_command": queued,
     })))
 }

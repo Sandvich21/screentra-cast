@@ -22,7 +22,6 @@ const RUNTIME_COLUMNS_MIGRATION: &str = include_str!("../migrations/postgres/000
 const ADDON_STORAGE_MIGRATION: &str = include_str!("../migrations/postgres/0003_addon_storage.sql");
 const DISPLAY_SETTINGS_MIGRATION: &str = include_str!("../migrations/postgres/0004_schedule_display_settings.sql");
 const SCHEDULE_END_ACTION_MIGRATION: &str = include_str!("../migrations/postgres/0005_schedule_end_action.sql");
-const CLIENT_DISPLAY_SCALE_MIGRATION: &str = include_str!("../migrations/postgres/0006_client_display_scale.sql");
 
 pub fn configured_database_url() -> Result<String, String> {
     database_url_from(std::env::var(DATABASE_URL_ENV).ok())
@@ -555,18 +554,18 @@ impl PostgresStore {
             .map_err(|error| format!("bulk set display layout: {error}"))
     }
 
-    pub async fn get_display_config(&self, client_id: &str, display_index: i64) -> Result<(Option<String>, String, f64), String> {
+    pub async fn get_display_config(&self, client_id: &str, display_index: i64) -> Result<(Option<String>, String), String> {
         let index = i32::try_from(display_index).map_err(|_| "display index out of range".to_string())?;
         let display = self
             .client
-            .query_opt("SELECT assigned_layout_id,orientation,output_scale FROM client_displays WHERE client_id=$1 AND display_index=$2", &[&client_id, &index])
+            .query_opt("SELECT assigned_layout_id,orientation FROM client_displays WHERE client_id=$1 AND display_index=$2", &[&client_id, &index])
             .await
             .map_err(|error| format!("get display config: {error}"))?;
-        let (display_layout, orientation, output_scale) = display
-            .map(|row| (row.get::<_, Option<String>>(0), row.get::<_, Option<String>>(1).unwrap_or_else(|| "normal".into()), row.get::<_, Option<f64>>(2).unwrap_or(1.0)))
-            .unwrap_or((None, "normal".into(), 1.0));
+        let (display_layout, orientation) = display
+            .map(|row| (row.get::<_, Option<String>>(0), row.get::<_, Option<String>>(1).unwrap_or_else(|| "normal".into())))
+            .unwrap_or((None, "normal".into()));
         if display_layout.is_some() {
-            return Ok((display_layout, orientation, output_scale));
+            return Ok((display_layout, orientation));
         }
         let client_layout = self
             .client
@@ -574,7 +573,7 @@ impl PostgresStore {
             .await
             .map_err(|error| format!("get client fallback layout: {error}"))?
             .and_then(|row| row.get::<_, Option<String>>(0));
-        Ok((client_layout, orientation, output_scale))
+        Ok((client_layout, orientation))
     }
 
     pub async fn set_display_layout(&self, client_id: &str, display_index: i64, layout_id: Option<&str>) -> Result<usize, String> {
@@ -584,21 +583,6 @@ impl PostgresStore {
             .await
             .map(|rows| rows as usize)
             .map_err(|error| format!("set display layout: {error}"))
-    }
-
-    pub async fn set_display_output_scale(&self, client_id: &str, display_index: i64, output_scale: f64) -> Result<usize, String> {
-        if !output_scale.is_finite() || !(0.5..=4.0).contains(&output_scale) {
-            return Err("output scale must be a finite number between 0.5 and 4.0".to_string());
-        }
-        let display_index = i32::try_from(display_index).map_err(|_| "display index out of range".to_string())?;
-        self.client
-            .execute(
-                "UPDATE client_displays SET output_scale=$1 WHERE client_id=$2 AND display_index=$3",
-                &[&output_scale, &client_id, &display_index],
-            )
-            .await
-            .map(|rows| rows as usize)
-            .map_err(|error| format!("set display output scale: {error}"))
     }
 
     pub async fn set_virtual_client_layout(&self, client_id: &str, layout_id: &str) -> Result<usize, String> {
@@ -2711,7 +2695,7 @@ impl PostgresStore {
         let rows = self
             .client
             .query(
-                "SELECT client_id, display_index, connector, label, width, height, refresh_rate, enabled, assigned_layout_id, active_layout_id, last_seen, last_error, orientation, control_method, output_scale FROM client_displays WHERE client_id=$1 ORDER BY display_index ASC LIMIT 4096",
+                "SELECT client_id, display_index, connector, label, width, height, refresh_rate, enabled, assigned_layout_id, active_layout_id, last_seen, last_error, orientation, control_method FROM client_displays WHERE client_id=$1 ORDER BY display_index ASC LIMIT 4096",
                 &[&client_id],
             )
             .await
@@ -2733,7 +2717,6 @@ impl PostgresStore {
                 last_error: row.get(11),
                 orientation: row.get(12),
                 control_method: row.get(13),
-                output_scale: row.get::<_, Option<f64>>(14).unwrap_or(1.0),
             })
             .collect();
         Ok((is_virtual, client_layout_id, displays))
@@ -3069,7 +3052,6 @@ pub async fn apply_initial_schema() -> Result<(), String> {
         ("0003_addon_storage", ADDON_STORAGE_MIGRATION),
         ("0004_schedule_display_settings", DISPLAY_SETTINGS_MIGRATION),
         ("0005_schedule_end_action", SCHEDULE_END_ACTION_MIGRATION),
-        ("0006_client_display_scale", CLIENT_DISPLAY_SCALE_MIGRATION),
     ] {
         let applied = transaction
             .query_opt("SELECT 1 FROM schema_migrations WHERE version=$1", &[&version])
