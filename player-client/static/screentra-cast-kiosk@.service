@@ -12,6 +12,9 @@ StandardError=journal
 ExecStart=/usr/local/bin/screentra-kiosk.sh
 Restart=always
 RestartSec=5
+# Actor-triggered kiosk refreshes terminate this wrapper with SIGTERM. Treat
+# that controlled handoff as a successful stop rather than a crash.
+SuccessExitStatus=143 SIGTERM
 Environment=HOME=/home/board
 # AMD amdgpu APUs need the GLES2 renderer for reliable DRM scan-out.
 # Pixman can start Sway but repeatedly fails to import the Chromium buffer,

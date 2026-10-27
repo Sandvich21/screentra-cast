@@ -195,7 +195,28 @@ fi
 WAYLAND_DISPLAY="$(basename "$WAYLAND_DISPLAY_SOCK")"
 log "Wayland socket: $WAYLAND_DISPLAY"
 
-# Start one fullscreen Chromium window per display. Each window has a unique
+# The Wayland socket can exist briefly before Sway is accepting IPC. Probe a
+# live Sway socket before launching Chromium; otherwise a DPMS wake/restart can
+# race the browser into "Connection refused" and leave only the compositor.
+LIVE_SWAYSOCK=""
+for i in $(seq 1 40); do
+    for sock in "$XDG_RUNTIME_DIR"/sway-ipc.*.sock; do
+        [ -S "$sock" ] || continue
+        if sudo -u "$BOARD_USER" env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" SWAYSOCK="$sock" \
+            swaymsg -t get_version >/dev/null 2>&1; then
+            LIVE_SWAYSOCK="$sock"
+            break 2
+        fi
+    done
+    sleep 0.25
+done
+if [ -z "$LIVE_SWAYSOCK" ]; then
+    log "ERROR: Sway IPC was not ready"
+    exit 1
+fi
+log "Sway IPC ready: $LIVE_SWAYSOCK"
+
+# Start one fullscreen Chromium window per display. Each Chromium gets a unique
 # app_id so Sway can place it on the matching physical connector.
 while IFS='|' read -r idx connector port; do
     [ -n "$idx" ] || continue

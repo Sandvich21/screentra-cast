@@ -16,13 +16,18 @@ function playerFetch(url, options) {
     const path = String(url).split('?', 1)[0];
     if (response.status === 401 && PLAYER_RENDERER_URL && /\/api\/clients\/[^/]+\/displays$/.test(path)) {
       try {
-        if (window.sessionStorage.getItem('screentra-capability-refresh') !== '1') {
-          window.sessionStorage.setItem('screentra-capability-refresh', '1');
+        const now = Date.now();
+        const previous = Number(window.sessionStorage.getItem('screentra-capability-refresh-at') || '0');
+        // A capability expires after a fixed TTL. Throttle refreshes briefly so
+        // a transient exchange failure cannot create a redirect loop, while
+        // still allowing a second refresh if the first one did not work.
+        if (!Number.isFinite(previous) || now - previous >= 10000) {
+          window.sessionStorage.setItem('screentra-capability-refresh-at', String(now));
           window.location.replace(PLAYER_RENDERER_URL);
         }
       } catch (_) {}
     } else if (response.ok) {
-      try { window.sessionStorage.removeItem('screentra-capability-refresh'); } catch (_) {}
+      try { window.sessionStorage.removeItem('screentra-capability-refresh-at'); } catch (_) {}
     }
     return response;
   });

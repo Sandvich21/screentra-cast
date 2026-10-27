@@ -462,7 +462,7 @@ create_board_user() {
     # Grant only the device-control commands used by the actor. Do not add the
     # player account to sudo or grant unrestricted NOPASSWD access.
     run_privileged tee /etc/sudoers.d/"$board_user" > /dev/null << 'SUDOERS'
-Cmnd_Alias SCREENTRA_DEVICE_CONTROL = /usr/bin/ddcutil, /usr/bin/cec-client, /usr/bin/systemctl restart screentra-cast-kiosk@*.service, /usr/bin/systemctl try-restart screentra-cast-kiosk@*.service, /usr/bin/systemctl disable --now screentra-cast-kiosk@*.service, /usr/bin/systemctl reboot, /usr/sbin/reboot
+Cmnd_Alias SCREENTRA_DEVICE_CONTROL = /usr/bin/ddcutil, /usr/bin/cec-client, /usr/bin/systemctl start screentra-cast-kiosk@*.service, /usr/bin/systemctl stop screentra-cast-kiosk@*.service, /usr/bin/systemctl restart screentra-cast-kiosk@*.service, /usr/bin/systemctl try-restart screentra-cast-kiosk@*.service, /usr/bin/systemctl disable --now screentra-cast-kiosk@*.service, /usr/bin/systemctl reboot, /usr/sbin/reboot
 board ALL=(root) NOPASSWD: SCREENTRA_DEVICE_CONTROL
 SUDOERS
     run_privileged chmod 0440 /etc/sudoers.d/"$board_user" 2>/dev/null || true

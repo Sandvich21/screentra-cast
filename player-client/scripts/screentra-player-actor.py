@@ -477,7 +477,7 @@ def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_lay
     return False, msg_or_tag
 
 
-_CEC_COMMAND_RE = re.compile(r'^(?:pow|is) [0-9A-Fa-f]$')
+_CEC_COMMAND_RE = re.compile(r'^(?:pow|standby|is) [0-9A-Fa-f]$')
 
 
 def _validate_cec_command(cec_cmd: str) -> str:
@@ -1131,8 +1131,161 @@ def _preview_wayland_env() -> dict[str, str]:
     return env
 
 
+def _display_renderer_units(display_index: int) -> list[tuple[str, str]]:
+    if display_index == 0:
+        return [('system', 'screentra-cast-kiosk@0.service')]
+    return [
+        ('user', f'screentra-client-renderer@{display_index}.service'),
+        ('user', f'screentra-kiosk-browser@{display_index}.service'),
+    ]
+
+
+def display_renderer_active(display_index: int) -> bool:
+    """Return whether the display-specific renderer/browser is active."""
+    units = _display_renderer_units(display_index)
+    for scope, unit_name in units:
+        if scope == 'system':
+            rc, _, _ = _run_list(
+                ['sudo', '-n', 'systemctl', 'is-active', '--quiet', unit_name],
+                timeout=10,
+            )
+            if rc != 0:
+                return False
+        elif not systemctl_user('is-active', unit_name)[0]:
+            return False
+    return True
+
+
+def _system_display_renderer_action(action: str, unit_name: str) -> tuple[bool, str]:
+    rc, out, err = _run_list(
+        ['sudo', '-n', 'systemctl', action, unit_name],
+        timeout=30,
+    )
+    return rc == 0, _bound_hardware_message((out or err or f'{action} {unit_name} rc={rc}').strip())
+
+
+def stop_display_renderer(display_index: int) -> tuple[bool, str]:
+    """Stop rendering for one display while leaving the control plane alive."""
+    units = list(reversed(_display_renderer_units(display_index)))
+    messages = []
+    for scope, unit_name in units:
+        if scope == 'system':
+            ok, message = _system_display_renderer_action('stop', unit_name)
+        else:
+            ok, message = systemctl_user('stop', unit_name)
+        messages.append(message)
+        if not ok:
+            return False, _bound_hardware_message('; '.join(messages))
+    return True, _bound_hardware_message('; '.join(messages))
+
+
+def suspend_primary_display_renderer(env: dict[str, str]) -> tuple[bool, str]:
+    """Stop display 0's browser/renderer without stopping its compositor.
+
+    The primary system kiosk unit owns Sway as well as the browser and
+    renderer. Stopping that unit destroys the compositor and therefore loses
+    the DPMS state. Close only the display-0 Chromium surface and terminate
+    only the display-0 renderer process; leave the unit/Sway alive so the
+    compositor can keep the output powered off and receive the later wake
+    command.
+    """
+    socket = env.get('SWAYSOCK')
+    if not socket:
+        return False, 'active Sway compositor socket is unavailable'
+    messages = []
+    rc, out, err = _run_list(
+        [
+            'swaymsg', '-s', socket,
+            '[app_id="screentra-cast-display-0"] kill',
+        ],
+        timeout=10,
+        env=env,
+    )
+    if rc == 0:
+        messages.append('display-0 browser surface closed')
+    elif 'No matching node' in (out or err):
+        messages.append('display-0 browser surface was already closed')
+    else:
+        return False, _bound_hardware_message(
+            out or err or 'failed to close display-0 browser surface'
+        )
+
+    def _terminate_matching(pattern: str, label: str) -> tuple[bool, int, str]:
+        rc, output, error = _run_list(
+            ['pgrep', '-u', str(os.getuid()), '-f', pattern],
+            timeout=5,
+        )
+        if rc not in {0, 1}:
+            return False, 0, _bound_hardware_message(
+                error or output or f'failed to find {label} (rc={rc})'
+            )
+        pids = []
+        for raw_pid in (output or '').splitlines()[:16]:
+            try:
+                pid = int(raw_pid.strip())
+            except ValueError:
+                continue
+            if 1 <= pid <= 4194304 and pid != os.getpid():
+                pids.append(pid)
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            except OSError as exc:
+                return False, len(pids), _bound_hardware_message(
+                    f'failed to stop {label} pid {pid}: {exc}'
+                )
+        return True, len(pids), ''
+
+    browser_ok, browser_count, browser_message = _terminate_matching(
+        r'chromium.*screentra-cast-display-0', 'display-0 browser'
+    )
+    if not browser_ok:
+        return False, browser_message
+    messages.append(f'display-0 browser process stopped ({browser_count})')
+
+    renderer_ok, renderer_count, renderer_message = _terminate_matching(
+        r'screentra-client-renderer\.py.*--port 3900', 'display-0 renderer'
+    )
+    if not renderer_ok:
+        return False, renderer_message
+    messages.append(f'display-0 renderer stopped ({renderer_count})')
+    return True, _bound_hardware_message('; '.join(messages))
+
+
+def start_display_renderer(display_index: int) -> tuple[bool, str]:
+    """Start rendering for one display after a power-on transition."""
+    messages = []
+    for scope, unit_name in _display_renderer_units(display_index):
+        if scope == 'system':
+            ok, message = _system_display_renderer_action('start', unit_name)
+        else:
+            ok, message = systemctl_user('start', unit_name)
+        messages.append(message)
+        if not ok:
+            return False, _bound_hardware_message('; '.join(messages))
+    return True, _bound_hardware_message('; '.join(messages))
+
+
+def restart_display_renderer(display_index: int) -> tuple[bool, str]:
+    """Refresh one display's rendering after an in-place power transition."""
+    if display_index == 0:
+        return restart_system_kiosk()
+    return systemctl_user('restart', f'screentra-kiosk-browser@{display_index}.service')
+
+
+def refresh_or_start_display_renderer(display_index: int) -> tuple[bool, str, str]:
+    """Refresh an active renderer or start one that was suspended."""
+    if display_renderer_active(display_index):
+        ok, message = restart_display_renderer(display_index)
+        return ok, message, 'restarted'
+    ok, message = start_display_renderer(display_index)
+    return ok, message, 'started'
+
+
 def apply_display_power(cache_dir: Path, display_index: int | None, state: str) -> tuple[bool, str, dict]:
-    """Apply Linux DPMS/KMS power state to one validated Wayland output."""
+    """Apply Linux DPMS/KMS power state and suspend/resume display rendering."""
     if display_index is None or display_index < 0 or display_index > 3:
         return False, 'a display index from 0 to 3 is required', {}
     if not isinstance(state, str) or state not in {'on', 'off'}:
@@ -1140,7 +1293,63 @@ def apply_display_power(cache_dir: Path, display_index: int | None, state: str) 
     connector = _preview_connector(cache_dir, display_index)
     if not connector:
         return False, f'no connector is recorded for display {display_index}', {'display_index': display_index}
-    env = _preview_wayland_env()
+    # If the primary stack is not running there is no compositor IPC to wake;
+    # start the complete stack first. During a normal suspend, the system kiosk
+    # unit remains active and only its browser/renderer are stopped below.
+    initial_env = _preview_wayland_env()
+    if state == 'on' and (
+        (display_index == 0 and not initial_env.get('SWAYSOCK'))
+        or (display_index != 0 and not display_renderer_active(display_index))
+    ):
+        renderer_ok, renderer_message = start_display_renderer(display_index)
+        details = {
+            'display_index': display_index,
+            'connector': connector,
+            'state': state,
+            'method': 'kiosk-stack-start',
+            'renderer_started': renderer_ok,
+            'renderer_start_message': renderer_message,
+        }
+        if not renderer_ok:
+            return False, _bound_hardware_message(f'display renderer start failed: {renderer_message}'), details
+        return True, _bound_hardware_message(f'display renderer started: {renderer_message}'), details
+
+    env = initial_env
+    if state == 'off' and display_index == 0:
+        if not env.get('SWAYSOCK') or not shutil.which('swaymsg'):
+            return False, 'active Sway compositor is required for Linux DPMS suspend', {
+                'display_index': display_index,
+                'connector': connector,
+                'state': state,
+                'method': 'sway-dpms',
+                'stage': 'discover-compositor',
+            }
+        renderer_ok, renderer_message = suspend_primary_display_renderer(env)
+        details = {
+            'display_index': display_index,
+            'connector': connector,
+            'state': state,
+            'method': 'sway-dpms',
+            'renderer_suspended': renderer_ok,
+            'renderer_suspend_message': renderer_message,
+        }
+        if not renderer_ok:
+            return False, _bound_hardware_message(
+                f'display renderer suspend failed: {renderer_message}'
+            ), details
+        rc, out, err = _run_list(
+            ['swaymsg', '-s', env['SWAYSOCK'], 'output', connector, 'power', 'off'],
+            timeout=10,
+            env=env,
+        )
+        message = _bound_hardware_message(
+            out or err or ('display powered off via Sway DPMS' if rc == 0 else 'Sway DPMS suspend failed')
+        )
+        details['return_code'] = rc
+        if rc != 0:
+            return False, message, details
+        return True, _bound_hardware_message(f'{message}; renderer suspended'), details
+
     requested = '--on' if state == 'on' else '--off'
     if state == 'on' and env.get('SWAYSOCK') and shutil.which('swaymsg'):
         enable_rc, enable_out, enable_err = _run_list(
@@ -1178,27 +1387,63 @@ def apply_display_power(cache_dir: Path, display_index: int | None, state: str) 
         }
         if rc != 0:
             return False, message, details
-        kiosk_ok, kiosk_message = restart_system_kiosk()
-        details['kiosk_restart'] = kiosk_ok
-        details['kiosk_restart_message'] = kiosk_message
-        if not kiosk_ok:
+        if display_index == 0:
+            renderer_ok, renderer_message = restart_display_renderer(display_index)
+            renderer_action = 'restarted'
+        else:
+            renderer_ok, renderer_message, renderer_action = refresh_or_start_display_renderer(display_index)
+        details[f'renderer_{renderer_action}'] = renderer_ok
+        details[f'renderer_{renderer_action}_message'] = renderer_message
+        if not renderer_ok:
             return False, _bound_hardware_message(
-                f'{message}; kiosk refresh failed: {kiosk_message}'
+                f'{message}; renderer {renderer_action} failed: {renderer_message}'
             ), details
-        return True, _bound_hardware_message(f'{message}; kiosk refreshed'), details
+        return True, _bound_hardware_message(f'{message}; renderer {renderer_action}'), details
     rc, out, err = _run_list(
         ['wlr-randr', '--output', connector, requested],
         timeout=10,
         env=env,
     )
     message = _bound_hardware_message(out or err or ('display enabled' if state == 'on' else 'display disabled'))
-    return rc == 0, message, {
+    details = {
         'display_index': display_index,
         'connector': connector,
         'state': state,
         'method': 'wlr-randr',
         'return_code': rc,
     }
+    if rc != 0:
+        return False, message, details
+    if state == 'off':
+        renderer_ok, renderer_message = stop_display_renderer(display_index)
+        details['renderer_stopped'] = renderer_ok
+        details['renderer_stop_message'] = renderer_message
+        if not renderer_ok:
+            return False, _bound_hardware_message(
+                f'{message}; renderer suspend failed: {renderer_message}'
+            ), details
+        return True, _bound_hardware_message(f'{message}; renderer suspended'), details
+    renderer_ok, renderer_message, renderer_action = refresh_or_start_display_renderer(display_index)
+    details[f'renderer_{renderer_action}'] = renderer_ok
+    details[f'renderer_{renderer_action}_message'] = renderer_message
+    if not renderer_ok:
+        return False, _bound_hardware_message(
+            f'{message}; renderer {renderer_action} failed: {renderer_message}'
+        ), details
+    return True, _bound_hardware_message(f'{message}; renderer {renderer_action}'), details
+
+
+def sync_display_renderer_power_state(display_index: int | None, state: str) -> tuple[bool, str, dict]:
+    """Match renderer state to a successful DDC/CEC power transition."""
+    if display_index is None:
+        return True, 'display renderer state unchanged because display index is unavailable', {}
+    if state == 'off':
+        ok, message = stop_display_renderer(display_index)
+        return ok, message, {'renderer_stopped': ok, 'renderer_stop_message': message}
+    if state == 'on' and not display_renderer_active(display_index):
+        ok, message = start_display_renderer(display_index)
+        return ok, message, {'renderer_started': ok, 'renderer_start_message': message}
+    return True, 'display renderer already active', {'renderer_started': False}
 
 
 def _upload_preview_frame(server: str, client_id: str, display_index: int, frame: bytes, cache_dir: Path) -> tuple[bool, str]:
@@ -1906,7 +2151,11 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         # optional: { "bus": "1" }                specific display bus
         # optional: { "has_layout": true }        retry detect if display not found
         try:
-            vcp = payload.get('vcp', '')
+            raw_vcp = payload.get('vcp', '')
+            if isinstance(raw_vcp, int) and not isinstance(raw_vcp, bool):
+                vcp = 'D6' if raw_vcp == 6 else str(raw_vcp)
+            else:
+                vcp = raw_vcp
             value = _bounded_integer_input(payload.get('value', 0), 0, 65535, 'DDC value')
             bus = payload.get('bus')
             has_layout = payload.get('has_layout', False)
@@ -1915,17 +2164,44 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
             ok, msg = apply_ddc_control(vcp, value, bus=bus, has_layout=has_layout)
         except (TypeError, ValueError, OverflowError) as exc:
             return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
-        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
+        details = {}
+        if ok and vcp.lower() in {'6', 'd6'} and value in {1, 2, 3, 4}:
+            render_state = 'on' if value == 1 else 'off'
+            render_ok, render_message, render_details = sync_display_renderer_power_state(display_index, render_state)
+            details.update(render_details)
+            details['render_state'] = render_state
+            if not render_ok:
+                return {
+                    'action': action, 'display_index': display_index, 'ok': False,
+                    'partial': True, 'message': f'{msg}; renderer transition failed: {render_message}',
+                    'details': details, 'started_at': started,
+                }
+            msg = f'{msg}; {render_message}'
+        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'details': details, 'started_at': started}
 
     if action == 'cec_send':
         # payload: { "cmd": "pow 0" }   power on OSD addr 0
+        # or { "cmd": "standby 0" }    standby/off OSD addr 0
         # or { "cmd": "is 1" }          input HDMI-2
         try:
             cmd = payload.get('cmd', '')
             ok, msg = apply_cec_command(cmd)
         except (TypeError, ValueError, OverflowError) as exc:
             return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
-        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
+        details = {}
+        if ok and isinstance(cmd, str) and (cmd.startswith('pow ') or cmd.startswith('standby ')):
+            render_state = 'on' if cmd.startswith('pow ') else 'off'
+            render_ok, render_message, render_details = sync_display_renderer_power_state(display_index, render_state)
+            details.update(render_details)
+            details['render_state'] = render_state
+            if not render_ok:
+                return {
+                    'action': action, 'display_index': display_index, 'ok': False,
+                    'partial': True, 'message': f'{msg}; renderer transition failed: {render_message}',
+                    'details': details, 'started_at': started,
+                }
+            msg = f'{msg}; {render_message}'
+        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'details': details, 'started_at': started}
 
     if action == 'ir_send':
         # IR control — stub; hardware integration for later

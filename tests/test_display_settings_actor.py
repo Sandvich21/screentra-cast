@@ -51,8 +51,16 @@ class DisplaySettingsActorTests(unittest.TestCase):
         original_connector = actor._preview_connector
         original_run_list = actor._run_list
         original_env = actor._preview_wayland_env
+        original_which = actor.shutil.which
+        original_suspend_renderer = actor.suspend_primary_display_renderer
         actor._preview_connector = lambda cache_dir, display_index: 'DP-2'
-        actor._preview_wayland_env = lambda: {'XDG_RUNTIME_DIR': '/run/board', 'WAYLAND_DISPLAY': 'wayland-1'}
+        actor._preview_wayland_env = lambda: {
+            'XDG_RUNTIME_DIR': '/run/board',
+            'WAYLAND_DISPLAY': 'wayland-1',
+            'SWAYSOCK': '/run/board/sway-ipc.1000.1820.sock',
+        }
+        actor.shutil.which = lambda name: '/usr/bin/swaymsg' if name == 'swaymsg' else None
+        actor.suspend_primary_display_renderer = lambda env: (True, 'suspended')
         actor._run_list = lambda argv, **kwargs: (calls.append((argv, kwargs)) or (0, '', ''))
         try:
             result = actor.execute(
@@ -64,11 +72,16 @@ class DisplaySettingsActorTests(unittest.TestCase):
             actor._preview_connector = original_connector
             actor._run_list = original_run_list
             actor._preview_wayland_env = original_env
+            actor.shutil.which = original_which
+            actor.suspend_primary_display_renderer = original_suspend_renderer
         self.assertTrue(result['ok'])
         self.assertEqual(result['details']['connector'], 'DP-2')
-        wlr_calls = [call for call in calls if call[0][0] == 'wlr-randr']
-        self.assertEqual(wlr_calls[0][0], ['wlr-randr', '--output', 'DP-2', '--off'])
-        self.assertEqual(wlr_calls[0][1]['env']['WAYLAND_DISPLAY'], 'wayland-1')
+        self.assertEqual(result['details']['method'], 'sway-dpms')
+        self.assertEqual(calls[0][0], [
+            'swaymsg', '-s', '/run/board/sway-ipc.1000.1820.sock',
+            'output', 'DP-2', 'power', 'off',
+        ])
+        self.assertEqual(calls[0][1]['env']['WAYLAND_DISPLAY'], 'wayland-1')
 
     def test_display_power_on_uses_sway_dpms_wake_for_selected_connector(self):
         calls = []
@@ -76,6 +89,8 @@ class DisplaySettingsActorTests(unittest.TestCase):
         original_run_list = actor._run_list
         original_env = actor._preview_wayland_env
         original_which = actor.shutil.which
+        original_renderer_active = actor.display_renderer_active
+        original_restart_renderer = actor.restart_display_renderer
         actor._preview_connector = lambda cache_dir, display_index: 'DP-2'
         actor._preview_wayland_env = lambda: {
             'XDG_RUNTIME_DIR': '/run/board',
@@ -83,6 +98,8 @@ class DisplaySettingsActorTests(unittest.TestCase):
             'SWAYSOCK': '/run/board/sway-ipc.1000.1820.sock',
         }
         actor.shutil.which = lambda name: '/usr/bin/swaymsg' if name == 'swaymsg' else None
+        actor.display_renderer_active = lambda display_index: True
+        actor.restart_display_renderer = lambda display_index: (True, 'restarted')
         actor._run_list = lambda argv, **kwargs: (calls.append((argv, kwargs)) or (0, '', ''))
         try:
             result = actor.execute(
@@ -95,6 +112,8 @@ class DisplaySettingsActorTests(unittest.TestCase):
             actor._run_list = original_run_list
             actor._preview_wayland_env = original_env
             actor.shutil.which = original_which
+            actor.display_renderer_active = original_renderer_active
+            actor.restart_display_renderer = original_restart_renderer
         self.assertTrue(result['ok'])
         self.assertEqual(result['details']['method'], 'wlr-randr+sway-dpms')
         self.assertEqual(calls[0][0], ['wlr-randr', '--output', 'DP-2', '--on'])

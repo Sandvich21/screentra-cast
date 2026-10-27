@@ -181,12 +181,16 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertIn("screentra-capability-refresh", source)
         self.assertIn("window.location.replace(PLAYER_RENDERER_URL)", source)
 
+    def test_kiosk_unit_marks_actor_refresh_as_successful(self):
+        source = (ROOT / 'player-client/static/screentra-cast-kiosk@.service').read_text()
+        self.assertIn('SuccessExitStatus=143 SIGTERM', source)
+
     def test_layout_change_marker_is_written_before_kiosk_restart(self):
         source = (ROOT / 'player-client/scripts/screentra-player-heartbeat.py').read_text()
         marker = source.index("if cfg and current_layout_id and current_layout_id != previous_layout_id:")
         block = source[marker:source.index('        elif cfg and current_layout_id:', marker)]
         self.assertLess(
-            block.index('_atomic_write_text(prev_layout_path'),
+            block.index('_atomic_write_text_if_changed(prev_layout_path'),
             block.index('subprocess.run'),
         )
         self.assertIn('_read_real_file(prev_layout_path, 4096)', source)
@@ -515,12 +519,58 @@ class PlayerClientAuditTests(unittest.TestCase):
             (cache / 'display-0.json').write_text(json.dumps({'connector': 'DP-2'}))
             with mock.patch.object(actor, '_preview_wayland_env', return_value={'SWAYSOCK': '/run/board/sway.sock'}), \
                     mock.patch.object(actor.shutil, 'which', return_value='/usr/bin/swaymsg'), \
+                    mock.patch.object(actor, 'display_renderer_active', return_value=True), \
                     mock.patch.object(actor, '_run_list', side_effect=[(0, '', ''), (0, 'ok', '')]), \
-                    mock.patch.object(actor, 'restart_system_kiosk', return_value=(True, 'restarted')) as restart:
+                    mock.patch.object(actor, 'restart_display_renderer', return_value=(True, 'restarted')) as restart:
                 ok, message, details = actor.apply_display_power(cache, 0, 'on')
         self.assertTrue(ok)
-        self.assertEqual(details['kiosk_restart'], True)
-        restart.assert_called_once_with()
+        self.assertTrue(details['renderer_restarted'])
+        restart.assert_called_once_with(0)
+
+    def test_display_power_off_keeps_compositor_and_suspends_renderer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp)
+            (cache / 'display-0.json').write_text(json.dumps({'connector': 'DP-2'}))
+            with mock.patch.object(actor, '_preview_wayland_env', return_value={'SWAYSOCK': '/run/board/sway.sock'}), \
+                    mock.patch.object(actor.shutil, 'which', return_value='/usr/bin/swaymsg'), \
+                    mock.patch.object(actor, 'suspend_primary_display_renderer', return_value=(True, 'suspended')) as suspend, \
+                    mock.patch.object(actor, '_run_list', return_value=(0, '', '')) as run:
+                ok, message, details = actor.apply_display_power(cache, 0, 'off')
+        self.assertTrue(ok)
+        self.assertTrue(details['renderer_suspended'])
+        self.assertEqual(details['method'], 'sway-dpms')
+        suspend.assert_called_once_with({'SWAYSOCK': '/run/board/sway.sock'})
+        run.assert_called_once_with(
+            ['swaymsg', '-s', '/run/board/sway.sock', 'output', 'DP-2', 'power', 'off'],
+            timeout=10,
+            env={'SWAYSOCK': '/run/board/sway.sock'},
+        )
+
+    def test_display_power_off_requires_live_compositor(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp)
+            (cache / 'display-0.json').write_text(json.dumps({'connector': 'DP-2'}))
+            with mock.patch.object(actor, '_preview_wayland_env', return_value={}), \
+                    mock.patch.object(actor.shutil, 'which', return_value='/usr/bin/swaymsg'), \
+                    mock.patch.object(actor, 'suspend_primary_display_renderer') as suspend:
+                ok, message, details = actor.apply_display_power(cache, 0, 'off')
+        self.assertFalse(ok)
+        self.assertIn('compositor', message)
+        self.assertEqual(details['stage'], 'discover-compositor')
+        suspend.assert_not_called()
+
+    def test_display_power_on_starts_suspended_display_renderer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp)
+            (cache / 'display-0.json').write_text(json.dumps({'connector': 'DP-2'}))
+            with mock.patch.object(actor, '_preview_wayland_env', return_value={}), \
+                    mock.patch.object(actor, '_run_list', return_value=(0, '', '')), \
+                    mock.patch.object(actor, 'display_renderer_active', return_value=False), \
+                    mock.patch.object(actor, 'start_display_renderer', return_value=(True, 'started')) as start:
+                ok, message, details = actor.apply_display_power(cache, 0, 'on')
+        self.assertTrue(ok)
+        self.assertTrue(details['renderer_started'])
+        start.assert_called_once_with(0)
 
     def test_display_power_rejects_non_string_state(self):
         result = actor.execute('display_power', {'display_index': 0, 'state': ['on']}, {'cache_dir': '/tmp/cache', 'client_id': 'client-1', 'server': 'https://example.test'})
@@ -542,6 +592,15 @@ class PlayerClientAuditTests(unittest.TestCase):
         cec = actor.execute('cec_send', {'cmd': 'tx 0F:44:6D:00'}, context)
         self.assertEqual(ddc['code'], 'invalid_payload')
         self.assertEqual(cec['code'], 'invalid_payload')
+
+    def test_ddc_power_off_suspends_display_renderer(self):
+        context = {'cache_dir': '/tmp/cache', 'client_id': 'client-1', 'server': 'https://example.test'}
+        with mock.patch.object(actor, 'apply_ddc_control', return_value=(True, 'DDC: D6=4')), \
+                mock.patch.object(actor, 'stop_display_renderer', return_value=(True, 'stopped')) as stop:
+            result = actor.execute('ddc_set', {'display_index': 0, 'vcp': 6, 'value': 4}, context)
+        self.assertTrue(result['ok'])
+        self.assertTrue(result['details']['renderer_stopped'])
+        stop.assert_called_once_with(0)
 
     def test_execute_rejects_non_object_payloads(self):
         result = actor.execute('ddc_set', ['not-an-object'], {'cache_dir': '/tmp/cache', 'client_id': 'client-1', 'server': 'https://example.test'})

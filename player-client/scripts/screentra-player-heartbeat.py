@@ -99,10 +99,37 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
                 pass
 
 
+def _atomic_write_text_if_changed(path: Path, text: str, mode: int = 0o600) -> bool:
+    """Atomically replace a cache file only when its contents changed."""
+    try:
+        current = _read_real_file(
+            path,
+            max_bytes=max(MAX_JSON_FILE_BYTES, len(text.encode('utf-8'))),
+        )
+        if current == text.encode('utf-8'):
+            return False
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+    _atomic_write_text(path, text, mode=mode)
+    return True
+
+
 def _write_status_report(path: Path, status):
     """Persist only a report admitted by the metadata-only status boundary."""
     validate_status_report(status)
+    comparable = dict(status)
+    comparable.pop('at', None)
+    try:
+        previous = _read_cache_json(path, {})
+        if isinstance(previous, dict):
+            previous_comparable = dict(previous)
+            previous_comparable.pop('at', None)
+            if previous_comparable == comparable:
+                return False
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        pass
     _atomic_write_text(path, json.dumps(status, indent=2))
+    return True
 
 
 def _display_governance_count(which):
@@ -1169,16 +1196,28 @@ def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='
         except Exception:
             pass
         _ensure_real_directory(Path(cache_dir), create=True)
-        if display_index == 0:
-            _atomic_write_text(Path(cache_dir, 'client-config.json'), json.dumps(data, indent=2))
-        else:
-            _atomic_write_text(Path(cache_dir, f'display-config-{display_index}.json'), json.dumps(data, indent=2))
+        config_path = Path(cache_dir, 'client-config.json' if display_index == 0 else f'display-config-{display_index}.json')
+        config_text = json.dumps(data, indent=2)
+        comparable = dict(data) if isinstance(data, dict) else data
+        if isinstance(comparable, dict):
+            comparable.pop('server_time', None)
+        try:
+            previous = _read_cache_json(config_path, {})
+            if isinstance(previous, dict):
+                previous_comparable = dict(previous)
+                previous_comparable.pop('server_time', None)
+                if previous_comparable == comparable:
+                    config_text = None
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            pass
+        if config_text is not None:
+            _atomic_write_text_if_changed(config_path, config_text)
         target = config_pattern.format(index=display_index)
         if data.get('layout') is not None:
             # backwards-compat: also write the canonical index=0 name
-            _atomic_write_text(Path(cache_dir, target), json.dumps(data['layout'], indent=2))
+            _atomic_write_text_if_changed(Path(cache_dir, target), json.dumps(data['layout'], indent=2))
             if display_index == 0:
-                _atomic_write_text(Path(cache_dir, 'assigned-layout.json'), json.dumps(data['layout'], indent=2))
+                _atomic_write_text_if_changed(Path(cache_dir, 'assigned-layout.json'), json.dumps(data['layout'], indent=2))
         else:
             for stale in [Path(cache_dir, target), Path(cache_dir, 'assigned-layout.json') if display_index == 0 else None]:
                 if stale is None: continue
@@ -1190,9 +1229,9 @@ def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='
         return None
 
 
-def fetch_all_displays(server, client_id, cache_dir, display_count, config_pattern):
+def fetch_all_displays(server, client_id, cache_dir, display_count, config_pattern, start_index=0):
     """Fetch per-display config and populate cache/assigned-layout-display-N.json."""
-    for idx in range(display_count):
+    for idx in range(start_index, display_count):
         fetch_config(server, client_id, cache_dir, display_index=idx, config_pattern=config_pattern)
 
 
@@ -1211,7 +1250,20 @@ def fetch_admin_users(server, client_id, cache_dir):
         if users:
             target = Path(cache_dir).parent / 'admin-users.json'
             _ensure_real_directory(target.parent, create=True)
-            _atomic_write_text(target, json.dumps(data, indent=2))
+            admin_text = json.dumps(data, indent=2)
+            comparable = dict(data)
+            comparable.pop('synced_at', None)
+            try:
+                previous = _read_cache_json(target, {})
+                if isinstance(previous, dict):
+                    previous_comparable = dict(previous)
+                    previous_comparable.pop('synced_at', None)
+                    if previous_comparable == comparable:
+                        admin_text = None
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+                pass
+            if admin_text is not None:
+                _atomic_write_text_if_changed(target, admin_text)
             print(f'admin users synced: {len(users)}', flush=True)
             return data
         return None
@@ -1284,7 +1336,7 @@ def main():
         probe = payload(args)
         try:
             fetch_config(args.server, probe['client_id'], args.cache_dir, display_index=0, config_pattern=args.display_config_pattern)
-            fetch_all_displays(args.server, probe['client_id'], args.cache_dir, len(probe.get('displays') or []), args.display_config_pattern)
+            fetch_all_displays(args.server, probe['client_id'], args.cache_dir, len(probe.get('displays') or []), args.display_config_pattern, start_index=1)
         except Exception as e:
             print(f'pre-heartbeat config refresh failed: {e}', flush=True)
         data = payload(args)
@@ -1301,7 +1353,7 @@ def main():
                         cached = {}
                     cached['theme'] = server_theme
                     _ensure_real_directory(theme_path.parent, create=True)
-                    _atomic_write_text(theme_path, json.dumps(cached, indent=2))
+                    _atomic_write_text_if_changed(theme_path, json.dumps(cached, indent=2))
             except Exception:
                 pass
         except Exception as e:
@@ -1338,20 +1390,20 @@ def main():
                 # Persist the observed assignment before restarting the kiosk.
                 # The kiosk restart can restart this heartbeat service too; writing
                 # afterward caused the same assignment to trigger repeatedly.
-                _atomic_write_text(prev_layout_path, current_layout_id)
+                _atomic_write_text_if_changed(prev_layout_path, current_layout_id)
                 subprocess.run(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'], check=True, timeout=15)
                 print(f'layout changed {previous_layout_id} -> {current_layout_id}; kiosk restarted', flush=True)
             except Exception as e:
                 print(f'layout-change restart failed: {e}', flush=True)
         elif cfg and current_layout_id:
-            _atomic_write_text(prev_layout_path, current_layout_id or '')
+            _atomic_write_text_if_changed(prev_layout_path, current_layout_id or '')
         if cfg and current_orientation != previous_orientation:
             try:
                 subprocess.run(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'], check=True, timeout=15)
                 print(f'orientation changed {previous_orientation} -> {current_orientation}; kiosk restarted', flush=True)
             except Exception as e:
                 print(f'orientation restart failed: {e}', flush=True)
-        fetch_all_displays(args.server, data['client_id'], args.cache_dir, len(data.get('displays') or []), args.display_config_pattern)
+        fetch_all_displays(args.server, data['client_id'], args.cache_dir, len(data.get('displays') or []), args.display_config_pattern, start_index=1)
         fetch_admin_users(args.server, data['client_id'], args.cache_dir)
         addon_status = sync_client_addons(args.server, data['client_id'], args.cache_dir)
         try:
@@ -1375,7 +1427,7 @@ def main():
             for d in data.get('displays') or []:
                 idx = d.get('display_index')
                 if idx is None: continue
-                _atomic_write_text(
+                _atomic_write_text_if_changed(
                     Path(args.cache_dir, f'display-{idx}.json'),
                     __import__('json').dumps(d),
                 )

@@ -397,6 +397,9 @@ StandardError=journal
 ExecStart=/usr/local/bin/screentra-kiosk.sh
 Restart=always
 RestartSec=5
+# Actor-triggered kiosk refreshes terminate this wrapper with SIGTERM. Treat
+# that controlled handoff as a successful stop rather than a crash.
+SuccessExitStatus=143 SIGTERM
 Environment=HOME=/home/board
 # AMD amdgpu APUs need the GLES2 renderer for reliable DRM scan-out.
 # Pixman can start Sway but repeatedly fails to import the Chromium buffer,
@@ -640,7 +643,7 @@ create_board_user() {
     # Grant only the device-control commands used by the actor. Do not add the
     # player account to sudo or grant unrestricted NOPASSWD access.
     run_privileged tee /etc/sudoers.d/"$board_user" > /dev/null << 'SUDOERS'
-Cmnd_Alias SCREENTRA_DEVICE_CONTROL = /usr/bin/ddcutil, /usr/bin/cec-client, /usr/bin/systemctl restart screentra-cast-kiosk@*.service, /usr/bin/systemctl try-restart screentra-cast-kiosk@*.service, /usr/bin/systemctl disable --now screentra-cast-kiosk@*.service, /usr/bin/systemctl reboot, /usr/sbin/reboot
+Cmnd_Alias SCREENTRA_DEVICE_CONTROL = /usr/bin/ddcutil, /usr/bin/cec-client, /usr/bin/systemctl start screentra-cast-kiosk@*.service, /usr/bin/systemctl stop screentra-cast-kiosk@*.service, /usr/bin/systemctl restart screentra-cast-kiosk@*.service, /usr/bin/systemctl try-restart screentra-cast-kiosk@*.service, /usr/bin/systemctl disable --now screentra-cast-kiosk@*.service, /usr/bin/systemctl reboot, /usr/sbin/reboot
 board ALL=(root) NOPASSWD: SCREENTRA_DEVICE_CONTROL
 SUDOERS
     run_privileged chmod 0440 /etc/sudoers.d/"$board_user" 2>/dev/null || true
@@ -1564,10 +1567,37 @@ def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
                 pass
 
 
+def _atomic_write_text_if_changed(path: Path, text: str, mode: int = 0o600) -> bool:
+    """Atomically replace a cache file only when its contents changed."""
+    try:
+        current = _read_real_file(
+            path,
+            max_bytes=max(MAX_JSON_FILE_BYTES, len(text.encode('utf-8'))),
+        )
+        if current == text.encode('utf-8'):
+            return False
+    except (FileNotFoundError, OSError, ValueError):
+        pass
+    _atomic_write_text(path, text, mode=mode)
+    return True
+
+
 def _write_status_report(path: Path, status):
     """Persist only a report admitted by the metadata-only status boundary."""
     validate_status_report(status)
+    comparable = dict(status)
+    comparable.pop('at', None)
+    try:
+        previous = _read_cache_json(path, {})
+        if isinstance(previous, dict):
+            previous_comparable = dict(previous)
+            previous_comparable.pop('at', None)
+            if previous_comparable == comparable:
+                return False
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        pass
     _atomic_write_text(path, json.dumps(status, indent=2))
+    return True
 
 
 def _display_governance_count(which):
@@ -2634,16 +2664,28 @@ def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='
         except Exception:
             pass
         _ensure_real_directory(Path(cache_dir), create=True)
-        if display_index == 0:
-            _atomic_write_text(Path(cache_dir, 'client-config.json'), json.dumps(data, indent=2))
-        else:
-            _atomic_write_text(Path(cache_dir, f'display-config-{display_index}.json'), json.dumps(data, indent=2))
+        config_path = Path(cache_dir, 'client-config.json' if display_index == 0 else f'display-config-{display_index}.json')
+        config_text = json.dumps(data, indent=2)
+        comparable = dict(data) if isinstance(data, dict) else data
+        if isinstance(comparable, dict):
+            comparable.pop('server_time', None)
+        try:
+            previous = _read_cache_json(config_path, {})
+            if isinstance(previous, dict):
+                previous_comparable = dict(previous)
+                previous_comparable.pop('server_time', None)
+                if previous_comparable == comparable:
+                    config_text = None
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            pass
+        if config_text is not None:
+            _atomic_write_text_if_changed(config_path, config_text)
         target = config_pattern.format(index=display_index)
         if data.get('layout') is not None:
             # backwards-compat: also write the canonical index=0 name
-            _atomic_write_text(Path(cache_dir, target), json.dumps(data['layout'], indent=2))
+            _atomic_write_text_if_changed(Path(cache_dir, target), json.dumps(data['layout'], indent=2))
             if display_index == 0:
-                _atomic_write_text(Path(cache_dir, 'assigned-layout.json'), json.dumps(data['layout'], indent=2))
+                _atomic_write_text_if_changed(Path(cache_dir, 'assigned-layout.json'), json.dumps(data['layout'], indent=2))
         else:
             for stale in [Path(cache_dir, target), Path(cache_dir, 'assigned-layout.json') if display_index == 0 else None]:
                 if stale is None: continue
@@ -2655,9 +2697,9 @@ def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='
         return None
 
 
-def fetch_all_displays(server, client_id, cache_dir, display_count, config_pattern):
+def fetch_all_displays(server, client_id, cache_dir, display_count, config_pattern, start_index=0):
     """Fetch per-display config and populate cache/assigned-layout-display-N.json."""
-    for idx in range(display_count):
+    for idx in range(start_index, display_count):
         fetch_config(server, client_id, cache_dir, display_index=idx, config_pattern=config_pattern)
 
 
@@ -2676,7 +2718,20 @@ def fetch_admin_users(server, client_id, cache_dir):
         if users:
             target = Path(cache_dir).parent / 'admin-users.json'
             _ensure_real_directory(target.parent, create=True)
-            _atomic_write_text(target, json.dumps(data, indent=2))
+            admin_text = json.dumps(data, indent=2)
+            comparable = dict(data)
+            comparable.pop('synced_at', None)
+            try:
+                previous = _read_cache_json(target, {})
+                if isinstance(previous, dict):
+                    previous_comparable = dict(previous)
+                    previous_comparable.pop('synced_at', None)
+                    if previous_comparable == comparable:
+                        admin_text = None
+            except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+                pass
+            if admin_text is not None:
+                _atomic_write_text_if_changed(target, admin_text)
             print(f'admin users synced: {len(users)}', flush=True)
             return data
         return None
@@ -2749,7 +2804,7 @@ def main():
         probe = payload(args)
         try:
             fetch_config(args.server, probe['client_id'], args.cache_dir, display_index=0, config_pattern=args.display_config_pattern)
-            fetch_all_displays(args.server, probe['client_id'], args.cache_dir, len(probe.get('displays') or []), args.display_config_pattern)
+            fetch_all_displays(args.server, probe['client_id'], args.cache_dir, len(probe.get('displays') or []), args.display_config_pattern, start_index=1)
         except Exception as e:
             print(f'pre-heartbeat config refresh failed: {e}', flush=True)
         data = payload(args)
@@ -2766,7 +2821,7 @@ def main():
                         cached = {}
                     cached['theme'] = server_theme
                     _ensure_real_directory(theme_path.parent, create=True)
-                    _atomic_write_text(theme_path, json.dumps(cached, indent=2))
+                    _atomic_write_text_if_changed(theme_path, json.dumps(cached, indent=2))
             except Exception:
                 pass
         except Exception as e:
@@ -2803,20 +2858,20 @@ def main():
                 # Persist the observed assignment before restarting the kiosk.
                 # The kiosk restart can restart this heartbeat service too; writing
                 # afterward caused the same assignment to trigger repeatedly.
-                _atomic_write_text(prev_layout_path, current_layout_id)
+                _atomic_write_text_if_changed(prev_layout_path, current_layout_id)
                 subprocess.run(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'], check=True, timeout=15)
                 print(f'layout changed {previous_layout_id} -> {current_layout_id}; kiosk restarted', flush=True)
             except Exception as e:
                 print(f'layout-change restart failed: {e}', flush=True)
         elif cfg and current_layout_id:
-            _atomic_write_text(prev_layout_path, current_layout_id or '')
+            _atomic_write_text_if_changed(prev_layout_path, current_layout_id or '')
         if cfg and current_orientation != previous_orientation:
             try:
                 subprocess.run(['sudo', '-n', 'systemctl', 'restart', 'screentra-cast-kiosk@0.service'], check=True, timeout=15)
                 print(f'orientation changed {previous_orientation} -> {current_orientation}; kiosk restarted', flush=True)
             except Exception as e:
                 print(f'orientation restart failed: {e}', flush=True)
-        fetch_all_displays(args.server, data['client_id'], args.cache_dir, len(data.get('displays') or []), args.display_config_pattern)
+        fetch_all_displays(args.server, data['client_id'], args.cache_dir, len(data.get('displays') or []), args.display_config_pattern, start_index=1)
         fetch_admin_users(args.server, data['client_id'], args.cache_dir)
         addon_status = sync_client_addons(args.server, data['client_id'], args.cache_dir)
         try:
@@ -2840,7 +2895,7 @@ def main():
             for d in data.get('displays') or []:
                 idx = d.get('display_index')
                 if idx is None: continue
-                _atomic_write_text(
+                _atomic_write_text_if_changed(
                     Path(args.cache_dir, f'display-{idx}.json'),
                     __import__('json').dumps(d),
                 )
@@ -7733,7 +7788,7 @@ def apply_ddc_control(vcp_code: str, value: int, bus: str | None = None, has_lay
     return False, msg_or_tag
 
 
-_CEC_COMMAND_RE = re.compile(r'^(?:pow|is) [0-9A-Fa-f]$')
+_CEC_COMMAND_RE = re.compile(r'^(?:pow|standby|is) [0-9A-Fa-f]$')
 
 
 def _validate_cec_command(cec_cmd: str) -> str:
@@ -8387,8 +8442,161 @@ def _preview_wayland_env() -> dict[str, str]:
     return env
 
 
+def _display_renderer_units(display_index: int) -> list[tuple[str, str]]:
+    if display_index == 0:
+        return [('system', 'screentra-cast-kiosk@0.service')]
+    return [
+        ('user', f'screentra-client-renderer@{display_index}.service'),
+        ('user', f'screentra-kiosk-browser@{display_index}.service'),
+    ]
+
+
+def display_renderer_active(display_index: int) -> bool:
+    """Return whether the display-specific renderer/browser is active."""
+    units = _display_renderer_units(display_index)
+    for scope, unit_name in units:
+        if scope == 'system':
+            rc, _, _ = _run_list(
+                ['sudo', '-n', 'systemctl', 'is-active', '--quiet', unit_name],
+                timeout=10,
+            )
+            if rc != 0:
+                return False
+        elif not systemctl_user('is-active', unit_name)[0]:
+            return False
+    return True
+
+
+def _system_display_renderer_action(action: str, unit_name: str) -> tuple[bool, str]:
+    rc, out, err = _run_list(
+        ['sudo', '-n', 'systemctl', action, unit_name],
+        timeout=30,
+    )
+    return rc == 0, _bound_hardware_message((out or err or f'{action} {unit_name} rc={rc}').strip())
+
+
+def stop_display_renderer(display_index: int) -> tuple[bool, str]:
+    """Stop rendering for one display while leaving the control plane alive."""
+    units = list(reversed(_display_renderer_units(display_index)))
+    messages = []
+    for scope, unit_name in units:
+        if scope == 'system':
+            ok, message = _system_display_renderer_action('stop', unit_name)
+        else:
+            ok, message = systemctl_user('stop', unit_name)
+        messages.append(message)
+        if not ok:
+            return False, _bound_hardware_message('; '.join(messages))
+    return True, _bound_hardware_message('; '.join(messages))
+
+
+def suspend_primary_display_renderer(env: dict[str, str]) -> tuple[bool, str]:
+    """Stop display 0's browser/renderer without stopping its compositor.
+
+    The primary system kiosk unit owns Sway as well as the browser and
+    renderer. Stopping that unit destroys the compositor and therefore loses
+    the DPMS state. Close only the display-0 Chromium surface and terminate
+    only the display-0 renderer process; leave the unit/Sway alive so the
+    compositor can keep the output powered off and receive the later wake
+    command.
+    """
+    socket = env.get('SWAYSOCK')
+    if not socket:
+        return False, 'active Sway compositor socket is unavailable'
+    messages = []
+    rc, out, err = _run_list(
+        [
+            'swaymsg', '-s', socket,
+            '[app_id="screentra-cast-display-0"] kill',
+        ],
+        timeout=10,
+        env=env,
+    )
+    if rc == 0:
+        messages.append('display-0 browser surface closed')
+    elif 'No matching node' in (out or err):
+        messages.append('display-0 browser surface was already closed')
+    else:
+        return False, _bound_hardware_message(
+            out or err or 'failed to close display-0 browser surface'
+        )
+
+    def _terminate_matching(pattern: str, label: str) -> tuple[bool, int, str]:
+        rc, output, error = _run_list(
+            ['pgrep', '-u', str(os.getuid()), '-f', pattern],
+            timeout=5,
+        )
+        if rc not in {0, 1}:
+            return False, 0, _bound_hardware_message(
+                error or output or f'failed to find {label} (rc={rc})'
+            )
+        pids = []
+        for raw_pid in (output or '').splitlines()[:16]:
+            try:
+                pid = int(raw_pid.strip())
+            except ValueError:
+                continue
+            if 1 <= pid <= 4194304 and pid != os.getpid():
+                pids.append(pid)
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            except OSError as exc:
+                return False, len(pids), _bound_hardware_message(
+                    f'failed to stop {label} pid {pid}: {exc}'
+                )
+        return True, len(pids), ''
+
+    browser_ok, browser_count, browser_message = _terminate_matching(
+        r'chromium.*screentra-cast-display-0', 'display-0 browser'
+    )
+    if not browser_ok:
+        return False, browser_message
+    messages.append(f'display-0 browser process stopped ({browser_count})')
+
+    renderer_ok, renderer_count, renderer_message = _terminate_matching(
+        r'screentra-client-renderer\.py.*--port 3900', 'display-0 renderer'
+    )
+    if not renderer_ok:
+        return False, renderer_message
+    messages.append(f'display-0 renderer stopped ({renderer_count})')
+    return True, _bound_hardware_message('; '.join(messages))
+
+
+def start_display_renderer(display_index: int) -> tuple[bool, str]:
+    """Start rendering for one display after a power-on transition."""
+    messages = []
+    for scope, unit_name in _display_renderer_units(display_index):
+        if scope == 'system':
+            ok, message = _system_display_renderer_action('start', unit_name)
+        else:
+            ok, message = systemctl_user('start', unit_name)
+        messages.append(message)
+        if not ok:
+            return False, _bound_hardware_message('; '.join(messages))
+    return True, _bound_hardware_message('; '.join(messages))
+
+
+def restart_display_renderer(display_index: int) -> tuple[bool, str]:
+    """Refresh one display's rendering after an in-place power transition."""
+    if display_index == 0:
+        return restart_system_kiosk()
+    return systemctl_user('restart', f'screentra-kiosk-browser@{display_index}.service')
+
+
+def refresh_or_start_display_renderer(display_index: int) -> tuple[bool, str, str]:
+    """Refresh an active renderer or start one that was suspended."""
+    if display_renderer_active(display_index):
+        ok, message = restart_display_renderer(display_index)
+        return ok, message, 'restarted'
+    ok, message = start_display_renderer(display_index)
+    return ok, message, 'started'
+
+
 def apply_display_power(cache_dir: Path, display_index: int | None, state: str) -> tuple[bool, str, dict]:
-    """Apply Linux DPMS/KMS power state to one validated Wayland output."""
+    """Apply Linux DPMS/KMS power state and suspend/resume display rendering."""
     if display_index is None or display_index < 0 or display_index > 3:
         return False, 'a display index from 0 to 3 is required', {}
     if not isinstance(state, str) or state not in {'on', 'off'}:
@@ -8396,7 +8604,63 @@ def apply_display_power(cache_dir: Path, display_index: int | None, state: str) 
     connector = _preview_connector(cache_dir, display_index)
     if not connector:
         return False, f'no connector is recorded for display {display_index}', {'display_index': display_index}
-    env = _preview_wayland_env()
+    # If the primary stack is not running there is no compositor IPC to wake;
+    # start the complete stack first. During a normal suspend, the system kiosk
+    # unit remains active and only its browser/renderer are stopped below.
+    initial_env = _preview_wayland_env()
+    if state == 'on' and (
+        (display_index == 0 and not initial_env.get('SWAYSOCK'))
+        or (display_index != 0 and not display_renderer_active(display_index))
+    ):
+        renderer_ok, renderer_message = start_display_renderer(display_index)
+        details = {
+            'display_index': display_index,
+            'connector': connector,
+            'state': state,
+            'method': 'kiosk-stack-start',
+            'renderer_started': renderer_ok,
+            'renderer_start_message': renderer_message,
+        }
+        if not renderer_ok:
+            return False, _bound_hardware_message(f'display renderer start failed: {renderer_message}'), details
+        return True, _bound_hardware_message(f'display renderer started: {renderer_message}'), details
+
+    env = initial_env
+    if state == 'off' and display_index == 0:
+        if not env.get('SWAYSOCK') or not shutil.which('swaymsg'):
+            return False, 'active Sway compositor is required for Linux DPMS suspend', {
+                'display_index': display_index,
+                'connector': connector,
+                'state': state,
+                'method': 'sway-dpms',
+                'stage': 'discover-compositor',
+            }
+        renderer_ok, renderer_message = suspend_primary_display_renderer(env)
+        details = {
+            'display_index': display_index,
+            'connector': connector,
+            'state': state,
+            'method': 'sway-dpms',
+            'renderer_suspended': renderer_ok,
+            'renderer_suspend_message': renderer_message,
+        }
+        if not renderer_ok:
+            return False, _bound_hardware_message(
+                f'display renderer suspend failed: {renderer_message}'
+            ), details
+        rc, out, err = _run_list(
+            ['swaymsg', '-s', env['SWAYSOCK'], 'output', connector, 'power', 'off'],
+            timeout=10,
+            env=env,
+        )
+        message = _bound_hardware_message(
+            out or err or ('display powered off via Sway DPMS' if rc == 0 else 'Sway DPMS suspend failed')
+        )
+        details['return_code'] = rc
+        if rc != 0:
+            return False, message, details
+        return True, _bound_hardware_message(f'{message}; renderer suspended'), details
+
     requested = '--on' if state == 'on' else '--off'
     if state == 'on' and env.get('SWAYSOCK') and shutil.which('swaymsg'):
         enable_rc, enable_out, enable_err = _run_list(
@@ -8434,27 +8698,63 @@ def apply_display_power(cache_dir: Path, display_index: int | None, state: str) 
         }
         if rc != 0:
             return False, message, details
-        kiosk_ok, kiosk_message = restart_system_kiosk()
-        details['kiosk_restart'] = kiosk_ok
-        details['kiosk_restart_message'] = kiosk_message
-        if not kiosk_ok:
+        if display_index == 0:
+            renderer_ok, renderer_message = restart_display_renderer(display_index)
+            renderer_action = 'restarted'
+        else:
+            renderer_ok, renderer_message, renderer_action = refresh_or_start_display_renderer(display_index)
+        details[f'renderer_{renderer_action}'] = renderer_ok
+        details[f'renderer_{renderer_action}_message'] = renderer_message
+        if not renderer_ok:
             return False, _bound_hardware_message(
-                f'{message}; kiosk refresh failed: {kiosk_message}'
+                f'{message}; renderer {renderer_action} failed: {renderer_message}'
             ), details
-        return True, _bound_hardware_message(f'{message}; kiosk refreshed'), details
+        return True, _bound_hardware_message(f'{message}; renderer {renderer_action}'), details
     rc, out, err = _run_list(
         ['wlr-randr', '--output', connector, requested],
         timeout=10,
         env=env,
     )
     message = _bound_hardware_message(out or err or ('display enabled' if state == 'on' else 'display disabled'))
-    return rc == 0, message, {
+    details = {
         'display_index': display_index,
         'connector': connector,
         'state': state,
         'method': 'wlr-randr',
         'return_code': rc,
     }
+    if rc != 0:
+        return False, message, details
+    if state == 'off':
+        renderer_ok, renderer_message = stop_display_renderer(display_index)
+        details['renderer_stopped'] = renderer_ok
+        details['renderer_stop_message'] = renderer_message
+        if not renderer_ok:
+            return False, _bound_hardware_message(
+                f'{message}; renderer suspend failed: {renderer_message}'
+            ), details
+        return True, _bound_hardware_message(f'{message}; renderer suspended'), details
+    renderer_ok, renderer_message, renderer_action = refresh_or_start_display_renderer(display_index)
+    details[f'renderer_{renderer_action}'] = renderer_ok
+    details[f'renderer_{renderer_action}_message'] = renderer_message
+    if not renderer_ok:
+        return False, _bound_hardware_message(
+            f'{message}; renderer {renderer_action} failed: {renderer_message}'
+        ), details
+    return True, _bound_hardware_message(f'{message}; renderer {renderer_action}'), details
+
+
+def sync_display_renderer_power_state(display_index: int | None, state: str) -> tuple[bool, str, dict]:
+    """Match renderer state to a successful DDC/CEC power transition."""
+    if display_index is None:
+        return True, 'display renderer state unchanged because display index is unavailable', {}
+    if state == 'off':
+        ok, message = stop_display_renderer(display_index)
+        return ok, message, {'renderer_stopped': ok, 'renderer_stop_message': message}
+    if state == 'on' and not display_renderer_active(display_index):
+        ok, message = start_display_renderer(display_index)
+        return ok, message, {'renderer_started': ok, 'renderer_start_message': message}
+    return True, 'display renderer already active', {'renderer_started': False}
 
 
 def _upload_preview_frame(server: str, client_id: str, display_index: int, frame: bytes, cache_dir: Path) -> tuple[bool, str]:
@@ -9162,7 +9462,11 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
         # optional: { "bus": "1" }                specific display bus
         # optional: { "has_layout": true }        retry detect if display not found
         try:
-            vcp = payload.get('vcp', '')
+            raw_vcp = payload.get('vcp', '')
+            if isinstance(raw_vcp, int) and not isinstance(raw_vcp, bool):
+                vcp = 'D6' if raw_vcp == 6 else str(raw_vcp)
+            else:
+                vcp = raw_vcp
             value = _bounded_integer_input(payload.get('value', 0), 0, 65535, 'DDC value')
             bus = payload.get('bus')
             has_layout = payload.get('has_layout', False)
@@ -9171,17 +9475,44 @@ def execute(action: str, payload: dict | None, ctx: dict) -> dict:
             ok, msg = apply_ddc_control(vcp, value, bus=bus, has_layout=has_layout)
         except (TypeError, ValueError, OverflowError) as exc:
             return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
-        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
+        details = {}
+        if ok and vcp.lower() in {'6', 'd6'} and value in {1, 2, 3, 4}:
+            render_state = 'on' if value == 1 else 'off'
+            render_ok, render_message, render_details = sync_display_renderer_power_state(display_index, render_state)
+            details.update(render_details)
+            details['render_state'] = render_state
+            if not render_ok:
+                return {
+                    'action': action, 'display_index': display_index, 'ok': False,
+                    'partial': True, 'message': f'{msg}; renderer transition failed: {render_message}',
+                    'details': details, 'started_at': started,
+                }
+            msg = f'{msg}; {render_message}'
+        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'details': details, 'started_at': started}
 
     if action == 'cec_send':
         # payload: { "cmd": "pow 0" }   power on OSD addr 0
+        # or { "cmd": "standby 0" }    standby/off OSD addr 0
         # or { "cmd": "is 1" }          input HDMI-2
         try:
             cmd = payload.get('cmd', '')
             ok, msg = apply_cec_command(cmd)
         except (TypeError, ValueError, OverflowError) as exc:
             return {'action': action, 'display_index': display_index, 'ok': False, 'code': 'invalid_payload', 'message': str(exc), 'started_at': started}
-        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'started_at': started}
+        details = {}
+        if ok and isinstance(cmd, str) and (cmd.startswith('pow ') or cmd.startswith('standby ')):
+            render_state = 'on' if cmd.startswith('pow ') else 'off'
+            render_ok, render_message, render_details = sync_display_renderer_power_state(display_index, render_state)
+            details.update(render_details)
+            details['render_state'] = render_state
+            if not render_ok:
+                return {
+                    'action': action, 'display_index': display_index, 'ok': False,
+                    'partial': True, 'message': f'{msg}; renderer transition failed: {render_message}',
+                    'details': details, 'started_at': started,
+                }
+            msg = f'{msg}; {render_message}'
+        return {'action': action, 'display_index': display_index, 'ok': ok, 'message': msg, 'details': details, 'started_at': started}
 
     if action == 'ir_send':
         # IR control — stub; hardware integration for later
@@ -9597,7 +9928,28 @@ fi
 WAYLAND_DISPLAY="$(basename "$WAYLAND_DISPLAY_SOCK")"
 log "Wayland socket: $WAYLAND_DISPLAY"
 
-# Start one fullscreen Chromium window per display. Each window has a unique
+# The Wayland socket can exist briefly before Sway is accepting IPC. Probe a
+# live Sway socket before launching Chromium; otherwise a DPMS wake/restart can
+# race the browser into "Connection refused" and leave only the compositor.
+LIVE_SWAYSOCK=""
+for i in $(seq 1 40); do
+    for sock in "$XDG_RUNTIME_DIR"/sway-ipc.*.sock; do
+        [ -S "$sock" ] || continue
+        if sudo -u "$BOARD_USER" env XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" SWAYSOCK="$sock" \
+            swaymsg -t get_version >/dev/null 2>&1; then
+            LIVE_SWAYSOCK="$sock"
+            break 2
+        fi
+    done
+    sleep 0.25
+done
+if [ -z "$LIVE_SWAYSOCK" ]; then
+    log "ERROR: Sway IPC was not ready"
+    exit 1
+fi
+log "Sway IPC ready: $LIVE_SWAYSOCK"
+
+# Start one fullscreen Chromium window per display. Each Chromium gets a unique
 # app_id so Sway can place it on the matching physical connector.
 while IFS='|' read -r idx connector port; do
     [ -n "$idx" ] || continue

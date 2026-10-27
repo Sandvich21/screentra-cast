@@ -471,7 +471,7 @@ fn power_command(
             };
             (
                 "ddc_set".to_string(),
-                serde_json::json!({ "vcp": 6, "value": value, "display_index": display_index }),
+                serde_json::json!({ "vcp": "D6", "value": value, "display_index": display_index }),
             )
         }
         ("cec", "off") | ("auto", "off") => (
@@ -695,7 +695,7 @@ fn apply_power_action(
                 "sleep" | "standby" => 2,
                 _ => 4,
             };
-            let payload = serde_json::json!({ "vcp": 6, "value": vcp_val, "display_index": display_index });
+            let payload = serde_json::json!({ "vcp": "D6", "value": vcp_val, "display_index": display_index });
             ("ddc_set".to_string(), payload)
         }
         ("cec", "off") => {
@@ -901,7 +901,7 @@ mod tests {
         let (_, standby) = power_command("ddc", "standby", 0);
         let (_, off) = power_command("ddc", "off", 0);
 
-        assert_eq!(on["vcp"], 6);
+        assert_eq!(on["vcp"], "D6");
         assert_eq!(on["value"], 1);
         assert_eq!(standby["value"], 2);
         assert_eq!(off["value"], 4);
