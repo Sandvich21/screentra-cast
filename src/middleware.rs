@@ -99,7 +99,7 @@ fn is_open_path(path: &str, method: &str) -> bool {
     if OPEN_ROUTES.contains(&path) {
         let public_method = match path {
             "/api/auth/login" | "/api/setup" | "/api/clients/register" | "/api/log" | "/api/interactive/submit" => method == "POST",
-            "/api/auth/status" | "/api/setup/status" | "/api/system" | "/api/system/time" | "/api/system/liveness" | "/api/system/readiness" | "/metrics" | "/api/ics-proxy" | "/api/weather/forecast" | "/api/traffic/events" | "/api/traffic/map.png" | "/install/screentra-cast-installers.tar.gz" | "/install/player-client.sh" | "/install/player-client.sh.sig" | "/install/player-client-bundle.tar.gz" | "/install/player-client-bundle-install.sh" | "/install/screentra-cast-signage-ca.crt" => method == "GET",
+            "/api/auth/status" | "/api/setup/status" | "/api/system" | "/api/system/time" | "/api/system/liveness" | "/api/system/readiness" | "/metrics" | "/api/ics-proxy" | "/api/weather/forecast" | "/api/traffic/events" | "/api/traffic/map.png" | "/camera-stream.mjpeg" | "/install/screentra-cast-installers.tar.gz" | "/install/player-client.sh" | "/install/player-client.sh.sig" | "/install/player-client-bundle.tar.gz" | "/install/player-client-bundle-install.sh" | "/install/screentra-cast-signage-ca.crt" => method == "GET",
             _ => false,
         };
         if public_method {
@@ -210,6 +210,9 @@ fn is_open_path(path: &str, method: &str) -> bool {
             }
             if path.starts_with("/api/layouts/") {
                 let rest = &path["/api/layouts/".len()..];
+                if rest.strip_suffix("/player").is_some_and(|layout_id| !layout_id.is_empty() && !layout_id.contains('/')) {
+                    return true;
+                }
                 if !rest.is_empty() && !rest.contains('/') {
                     return true;
                 }
@@ -559,6 +562,8 @@ mod authorization_tests {
         assert!(!is_open_path("/js/app.js", "DELETE"));
         assert!(!is_open_path("/api/layouts", "GET"));
         assert!(is_open_path("/api/layouts/layout-1", "GET"));
+        assert!(is_open_path("/api/layouts/layout-1/player", "GET"));
+        assert!(!is_open_path("/api/layouts/layout-1/player/extra", "GET"));
         assert!(!is_open_path("/api/layouts/layout-1/revisions", "GET"));
         assert!(!is_open_path("/api/layouts/layout-1/render", "GET"));
         assert!(is_open_path("/api/widget-presets/preset-1", "GET"));

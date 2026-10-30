@@ -40,6 +40,7 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
     # Optional operator-set cap (per-box). None means every connected physical
     # display is eligible, including displays with no touch/input device.
     "max_displays": None,
+    "display_blacklist": [],
     # Cache of the most recent detection for offline debugging. Useful when
     # the user opens /admin and the display count looks wrong after a
     # hotplug or cable swap.
@@ -53,13 +54,16 @@ def detect_count(max_scan: int = 16) -> int:
     Count connected connectors even if currently disabled in the compositor, so
     an operator can re-enable DP-4 after touchscreen-only mode turned it off.
     """
-    displays = _det.detect_displays(max_displays=max_scan)
+    config = load_config(Path(os.environ.get('SCREENTRA_CLIENT_DIR') or os.environ.get('RIPLEY_CLIENT_DIR') or os.path.expanduser('~/.local/share/screentra-client')) / 'config.json')
+    displays = _det.detect_displays(max_displays=max_scan, blacklisted_keys=config.get('display_blacklist'))
     return sum(1 for d in displays if d.get("connected", d.get("enabled")))
 
 
 def detect_full(max_scan: int = 16) -> List[Dict[str, Any]]:
     """Return the raw detection list (same shape as heartbeat 'displays' field)."""
-    return _det.detect_displays(max_displays=max_scan)
+    config_path = Path(os.environ.get('SCREENTRA_CLIENT_DIR') or os.environ.get('RIPLEY_CLIENT_DIR') or os.path.expanduser('~/.local/share/screentra-client')) / 'config.json'
+    config = load_config(config_path)
+    return _det.detect_displays(max_displays=max_scan, blacklisted_keys=config.get('display_blacklist'))
 
 
 def _ensure_real_directory(path: Path, create: bool = False) -> bool:

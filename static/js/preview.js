@@ -100,6 +100,7 @@ function preparePreviewVideoPlayback(root){
 }
 function renderShared(layout){
  window.__previewLayout=layout;
+ window.__ripleyCameraLayoutId=layout && layout.id || '';
  ripleySetRenderOrientation(layout);
  document.body.classList.toggle('preview-portrait', layout && layout.canvas_orientation === 'portrait');
  const stage=document.getElementById('stage'); stage.innerHTML=(layout.widgets||[]).slice().sort((a,b)=>(a.z||0)-(b.z||0)).map(function(w){
@@ -107,13 +108,14 @@ function renderShared(layout){
   // divide it here: values just over 100% (for example 100.376%) would become
   // 1.00376 and then be divided again by the shared renderer, shrinking the
   // widget to roughly one percent in the upper-left corner.
-  const copy=Object.assign({},w,{props:Object.assign({},w.props||{})});
+  const copy=Object.assign({},w,{_layout_id:layout.id,props:Object.assign({},w.props||{})});
    if(copy.widget_type==='text' && copy.props.content!=null) copy.props.text=copy.props.content;
    return window.RipleyPreviewRenderer.buildWidgetHTML(copy);
  }).join('');
  if(typeof ripleyFitTrafficTemplateText==='function') ripleyFitTrafficTemplateText(stage);
  if(typeof initVideoWidgets==='function') initVideoWidgets(layout.widgets||[], stage);
  if(typeof initCameraWidgets==='function') initCameraWidgets(layout.widgets||[], stage);
+ if(typeof initCameraStreamWidgets==='function') initCameraStreamWidgets(layout.widgets||[], stage);
  preparePreviewVideoPlayback(stage);
  if(typeof initImageWidgets==='function') initImageWidgets(layout.widgets||[], stage);
  if(typeof injectInstalledFontsIntoIframes==='function') injectInstalledFontsIntoIframes(stage);
@@ -144,7 +146,7 @@ async function refreshPreviewTraffic(layout){
 }
 async function refreshPreviewCalendars(layout){
  const widgets=(layout.widgets||[]).filter(function(w){var p=w&&w.props||{};return w&&((w.widget_type||w.type)==='calendar')&&Array.isArray(p.template_elements)&&p.template_elements.length&&(p.ics_url||p.ical_url||p.ical||p.calendar_url);});
- await Promise.all(widgets.map(async function(w){try{var p=w.props;var url=p.ics_url||p.ical_url||p.ical||p.calendar_url;var r=await fetch('/api/ics-proxy?url='+encodeURIComponent(url),{cache:'no-store'});if(r.ok){p._calendar_events=ripleyParseCalendarText(await readPreviewTextBounded(r),ripleyCalendarRequiredEventCount(p),p.time_format === '24' ? '24' : '12');}}catch(_e){w.props._calendar_events=[];}}));
+ await Promise.all(widgets.map(async function(w){try{var p=w.props;var url=p.ics_url||p.ical_url||p.ical||p.calendar_url;var r=await fetch('/api/ics-proxy?url='+encodeURIComponent(url),{cache:'no-store'});if(r.ok){p._calendar_events=ripleyParseCalendarText(await readPreviewTextBounded(r),ripleyCalendarRequiredEventCount(p),p.time_format === '24' ? '24' : '12',p.calendar_time_overrides);}}catch(_e){w.props._calendar_events=[];}}));
 }
 async function load(){
  // preview mode skips player.js init(), so load installed fonts here.

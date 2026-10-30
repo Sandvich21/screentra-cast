@@ -80,6 +80,10 @@ const Editor = {
   _savePromise: Promise.resolve(),
   _publishBusy: false,
   _fetchEpoch: 0,
+  _layoutLoadEpoch: 0,
+  _layoutLoadId: null,
+  _layoutLoadPromise: null,
+  _layoutLoadReadyId: null,
 
   init() {
     this.cacheEls();
@@ -221,7 +225,7 @@ const Editor = {
       if (v.startsWith('layout:')) this.switchToLayout(v.slice(7));
       else if (v) this.switchToLayout(v);
     };
-    E.saveBtn.onclick = () => this.saveCurrent({ silent: false }).catch(() => {});
+    E.saveBtn.onclick = () => this.saveCurrent({ silent: false }).catch(error => alert(error.message));
     if (E.publishBtn) E.publishBtn.onclick = () => this.publishCurrent();
     E.previewBtn.onclick = () => this.openPreview();
     E.exportBtn.onclick = () => this.exportAll();
@@ -628,6 +632,28 @@ const Editor = {
     this.renderCanvas();
     this.renderProps();
     this.updateInfo();
+
+    // GET /api/layouts intentionally redacts protected RTSP sources. Load the
+    // authenticated edit representation before the next save, otherwise any
+    // unrelated layout edit serializes the redacted widget and clears the URL.
+    const loadEpoch = ++this._layoutLoadEpoch;
+    this._layoutLoadId = id;
+    this._layoutLoadReadyId = null;
+    const loadPromise = API.getLayout(id);
+    this._layoutLoadPromise = loadPromise;
+    loadPromise.then(fullLayout => {
+      if (loadEpoch !== this._layoutLoadEpoch || this.currentLayoutId !== id || !fullLayout) return;
+      const index = this.layouts.findIndex(layout => layout.id === id);
+      if (index < 0) return;
+      this.layouts[index] = this._normalizeLayout(fullLayout);
+      this._layoutLoadReadyId = id;
+      this.renderSidebar();
+      this.renderCanvas();
+      this.renderProps();
+      this.updateInfo();
+    }).catch(error => {
+      if (loadEpoch === this._layoutLoadEpoch) console.warn('Failed to load editable layout:', error);
+    });
   },
 
   get currentLayout() {
@@ -907,12 +933,19 @@ const Editor = {
       { type: 'news', icon: '📰', label: 'News Ticker' },
       { type: 'rectangle', icon: '🟦', label: 'Shape' },
     ];
-    const widgets = mode === 'normal' ? normalWidgets.concat((this.addonWidgetTypes || []).map(addon => ({
-      type: `addon:${addon.addon_id}:${addon.id}`,
-      icon: addon.icon || '🧩',
-      label: addon.name,
-      addon,
-    }))) : interactiveWidgets;
+    // Some legacy bundled add-ons expose the same widget type as a built-in
+    // widget (currently magic-mirror-camera/camera). Do not render that
+    // registration twice; distinct add-on types such as rtsp-stream remain.
+    const builtinLabels = new Map(normalWidgets.map(widget => [widget.type, widget.label]));
+    const addonWidgets = (this.addonWidgetTypes || [])
+      .filter(addon => builtinLabels.get(addon.id) !== addon.name)
+      .map(addon => ({
+        type: `addon:${addon.addon_id}:${addon.id}`,
+        icon: addon.icon || '🧩',
+        label: addon.name,
+        addon,
+      }));
+    const widgets = mode === 'normal' ? normalWidgets.concat(addonWidgets) : interactiveWidgets;
     const note = mode === 'normal'
       ? 'Display/media widgets for normal layouts.'
       : 'Interactive touch widgets. Switch to Widgets for display/media widgets.';
@@ -1331,6 +1364,35 @@ const Editor = {
     return `<div class="editor-weather-template-preview" data-weather-preview-id="${this.esc(w.id)}" style="position:relative;display:block;flex:1 1 auto;align-self:stretch;min-height:100%;width:100%;overflow:visible;container-type:inline-size;background:rgba(15,23,42,.35);">${html}</div>`;
   },
 
+  _calendarOverrideMatches(event, override) {
+    const type = String(override?.match_type || override?.match || (override?.uid ? 'uid' : 'title')).toLowerCase();
+    const value = String(override?.match_value || override?.value || (type === 'uid' ? override?.uid : override?.title) || '').trim();
+    if (!value) return false;
+    if (override?.source_date && String(override.source_date) !== String(event.source_date || '')) return false;
+    if (type === 'uid') return String(event.uid || '').trim() === value;
+    return String(event.summary || '').trim().toLocaleLowerCase() === value.toLocaleLowerCase();
+  },
+
+  _applyCalendarEditorOverrides(events, overrides, timeFormat) {
+    const list = Array.isArray(overrides) ? overrides : [];
+    return events.map(event => {
+      const override = list.find(item => this._calendarOverrideMatches(event, item));
+      if (!override) return event;
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(String(override.date || '')) ? String(override.date) : event.date;
+      const corrected = String(override.time || '');
+      const match = corrected.match(/^(\d{1,2}):(\d{2})$/);
+      let time = event.time;
+      if (match) {
+        const hour = Number(match[1]);
+        const minute = Number(match[2]);
+        if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+          time = timeFormat === '24' ? `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` : `${hour % 12 || 12}:${String(minute).padStart(2, '0')} ${hour >= 12 ? 'PM' : 'AM'}`;
+        }
+      }
+      return { ...event, date, time, override_applied: true };
+    });
+  },
+
   async _refreshCalendarEditorPreviews() {
     const widgets = (this.currentLayout?.widgets || []).filter(w => w.type === 'calendar' && (w.props?.ical_url || w.props?.ical || w.props?.calendar_url));
     for (const w of widgets) {
@@ -1343,15 +1405,23 @@ const Editor = {
         const raw = (await readEditorResponseTextBounded(response, MAX_EDITOR_CALENDAR_BYTES)).replace(/\\r?\\n[ \\t]/g, '');
         const events = [...raw.matchAll(/BEGIN:VEVENT([\\s\\S]*?)END:VEVENT/g)].map(m => {
           const block = m[1];
-          const date = (block.match(/DTSTART(?:;[^:]+)?:([0-9]{8})/) || [])[1];
+          const start = (block.match(/DTSTART(?:;[^:]+)?:([^\\n]+)/) || [])[1] || '';
+          const uid = (block.match(/UID:(.*)/) || [,''])[1].trim();
+          const date = (start.match(/^(\\d{4})(\\d{2})(\\d{2})/) || [])[0];
           const summary = (block.match(/SUMMARY:(.*)/) || [,'iCal event'])[1].trim();
           if (!date) return null;
-          const d = new Date(Number(date.slice(0,4)), Number(date.slice(4,6))-1, Number(date.slice(6,8)));
-          return { date: d, summary };
-        }).filter(Boolean).sort((a,b) => a.date - b.date).slice(0, Math.max(1, Math.min(10, Number(w.props.max_events) || 5)));
+          const hh = (start.match(/T(\\d{2})(\\d{2})/) || [])[1];
+          const mm = (start.match(/T\\d{2}(\\d{2})/) || [])[1] || '00';
+          const hhNum = hh == null ? null : Number(hh);
+          const time = hhNum == null ? 'All day' : ((w.props.time_format || '12') === '24' ? `${String(hhNum).padStart(2, '0')}:${mm}` : `${hhNum % 12 || 12}:${mm} ${hhNum >= 12 ? 'PM' : 'AM'}`);
+          const sourceDate = `${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6,8)}`;
+          return { uid, source_start: start, source_date: sourceDate, date: sourceDate, time, summary };
+        }).filter(Boolean);
+        const timeFormat = w.props.time_format === '24' ? '24' : '12';
+        const adjustedEvents = this._applyCalendarEditorOverrides(events, w.props.calendar_time_overrides, timeFormat).sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time)).slice(0, Math.max(1, Math.min(10, Number(w.props.max_events) || 5)));
         root.querySelectorAll('.editor-calendar-row,.editor-calendar-empty').forEach(x => x.remove());
         const status = root.querySelector('.editor-calendar-status');
-        const html = events.length ? events.map(e => `<div class="editor-calendar-row"><b>${this.esc(e.date.toLocaleDateString(undefined,{month:'short',day:'numeric'}))}</b><span>${this.esc(e.summary)}</span></div>`).join('') : '<div class="editor-calendar-empty">No iCal events found</div>';
+        const html = adjustedEvents.length ? adjustedEvents.map(e => `<div class="editor-calendar-row"><b>${this.esc(new Date(`${e.date}T00:00:00`).toLocaleDateString(undefined,{month:'short',day:'numeric'}))}</b><span>${this.esc(e.time)} · ${this.esc(e.summary)}${e.override_applied ? ' · corrected' : ''}</span></div>`).join('') : '<div class="editor-calendar-empty">No iCal events found</div>';
         if (status) status.insertAdjacentHTML('beforebegin', html);
         if (status) status.textContent = 'iCal preview';
       } catch (_) {
@@ -1558,7 +1628,12 @@ const Editor = {
       return `<div style="width:100%;height:100%;background:${hasImage ? 'transparent' : '#222'};display:flex;align-items:center;justify-content:center;font-size:12px;color:#888;overflow:hidden;border-radius:${radius};">${hasImage ? `<img src="${this.esc(p.url)}" style="display:block;width:100%;height:100%;object-fit:${fit};border-radius:${radius};">` : '📷 Image'}</div>`;
     }
     if (w.type === 'video') return `<div style="width:100%;height:100%;background:#111;display:flex;align-items:center;justify-content:center;font-size:12px;color:#666;">▶ Video</div>`;
-    if (w.type === 'camera') return `<div style="width:100%;height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.4rem;background:#111827;border:1px dashed #64748b;color:#cbd5e1;font-size:12px;text-align:center;"><div>📷 Camera preview</div><small style="color:#94a3b8;">capture disabled</small></div>`;
+    if (w.type === 'camera') {
+      if (typeof p.stream_url === 'string' || p._addon_type === 'rtsp-stream') {
+        return `<div style="width:100%;height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.4rem;background:#020617;border:1px dashed #334155;color:#94a3b8;font-size:12px;text-align:center;"><div>📹 rstp widget</div><small>RTSP/RTSPS stream preview is available on a physical player</small></div>`;
+      }
+      return `<div style="width:100%;height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.4rem;background:#111827;border:1px dashed #64748b;color:#cbd5e1;font-size:12px;text-align:center;"><div>📷 Camera preview</div><small style="color:#94a3b8;">capture disabled</small></div>`;
+    }
     if (w.type === 'clock') {
       const fontFamily = this.esc(p.font_family || p.fontFamily || 'sans-serif');
       const color = this.esc(p.color || '#ffffff');
@@ -1991,7 +2066,7 @@ const Editor = {
     if (type === 'countdown') return { ...base, w: 30, h: 12, props: { targetDate: '', countdown_mode: 'date', duration_value: 5, duration_unit: 'minutes', expiry_text: '', font_size: 48, hide_on_layout: false, expiry_action: 'none', expiry_target_layout: '' } };
     if (type === 'sound') return { ...base, w: 10, h: 8, props: { playlist: [], replay: true, shuffle: false, trigger_mode: 'auto', volume: 0.7, priority: 10 } };
     if (type === 'embed') return { ...base, w: 40, h: 30, props: { url: '', aspectRatio: '16:9' } };
-    if (type === 'calendar') return { ...base, w: 40, h: 35, props: { max_events: 5, ical_url: '', time_format: '12' } };
+    if (type === 'calendar') return { ...base, w: 40, h: 35, props: { max_events: 5, ical_url: '', time_format: '12', calendar_time_overrides: [] } };
     if (type === 'news') return { ...base, w: 60, h: 10, props: { feedUrl: '', speed: 'normal' } };
     // Shape widget. Matches the player runtime's props (player.js
     // `w.widget_type === 'rectangle'` branch): color, shape_mode,
@@ -2480,7 +2555,15 @@ const Editor = {
         <div class="prop-group"><label>Video URL</label><input data-prop="url" value="${this.esc(p.url || '')}" placeholder="YouTube or direct .mp4" class="text-input" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--border,#30363d);background:var(--bg,#0d1117);color:var(--text,#e6edf3);"></div>
       `;
     } else if (w.type === 'camera') {
-      defaultsHtml = `
+      const streamCamera = typeof p.stream_url === 'string' || p._addon_type === 'rtsp-stream';
+      defaultsHtml = streamCamera ? `
+        <div class="prop-group"><label>RTSP / RTSPS stream URL</label><input type="text" data-prop="stream_url" value="${this.esc(p.stream_url || '')}" placeholder="rtsp://camera-host/path" autocomplete="off" spellcheck="false" class="text-input" style="width:100%;"><small class="tpl-field-help" style="display:block;margin-top:.35rem;color:#888;">The physical player converts this stream to MJPEG with FFmpeg. The URL is never written into the rendered image element or player logs.</small></div>
+        <div class="prop-group"><label>Scaling</label><select data-prop="fit" class="select" style="width:100%;"><option value="cover" ${(p.fit || 'cover') === 'cover' ? 'selected' : ''}>Cover</option><option value="contain" ${p.fit === 'contain' ? 'selected' : ''}>Contain</option><option value="fill" ${p.fit === 'fill' ? 'selected' : ''}>Fill</option></select></div>
+        <div class="prop-group"><label>Reconnect every (seconds)</label><input type="number" data-prop="reconnect_seconds" value="${this.esc(String(Math.max(1, Math.min(60, Number(p.reconnect_seconds) || 5))))}" min="1" max="60" step="1" class="text-input" style="width:100%;"></div>
+        <div class="prop-group"><label>Output frame rate</label><select data-prop="output_fps" class="select" style="width:100%;"><option value="1" ${(Number(p.output_fps) || 5) === 1 ? 'selected' : ''}>1 FPS (lowest CPU)</option><option value="5" ${(Number(p.output_fps) || 5) === 5 ? 'selected' : ''}>5 FPS</option><option value="10" ${(Number(p.output_fps) || 5) === 10 ? 'selected' : ''}>10 FPS</option><option value="15" ${(Number(p.output_fps) || 5) === 15 ? 'selected' : ''}>15 FPS</option><option value="20" ${(Number(p.output_fps) || 5) === 20 ? 'selected' : ''}>20 FPS</option><option value="30" ${(Number(p.output_fps) || 5) === 30 ? 'selected' : ''}>30 FPS</option></select></div>
+        <div class="prop-group"><label>Maximum output width</label><select data-prop="output_width" class="select" style="width:100%;"><option value="640" ${(Number(p.output_width) || 960) === 640 ? 'selected' : ''}>640 px</option><option value="960" ${(Number(p.output_width) || 960) === 960 ? 'selected' : ''}>960 px (recommended)</option><option value="1280" ${(Number(p.output_width) || 960) === 1280 ? 'selected' : ''}>1280 px</option><option value="1920" ${(Number(p.output_width) || 960) === 1920 ? 'selected' : ''}>1920 px</option></select></div>
+        <div class="prop-group"><label><input type="checkbox" data-prop="frame_interpolation" ${p.frame_interpolation === true ? 'checked' : ''}> Frame interpolation</label><small class="tpl-field-help" style="display:block;margin-top:.35rem;color:#888;">Synthesizes in-between frames for smoother motion. It increases CPU usage and is off by default.</small></div>
+      ` : `
         <div class="prop-group"><label><input type="checkbox" data-prop="capture_enabled" ${p.capture_enabled === true ? 'checked' : ''}> Enable local browser camera</label><small class="tpl-field-help" style="display:block;margin-top:.35rem;color:#888;">Off by default. When enabled, the browser requests local camera access; frames stay in this browser and are never uploaded.</small></div>
         <div class="prop-group"><label>Facing</label><select data-prop="facing_mode" class="select" style="width:100%;"><option value="environment" ${(p.facing_mode || 'environment') === 'environment' ? 'selected' : ''}>Back / environment</option><option value="user" ${p.facing_mode === 'user' ? 'selected' : ''}>Front / user</option></select></div>
         <div class="prop-group"><label>Camera filter</label><select data-prop="filter" class="select" style="width:100%;"><option value="none" ${(p.filter || 'none') === 'none' ? 'selected' : ''}>None</option><option value="grayscale" ${p.filter === 'grayscale' ? 'selected' : ''}>Grayscale</option><option value="sepia" ${p.filter === 'sepia' ? 'selected' : ''}>Sepia</option><option value="halloween" ${p.filter === 'halloween' ? 'selected' : ''}>Halloween</option></select><small class="tpl-field-help" style="display:block;margin-top:.35rem;color:#888;">Fixed local effect only; no custom CSS.</small></div>
@@ -2566,8 +2649,9 @@ const Editor = {
         <div class="prop-group"><label>Aspect Ratio</label><input data-prop="aspectRatio" value="${this.esc(p.aspectRatio || '16:9')}" class="text-input" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--border,#30363d);background:var(--bg,#0d1117);color:var(--text,#e6edf3);"></div>
       `;
     } else if (w.type === 'calendar') {
-      defaultsHtml = `<div class="prop-group"><label>Events to show</label><input type="number" data-prop="max_events" value="${this.esc(String(p.max_events || 5))}" min="1" max="30" step="1" class="text-input" style="width:100%;"><small class="tpl-field-help">Leave iCal URL blank to preview US holidays in the editor.</small></div><div class="prop-group"><label>Event time format</label><select data-prop="time_format" class="select" style="width:100%;"><option value="12" ${(p.time_format || '12') === '12' ? 'selected' : ''}>12-hour (AM/PM)</option><option value="24" ${p.time_format === '24' ? 'selected' : ''}>24-hour</option></select></div><div class="prop-group"><label>iCal URL</label><input type="url" data-prop="ical_url" value="${this.esc(p.ical_url || p.ical || p.calendar_url || '')}" placeholder="https://example.com/calendar.ics" class="text-input" style="width:100%;"><small class="tpl-field-help">Optional .ics calendar source used by the player.</small></div><p style="font-size:.8rem;color:#888;">Calendar events repeat using the selected template group.</p>`;
-    } else if (w.type === 'news') {
+      const calendarOverrides = Array.isArray(p.calendar_time_overrides) ? p.calendar_time_overrides : [];
+      const overrideRows = calendarOverrides.map((item, index) => `<div data-calendar-override-row="${index}" style="display:grid;grid-template-columns:96px minmax(120px,1fr) 115px 100px auto;gap:5px;align-items:center;margin-top:6px;"><select data-calendar-override-field="match_type" data-calendar-override-index="${index}" class="select" title="How to find the source event"><option value="title" ${String(item.match_type || 'title') === 'title' ? 'selected' : ''}>Title</option><option value="uid" ${String(item.match_type || '') === 'uid' ? 'selected' : ''}>UID</option></select><input data-calendar-override-field="match_value" data-calendar-override-index="${index}" value="${this.esc(item.match_value || item.value || item.title || item.uid || '')}" placeholder="Event title or UID" class="text-input"><input type="date" data-calendar-override-field="source_date" data-calendar-override-index="${index}" value="${this.esc(item.source_date || '')}" title="Optional original event date; useful for recurring events" class="text-input"><input type="time" data-calendar-override-field="time" data-calendar-override-index="${index}" value="${this.esc(item.time || '')}" title="Corrected time" class="text-input"><button type="button" data-calendar-override-remove="${index}" class="btn btn-secondary btn-sm">Remove</button><div style="grid-column:2 / -1;display:flex;gap:5px;align-items:center;"><input type="date" data-calendar-override-field="date" data-calendar-override-index="${index}" value="${this.esc(item.date || '')}" title="Optional corrected date" class="text-input"><small style="color:#888;">Corrected date (optional; leave blank to keep the source date)</small></div></div>`).join('');
+      defaultsHtml = `<div class="prop-group"><label>Events to show</label><input type="number" data-prop="max_events" value="${this.esc(String(p.max_events || 5))}" min="1" max="30" step="1" class="text-input" style="width:100%;"><small class="tpl-field-help">Leave iCal URL blank to preview US holidays in the editor.</small></div><div class="prop-group"><label>Event time format</label><select data-prop="time_format" class="select" style="width:100%;"><option value="12" ${(p.time_format || '12') === '12' ? 'selected' : ''}>12-hour (AM/PM)</option><option value="24" ${p.time_format === '24' ? 'selected' : ''}>24-hour</option></select></div><div class="prop-group"><label>iCal URL</label><input type="url" data-prop="ical_url" value="${this.esc(p.ical_url || p.ical || p.calendar_url || '')}" placeholder="https://example.com/calendar.ics" class="text-input" style="width:100%;"><small class="tpl-field-help">Optional .ics calendar source used by the player.</small></div><div class="prop-group"><label>Incorrect event time corrections</label><small class="tpl-field-help" style="display:block;margin-bottom:5px;">Match by exact event title or stable iCal UID. Add the original date when correcting one occurrence of a recurring event. Corrections are applied after the feed is read and do not change Google Calendar.</small><div data-calendar-overrides>${overrideRows || '<small style="color:#888;">No corrections configured.</small>'}</div><button type="button" id="calendar-add-override" class="btn btn-secondary btn-sm" style="margin-top:7px;">Add time correction</button></div><p style="font-size:.8rem;color:#888;">Calendar events repeat using the selected template group.</p>`;    } else if (w.type === 'news') {
       defaultsHtml = `
         <div class="prop-group"><label>Feed URL</label><input data-prop="feedUrl" value="${this.esc(p.feedUrl || '')}" class="text-input" style="width:100%;padding:6px;border-radius:6px;border:1px solid var(--border,#30363d);background:var(--bg,#0d1117);color:var(--text,#e6edf3);"></div>
         <div class="prop-group"><label>Speed</label>
@@ -2920,6 +3004,46 @@ const Editor = {
         } finally { closureManager.disabled = false; }
       };
     }
+    const calendarAddOverride = E.props.querySelector('#calendar-add-override');
+    const calendarOverrideRows = E.props.querySelectorAll('[data-calendar-override-field]');
+    const calendarOverrideRemove = E.props.querySelectorAll('[data-calendar-override-remove]');
+    const liveCalendar = () => {
+      const live = (this.currentLayout?.widgets || []).find(x => x.id === w.id) || w;
+      live.props = live.props || {};
+      if (!Array.isArray(live.props.calendar_time_overrides)) live.props.calendar_time_overrides = [];
+      return live;
+    };
+    if (calendarAddOverride) calendarAddOverride.onclick = () => {
+      const live = liveCalendar();
+      live.props.calendar_time_overrides.push({ match_type: 'title', match_value: '', source_date: '', date: '', time: '' });
+      this.selectedWidget = live;
+      this.saveCurrent();
+      this.renderProps();
+    };
+    calendarOverrideRows.forEach(input => {
+      input.oninput = input.onchange = () => {
+        const live = liveCalendar();
+        const index = Number(input.dataset.calendarOverrideIndex);
+        const field = input.dataset.calendarOverrideField;
+        const item = live.props.calendar_time_overrides[index];
+        if (!item || !field) return;
+        item[field] = String(input.value || '');
+        this.selectedWidget = live;
+        this.saveCurrent();
+        this.renderCanvas();
+      };
+    });
+    calendarOverrideRemove.forEach(button => {
+      button.onclick = () => {
+        const live = liveCalendar();
+        const index = Number(button.dataset.calendarOverrideRemove);
+        live.props.calendar_time_overrides.splice(index, 1);
+        this.selectedWidget = live;
+        this.saveCurrent();
+        this.renderProps();
+        this.renderCanvas();
+      };
+    });
     E.props.querySelectorAll('[data-prop]').forEach(i => {
       i.oninput = i.onchange = () => {
         const k = i.dataset.prop;
@@ -2928,7 +3052,15 @@ const Editor = {
         // if a previous save round-trip swapped the array contents.
         const live = (this.currentLayout?.widgets || []).find(x => x.id === w.id) || w;
         if (i.type === 'checkbox') live.props[k] = i.checked;
-        else if (k === 'rotation') {
+        else if (k === 'output_fps') {
+          const parsed = Number(i.value);
+          live.props[k] = Number.isFinite(parsed) ? Math.max(1, Math.min(30, Math.round(parsed))) : 5;
+          i.value = String(live.props[k]);
+        } else if (k === 'output_width') {
+          const parsed = Number(i.value);
+          live.props[k] = Number.isFinite(parsed) ? Math.max(320, Math.min(1920, Math.round(parsed))) : 960;
+          i.value = String(live.props[k]);
+        } else if (k === 'rotation') {
           const parsed = Number(i.value);
           live.props[k] = Number.isFinite(parsed) ? Math.max(-180, Math.min(180, parsed)) : 0;
           i.value = String(live.props[k]);
@@ -3289,6 +3421,17 @@ const Editor = {
 
   async saveCurrent(options = {}) {
     const silent = options.silent !== false;
+    const pendingLayoutLoad = this._layoutLoadPromise;
+    if (pendingLayoutLoad && this._layoutLoadId === this.currentLayoutId) {
+      try {
+        await pendingLayoutLoad;
+      } catch (e) {
+        throw new Error('The editable layout could not be loaded; save was blocked to protect the RTSP source.');
+      }
+      if (this._layoutLoadReadyId !== this.currentLayoutId) {
+        throw new Error('The editable layout is not ready; save was blocked to protect the RTSP source.');
+      }
+    }
     const layout = this.currentLayout;
     if (!layout) return null;
     // Queue writes so a fast drag/input sequence cannot let an older request

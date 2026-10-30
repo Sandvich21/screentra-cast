@@ -160,6 +160,11 @@ while IFS='|' read -r idx connector port; do
         XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" HOME="$BOARD_HOME" \
         RIPLEY_DISPLAY_INDEX="$idx" RIPLEY_RENDER_PORT="$port" \
         RIPLEY_RENDER_BASE_PORT="$BASE_PORT" \
+        SCREENTRA_FFMPEG_BIN="${SCREENTRA_FFMPEG_BIN:-}" \
+        SCREENTRA_FFMPEG_HWACCEL="${SCREENTRA_FFMPEG_HWACCEL:-}" \
+        SCREENTRA_VAAPI_DEVICE="${SCREENTRA_VAAPI_DEVICE:-}" \
+        SCREENTRA_CAMERA_MAX_FPS="${SCREENTRA_CAMERA_MAX_FPS:-}" \
+        SCREENTRA_CAMERA_MAX_WIDTH="${SCREENTRA_CAMERA_MAX_WIDTH:-}" \
         python3 "$CLIENT_DIR/screentra-client-renderer.py" \
         --host 127.0.0.1 --port "$port" --cache-dir "$CACHE_DIR" \
         >> "$LOG" 2>&1 &
@@ -238,10 +243,36 @@ while IFS='|' read -r idx connector port; do
     chown -R "$BOARD_USER:$BOARD_USER" "$CHROMIUM_USER_DATA" "$BOARD_HOME/.config/chromium"
     chmod 700 "$CHROMIUM_USER_DATA"
     log "Starting Chromium display $idx on $connector (port $port, url $BROWSER_URL)..."
+    GPU_ENV_ARGS=()
+    GPU_CHROMIUM_ARGS=()
+    if [ "${SCREENTRA_GPU_ACCEL:-0}" = "1" ]; then
+        # The WX 2100 is the active DRM device on clients that opt in through
+        # the kiosk unit drop-in. Keep the default installer portable: clients
+        # without this opt-in continue using their existing GPU selection.
+        GPU_ENV_ARGS=(
+            DRI_PRIME=1
+            LIBVA_DRIVER_NAME=radeonsi
+            LIBVA_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri
+        )
+        GPU_CHROMIUM_ARGS=(
+            --use-gl=egl
+            --use-angle=gl
+            --ignore-gpu-blocklist
+            --enable-gpu-rasterization
+            --enable-zero-copy
+            --enable-native-gpu-memory-buffers
+            --enable-accelerated-2d-canvas
+            --enable-features=UseOzonePlatform,VaapiVideoDecoder,VaapiVideoEncoder
+        )
+        log "Chromium GPU acceleration enabled for display $idx"
+    fi
     sudo -u "$BOARD_USER" env \
+        SCREENTRA_GPU_ACCEL="${SCREENTRA_GPU_ACCEL:-0}" \
+        "${GPU_ENV_ARGS[@]}" \
         HOME="$BOARD_HOME" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
         WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
         chromium \
+        "${GPU_CHROMIUM_ARGS[@]}" \
         --class="screentra-cast-display-${idx}" \
         --no-sandbox --ozone-platform=wayland --hide-cursor --ash-hide-cursor \
         --app="$BROWSER_URL" --kiosk --start-fullscreen \

@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "id": "camera-widget",
+  "name": "RTSP widget",
+  "description": "Display one RTSP or RTSPS camera stream through the trusted player-side relay.",
+  "version": "1.0.0",
+  "kind": "declarative",
+  "min_server_version": "0.1.6",
+  "min_client_version": "1",
+  "widget_types": [
+    {
+      "id": "rtsp-stream",
+      "name": "RTSP widget",
+      "description": "Display one RTSP or RTSPS camera stream.",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "stream_url": {
+            "type": "string",
+            "pattern": "^rtsps?://",
+            "maxLength": 4096
+          },
+          "fit": {
+            "type": "string",
+            "enum": ["cover", "contain", "fill"]
+          },
+          "reconnect_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60
+          },
+          "output_fps": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 30
+          },
+          "output_width": {
+            "type": "integer",
+            "minimum": 320,
+            "maximum": 1920
+          },
+          "frame_interpolation": {
+            "type": "boolean"
+          }
+        },
+        "required": ["stream_url"],
+        "additionalProperties": false
+      },
+      "host_renderer": "camera",
+      "icon": "📹",
+      "default_props": {
+        "stream_url": "",
+        "fit": "cover",
+        "reconnect_seconds": 5,
+        "output_fps": 5,
+        "output_width": 960,
+        "frame_interpolation": false
+      }
+    }
+  ],
+  "permissions": [],
+  "client_capabilities": [],
+  "data_contract": null,
+  "client_entrypoint": null,
+  "server_entrypoint": null,
+  "trusted_service": null,
+  "client_service": null
+}

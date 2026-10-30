@@ -719,19 +719,19 @@ required_packages() {
             # python3, sudo, curl, wget, openssl, ca-certificates, dbus, logind
             # display:  (only supported kiosk compositor) + sway (for wlr-randr)
             # browser: chromium
-            echo "python3 python3-venv sudo curl wget openssl ca-certificates dbus libnss3-tools  sway wlrctl seatd chromium ddcutil cec-utils"
+            echo "python3 python3-venv sudo curl wget openssl ca-certificates dbus libnss3-tools  sway wlrctl seatd chromium ddcutil cec-utils ffmpeg firmware-amd-graphics mesa-va-drivers vainfo"
             ;;
         fedora|rhel)
-            echo "python3 sudo curl wget openssl ca-certificates dbus nss-tools  seatd chromium"
+            echo "python3 sudo curl wget openssl ca-certificates dbus nss-tools  seatd chromium ffmpeg"
             ;;
         arch)
-            echo "python sudo curl wget openssl ca-certificates dbus nss  seatd chromium"
+            echo "python sudo curl wget openssl ca-certificates dbus nss  seatd chromium ffmpeg"
             ;;
         alpine)
-            echo "python3 sudo curl wget openssl ca-certificates dbus  seatd chromium"
+            echo "python3 sudo curl wget openssl ca-certificates dbus  seatd chromium ffmpeg"
             ;;
         suse)
-            echo "python3 sudo curl wget openssl ca-certificates dbus libnss3-tools  seatd chromium"
+            echo "python3 sudo curl wget openssl ca-certificates dbus libnss3-tools  seatd chromium ffmpeg"
             ;;
         *)
             echo ""
@@ -4180,6 +4180,7 @@ import mimetypes
 import os
 import sys
 import urllib.parse
+import urllib.request
 import socket
 import ssl
 import stat
@@ -4192,11 +4193,14 @@ import base64
 import threading
 import selectors
 import tarfile
+import shutil
+import signal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 MAX_REQUEST_BODY_BYTES = 1 << 20
 MAX_JSON_FILE_BYTES = 1 << 20
+MAX_DATA_PROXY_BYTES = 4 * 1024 * 1024
 MAX_BACKUP_DOWNLOAD_BYTES = 256 * 1024 * 1024
 MAX_CACHED_ASSET_BYTES = 16 * 1024 * 1024
 MAX_INPUT_DEVICE_FILE_BYTES = 256 * 1024
@@ -4207,6 +4211,20 @@ MAX_SYSTEM_METRICS_BYTES = 64 * 1024
 MAX_GPU_HELPER_OUTPUT_BYTES = 64 * 1024
 MAX_ERROR_BYTES = 512
 MAX_STATIC_HTML_BYTES = 2 * 1024 * 1024
+CAMERA_STREAM_URL_BYTES = 4096
+CAMERA_WIDGET_ID_BYTES = 128
+CAMERA_STREAM_FPS = 5
+WEATHER_ICON_SLUGS = frozenset({
+    'clear-day', 'clear-night', 'mostly-clear-day', 'mostly-clear-night',
+    'partly-cloudy-day', 'partly-cloudy-night', 'overcast-day', 'overcast-night',
+    'fog-day', 'fog-night', 'overcast-day-fog', 'overcast-night-fog',
+    'drizzle', 'extreme-drizzle', 'rain', 'extreme-rain', 'snow', 'extreme-snow',
+    'partly-cloudy-day-rain', 'partly-cloudy-night-rain',
+    'overcast-day-rain', 'overcast-night-rain', 'extreme-day-rain',
+    'extreme-night-rain', 'thunderstorms-day', 'thunderstorms-night',
+    'thunderstorms-day-hail', 'thunderstorms-night-hail',
+    'extreme-thunderstorms-day', 'extreme-thunderstorms-night',
+})
 
 
 def _bound_text(value: str | None, maximum: int) -> str:
@@ -5399,14 +5417,18 @@ function props(w){return w.props || w.properties || {};}
 function isYouTubeUrl(u){return /(?:youtube\.com|youtu\.be)/i.test(String(u||''));}
 function youtubeId(u){const s=String(u||'');let m=s.match(/[?&]v=([^&]+)/); if(m) return m[1]; m=s.match(/youtu\.be\/([^?&/]+)/); if(m) return m[1]; m=s.match(/youtube\.com\/(?:embed|shorts)\/([^?&/]+)/); return m?m[1]:'';}
 function youtubeEmbedUrl(u,p){const id=youtubeId(u); const params=new URLSearchParams({autoplay:'1',mute:(p.mute||p.muted)?'1':'0',loop:'1',playsinline:'1',rel:'0'}); if(id) params.set('playlist',id); return id ? ('https://www.youtube.com/embed/'+encodeURIComponent(id)+'?'+params.toString()) : String(u||'');}
-function styleFor(w){const x=(Number(w.x)||0)*100,y=(Number(w.y)||0)*100,ww=(Number(w.w??w.width)||0.1)*100,hh=(Number(w.h??w.height)||0.1)*100,z=Number(w.z)||1;return `left:${x}%;top:${y}%;width:${ww}%;height:${hh}%;z-index:${z};`;}
+function cachedLayoutPercent(value){value=Number(value)||0;return Math.abs(value)>1?value/100:value;}
+function styleFor(w){const x=cachedLayoutPercent(Number(w.x)||0),y=cachedLayoutPercent(Number(w.y)||0),ww=cachedLayoutPercent(Number(w.w??w.width)||0.1),hh=cachedLayoutPercent(Number(w.h??w.height)||0.1),z=Number(w.z)||1;return `left:${x*100}%;top:${y*100}%;width:${ww*100}%;height:${hh*100}%;z-index:${z};`;}
 function wmoIcon(code){const m={'0':'☀️','1':'🌤️','2':'⛅','3':'☁️','45':'🌫️','48':'🌫️','51':'🌦️','53':'🌦️','55':'🌦️','61':'🌧️','63':'🌧️','65':'🌧️','71':'❄️','73':'❄️','75':'❄️','80':'🌦️','81':'🌧️','82':'🌧️','95':'⛈️','96':'⛈️','99':'⛈️'};return m[String(code)]||'🌤️';}
-function wmoIconHtml(code,p){const key=String(code),custom=p&&p.custom_icons&&p.custom_icons[key];if(custom)return `<img src="${esc(custom)}" style="width:100%;height:100%;object-fit:contain;">`;const n=Number(code),sun=n<=1,cloud=n>=2,rain=(n>=51&&n<=67)||(n>=80&&n<=82),snow=n>=71&&n<=77,storm=n>=95;let body='';if(sun)body+='<circle cx="28" cy="28" r="13" fill="#facc15"/><g stroke="#facc15" stroke-width="4"> <path d="M28 5v9M28 42v9M5 28h9M42 28h9M12 12l7 7M37 37l7 7M44 12l-7 7M19 37l-7 7"/></g>';if(cloud)body+='<path d="M20 47h27a12 12 0 0 0 0-24 18 18 0 0 0-34 5 10 10 0 0 0 7 19z" fill="#cbd5e1" stroke="#64748b" stroke-width="2"/>';if(rain)body+='<g stroke="#38bdf8" stroke-width="4" stroke-linecap="round"><path d="M22 43l-4 9M34 43l-4 9M46 43l-4 9"/></g>';if(snow)body+='<g stroke="#e0f2fe" stroke-width="3" stroke-linecap="round"><path d="M20 42v14M13 49h14M15 44l10 10M25 44L15 54M37 42v14M30 49h14M32 44l10 10M42 44L32 54"/></g>';if(storm)body+='<path d="M30 32h12L29 57l3-16H21l9-19z" fill="#facc15"/>';if(!body)body='<circle cx="32" cy="32" r="20" fill="#facc15"/>';return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" style="width:100%;height:100%;padding:8px;">${body}</svg>`;}
-function weatherFor(p,i){const d=p._weather_data||{},q=d.daily||{},codes=q.weather_code||q.weathercode||[],code=codes[i]??d.current_weather?.weather_code??d.current_weather?.weathercode??2,winds=q.wind_speed||q.windspeed||[],wind=winds[i]??d.current_weather?.windspeed??0;return {code,icon:wmoIcon(code),high:q.temperature_2m_max?.[i],low:q.temperature_2m_min?.[i],precip:q.precipitation_probability_max?.[i]??0,wind};}
-function repeatCount(p,e){const r=e.repeat||{};return r.group?Math.max(1,Math.min(14,Number(p.shown_days)||Number(r.count)||4)):Math.max(1,Number(r.count)||1);}
+function wmoIconHtml(code,p){const key=String(code),custom=p&&p.custom_icons&&p.custom_icons[key];if(custom)return `<img src="${esc(custom)}" style="width:100%;height:100%;object-fit:contain;">`;const slugs={'0':'clear-day','1':'mostly-clear-day','2':'partly-cloudy-day','3':'overcast-day','45':'fog-day','48':'overcast-day-fog','51':'drizzle','53':'drizzle','55':'extreme-drizzle','61':'rain','63':'rain','65':'extreme-rain','71':'snow','73':'snow','75':'extreme-snow','80':'partly-cloudy-day-rain','81':'overcast-day-rain','82':'extreme-day-rain','95':'thunderstorms-day','96':'thunderstorms-day-hail','99':'extreme-thunderstorms-day'},slug=slugs[key]||'partly-cloudy-day';return `<img class="ripley-weather-icon" src="/assets/weather/meteocons/fill/${slug}.svg?v=20261028111500-weather-animated-refresh" alt="Weather" loading="eager" decoding="async" style="display:block;width:100%;height:100%;object-fit:contain;">`;}
+function weatherFor(p,i){const d=p._weather_data||{},q=d.daily||{},codes=q.weather_code_day||q.weather_code||q.weathercode||[],code=codes[i]??d.current_weather?.weather_code??d.current_weather?.weathercode??2,winds=q.wind_speed||q.windspeed||[],windRaw=winds[i]??d.current_weather?.windspeed??0,metric=String(p.unit||(p.units==='metric'?'C':'F')).toUpperCase()!=='F',sourceF=d.source==='noaa_nws',display=v=>{if(v==null||Number.isNaN(Number(v)))return '';const n=Number(v);return Math.round(sourceF?(metric?(n-32)*5/9:n):(metric?n:n*9/5+32));},highRaw=q.temperature_2m_max?.[i]??d.current_weather?.temperature,lowRaw=q.temperature_2m_min?.[i]??highRaw,currentRaw=d.current_weather?.temperature??highRaw,descriptions={'0':'Clear','1':'Mainly clear','2':'Partly cloudy','3':'Overcast','45':'Fog','48':'Rime fog','51':'Light drizzle','53':'Moderate drizzle','55':'Dense drizzle','61':'Slight rain','63':'Moderate rain','65':'Heavy rain','71':'Slight snow','73':'Moderate snow','75':'Heavy snow','80':'Rain showers','81':'Heavy rain showers','82':'Violent rain showers','95':'Thunderstorm','96':'Thunderstorm with hail','99':'Severe thunderstorm'};return {code,icon:wmoIcon(code),current:display(currentRaw),high:display(highRaw),low:display(lowRaw),desc:d.source==='unavailable'?'':(descriptions[String(code)]||''),precip:q.precipitation_probability_max?.[i]??0,wind:Math.round(Number(windRaw||0)*(metric?1.60934:1)),unit:metric?'°C':'°F',windUnit:metric?'km/h':'mph'};}
+function calendarOverrideMatches(event,override){const type=String(override&&(override.match_type||override.match)||(override&&override.uid?'uid':'title')).toLowerCase(),value=String(override&&(override.match_value||override.value||(type==='uid'?override.uid:override.title))||'').trim();if(!value)return false;if(override.source_date&&String(override.source_date)!==String(event.source_date||''))return false;if(type==='uid')return String(event.uid||'').trim()===value;return String(event.summary||'').trim().toLocaleLowerCase()===value.toLocaleLowerCase();}function applyCalendarOverrides(events,overrides,timeFormat){const list=Array.isArray(overrides)?overrides:[];return(Array.isArray(events)?events:[]).map(event=>{const o=list.find(item=>calendarOverrideMatches(event,item));if(!o)return event;const date=/^\d{4}-\d{2}-\d{2}$/.test(String(o.date||''))?String(o.date):event.date,corrected=String(o.time||''),match=corrected.match(/^(\d{1,2}):(\d{2})$/);let time=event.time;if(match){const hour=Number(match[1]),minute=Number(match[2]);if(hour>=0&&hour<=23&&minute>=0&&minute<=59)time=timeFormat==='24'?String(hour).padStart(2,'0')+':'+String(minute).padStart(2,'0'):(hour%12||12)+':'+String(minute).padStart(2,'0')+' '+(hour>=12?'PM':'AM');}return Object.assign({},event,{date,time,sort_time:match?Number(match[1])*60+Number(match[2]):event.sort_time,override_applied:true});});}function parseCalendarText(raw,maxEvents,timeFormat,overrides){const unfolded=String(raw||'').replace(/\r?\n[ \t]/g,''),out=[];const blocks=unfolded.match(/BEGIN:VEVENT[\s\S]*?END:VEVENT/g)||[];blocks.forEach(block=>{const start=(block.match(/(?:^|\n)DTSTART(?:;[^:]+)?:([^\n]+)/)||[])[1],uid=((block.match(/(?:^|\n)UID:(.*)/)||[])[1]||'').trim(),summary=((block.match(/(?:^|\n)SUMMARY:(.*)/)||[])[1]||'').trim(),location=((block.match(/(?:^|\n)LOCATION:(.*)/)||[])[1]||'').trim();if(!start||!summary)return;const date=start.match(/^(\d{4})(\d{2})(\d{2})/);if(!date)return;const hh=(start.match(/T(\d{2})(\d{2})/)||[])[1],mm=(start.match(/T\d{2}(\d{2})/)||[])[1];let time='All day';if(hh!=null){const n=Number(hh);time=timeFormat==='24'?String(n).padStart(2,'0')+':'+(mm||'00'):(n%12||12)+':'+(mm||'00')+' '+(n>=12?'PM':'AM');}out.push({uid,summary,location,time,date:date[1]+'-'+date[2]+'-'+date[3],source_date:date[1]+'-'+date[2]+'-'+date[3],source_start:start,sort_time:hh==null?0:Number(hh)*60+Number(mm||'0')});});const today=new Date().toISOString().slice(0,10);return applyCalendarOverrides(out,overrides,timeFormat).filter(e=>e.date>=today).sort((a,b)=>a.date.localeCompare(b.date)||(Number(a.sort_time)||0)-(Number(b.sort_time)||0)||a.summary.localeCompare(b.summary)).slice(0,Math.max(1,Math.min(30,Number(maxEvents)||7)));}
+function calendarFor(p,i){return Array.isArray(p._calendar_events)?p._calendar_events[i]||null:null;}
+function loadCalendar(p){const u=p.ical_url||p.ics_url||p.calendar_url||'';if(!u)return Promise.resolve();return fetch('/api/ics-proxy?url='+encodeURIComponent(u),{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error('calendar '+r.status);return readTextBounded(r,4*1024*1024);}).then(t=>{p._calendar_events=parseCalendarText(t,p.max_events,p.time_format==='24'?'24':'12',p.calendar_time_overrides);}).catch(()=>{p._calendar_events=[];});}
+function repeatCount(p,e){const r=e.repeat||{},t=String(p._widget_type||p.widget_type||'').toLowerCase();if(r.group&&t==='calendar'){const requested=Math.max(1,Math.min(30,Number(p.max_events)||Number(r.count)||5)),es=Array.isArray(p.template_elements)?p.template_elements:[],hasCalendarExemplar=es.some(item=>{const q=item&&item.props||{},source=q.variable_source||(item&&item.type==='variable_icon'?'weather':'date');return source==='calendar'&&!(item.repeat&&item.repeat.group);});return hasCalendarExemplar?Math.max(1,requested-1):requested;}return r.group?Math.max(1,Math.min(14,Number(p.shown_days)||Number(r.count)||4)):Math.max(1,Number(r.count)||1);}
 function groupMetrics(es){const g={};es.forEach(e=>{const id=e.repeat&&e.repeat.group;if(!id)return;const r=e.repeat,x=Number(e.x)||0,y=Number(e.y)||0,w=Number(e.width)||120,h=Number(e.height)||80,m=g[id]||(g[id]={minX:x,minY:y,maxX:x+w,maxY:y+h,gapX:Number(r.gap_x)||0,gapY:Number(r.gap_y)||0,mode:r.mode||'rows'});m.minX=Math.min(m.minX,x);m.minY=Math.min(m.minY,y);m.maxX=Math.max(m.maxX,x+w);m.maxY=Math.max(m.maxY,y+h);});return g;}
-function templateEl(e,p,i,g,dw,dh){const q=Object.assign({},e.props||{}),r=e.repeat||{},m=r.group&&g[r.group];if(i){const n=Number(q.day_offset??q.weather_day_offset)||0;q.day_offset=n+i;q.weather_day_offset=n+i;}let x=Number(e.x)||0,y=Number(e.y)||0,w=Number(e.width)||120,h=Number(e.height)||80;if(m&&i){if((m.mode||'rows')==='columns')x+=i*(m.maxX-m.minX+m.gapX);else y+=i*(m.maxY-m.minY+m.gapY);}const a=q.align||'center',j=a==='left'?'flex-start':a==='right'?'flex-end':'center';let st=`position:absolute;box-sizing:border-box;left:${x/dw*100}%;top:${y/dh*100}%;width:${w/dw*100}%;height:${h/dh*100}%;display:flex;align-items:center;justify-content:${j};text-align:${a};overflow:hidden;z-index:${Number(e.z)||0};color:${q.color||'#fff'};font-size:${Number(q.font_size)||24}px;`;let inner='';if(e.type==='rectangle')st+=`background:${q.color||'#1e293b'};opacity:${Number(q.opacity??100)/100};border-radius:${Number(q.radius)||0}px;`;else if(e.type==='text')inner=esc(q.text||'Text');else if(['variable_icon','variable_text','variable','date'].includes(e.type)){const k=q.variable_key||'',wx=weatherFor(p,Math.max(0,Math.min(6,Number(q.day_offset??q.weather_day_offset)||0)));if(k==='weather_icon'||e.type==='variable_icon'||q.display_mode==='weather_icon')inner=wmoIconHtml(wx.code,p);else if(k==='weather_description')inner=esc('Weather');else if(k==='high_temp')inner=esc('High '+(wx.high??'—'));else if(k==='low_temp')inner=esc('Low '+(wx.low??'—'));else if(k==='wind_speed')inner=esc('Wind '+Math.round(wx.wind)+' mph');else{const d=new Date();d.setDate(d.getDate()+(Number(q.day_offset??q.weather_day_offset)||0));inner=esc(k==='day_name'?d.toLocaleDateString(undefined,{weekday:'long'}):d.toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'}));}}else inner=esc(q.label||e.type||'');return `<div style="${st}">${inner}</div>`;}
-function templateHtml(w){const p=props(w),es=Array.isArray(p.template_elements)?p.template_elements:[];if(!es.length)return '';const g=groupMetrics(es);let dw=Number(p.template_width)||760,dh=Number(p.template_height)||427.5;es.forEach(e=>{dw=Math.max(dw,(Number(e.x)||0)+(Number(e.width)||120));dh=Math.max(dh,(Number(e.y)||0)+(Number(e.height)||80));});return `<div style="position:relative;width:100%;height:100%;overflow:hidden;">${es.slice().sort((a,b)=>(Number(a.z)||0)-(Number(b.z)||0)).map(e=>Array.from({length:repeatCount(p,e)},(_,i)=>templateEl(e,p,i,g,dw,dh)).join('')).join('')}</div>`;}
+function templateEl(e,p,i,g,dw,dh){const q=Object.assign({},e.props||{}),r=e.repeat||{},m=r.group&&g[r.group];if(i&&q.variable_source!=='calendar'){const n=Number(q.day_offset??q.weather_day_offset)||0;q.day_offset=n+i;q.weather_day_offset=n+i;}let x=Number(e.x)||0,y=Number(e.y)||0,w=Number(e.width)||120,h=Number(e.height)||80;if(m&&i){if((m.mode||'rows')==='columns')x+=i*(m.maxX-m.minX+m.gapX);else y+=i*(m.maxY-m.minY+m.gapY);}const a=q.align||'center',j=a==='left'?'flex-start':a==='right'?'flex-end':'center';let st=`position:absolute;box-sizing:border-box;left:${x/dw*100}%;top:${y/dh*100}%;width:${w/dw*100}%;height:${h/dh*100}%;display:flex;align-items:center;justify-content:${j};text-align:${a};overflow:hidden;z-index:${Number(e.z)||0};color:${q.color||'#fff'};font-size:clamp(4px,min(calc(${(Number(q.font_size)||24)/dw*100}cqw),calc(${(Number(q.font_size)||24)/dh*100}cqh)),${(Number(q.font_size)||24)*4}px);font-weight:${['variable_icon','variable_text','variable','date'].includes(e.type)?800:(q.font_weight||700)};line-height:1.08;`;let inner='';if(e.type==='rectangle')st+=`background:${q.color||'#1e293b'};opacity:${Number(q.opacity??100)/100};border-radius:${Number(q.radius)||0}px;`;else if(e.type==='text')inner=esc(q.text||'Text');else if(['variable_icon','variable_text','variable','date'].includes(e.type)){const k=q.variable_key||'';if(q.variable_source==='calendar'){const base=Number(q.calendar_event_index??(r.group?0:(q.day_offset??q.weather_day_offset)))||0,idx=Math.max(0,Math.min(29,base+(r.group?i+1:0))),ev=calendarFor(p,idx);if(k==='calendar_event_title')inner=esc(ev?.summary||'');else if(k==='calendar_event_time')inner=esc(ev?.time||'');else if(k==='calendar_event_location')inner=esc(ev?.location||'');else if(k==='calendar_event_date'){const d=ev?new Date(ev.date+'T00:00:00'):null;inner=esc(d&&!isNaN(d)?d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):'');}}else {const source=q.variable_source||(e.type==='variable_icon'?'weather':'date');if(source==='weather'){const wx=weatherFor(p,Math.max(0,Math.min(6,Number(q.day_offset??q.weather_day_offset)||0)));if(k==='weather_icon'||e.type==='variable_icon'||q.display_mode==='weather_icon')inner=wmoIconHtml(wx.code,p);else if(k==='current_temp')inner=esc(wx.current===''?'':wx.current+wx.unit);else if(k==='high_temp')inner=esc(wx.high===''?'':'High '+wx.high+wx.unit);else if(k==='low_temp')inner=esc(wx.low===''?'':'Low '+wx.low+wx.unit);else if(k==='weather_description')inner=esc(wx.desc);else if(k==='precip_chance')inner=esc(wx.precip+'%');else if(k==='wind_speed')inner=esc(wx.wind===''?'':'Wind '+wx.wind+' '+wx.windUnit);else inner=esc(q.default_text||q.label||k);}else if(source==='date'){const d=new Date();d.setDate(d.getDate()+(Number(q.day_offset??q.weather_day_offset)||0));if(k==='day_name')inner=esc(d.toLocaleDateString(undefined,{weekday:'long'}));else if(k==='date_number')inner=esc(String(d.getDate()));else if(k==='month_day')inner=esc(d.toLocaleDateString(undefined,{month:'short',day:'numeric'}));else inner=esc(d.toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'}));}else inner=esc(q.default_text||q.label||k);}}else inner=esc(q.label||e.type||'');return `<div style="${st}">${inner}</div>`;}
+function templateHtml(w){const p=props(w),es=Array.isArray(p.template_elements)?p.template_elements:[];if(!es.length)return '';const g=groupMetrics(es);let dw=Number(p.template_width)||760,dh=Number(p.template_height)||427.5;es.forEach(e=>{dw=Math.max(dw,(Number(e.x)||0)+(Number(e.width)||120));dh=Math.max(dh,(Number(e.y)||0)+(Number(e.height)||80));});es.forEach(e=>{const r=e.repeat||{},m=r.group&&g[r.group],count=repeatCount(p,e);if(!m||!r.group)return;const stepX=(m.maxX-m.minX)+m.gapX,stepY=(m.maxY-m.minY)+m.gapY;if((m.mode||r.mode||'rows')==='columns')dw=Math.max(dw,m.maxX+Math.max(0,count-1)*stepX);else dh=Math.max(dh,m.maxY+Math.max(0,count-1)*stepY);});return `<div style="position:relative;width:100%;height:100%;overflow:hidden;container-type:size;">${es.slice().sort((a,b)=>(Number(a.z)||0)-(Number(b.z)||0)).map(e=>Array.from({length:repeatCount(p,e)},(_,i)=>templateEl(e,p,i,g,dw,dh)).join('')).join('')}</div>`;}
 async function loadWeather(p){const lat=Number(p.lat||0),lon=Number(p.lon||0);if(!lat||!lon)return;try{const r=await fetch(`/api/weather/forecast?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`,{cache:'no-store'});if(r.ok)p._weather_data=JSON.parse(await readTextBounded(r,4*1024*1024));}catch(_e){}}
 function countdownFontSize(p){return Math.max(8,Math.min(160,Number(p.font_size||p.fontSize||48)||48))*2;}
 function countdownText(node,now){const get=(name)=>node.getAttribute?node.getAttribute(name):(node.dataset||{})[name.slice(5).split('-').map((part,i)=>i?part[0].toUpperCase()+part.slice(1):part).join('')]||'',mode=get('data-countdown-mode')||'date',unit=get('data-countdown-duration-unit')||'minutes',value=Math.max(1,Number(get('data-countdown-duration-value'))||1),started=Number(get('data-countdown-started-at'))||now,target=mode==='duration'?started+value*({seconds:1000,minutes:60000,hours:3600000,days:86400000}[unit]||60000):new Date(get('data-countdown-target-date')||'').getTime(),diff=Math.max(0,target-now),expiry=get('data-countdown-expiry-text')||'Time\u2019s up!';if(!Number.isFinite(target)||target<=0)return get('data-countdown-invalid-text')||'Choose a date and time';if(diff<=0)return expiry;const d=Math.floor(diff/86400000),h=Math.floor(diff%86400000/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000);return d?d+'d '+h+'h':h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s';}
@@ -5415,14 +5437,15 @@ function cachedCameraFilterName(value){return ['none','grayscale','sepia','hallo
 function cachedCameraFilterCss(value){return ({none:'none',grayscale:'grayscale(1)',sepia:'sepia(1)',halloween:'saturate(1.35) contrast(1.15) hue-rotate(300deg)'})[cachedCameraFilterName(value)];}
 function cachedCameraFilterOverlay(value,id){return cachedCameraFilterName(value)==='halloween'?`<span data-camera-filter-overlay="halloween" data-camera-filter-overlay-id="${esc(id||'')}" aria-hidden="true" style="position:absolute;inset:0;pointer-events:none;background:linear-gradient(135deg,rgba(249,115,22,.34),rgba(88,28,135,.42));mix-blend-mode:screen;opacity:.8;"></span>`:'';}
 function initCachedCameraWidgets(widgets){const nodes=document.querySelectorAll('[data-camera-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-camera-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget);if(!p||p.capture_enabled!==true||!navigator.mediaDevices||typeof navigator.mediaDevices.getUserMedia!=='function'||node.tagName!=='VIDEO')return;const facing=['user','environment','left','right'].includes(p.facing_mode)?p.facing_mode:'environment';const constraints={video:{facingMode:{ideal:facing},width:{ideal:1280,max:1280},height:{ideal:720,max:720},frameRate:{ideal:30,max:30}},audio:false};node.muted=true;node.autoplay=true;node.playsInline=true;navigator.mediaDevices.getUserMedia(constraints).then(stream=>{node.srcObject=stream;const result=typeof node.play==='function'?node.play():null;if(result&&typeof result.catch==='function')result.catch(()=>{});}).catch(()=>{});});}
+function initCachedCameraStreamWidgets(widgets){const nodes=document.querySelectorAll('[data-camera-stream-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-camera-stream-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget);if(!p||node.tagName!=='IMG')return;const wait=Math.max(1000,Math.min(60000,Number(p.reconnect_seconds)*1000||5000)),stallLimit=90000;let timer=null,reconnecting=false,lastSignature='',unchangedSince=Date.now();const base='/camera-stream.mjpeg?widget_id='+encodeURIComponent(id);const reconnect=()=>{if(reconnecting)return;reconnecting=true;if(timer){clearTimeout(timer);timer=null;}node.removeAttribute('src');node.src='about:blank';setTimeout(()=>{node.src=base+'&retry='+Date.now();reconnecting=false;},400);};node.onerror=()=>{if(timer||reconnecting)return;timer=setTimeout(()=>{timer=null;reconnect();},wait);};const canvas=document.createElement('canvas');canvas.width=16;canvas.height=9;const context=canvas.getContext('2d',{willReadFrequently:true});if(context){node.__cameraWatchdog=setInterval(()=>{if(!node.isConnected){clearInterval(node.__cameraWatchdog);return;}if(!node.complete||!node.naturalWidth||reconnecting)return;let signature='';try{context.drawImage(node,0,0,16,9);const pixels=context.getImageData(0,0,16,9).data;let sum=0;for(let i=0;i<pixels.length;i+=16)sum=(sum+pixels[i]*3+pixels[i+1]*5+pixels[i+2]*7)>>>0;signature=String(sum);}catch(_e){return;}if(signature!==lastSignature){lastSignature=signature;unchangedSince=Date.now();}else if(Date.now()-unchangedSince>=stallLimit)reconnect();},5000);}}); }
 function initCachedVideoWidgets(widgets){const nodes=document.querySelectorAll('[data-video-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-video-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget),list=p&&Array.isArray(p.playlist)?p.playlist:[];if(!list.length)return;let index=0;const advance=()=>{index=(index+1)%list.length;node.src=String(list[index].url||'');if(typeof node.load==='function')node.load();const result=typeof node.play==='function'?node.play():null;if(result&&typeof result.catch==='function')result.catch(()=>{});};node.src=String(list[0].url||'');node.loop=list.length===1&&p.loop!==false;node.onended=list.length>1?advance:null;node.onerror=list.length>1?advance:null;});}
-async function renderWidget(w){const p=props(w),t=normWidgetType(w);if(t==='weather')await loadWeather(p);let inner='';
- if(t==='weather'&&Array.isArray(p.template_elements)&&p.template_elements.length) inner=templateHtml(w);
+async function renderWidget(w){const t=normWidgetType(w),p=Object.assign({_widget_type:t},props(w));if(t==='weather')await loadWeather(p);else if(t==='calendar')await loadCalendar(p);let inner='';
+ if((t==='weather'||t==='calendar')&&Array.isArray(p.template_elements)&&p.template_elements.length) inner=templateHtml(Object.assign({},w,{props:p}));
  else if(t==='text') inner=`<div style="width:100%;height:100%;display:flex;align-items:${p.valign||'center'};justify-content:${p.align==='left'?'flex-start':p.align==='right'?'flex-end':'center'};padding:1rem;color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||24)*2}px;text-align:${p.align||'center'};">${esc(p.text||'Text')}</div>`;
  else if(t==='countdown') { const target=p.countdown_mode==='duration' ? Date.now() + Math.max(1,Number(p.duration_value||1))*({seconds:1000,minutes:60000,hours:3600000,days:86400000}[p.duration_unit||'minutes']||60000) : new Date(p.targetDate||'').getTime(); const diff=Math.max(0,target-Date.now()); const d=Math.floor(diff/86400000),h=Math.floor(diff%86400000/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000); const text=Number.isFinite(target)&&target>0?(d?d+'d '+h+'h':h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s'):(p.expiry_text||'Choose a date and time'); inner=`<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;padding:1rem;color:${p.color||'#fff'};font-size:${countdownFontSize(p)}px;font-weight:800;line-height:1;text-align:center;overflow:hidden;white-space:nowrap;">${esc(text)}</div>`; }
  else if(t==='video') { const list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url?[{url:p.url}]:[]),u=String((list[0]||{}).url||''); const fit=['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'; inner=`<video data-video-widget-id="${esc(w.id||'')}" src="${esc(u)}" autoplay playsinline preload="auto" ${p.loop !== false && list.length === 1 ? 'loop' : ''} ${p.muted||p.mute?'muted':''} style="width:100%;height:100%;object-fit:${fit};background:#000;"></video>`;}
  else if(t==='image') inner=`<img src="${esc(p.url||p.src||'')}" style="width:100%;height:100%;object-fit:${p.fit||'cover'};">`;
- else if(t==='camera') { const cameraFilter=cachedCameraFilterName(p.filter); const facing=['user','environment','left','right'].includes(p.facing_mode)?p.facing_mode:'environment'; if(p.capture_enabled===true) inner=`<div style="position:relative;width:100%;height:100%;background:#020617;color:#cbd5e1;"><video data-camera-widget-id="${esc(w.id||'')}" data-camera-filter="${cameraFilter}" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;background:#020617;filter:${cachedCameraFilterCss(cameraFilter)};"></video>${cachedCameraFilterOverlay(cameraFilter,w.id)}<span style="position:absolute;left:.5rem;bottom:.5rem;padding:.2rem .45rem;border-radius:.25rem;background:rgba(2,6,23,.75);font:600 12px system-ui;">Camera · ${esc(facing)}</span></div>`; else inner=`<div data-camera-widget-id="${esc(w.id||'')}" style="width:100%;height:100%;display:grid;place-items:center;border:1px dashed #334155;background:#020617;color:#94a3b8;font:600 14px system-ui;text-align:center;">📷 Camera preview<br><small style="font-weight:400;">capture disabled</small></div>`;}
+ else if(t==='camera') { if(w._addon_type==='rtsp-stream'||p._addon_type==='rtsp-stream'){const fit=['cover','contain','fill'].includes(p.fit)?p.fit:'cover'; inner=`<div style="position:relative;width:100%;height:100%;background:#020617;overflow:hidden;"><img data-camera-stream-widget-id="${esc(w.id||'')}" src="/camera-stream.mjpeg?widget_id=${encodeURIComponent(String(w.id||''))}" style="width:100%;height:100%;object-fit:${fit};background:#020617;"></div>`;}else{const cameraFilter=cachedCameraFilterName(p.filter);const facing=['user','environment','left','right'].includes(p.facing_mode)?p.facing_mode:'environment';if(p.capture_enabled===true) inner=`<div style="position:relative;width:100%;height:100%;background:#020617;color:#cbd5e1;"><video data-camera-widget-id="${esc(w.id||'')}" data-camera-filter="${cameraFilter}" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;background:#020617;filter:${cachedCameraFilterCss(cameraFilter)};"></video>${cachedCameraFilterOverlay(cameraFilter,w.id)}<span style="position:absolute;left:.5rem;bottom:.5rem;padding:.2rem .45rem;border-radius:.25rem;background:rgba(2,6,23,.75);font:600 12px system-ui;">Camera · ${esc(facing)}</span></div>`;else inner=`<div data-camera-widget-id="${esc(w.id||'')}" style="width:100%;height:100%;display:grid;place-items:center;border:1px dashed #334155;background:#020617;color:#94a3b8;font:600 14px system-ui;text-align:center;">📷 Camera preview<br><small style="font-weight:400;">capture disabled</small></div>`;}}
  else if(t==='video') { const list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url?[{url:p.url}]:[]), u=String((list[0]||{}).url||''); if(isYouTubeUrl(u)){ inner=`<iframe src="${esc(youtubeEmbedUrl(u,Object.assign({},p,{muted:true})))}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:0;background:#000;"></iframe>`; } else { const fit=['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'; inner=`<video src="${esc(u)}" autoplay playsinline preload="auto" ${p.loop !== false && list.length === 1 ? 'loop' : ''} ${p.muted||p.mute?'muted':''} style="width:100%;height:100%;object-fit:${fit};background:#000;"></video>`; } }
  else if(t==='clock') inner=`<div class="clock" data-clock style="color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||48)*2}px"></div>`;
  else if(t==='datetime'||t==='date') inner=`<div class="date" data-date style="color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||36)*2}px"></div>`;
@@ -5432,10 +5455,11 @@ async function renderWidget(w){const p=props(w),t=normWidgetType(w);if(t==='weat
  else if(t==='calendar') inner=`<div style="width:100%;height:100%;display:grid;place-items:center;color:${p.color||'#fff'};font-size:4rem;">${esc(p.label||'Calendar')}</div>`;
  else inner=`<div style="width:100%;height:100%;display:grid;place-items:center;border:1px dashed #334155;color:#94a3b8;">${esc(t||'widget')}</div>`;
  if(t==='countdown'){const mode=p.countdown_mode==='duration'?'duration':'date',started=Date.now(),durationValue=Math.max(1,Number(p.duration_value||1)),durationUnit=p.duration_unit||'minutes',target=p.targetDate||'',fake={getAttribute:(name)=>({'data-countdown-mode':mode,'data-countdown-duration-value':durationValue,'data-countdown-duration-unit':durationUnit,'data-countdown-started-at':started,'data-countdown-target-date':target,'data-countdown-expiry-text':p.expiry_text||'Time\u2019s up!','data-countdown-invalid-text':'Choose a date and time'}[name]||'')},text=countdownText(fake,started);inner=`<div data-countdown-widget data-countdown-mode="${esc(mode)}" data-countdown-duration-value="${durationValue}" data-countdown-duration-unit="${esc(durationUnit)}" data-countdown-started-at="${started}" data-countdown-target-date="${esc(target)}" data-countdown-expiry-text="${esc(p.expiry_text||'Time\u2019s up!')}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;"><div class="countdown-value">${esc(text)}</div></div>`;}
- return `<div class="widget" style="${styleFor(w)}">${inner}</div>`;}
+ const outputWidget=t==='calendar'&&Array.isArray(p.template_elements)&&p.template_elements.some(e=>e.repeat&&e.repeat.group)?Object.assign({},w,{z:Math.max(Number(w.z)||1,100)}):w;
+ return `<div class="widget" style="${styleFor(outputWidget)}">${inner}</div>`;}
 function tickClocks(){const now=new Date();document.querySelectorAll('[data-clock]').forEach(e=>e.textContent=now.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}));document.querySelectorAll('[data-date]').forEach(e=>e.textContent=now.toLocaleDateString());tickCountdowns();}
 function applyOrientation(value){const v=String(value||'normal');document.body.dataset.orientation=['normal','flipped','rotated_left','rotated_right'].includes(v)?v:'normal';}
-async function loadLayout(){try{const r=await fetch('/assigned-layout.json?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('no assigned layout');const txt=await readTextBounded(r,4*1024*1024);try{const c=await fetch('/api/client-config.json?ts='+Date.now(),{cache:'no-store'});if(c.ok)applyOrientation(JSON.parse(await readTextBounded(c,256*1024)).orientation);}catch(_e){}if(txt===currentHash)return;currentHash=txt;const layout=JSON.parse(txt);const ws=(layout.widgets||[]).slice().sort((a,b)=>(a.z||0)-(b.z||0));const rendered=await Promise.all(ws.map(renderWidget));document.getElementById('player').innerHTML=rendered.join('')||'<div class="fallback"><div><strong>Empty Layout</strong></div></div>';tickClocks();initCachedVideoWidgets(ws);initCachedCameraWidgets(ws);}catch(e){if(!currentHash)document.getElementById('player').innerHTML='<div class="fallback"><div><strong>Waiting for cached assigned layout</strong><span>'+esc(e.message)+'</span></div></div>';}}
+async function loadLayout(){try{const r=await fetch('/assigned-layout.json?ts='+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('no assigned layout');const txt=await readTextBounded(r,4*1024*1024);try{const c=await fetch('/api/client-config.json?ts='+Date.now(),{cache:'no-store'});if(c.ok)applyOrientation(JSON.parse(await readTextBounded(c,256*1024)).orientation);}catch(_e){}if(txt===currentHash)return;currentHash=txt;const layout=JSON.parse(txt);const ws=(layout.widgets||[]).slice().sort((a,b)=>(a.z||0)-(b.z||0));const rendered=await Promise.all(ws.map(renderWidget));document.getElementById('player').innerHTML=rendered.join('')||'<div class="fallback"><div><strong>Empty Layout</strong></div></div>';tickClocks();initCachedVideoWidgets(ws);initCachedCameraWidgets(ws);initCachedCameraStreamWidgets(ws);}catch(e){if(!currentHash)document.getElementById('player').innerHTML='<div class="fallback"><div><strong>Waiting for cached assigned layout</strong><span>'+esc(e.message)+'</span></div></div>';}}
 setInterval(tickClocks,1000);setInterval(loadLayout,5000);setInterval(()=>{currentHash='';loadLayout().catch(()=>{});},15*60*1000);loadLayout();
 
 // === Cursor auto-hide (3.5s default, configurable via /api/cursor-config.json) ===
@@ -5661,6 +5685,307 @@ def _live_player_redirect_html(server_url: str, display_index: int, connector: s
     )
 
 
+def _camera_layout_path(cache_dir: Path) -> Path:
+    display_index = int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0'))
+    target = cache_dir / f'assigned-layout-display-{display_index}.json'
+    if display_index == 0 and not target.exists():
+        target = cache_dir / 'assigned-layout.json'
+    return target
+
+
+def _camera_stream_url(cache_dir: Path, widget_id: str) -> str | None:
+    if not isinstance(widget_id, str) or not widget_id or len(widget_id.encode('utf-8')) > CAMERA_WIDGET_ID_BYTES:
+        return None
+    try:
+        layout = _read_json_file(_camera_layout_path(cache_dir), {})
+        widgets = layout.get('widgets', [])
+        if not isinstance(widgets, list):
+            return None
+        widget = next((item for item in widgets if isinstance(item, dict) and str(item.get('id', '')) == widget_id), None)
+        props = widget.get('props', {}) if isinstance(widget, dict) else {}
+        raw_url = props.get('stream_url') if isinstance(props, dict) else None
+        if not isinstance(raw_url, str) or not raw_url or len(raw_url.encode('utf-8')) > CAMERA_STREAM_URL_BYTES:
+            return None
+        if any(character in raw_url for character in '\r\n\x00'):
+            return None
+        parsed = urllib.parse.urlparse(raw_url)
+        if parsed.scheme.lower() not in ('rtsp', 'rtsps') or not parsed.hostname:
+            return None
+        try:
+            _ = parsed.port
+        except ValueError:
+            return None
+        return raw_url
+    except Exception:
+        return None
+
+
+def _camera_stream_props(cache_dir: Path, widget_id: str) -> dict:
+    try:
+        layout = _read_json_file(_camera_layout_path(cache_dir), {})
+        widgets = layout.get('widgets', []) if isinstance(layout, dict) else []
+        if not isinstance(widgets, list):
+            return {}
+        widget = next((item for item in widgets if isinstance(item, dict) and str(item.get('id', '')) == widget_id), None)
+        props = widget.get('props', {}) if isinstance(widget, dict) else {}
+        return dict(props) if isinstance(props, dict) else {}
+    except Exception:
+        return {}
+
+
+def _camera_layout_has_rtsp_widget(cache_dir: Path) -> bool:
+    try:
+        layout = _read_json_file(_camera_layout_path(cache_dir), {})
+        widgets = layout.get('widgets', [])
+        return isinstance(widgets, list) and any(
+            isinstance(item, dict)
+            and (item.get('_addon_type') == 'rtsp-stream'
+                 or isinstance(item.get('props'), dict)
+                 and item['props'].get('_addon_type') == 'rtsp-stream')
+            for item in widgets
+        )
+    except Exception:
+        return False
+
+
+def _camera_layout_has_stream(cache_dir: Path) -> bool:
+    layout = _read_json_file(_camera_layout_path(cache_dir), {})
+    widgets = layout.get('widgets', []) if isinstance(layout, dict) else []
+    if not isinstance(widgets, list):
+        return False
+    return any(
+        _camera_stream_url(cache_dir, str(item.get('id', '')))
+        for item in widgets
+        if isinstance(item, dict) and item.get('id')
+    )
+
+
+def _camera_public_layout(layout: dict) -> dict:
+    """Remove RTSP/RTSPS source values before serving layout JSON to Chromium."""
+    if not isinstance(layout, dict):
+        return {}
+    public = dict(layout)
+    widgets = []
+    for item in layout.get('widgets', []):
+        if not isinstance(item, dict):
+            widgets.append(item)
+            continue
+        widget = dict(item)
+        props = widget.get('props')
+        widget_type = str(widget.get('widget_type') or widget.get('type') or '').lower().replace('_', '-')
+        addon_type = widget.get('_addon_type')
+        if widget_type == 'camera' or addon_type == 'rtsp-stream' or (isinstance(props, dict) and props.get('_addon_type') == 'rtsp-stream'):
+            if isinstance(props, dict):
+                props = dict(props)
+                props.pop('stream_url', None)
+                widget['props'] = props
+            widget.pop('stream_url', None)
+        widgets.append(widget)
+    public['widgets'] = widgets
+    return public
+
+
+def _proxy_live_data_request(path: str, query: str, cache_dir: Path):
+    """Proxy safe live data APIs through the local renderer.
+
+    RTSP layouts intentionally stay on the local cached renderer so the
+    renderer can access the protected stream URL.  That renderer must still
+    provide the server-backed weather and calendar APIs; relative browser
+    fetches otherwise hit port 3900, where those routes do not exist.
+    """
+    if path not in ('/api/weather/forecast', '/api/ics-proxy'):
+        return None
+    server = _live_player_url()
+    if not server:
+        return None
+    parsed = urllib.parse.urlparse(server)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        return None
+    endpoint = server.rstrip('/') + path
+    if query:
+        endpoint += '?' + query
+    headers = {'Cache-Control': 'no-cache'}
+    token = _client_auth_token(cache_dir)
+    if token:
+        headers['X-SCREENTRA-CLIENT-TOKEN'] = token
+    request = urllib.request.Request(endpoint, headers=headers, method='GET')
+    context = None
+    if parsed.scheme == 'https':
+        for cafile in (
+            os.environ.get('RIPLEY_CA_CERT', ''),
+            str(Path.home() / '.local/share/screentra-client/screentra-cast-signage-ca.crt'),
+        ):
+            if cafile and Path(cafile).exists():
+                try:
+                    context = ssl.create_default_context(cafile=cafile)
+                    break
+                except Exception:
+                    context = None
+        if context is None:
+            return None
+    with urllib.request.urlopen(request, timeout=20, context=context) as response:
+        body = response.read(MAX_DATA_PROXY_BYTES + 1)
+        if len(body) > MAX_DATA_PROXY_BYTES:
+            raise ValueError('proxied data response exceeds its size limit')
+        content_type = response.headers.get('Content-Type', 'application/octet-stream')
+        return response.status, content_type, body
+
+
+def _proxy_weather_icon_asset(path: str, cache_dir: Path):
+    """Proxy only the vendored weather icon assets needed by offline playback."""
+    prefix = '/assets/weather/meteocons/'
+    if not path.startswith(prefix):
+        return None
+    relative = path[len(prefix):]
+    parts = relative.split('/')
+    if len(parts) != 2 or parts[0] not in ('fill', 'fill-static') or not parts[1].endswith('.svg'):
+        return None
+    slug = parts[1][:-4]
+    if slug not in WEATHER_ICON_SLUGS:
+        return None
+    server = _live_player_url()
+    if not server:
+        return None
+    parsed = urllib.parse.urlparse(server)
+    if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+        return None
+    request = urllib.request.Request(server.rstrip('/') + path, headers={'Cache-Control': 'no-cache'}, method='GET')
+    context = None
+    if parsed.scheme == 'https':
+        for cafile in (
+            os.environ.get('RIPLEY_CA_CERT', ''),
+            str(Path.home() / '.local/share/screentra-client/screentra-cast-signage-ca.crt'),
+        ):
+            if cafile and Path(cafile).exists():
+                try:
+                    context = ssl.create_default_context(cafile=cafile)
+                    break
+                except Exception:
+                    context = None
+        if context is None:
+            return None
+    with urllib.request.urlopen(request, timeout=10, context=context) as response:
+        body = response.read(256 * 1024 + 1)
+        if len(body) > 256 * 1024:
+            raise ValueError('weather icon asset exceeds its size limit')
+        return response.status, response.headers.get('Content-Type', 'image/svg+xml'), body
+
+
+def _terminate_camera_process(process) -> None:
+    if process is None:
+        return
+    if process.poll() is not None:
+        try:
+            process.wait(timeout=0.5)
+        except Exception:
+            pass
+        return
+    try:
+        if os.name == 'posix':
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+        process.wait(timeout=1.5)
+    except Exception:
+        try:
+            if os.name == 'posix':
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+            process.wait(timeout=1)
+        except Exception:
+            pass
+
+
+def _camera_stream_command(stream_url: str, props: dict | None = None) -> list[str]:
+    # Chromium does not decode RTSP/RTSPS directly. FFmpeg converts the one
+    # configured stream to a bounded-rate multipart JPEG response, while the
+    # URL remains server-side in the cached layout and is never placed in DOM.
+    # Per-widget settings are clamped here as a defense-in-depth boundary.
+    props = props if isinstance(props, dict) else {}
+    try:
+        output_fps = max(1, min(30, int(props.get('output_fps', CAMERA_STREAM_FPS))))
+    except (TypeError, ValueError):
+        output_fps = CAMERA_STREAM_FPS
+    try:
+        output_width = max(320, min(1920, int(props.get('output_width', 960))))
+    except (TypeError, ValueError):
+        output_width = 960
+    interpolate = props.get('frame_interpolation') is True and output_fps > 1
+    if interpolate:
+        source_fps = max(1, (output_fps + 1) // 2)
+        video_filter = (
+            f'fps={source_fps},scale={output_width}:-2:force_original_aspect_ratio=decrease,'
+            f'minterpolate=fps={output_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,format=yuv420p'
+        )
+    else:
+        video_filter = f'fps={output_fps},scale={output_width}:-2:force_original_aspect_ratio=decrease'
+    ffmpeg_bin = os.environ.get('SCREENTRA_FFMPEG_BIN') or shutil.which('ffmpeg') or 'ffmpeg'
+    return [
+        ffmpeg_bin,
+        '-nostdin',
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-fflags', 'nobuffer',
+        '-flags', 'low_delay',
+        '-analyzeduration', '1000000',
+        '-probesize', '1000000',
+        '-rtsp_transport', 'tcp',
+        '-timeout', '10000000',
+        '-i', stream_url,
+        '-an',
+        '-vf', video_filter,
+        '-q:v', '8',
+        '-fps_mode', 'vfr',
+        '-f', 'mpjpeg',
+        'pipe:1',
+    ]
+
+
+def _serve_camera_stream(handler, widget_id: str) -> None:
+    stream_url = _camera_stream_url(handler.cache_dir, widget_id)
+    ffmpeg_bin = os.environ.get('SCREENTRA_FFMPEG_BIN') or shutil.which('ffmpeg')
+    if not stream_url or not ffmpeg_bin:
+        return handler.send_text(503, 'camera stream unavailable')
+    stream_props = _camera_stream_props(handler.cache_dir, widget_id)
+    process = None
+    try:
+        process = _sp.Popen(
+            _camera_stream_command(stream_url, stream_props),
+            stdin=_sp.DEVNULL,
+            stdout=_sp.PIPE,
+            stderr=_sp.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+        handler.send_response(200)
+        handler.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=ffmpeg')
+        handler.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
+        handler.send_header('Pragma', 'no-cache')
+        handler.send_header('Connection', 'close')
+        handler.end_headers()
+        while True:
+            chunk = process.stdout.read(64 * 1024) if process.stdout else b''
+            if not chunk:
+                break
+            handler.wfile.write(chunk)
+            handler.wfile.flush()
+    except (BrokenPipeError, ConnectionResetError, TimeoutError):
+        pass
+    except Exception:
+        # Never send the source URL or subprocess diagnostics to the browser
+        # or renderer log. The next image reconnect will retry the stream.
+        pass
+    finally:
+        if process is not None:
+            _terminate_camera_process(process)
+            try:
+                if process.stdout:
+                    process.stdout.close()
+            except Exception:
+                pass
+
+
 class Handler(BaseHTTPRequestHandler):
     cache_dir = Path.home() / '.local/share/screentra-client/cache'
 
@@ -5827,6 +6152,43 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
     def do_GET(self):
         path = unquote(self.path.split('?',1)[0])
+        if path == '/camera-stream.mjpeg':
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query, keep_blank_values=False)
+            widget_ids = query.get('widget_id', [])
+            if len(widget_ids) != 1:
+                return self.send_text(400, 'invalid camera stream request')
+            return _serve_camera_stream(self, widget_ids[0])
+        if path.startswith('/assets/weather/meteocons/'):
+            try:
+                proxied = _proxy_weather_icon_asset(path, self.cache_dir)
+                if proxied is None:
+                    return self.send_text(404, 'weather icon not found')
+                status, content_type, data = proxied
+                self.send_response(status)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'public, max-age=86400')
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            except Exception:
+                return self.send_text(502, 'weather icon unavailable')
+        if path in ('/api/weather/forecast', '/api/ics-proxy'):
+            try:
+                query = urllib.parse.urlparse(self.path).query
+                proxied = _proxy_live_data_request(path, query, self.cache_dir)
+                if proxied is None:
+                    return self.send_text(503, json.dumps({'error': 'live server unavailable'}), 'application/json')
+                status, content_type, data = proxied
+                self.send_response(status)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            except Exception:
+                return self.send_text(502, json.dumps({'error': 'live data proxy failed'}), 'application/json')
         if path in ('/login', '/login.html'):
             return self.send_text(200, _admin_login_html(), 'text/html; charset=utf-8')
         if path == '/api/admin/auth/status':
@@ -5875,7 +6237,7 @@ class Handler(BaseHTTPRequestHandler):
             # from the heartbeat's cached client-config.json when available;
             # fall back to the index.
             live_url = _live_player_url()
-            if live_url and _server_reachable(live_url, LIVE_PROBE_TIMEOUT_SECS):
+            if not _camera_layout_has_rtsp_widget(self.cache_dir) and live_url and _server_reachable(live_url, LIVE_PROBE_TIMEOUT_SECS):
                 connector = _connector_for_display_index(display_index)
                 if connector:
                     client_id = _client_id_from_env() or _client_id_from_cache()
@@ -6001,7 +6363,7 @@ class Handler(BaseHTTPRequestHandler):
                 target = self.cache_dir / 'assigned-layout.json'
             if not target.exists():
                 return self.send_text(404, '{}', 'application/json')
-            return self.send_text(200, json.dumps(_read_json_file(target, {})), 'application/json')
+            return self.send_text(200, json.dumps(_camera_public_layout(_read_json_file(target, {}))), 'application/json')
         if path == '/client-config.json':
             target = self.cache_dir / path.lstrip('/')
             if not target.exists():
@@ -9971,10 +10333,34 @@ while IFS='|' read -r idx connector port; do
     chown -R "$BOARD_USER:$BOARD_USER" "$CHROMIUM_USER_DATA" "$BOARD_HOME/.config/chromium"
     chmod 700 "$CHROMIUM_USER_DATA"
     log "Starting Chromium display $idx on $connector (port $port, url $BROWSER_URL)..."
+    GPU_ENV_ARGS=()
+    GPU_CHROMIUM_ARGS=()
+    if [ "${SCREENTRA_GPU_ACCEL:-0}" = "1" ]; then
+        # The WX 2100 is the active DRM device on clients that opt in through
+        # the kiosk unit drop-in. Keep the default installer portable: clients
+        # without this opt-in continue using their existing GPU selection.
+        GPU_ENV_ARGS=(
+            DRI_PRIME=1
+            LIBVA_DRIVER_NAME=radeonsi
+            LIBVA_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri
+        )
+        GPU_CHROMIUM_ARGS=(
+            --use-gl=egl
+            --ignore-gpu-blocklist
+            --enable-gpu-rasterization
+            --enable-zero-copy
+            --enable-accelerated-2d-canvas
+            --enable-features=VaapiVideoDecoder,VaapiVideoEncoder
+        )
+        log "Chromium GPU acceleration enabled for display $idx"
+    fi
     sudo -u "$BOARD_USER" env \
+        SCREENTRA_GPU_ACCEL="${SCREENTRA_GPU_ACCEL:-0}" \
+        "${GPU_ENV_ARGS[@]}" \
         HOME="$BOARD_HOME" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
         WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
         chromium \
+        "${GPU_CHROMIUM_ARGS[@]}" \
         --class="screentra-cast-display-${idx}" \
         --no-sandbox --ozone-platform=wayland --hide-cursor --ash-hide-cursor \
         --app="$BROWSER_URL" --kiosk --start-fullscreen \

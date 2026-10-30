@@ -36,6 +36,7 @@ install_pkg(){
 install_pkg curl      curl wget
 install_pkg rsync     rsync
 install_pkg sqlite3   sqlite3
+install_pkg ffmpeg    ffmpeg
 
 # Install or build binary
 if [ -x "$INSTALL_DIR/target/release/signage" ]; then

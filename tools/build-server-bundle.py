@@ -65,6 +65,11 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "Run as root or with sudo." >&2
     exit 1
 fi
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    command -v apt-get >/dev/null 2>&1 || { echo "FFmpeg is required, but apt-get is unavailable." >&2; exit 1; }
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg
+fi
 [ -d "$PAYLOAD" ] || { echo "Bundle payload missing: $PAYLOAD" >&2; exit 1; }
 install -d -m 0755 "$DEST"
 if [ -f "$PAYLOAD/screentra-cast-server" ]; then

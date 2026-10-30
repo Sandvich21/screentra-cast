@@ -7,6 +7,7 @@ ready to send as the 'displays' field in heartbeat payload.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -50,7 +51,46 @@ def _connector_sort_key(connector: Dict[str, Any]) -> tuple[int, str]:
     return priority, str(connector.get('name') or '')
 
 
-def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
+def _gpu_metadata(entry: Path) -> Dict[str, Optional[str]]:
+    """Return stable, non-secret GPU identity for a DRM connector."""
+    card = entry.name.split('-', 1)[0]
+    drm_device = card
+    try:
+        for candidate in sorted(Path('/dev/dri/by-path').glob(f'pci-*-{card}')):
+            if candidate.name.endswith('-card') and candidate.exists():
+                drm_device = str(candidate)
+                break
+    except Exception:
+        pass
+    device = entry / 'device'
+    driver = ''
+    try:
+        driver = os.path.basename(os.path.realpath(device / 'driver'))
+    except Exception:
+        pass
+    vendor = _read(device / 'vendor') or None
+    device_id = _read(device / 'device') or None
+    pci_match = re.search(r'pci-[^-]+-[^-]+-[^-]+', drm_device)
+    gpu_id = pci_match.group(0) if pci_match else drm_device
+    gpu_name = {
+        '0x1002': 'AMD', '0x10de': 'NVIDIA', '0x8086': 'Intel',
+    }.get((vendor or '').lower(), vendor or 'Unknown GPU')
+    return {
+        'gpu': gpu_name,
+        'gpu_driver': driver or None,
+        'gpu_vendor': vendor,
+        'gpu_device': device_id,
+        'drm_device': drm_device,
+        'gpu_id': gpu_id,
+    }
+
+
+def display_key(display: Dict[str, Any]) -> str:
+    """Stable blacklist key: DRM device identity plus connector."""
+    return str(display.get('display_key') or f"{display.get('drm_device') or display.get('connector') or ''}|{display.get('connector') or ''}")
+
+
+def detect_displays(max_displays: int = 8, blacklisted_keys=None) -> List[Dict[str, Any]]:
     """Return a list of detected DRM connector displays.
 
     Each entry: { display_index, connector, label, width, height, refresh_rate, enabled, connected }
@@ -64,6 +104,7 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
     except (TypeError, ValueError):
         display_limit = MAX_DISPLAYS
 
+    blacklist = {str(value) for value in (blacklisted_keys or []) if isinstance(value, str) and value}
     if drm_root.exists():
         connectors = []
         for entry in sorted(drm_root.iterdir()):
@@ -85,6 +126,10 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
                 break
             entry = conn['entry']
             connector = conn['name'].split('-', 1)[1] if '-' in conn['name'] else conn['name']
+            gpu = _gpu_metadata(entry)
+            key = f"{gpu['drm_device']}|{connector}"
+            if key in blacklist:
+                continue
             width = _read_int(entry / 'modes') and None
             # best-effort parse modes file (similar to display.rs parse_mode_line)
             width_val = None
@@ -108,6 +153,8 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
                 'connected': conn['status'] == 'connected',
                 'enabled': conn['enabled'] and conn['status'] == 'connected',
                 'last_error': None,
+                **gpu,
+                'display_key': key,
             })
 
     # No physical connector means no supported display. Never synthesize a

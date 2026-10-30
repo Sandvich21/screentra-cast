@@ -4,6 +4,19 @@ const PLAYER_URL_PARAMS = new URLSearchParams(window.location.search);
 const PLAYER_HASH_PARAMS = new URLSearchParams(window.location.hash.slice(1));
 const PLAYER_CAPABILITY = PLAYER_HASH_PARAMS.get('player_capability') || PLAYER_URL_PARAMS.get('player_capability') || '';
 const PLAYER_RENDERER_URL = PLAYER_HASH_PARAMS.get('renderer_url') || '';
+const PLAYER_CLIENT_ID = PLAYER_URL_PARAMS.get('client_id') || '';
+function cameraStreamUrl(widgetId, layoutId) {
+  if (PLAYER_RENDERER_URL) {
+    return PLAYER_RENDERER_URL.replace(/\/?$/, '/') + 'camera-stream.mjpeg?widget_id=' + encodeURIComponent(String(widgetId || ''));
+  }
+  layoutId = layoutId || window.__ripleyCameraLayoutId || '';
+  if (!layoutId) return '';
+  var url = '/camera-stream.mjpeg?layout_id=' + encodeURIComponent(String(layoutId)) + '&widget_id=' + encodeURIComponent(String(widgetId || ''));
+  if (PLAYER_CLIENT_ID && PLAYER_CAPABILITY) {
+    url += '&client_id=' + encodeURIComponent(PLAYER_CLIENT_ID) + '&player_capability=' + encodeURIComponent(PLAYER_CAPABILITY);
+  }
+  return url;
+}
 function playerFetch(url, options) {
   options = options || {};
   const headers = new Headers(options.headers || {});
@@ -443,19 +456,27 @@ function ripleyTplSample(el, widgetProps) {
 }
 function ripleyTemplateRepeatCount(widgetProps, el) {
   var rep = el.repeat || {};
-  // The template editor stores repeat groups as repeat.group + gap_y.  The
-  // actual number of rows belongs to the layout widget (weather shown_days,
-  // calendar max_events), so layout/player rendering must expand grouped
-  // elements here instead of relying only on repeat.count.
+  // The template editor uses one non-repeated Calendar row as the event-0
+  // exemplar. max_events is the total visible event count, so the grouped
+  // rows must consume the remaining slots rather than adding one blank row.
   if (rep.group) {
     var isCalendar = widgetProps && String(widgetProps._widget_type || widgetProps.widget_type || widgetProps.type || '').toLowerCase() === 'calendar';
+    if (isCalendar) {
+      var requested = Math.max(1, Math.min(30, Number(widgetProps.max_events) || Number(rep.count) || 5));
+      var elements = Array.isArray(widgetProps.template_elements) ? widgetProps.template_elements : [];
+      var hasCalendarExemplar = elements.some(function(item) {
+        var p = item && item.props || {};
+        var source = p.variable_source || (item && item.type === 'variable_icon' ? 'weather' : 'date');
+        return source === 'calendar' && !(item.repeat && item.repeat.group);
+      });
+      return hasCalendarExemplar ? Math.max(1, requested - 1) : requested;
+    }
     if (rep.hide_if_empty && isCalendar && Array.isArray(widgetProps._calendar_events)) {
       var requestedCalendarCount = Math.max(1, Math.min(30, Number(widgetProps.max_events) || Number(rep.count) || 5));
       return Math.min(requestedCalendarCount, widgetProps._calendar_events.length);
     }
     if (widgetProps && Array.isArray(widgetProps.template_elements)) {
       var wt = String(widgetProps._widget_type || widgetProps.widget_type || widgetProps.type || '').toLowerCase();
-      if (wt === 'calendar') return Math.max(1, Math.min(30, Number(widgetProps.max_events) || Number(rep.count) || 5));
       if (wt === 'traffic') {
         var trafficEvents = ripleyTrafficEventsForRepeatGroup(widgetProps, el);
         var trafficCount = trafficEvents.length;
@@ -464,6 +485,7 @@ function ripleyTemplateRepeatCount(widgetProps, el) {
         if (hideTrafficGroup && trafficCount === 0) return 0;
         return hideTrafficGroup ? Math.min(requestedTrafficCount, trafficCount) : requestedTrafficCount;
       }
+      if (wt === 'calendar') return Math.max(1, Math.min(30, Number(widgetProps.max_events) || Number(rep.count) || 5));
     }
     return Math.max(1, Math.min(30, Number((widgetProps || {}).shown_days) || Number(rep.count) || 4));
   }
@@ -733,12 +755,39 @@ function ripleyCalendarRequiredEventCount(widgetProps) {
   return Math.max(1, Math.min(30, required));
 }
 
-function ripleyParseCalendarText(raw, maxEvents, timeFormat) {
+function ripleyCalendarOverrideMatches(event, override) {
+  var type = String(override && (override.match_type || override.match) || (override && override.uid ? 'uid' : 'title')).toLowerCase();
+  var value = String(override && (override.match_value || override.value || (type === 'uid' ? override.uid : override.title)) || '').trim();
+  if (!value) return false;
+  if (override.source_date && String(override.source_date) !== String(event.source_date || '')) return false;
+  if (type === 'uid') return String(event.uid || '').trim() === value;
+  return String(event.summary || '').trim().toLocaleLowerCase() === value.toLocaleLowerCase();
+}
+function ripleyApplyCalendarOverrides(events, overrides, timeFormat) {
+  var list = Array.isArray(overrides) ? overrides : [];
+  return (Array.isArray(events) ? events : []).map(function(event) {
+    var override = list.find(function(item) { return ripleyCalendarOverrideMatches(event, item); });
+    if (!override) return event;
+    var date = /^\d{4}-\d{2}-\d{2}$/.test(String(override.date || '')) ? String(override.date) : event.date;
+    var time = event.time;
+    var corrected = String(override.time || '');
+    var match = corrected.match(/^(\d{1,2}):(\d{2})$/);
+    if (match) {
+      var hour = Number(match[1]), minute = Number(match[2]);
+      if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+        time = timeFormat === '24' ? String(hour).padStart(2, '0') + ':' + String(minute).padStart(2, '0') : (hour % 12 || 12) + ':' + String(minute).padStart(2, '0') + ' ' + (hour >= 12 ? 'PM' : 'AM');
+      }
+    }
+    return Object.assign({}, event, {date: date, time: time, sort_time: match ? Number(match[1]) * 60 + Number(match[2]) : event.sort_time, override_applied: true});
+  });
+}
+function ripleyParseCalendarText(raw, maxEvents, timeFormat, overrides) {
   var unfolded = String(raw || '').replace(/\r?\n[ \t]/g, ''), out = [];
   var blocks = unfolded.match(/BEGIN:VEVENT[\s\S]*?END:VEVENT/g) || [];
   blocks.forEach(function(block) {
     var start = (block.match(/(?:^|\n)DTSTART(?:;[^:]+)?:([^\n]+)/) || [])[1];
     if (start) start = start.replace(/\r$/, '');
+    var uid = (block.match(/(?:^|\n)UID:(.*)/) || [,''])[1].trim();
     var summary = (block.match(/(?:^|\n)SUMMARY:(.*)/) || [,''])[1].trim();
     var location = (block.match(/(?:^|\n)LOCATION:(.*)/) || [,''])[1].trim();
     if (!start || !summary) return;
@@ -747,14 +796,16 @@ function ripleyParseCalendarText(raw, maxEvents, timeFormat) {
     if (date) {
       var hh = (start.match(/T(\d{2})(\d{2})/) || [])[1], mm = (start.match(/T\d{2}(\d{2})/) || [])[1];
       var hhNum = hh == null ? null : Number(hh), minuteText = mm || '00';
+      var sortTime = hhNum == null ? 0 : hhNum * 60 + Number(minuteText);
       if (hhNum == null) time = 'All day';
       else if (timeFormat === '24') time = String(hhNum).padStart(2, '0') + ':' + minuteText;
       else { var ap = hhNum >= 12 ? 'PM' : 'AM'; time = (hhNum % 12 || 12) + ':' + minuteText + ' ' + ap; }
-      out.push({summary: summary, location: location, time: time, date: date[1] + '-' + date[2] + '-' + date[3]});
+      out.push({uid: uid, source_start: start, source_date: date[1] + '-' + date[2] + '-' + date[3], summary: summary, location: location, time: time, date: date[1] + '-' + date[2] + '-' + date[3], sort_time: sortTime});
     }
   });
+  out = ripleyApplyCalendarOverrides(out, overrides, timeFormat);
   var todayKey = new Date().toISOString().slice(0, 10);
-  return out.filter(function(event){ return event.date >= todayKey; }).sort(function(a,b){return a.date.localeCompare(b.date) || a.time.localeCompare(b.time);}).slice(0, Math.max(1, Math.min(30, Number(maxEvents) || 7)));
+  return out.filter(function(event){ return event.date >= todayKey; }).sort(function(a,b){return a.date.localeCompare(b.date) || (Number(a.sort_time) || 0) - (Number(b.sort_time) || 0) || a.summary.localeCompare(b.summary);}).slice(0, Math.max(1, Math.min(30, Number(maxEvents) || 7)));
 }
 async function ripleyLoadCalendarData(widgetProps) {
   var url = widgetProps.ics_url || widgetProps.ical_url || widgetProps.ical || widgetProps.calendar_url || '';
@@ -762,7 +813,7 @@ async function ripleyLoadCalendarData(widgetProps) {
   try {
     var response = await playerFetch('/api/ics-proxy?url=' + encodeURIComponent(url), {cache:'no-store'});
     if (!response.ok) throw new Error('calendar ' + response.status);
-    widgetProps._calendar_events = ripleyParseCalendarText(await readPlayerTextBounded(response), ripleyCalendarRequiredEventCount(widgetProps), widgetProps.time_format === '24' ? '24' : '12');
+    widgetProps._calendar_events = ripleyParseCalendarText(await readPlayerTextBounded(response), ripleyCalendarRequiredEventCount(widgetProps), widgetProps.time_format === '24' ? '24' : '12', widgetProps.calendar_time_overrides);
   } catch (_) { widgetProps._calendar_events = []; }
   return widgetProps._calendar_events;
 }
@@ -1063,14 +1114,25 @@ function buildWidgetHTML(w) {
       html += '<div data-image-widget-id="' + ripleyTplEsc(w.id) + '" aria-hidden="true" style="width:100%;height:100%;"></div>';
     }
   } else if (w.widget_type === 'camera') {
-    var cameraCaptureEnabled = p.capture_enabled === true;
-    var cameraFilter = ripleyCameraFilterName(p.filter);
-    var cameraFilterCss = ripleyCameraFilterCss(cameraFilter);
-    var cameraFilterOverlay = ripleyCameraFilterOverlay(cameraFilter, w.id);
-    if (cameraCaptureEnabled) {
-      html += '<div style="width:100%;height:100%;position:relative;background:#111827;overflow:hidden;display:flex;align-items:center;justify-content:center;"><video data-camera-widget-id="' + ripleyTplEsc(w.id) + '" data-camera-filter="' + cameraFilter + '" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;background:#111827;filter:' + cameraFilterCss + ';"></video>' + cameraFilterOverlay + '<span data-camera-status="' + ripleyTplEsc(w.id) + '" style="position:absolute;left:.5rem;bottom:.5rem;padding:.25rem .45rem;border-radius:.35rem;background:rgba(15,23,42,.8);color:#cbd5e1;font:600 12px system-ui,sans-serif;">Starting local camera…</span></div>';
+    var cameraStreamWidget = w._addon_type === 'rtsp-stream' || p._addon_type === 'rtsp-stream';
+    if (cameraStreamWidget) {
+      var cameraStreamUrlValue = cameraStreamUrl(w.id, w._layout_id);
+      var streamFit = ['cover', 'contain', 'fill'].indexOf(p.fit) >= 0 ? p.fit : 'cover';
+      if (cameraStreamUrlValue) {
+        html += '<div style="width:100%;height:100%;position:relative;background:#020617;overflow:hidden;"><img data-camera-stream-widget-id="' + ripleyTplEsc(w.id) + '" data-camera-stream-reconnect="' + ripleyTplEsc(String(Math.max(1, Math.min(60, Number(p.reconnect_seconds) || 5)))) + '" src="' + ripleyTplEsc(cameraStreamUrlValue) + '" alt="" style="width:100%;height:100%;object-fit:' + streamFit + ';background:#020617;"><span data-camera-stream-status="' + ripleyTplEsc(w.id) + '" style="position:absolute;left:.5rem;bottom:.5rem;padding:.25rem .45rem;border-radius:.35rem;background:rgba(2,6,23,.8);color:#cbd5e1;font:600 12px system-ui,sans-serif;">Connecting to camera…</span></div>';
+      } else {
+        html += '<div data-camera-stream-widget-id="' + ripleyTplEsc(w.id) + '" style="width:100%;height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.4rem;background:#020617;border:1px dashed #334155;color:#94a3b8;font:600 clamp(12px,2cqw,22px) system-ui,sans-serif;text-align:center;"><div>📹 rstp widget</div><small style="font-weight:400;">Available on a physical player with FFmpeg</small></div>';
+      }
     } else {
-      html += '<div data-camera-widget-id="' + ripleyTplEsc(w.id) + '" data-camera-placeholder="' + ripleyTplEsc(w.id) + '" style="width:100%;height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.4rem;background:#111827;border:1px dashed #64748b;color:#cbd5e1;font:600 clamp(12px,2cqw,22px) system-ui,sans-serif;text-align:center;"><div>📷 Camera preview</div><small style="color:#94a3b8;font-size:.7em;">capture disabled</small></div>';
+      var cameraCaptureEnabled = p.capture_enabled === true;
+      var cameraFilter = ripleyCameraFilterName(p.filter);
+      var cameraFilterCss = ripleyCameraFilterCss(cameraFilter);
+      var cameraFilterOverlay = ripleyCameraFilterOverlay(cameraFilter, w.id);
+      if (cameraCaptureEnabled) {
+        html += '<div style="width:100%;height:100%;position:relative;background:#111827;overflow:hidden;display:flex;align-items:center;justify-content:center;"><video data-camera-widget-id="' + ripleyTplEsc(w.id) + '" data-camera-filter="' + cameraFilter + '" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;background:#111827;filter:' + cameraFilterCss + ';"></video>' + cameraFilterOverlay + '<span data-camera-status="' + ripleyTplEsc(w.id) + '" style="position:absolute;left:.5rem;bottom:.5rem;padding:.25rem .45rem;border-radius:.35rem;background:rgba(15,23,42,.8);color:#cbd5e1;font:600 12px system-ui,sans-serif;">Starting local camera…</span></div>';
+      } else {
+        html += '<div data-camera-widget-id="' + ripleyTplEsc(w.id) + '" data-camera-placeholder="' + ripleyTplEsc(w.id) + '" style="width:100%;height:100%;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.4rem;background:#111827;border:1px dashed #64748b;color:#cbd5e1;font:600 clamp(12px,2cqw,22px) system-ui,sans-serif;text-align:center;"><div>📷 Camera preview</div><small style="color:#94a3b8;font-size:.7em;">capture disabled</small></div>';
+      }
     }
   } else if (w.widget_type === 'traffic') {
     var trafficAllEvents = Array.isArray(p._traffic_data && p._traffic_data.events) ? p._traffic_data.events : [];
@@ -1304,11 +1366,13 @@ async function startCountdownRuntime(root, currentLayout, clientId, layoutCache,
     // fallback if the fresh request fails.
     var target = await fetchAndCacheLayout(targetId, true) || layoutCache[targetId];
     if (!target) { lg('Countdown target layout missing: ' + targetId); return; }
-    root.innerHTML = (target.widgets || []).slice().sort(function(a,b){ return a.z - b.z; }).map(buildWidgetHTML).join('');
+    window.__ripleyCameraLayoutId = target.id || '';
+    root.innerHTML = (target.widgets || []).slice().sort(function(a,b){ return a.z - b.z; }).map(function(widget){ return buildWidgetHTML(Object.assign({}, widget, {_layout_id: target.id})); }).join('');
     ripleyFitTrafficTemplateText(root);
     injectInstalledFontsIntoIframes(root);
     initVideoWidgets(target.widgets || [], root);
     initCameraWidgets(target.widgets || [], root);
+    initCameraStreamWidgets(target.widgets || [], root);
     initImageWidgets(target.widgets || [], root);
     cacheLayout(target);
     await startCountdownRuntime(root, target, clientId, layoutCache, fetchAndCacheLayout, cacheLayout, wireInteractiveRuntime);
@@ -1422,6 +1486,137 @@ function initCameraWidgets(widgets, root) {
       var status = root.querySelector ? root.querySelector('[data-camera-status="' + ripleyTplEsc(w.id) + '"]') : null;
       if (status) status.textContent = 'Camera unavailable';
     });
+  });
+}
+
+function previewCameraAuthToken() {
+  try {
+    var token = localStorage.getItem('signage.adminToken') || '';
+    return token ? (token.indexOf('Bearer ') === 0 ? token : 'Bearer ' + token) : '';
+  } catch (_) { return ''; }
+}
+function startAuthenticatedCameraPreview(node, status, retryMs) {
+  if (node.__cameraPreviewRetry) { clearTimeout(node.__cameraPreviewRetry); node.__cameraPreviewRetry = null; }
+  if (node.__cameraPreviewAbort) { try { node.__cameraPreviewAbort.abort(); } catch (_) {} }
+  var token = previewCameraAuthToken();
+  if (!token) {
+    if (status) status.textContent = 'Preview authentication required';
+    return;
+  }
+  var controller = new AbortController();
+  node.__cameraPreviewAbort = controller;
+  var responseUrl = node.getAttribute('data-camera-stream-url') || node.src;
+  fetch(responseUrl, { headers: { Authorization: token }, cache: 'no-store', signal: controller.signal }).then(function(response) {
+    if (!response.ok || !response.body) throw new Error('camera stream HTTP ' + response.status);
+    if (status) status.textContent = '';
+    var reader = response.body.getReader();
+    var buffer = new Uint8Array(0);
+    var previousUrl = '';
+    function append(part) {
+      var merged = new Uint8Array(buffer.length + part.length);
+      merged.set(buffer); merged.set(part, buffer.length); buffer = merged;
+    }
+    function consume() {
+      var soi = -1, eoi = -1;
+      for (var i = 0; i + 1 < buffer.length; i++) {
+        if (buffer[i] === 0xff && buffer[i + 1] === 0xd8) { soi = i; break; }
+      }
+      if (soi < 0) { if (buffer.length > 65536) buffer = buffer.slice(buffer.length - 2); return false; }
+      for (var j = soi + 2; j + 1 < buffer.length; j++) {
+        if (buffer[j] === 0xff && buffer[j + 1] === 0xd9) { eoi = j + 2; break; }
+      }
+      if (eoi < 0) { if (soi > 0) buffer = buffer.slice(soi); return false; }
+      var blob = new Blob([buffer.slice(soi, eoi)], { type: 'image/jpeg' });
+      var nextUrl = URL.createObjectURL(blob);
+      node.src = nextUrl;
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+      previousUrl = nextUrl;
+      buffer = buffer.slice(eoi);
+      return true;
+    }
+    function read() {
+      return reader.read().then(function(part) {
+        if (part.done) throw new Error('camera stream ended');
+        append(part.value || new Uint8Array());
+        while (consume()) {}
+        return read();
+      });
+    }
+    return read();
+  }).catch(function(error) {
+    if (controller.signal.aborted) return;
+    if (status) status.textContent = 'Camera unavailable; retrying…';
+    node.__cameraPreviewRetry = setTimeout(function() {
+      node.__cameraPreviewRetry = null;
+      startAuthenticatedCameraPreview(node, status, retryMs);
+    }, retryMs);
+  });
+}
+function initCameraStreamWidgets(widgets, root) {
+  root = root || document;
+  var nodes = root.querySelectorAll ? root.querySelectorAll('[data-camera-stream-widget-id]') : [];
+  (widgets || []).forEach(function(w) {
+    var p = w.props || {};
+    if (w.widget_type !== 'camera' || (typeof p.stream_url !== 'string' && p._addon_type !== 'rtsp-stream')) return;
+    var node = null;
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].getAttribute('data-camera-stream-widget-id') === String(w.id) && nodes[i].tagName === 'IMG') { node = nodes[i]; break; }
+    }
+    if (!node || !node.src) return;
+    var status = root.querySelector ? root.querySelector('[data-camera-stream-status="' + ripleyTplEsc(w.id) + '"]') : null;
+    var retryMs = Math.max(1000, Math.min(60000, Number(node.getAttribute('data-camera-stream-reconnect')) * 1000 || 5000));
+    var stallLimit = 90000;
+    var retryTimer = null;
+    var reconnecting = false;
+    var baseUrl = cameraStreamUrl(w.id);
+    function reconnect() {
+      if (reconnecting || !baseUrl) return;
+      reconnecting = true;
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      node.removeAttribute('src');
+      node.src = 'about:blank';
+      setTimeout(function() {
+        node.src = baseUrl + '&retry=' + Date.now();
+        reconnecting = false;
+      }, 400);
+    }
+    if (typeof ripleyPreviewMode !== 'undefined' && ripleyPreviewMode) {
+      node.setAttribute('data-camera-stream-url', node.src);
+      node.onerror = null;
+      startAuthenticatedCameraPreview(node, status, retryMs);
+      return;
+    }
+    node.onerror = function() {
+      if (status) status.textContent = 'Camera unavailable; retrying…';
+      if (retryTimer || reconnecting) return;
+      retryTimer = setTimeout(function() { retryTimer = null; reconnect(); }, retryMs);
+    };
+    node.onload = function() { if (status) status.textContent = ''; };
+    var canvas = document.createElement('canvas');
+    canvas.width = 16;
+    canvas.height = 9;
+    var context = canvas.getContext('2d', {willReadFrequently: true});
+    if (!context) return;
+    var lastSignature = '';
+    var unchangedSince = Date.now();
+    node.__cameraWatchdog = setInterval(function() {
+      if (!node.isConnected) { clearInterval(node.__cameraWatchdog); return; }
+      if (!node.complete || !node.naturalWidth || reconnecting) return;
+      var signature = '';
+      try {
+        context.drawImage(node, 0, 0, 16, 9);
+        var pixels = context.getImageData(0, 0, 16, 9).data;
+        var sum = 0;
+        for (var j = 0; j < pixels.length; j += 16) sum = (sum + pixels[j] * 3 + pixels[j + 1] * 5 + pixels[j + 2] * 7) >>> 0;
+        signature = String(sum);
+      } catch (_) { return; }
+      if (signature !== lastSignature) {
+        lastSignature = signature;
+        unchangedSince = Date.now();
+      } else if (Date.now() - unchangedSince >= stallLimit) {
+        reconnect();
+      }
+    }, 5000);
   });
 }
 
@@ -1616,7 +1811,7 @@ async function init() {
   async function fetchAndCacheLayout(layoutId, forceFetch) {
     if (!forceFetch && layoutCache[layoutId]) return layoutCache[layoutId];
     try {
-      var ly = await playerFetch('/api/layouts/' + encodeURIComponent(layoutId), {cache:'no-store'}).then(function(r){
+      var ly = await playerFetch('/api/layouts/' + encodeURIComponent(layoutId) + '/player', {cache:'no-store'}).then(function(r){
         if (!r.ok) throw new Error('layout HTTP ' + r.status);
         return readPlayerJsonBounded(r);
       });
@@ -1673,17 +1868,20 @@ async function init() {
         // slideshow; for interactive layouts we just render straight into the
         // single region (the slideshow is paused while interactive is up).
         var rg = root;
-        rg.innerHTML = widgetsFilter(currentLayout.widgets).map(buildWidgetHTML).join('');
+        window.__ripleyCameraLayoutId = currentLayout.id || '';
+        rg.innerHTML = widgetsFilter(currentLayout.widgets).map(function(widget){ return buildWidgetHTML(Object.assign({}, widget, {_layout_id: currentLayout.id})); }).join('');
         ripleyFitTrafficTemplateText(rg);
         cacheLayout(currentLayout);
         var targetWidgets = widgetsFilter(target.widgets).sort(function(a,b){ return a.z - b.z; });
         // Defer the swap so any error above doesn't strand the user.
         setTimeout(function(){
-          rg.innerHTML = targetWidgets.map(buildWidgetHTML).join('');
+          window.__ripleyCameraLayoutId = target.id || '';
+          rg.innerHTML = targetWidgets.map(function(widget){ return buildWidgetHTML(Object.assign({}, widget, {_layout_id: target.id})); }).join('');
           ripleyFitTrafficTemplateText(rg);
           injectInstalledFontsIntoIframes(rg);
           initVideoWidgets(target.widgets || [], rg);
           initCameraWidgets(target.widgets || [], rg);
+          initCameraStreamWidgets(target.widgets || [], rg);
           initImageWidgets(target.widgets || [], rg);
           cacheLayout(target);
           wireInteractiveRuntime(rg, target, clientId);
@@ -1746,13 +1944,15 @@ async function init() {
         }
       }
       var html = '';
-      for (var j = 0; j < ws.length; j++) { html += buildWidgetHTML(ws[j]); }
+      window.__ripleyCameraLayoutId = ly.id || '';
+      for (var j = 0; j < ws.length; j++) { html += buildWidgetHTML(Object.assign({}, ws[j], {_layout_id: ly.id})); }
       layer.innerHTML = html;
       ripleyFitTrafficTemplateText(layer);
       injectInstalledFontsIntoIframes(layer);
       initMusicWidgets(ws);
       initVideoWidgets(ws, layer);
       initCameraWidgets(ws, layer);
+      initCameraStreamWidgets(ws, layer);
       initImageWidgets(ws, layer);
       // Wire interactive runtime if this layer is the active one and the
       // layout is interactive (the slideshow engine for non-interactive

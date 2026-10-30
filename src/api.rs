@@ -11,6 +11,7 @@ use crate::schedule::ScheduleEntry;
 use crate::system::get_system_status;
 use crate::traffic::{TrafficProvider, TrafficQuery};
 use axum::{
+    body::Body,
     extract::{DefaultBodyLimit, Extension, FromRef, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json as AxumJson, Response},
@@ -1003,6 +1004,20 @@ impl ClientRepository {
         }
     }
 
+        async fn list_client_display_blacklist(&self, client_id: &str) -> Result<Vec<String>, String> {
+            match self {
+                Self::Sqlite(db) => db.list_client_display_blacklist(client_id),
+                Self::Postgres(db) => db.list_client_display_blacklist(client_id).await,
+            }
+        }
+
+        async fn set_client_display_blacklist(&self, client_id: &str, keys: &[String]) -> Result<bool, String> {
+            match self {
+                Self::Sqlite(db) => db.set_client_display_blacklist(client_id, keys),
+                Self::Postgres(db) => db.set_client_display_blacklist(client_id, keys).await,
+            }
+        }
+
     async fn list_client_displays(
         &self,
         client_id: &str,
@@ -1275,6 +1290,9 @@ pub fn router(runtime_state: RuntimeState) -> Router {
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route("/api/layouts/{id}/render", get(render_layout))
+        .route("/api/layouts/{id}/player", get(get_player_layout))
+        .route("/api/layouts/{id}/edit", get(get_edit_layout))
+        .route("/camera-stream.mjpeg", get(camera_stream_mjpeg))
         .route("/api/layouts/{id}/publish", post(publish_layout))
         .route("/api/layouts/{id}/revisions", get(list_layout_revisions))
         .route("/api/layouts/{id}/propagation", get(layout_propagation_status))
@@ -1947,14 +1965,34 @@ async fn delete_layout_folder(
 async fn list_layouts(
     State(repository): State<ClientRepository>,
 ) -> Result<AxumJson<Vec<Layout>>, (StatusCode, String)> {
-    repository
+    let layouts = repository
         .list_layouts()
         .await
-        .map(AxumJson)
-        .map_err(|_| internal_server_error())
+        .map_err(|_| internal_server_error())?
+        .into_iter()
+        .map(|mut layout| {
+            redact_camera_stream_sources(&mut layout);
+            layout
+        })
+        .collect();
+    Ok(AxumJson(layouts))
 }
 
 async fn get_layout(
+    State(repository): State<ClientRepository>,
+    Path(id): Path<String>,
+) -> Result<AxumJson<Layout>, (StatusCode, String)> {
+    validate_optional_layout_id(Some(&id))?;
+    let mut layout = repository
+        .get_layout(&id)
+        .await
+        .map_err(|_| internal_server_error())?
+        .ok_or((StatusCode::NOT_FOUND, "Layout not found".to_string()))?;
+    redact_camera_stream_sources(&mut layout);
+    Ok(AxumJson(layout))
+}
+
+async fn get_edit_layout(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
 ) -> Result<AxumJson<Layout>, (StatusCode, String)> {
@@ -2053,7 +2091,13 @@ async fn update_layout(
     AxumJson(mut layout): AxumJson<Layout>,
 ) -> Result<AxumJson<Layout>, (StatusCode, String)> {
     validate_optional_layout_id(Some(&id))?;
+    let existing = repository
+        .get_layout(&id)
+        .await
+        .map_err(|_| internal_server_error())?
+        .ok_or((StatusCode::NOT_FOUND, "Layout not found".to_string()))?;
     layout.id = id;
+    preserve_camera_stream_sources(&existing, &mut layout);
     if layout.page_type.is_empty() {
         layout.page_type = "single".to_string();
     }
@@ -8197,6 +8241,14 @@ struct DisplayReport {
     active_layout_revision: Option<i64>,
     #[serde(default)]
     last_error: Option<String>,
+    #[serde(default)]
+    display_key: Option<String>,
+    #[serde(default)]
+    gpu: Option<String>,
+    #[serde(default)]
+    gpu_driver: Option<String>,
+    #[serde(default)]
+    drm_device: Option<String>,
 }
 
 async fn adopt_client(
@@ -9732,6 +9784,11 @@ struct ClientDisplayInfo {
     port: i64,
     orientation: String,
     control_method: String,
+    display_key: Option<String>,
+    gpu: Option<String>,
+    gpu_driver: Option<String>,
+    drm_device: Option<String>,
+    blacklisted: bool,
     /// Present when the assigned layout is a set page
     #[serde(skip_serializing_if = "Option::is_none")]
     layout_set: Option<LayoutSetWithItems>,
@@ -9918,12 +9975,20 @@ async fn list_client_displays(
         .list_client_displays(&id)
         .await
         .map_err(|_| internal_server_error())?;
+    let blacklisted_keys = repository
+        .list_client_display_blacklist(&id)
+        .await
+        .map_err(|_| internal_server_error())?;
     let mut out = Vec::<ClientDisplayInfo>::new();
     for record in records {
         let display_index = record.display_index;
         if player_display_index.is_some_and(|allowed| allowed != display_index as i64) {
             continue;
         }
+        let display_key = record.display_key.clone();
+        let blacklisted = display_key
+            .as_ref()
+            .is_some_and(|key| blacklisted_keys.iter().any(|item| item == key));
         let enabled = record.enabled;
         let last_seen = record.last_seen.clone();
         let assigned_layout_id = record.assigned_layout_id.clone();
@@ -9944,6 +10009,11 @@ async fn list_client_displays(
             port: 3900 + display_index,
             orientation: record.orientation,
             control_method: record.control_method,
+            display_key,
+            gpu: record.gpu,
+            gpu_driver: record.gpu_driver,
+            drm_device: record.drm_device,
+            blacklisted,
             layout_set: None,
         });
     }
@@ -10407,6 +10477,224 @@ struct LayoutRender {
     canvas_orientation: String,
 }
 
+fn redact_camera_stream_sources(layout: &mut Layout) {
+    for widget in &mut layout.widgets {
+        let is_rtsp_addon = widget.widget_type == crate::models::WidgetType::Camera
+            && widget
+                .props
+                .get("_addon_type")
+                .and_then(serde_json::Value::as_str)
+                == Some("rtsp-stream");
+        if is_rtsp_addon {
+            if let Some(props) = widget.props.as_object_mut() {
+                props.remove("stream_url");
+            }
+        }
+    }
+}
+
+/// Keep protected RTSP credentials from being destroyed by a redacted layout
+/// round-trip. Public layout reads intentionally omit `stream_url`; an older
+/// editor or a non-editor write may therefore send the same widget back
+/// without that property. A missing URL is not an explicit disconnect action,
+/// so preserve the authoritative value on updates.
+fn preserve_camera_stream_sources(existing: &Layout, incoming: &mut Layout) {
+    for old_widget in &existing.widgets {
+        let is_rtsp = old_widget.widget_type == crate::models::WidgetType::Camera
+            && old_widget
+                .props
+                .get("_addon_type")
+                .and_then(serde_json::Value::as_str)
+                == Some("rtsp-stream");
+        let Some(stream_url) = old_widget
+            .props
+            .get("stream_url")
+            .and_then(serde_json::Value::as_str)
+            .filter(|url| !url.trim().is_empty())
+        else {
+            continue;
+        };
+        if !is_rtsp {
+            continue;
+        }
+        let Some(new_widget) = incoming.widgets.iter_mut().find(|widget| widget.id == old_widget.id) else {
+            continue;
+        };
+        if new_widget.widget_type != crate::models::WidgetType::Camera {
+            continue;
+        }
+        let Some(props) = new_widget.props.as_object_mut() else {
+            continue;
+        };
+        let missing = props
+            .get("stream_url")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|url| url.trim().is_empty());
+        if missing {
+            props.insert("stream_url".to_string(), serde_json::Value::String(stream_url.to_string()));
+        }
+    }
+}
+
+async fn get_player_layout(
+    State(repository): State<ClientRepository>,
+    Path(id): Path<String>,
+) -> Result<AxumJson<Layout>, (StatusCode, String)> {
+    validate_optional_layout_id(Some(&id))?;
+    let mut layout = repository
+        .get_layout(&id)
+        .await
+        .map_err(|_| internal_server_error())?
+        .ok_or((StatusCode::NOT_FOUND, "Layout not found".to_string()))?;
+    redact_camera_stream_sources(&mut layout);
+    Ok(AxumJson(layout))
+}
+
+#[derive(Debug, Deserialize)]
+struct CameraStreamQuery {
+    layout_id: String,
+    widget_id: String,
+    client_id: Option<String>,
+    player_capability: Option<String>,
+}
+
+fn camera_stream_options(props: &serde_json::Value) -> (u32, u32, bool) {
+    let object = props.as_object();
+    let bounded_u32 = |key: &str, default: u32, minimum: u32, maximum: u32| {
+        object
+            .and_then(|values| values.get(key))
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| (value as u32).clamp(minimum, maximum))
+            .unwrap_or(default)
+    };
+    let output_fps = bounded_u32("output_fps", 5, 1, 30);
+    let output_width = bounded_u32("output_width", 960, 320, 1920);
+    let interpolate = object
+        .and_then(|values| values.get("frame_interpolation"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        && output_fps > 1;
+    (output_fps, output_width, interpolate)
+}
+
+async fn camera_stream_mjpeg(
+    State(repository): State<ClientRepository>,
+    Extension(auth): Extension<crate::auth::AuthState>,
+    headers: HeaderMap,
+    Query(query): Query<CameraStreamQuery>,
+) -> Result<Response, (StatusCode, String)> {
+    validate_optional_layout_id(Some(&query.layout_id))?;
+    if query.widget_id.trim().is_empty() || query.widget_id.len() > 128 {
+        return Err((StatusCode::BAD_REQUEST, "invalid camera widget identifier".to_string()));
+    }
+
+    let authorized = match (query.client_id.as_deref(), query.player_capability.as_deref()) {
+        (Some(client_id), Some(capability)) => auth.verify_player_capability(capability, client_id, None),
+        _ => match crate::auth::extract_token(&headers) {
+            Some(token) => auth.token_payload(&token).await.is_some(),
+            None => false,
+        },
+    };
+    if !authorized {
+        return Err((StatusCode::UNAUTHORIZED, "camera stream authorization required".to_string()));
+    }
+
+    let layout = repository
+        .get_layout(&query.layout_id)
+        .await
+        .map_err(|_| internal_server_error())?
+        .ok_or((StatusCode::NOT_FOUND, "Layout not found".to_string()))?;
+    let widget = layout
+        .widgets
+        .iter()
+        .find(|widget| widget.id == query.widget_id)
+        .ok_or((StatusCode::NOT_FOUND, "Camera widget not found".to_string()))?;
+    let is_rtsp_addon = widget.widget_type == crate::models::WidgetType::Camera
+        && widget
+            .props
+            .get("_addon_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("rtsp-stream");
+    if !is_rtsp_addon {
+        return Err((StatusCode::BAD_REQUEST, "Widget is not an RTSP camera".to_string()));
+    }
+    let stream_url = widget
+        .props
+        .get("stream_url")
+        .and_then(serde_json::Value::as_str)
+        .filter(|url| {
+            url.len() <= 4096
+                && (url.to_ascii_lowercase().starts_with("rtsp://")
+                    || url.to_ascii_lowercase().starts_with("rtsps://"))
+        })
+        .ok_or((StatusCode::BAD_REQUEST, "Camera stream URL is not configured".to_string()))?;
+
+    let (output_fps, output_width, interpolate) = camera_stream_options(&widget.props);
+    let video_filter = if interpolate {
+        let source_fps = ((output_fps + 1) / 2).max(1);
+        format!(
+            "fps={source_fps},scale={output_width}:-2:force_original_aspect_ratio=decrease,minterpolate=fps={output_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,format=yuv420p"
+        )
+    } else {
+        format!("fps={output_fps},scale={output_width}:-2:force_original_aspect_ratio=decrease")
+    };
+    let ffmpeg_binary = std::env::var("SCREENTRA_FFMPEG_BIN").unwrap_or_else(|_| "ffmpeg".to_string());
+    let mut command = tokio::process::Command::new(ffmpeg_binary);
+    command
+        .kill_on_drop(true)
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
+            "-analyzeduration",
+            "1000000",
+            "-probesize",
+            "1000000",
+            "-rtsp_transport",
+            "tcp",
+            "-timeout",
+            "10000000",
+            "-i",
+        ])
+        .arg(stream_url)
+        .args(["-an", "-vf"])
+        .arg(video_filter)
+        .args([
+            "-q:v",
+            "8",
+            "-fps_mode",
+            "vfr",
+            "-f",
+            "mpjpeg",
+            "pipe:1",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "FFmpeg is unavailable".to_string()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "FFmpeg output unavailable".to_string()))?;
+    let stream = tokio_util::io::ReaderStream::new(stdout).map(move |chunk| {
+        let _child = &child;
+        chunk
+    });
+    let body = Body::from_stream(stream);
+    Response::builder()
+        .header("content-type", "multipart/x-mixed-replace; boundary=ffserver")
+        .header("cache-control", "no-store, no-cache, must-revalidate, max-age=0")
+        .header("x-content-type-options", "nosniff")
+        .body(body)
+        .map_err(|_| internal_server_error())
+}
+
 async fn render_layout(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
@@ -10417,17 +10705,19 @@ async fn render_layout(
         .await
         .map_err(|_| internal_server_error())?
         .ok_or((StatusCode::NOT_FOUND, format!("Layout {} not found", id)))?;
-    let widgets_json = serde_json::to_value(&layout.widgets)
+    let mut public_layout = layout;
+    redact_camera_stream_sources(&mut public_layout);
+    let widgets_json = serde_json::to_value(&public_layout.widgets)
         .map_err(|_| internal_server_error())?;
     let widgets_arr = widgets_json.as_array().cloned().unwrap_or_default();
     Ok(AxumJson(LayoutRender {
-        id: layout.id,
-        name: layout.name,
+        id: public_layout.id,
+        name: public_layout.name,
         widgets: widgets_arr,
         background: String::new(),
-        width: if layout.canvas_orientation == "portrait" { 1080 } else { 1920 },
-        height: if layout.canvas_orientation == "portrait" { 1920 } else { 1080 },
-        canvas_orientation: layout.canvas_orientation,
+        width: if public_layout.canvas_orientation == "portrait" { 1080 } else { 1920 },
+        height: if public_layout.canvas_orientation == "portrait" { 1920 } else { 1080 },
+        canvas_orientation: public_layout.canvas_orientation,
     }))
 }
 
@@ -10649,7 +10939,11 @@ async fn register_client(
         refresh_rate: disp.refresh_rate,
         enabled: disp.enabled,
         last_error: disp.last_error.clone(),
-    }).collect::<Vec<_>>();
+        display_key: disp.display_key.clone(),
+                gpu: disp.gpu.clone(),
+                gpu_driver: disp.gpu_driver.clone(),
+                drm_device: disp.drm_device.clone(),
+            }).collect::<Vec<_>>();
     if let Err(_error) = repository
         .register_client(&client_record, &display_records)
         .await

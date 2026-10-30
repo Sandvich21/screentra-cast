@@ -24,6 +24,8 @@ const DISPLAY_SETTINGS_MIGRATION: &str = include_str!("../migrations/postgres/00
 const SCHEDULE_END_ACTION_MIGRATION: &str = include_str!("../migrations/postgres/0005_schedule_end_action.sql");
 const CLIENT_HEARTBEAT_CPU_TEMP_MIGRATION: &str =
     include_str!("../migrations/postgres/0007_client_heartbeat_cpu_temp.sql");
+const CLIENT_DISPLAY_BLACKLIST_MIGRATION: &str =
+    include_str!("../migrations/postgres/0008_client_display_blacklist.sql");
 
 pub fn configured_database_url() -> Result<String, String> {
     database_url_from(std::env::var(DATABASE_URL_ENV).ok())
@@ -986,7 +988,7 @@ impl PostgresStore {
             touch_binding: None, theme: None, max_displays: None,
             client_auth_token_hash: None,
         };
-        self.register_client(&client, &[ClientDisplayRegistration { display_index: 0, connector: None, label: None, width: None, height: None, refresh_rate: None, enabled: None, last_error: None }]).await?;
+        self.register_client(&client, &[ClientDisplayRegistration { display_index: 0, connector: None, label: None, width: None, height: None, refresh_rate: None, enabled: None, last_error: None, display_key: None, gpu: None, gpu_driver: None, drm_device: None }]).await?;
         if self.publish_scene_assignments(&client_id, &[(0, Some(scene_id.clone()))]).await? != 1 {
             return Err("scene publish affected the wrong number of displays".into());
         }
@@ -2480,7 +2482,7 @@ impl PostgresStore {
             touch_binding: None, theme: None, max_displays: None,
             client_auth_token_hash: None,
         };
-        self.register_client(&client, &[ClientDisplayRegistration { display_index: 0, connector: Some("HDMI-A-1".into()), label: Some("Probe".into()), width: Some(1920), height: Some(1080), refresh_rate: Some(60.0), enabled: Some(true), last_error: None }]).await?;
+        self.register_client(&client, &[ClientDisplayRegistration { display_index: 0, connector: Some("HDMI-A-1".into()), label: Some("Probe".into()), width: Some(1920), height: Some(1080), refresh_rate: Some(60.0), enabled: Some(true), last_error: None, display_key: None, gpu: None, gpu_driver: None, drm_device: None }]).await?;
         let control = self.get_display_control(&id, 0).await?.ok_or("display control probe row missing")?;
         if control.0.as_deref() != Some("HDMI-A-1") || control.5 != true || control.6 != "normal" || control.7 != "auto" {
             return Err("display control initial state mismatch".into());
@@ -2700,7 +2702,7 @@ impl PostgresStore {
         let rows = self
             .client
             .query(
-                "SELECT client_id, display_index, connector, label, width, height, refresh_rate, enabled, assigned_layout_id, active_layout_id, last_seen, last_error, orientation, control_method FROM client_displays WHERE client_id=$1 ORDER BY display_index ASC LIMIT 4096",
+                "SELECT client_id, display_index, connector, label, width, height, refresh_rate, enabled, assigned_layout_id, active_layout_id, last_seen, last_error, orientation, control_method, display_key, gpu, gpu_driver, drm_device FROM client_displays WHERE client_id=$1 ORDER BY display_index ASC LIMIT 4096",
                 &[&client_id],
             )
             .await
@@ -2722,9 +2724,68 @@ impl PostgresStore {
                 last_error: row.get(11),
                 orientation: row.get(12),
                 control_method: row.get(13),
+                display_key: row.get(14),
+                gpu: row.get(15),
+                gpu_driver: row.get(16),
+                drm_device: row.get(17),
             })
             .collect();
         Ok((is_virtual, client_layout_id, displays))
+    }
+
+    pub async fn list_client_display_blacklist(
+        &self,
+        client_id: &str,
+    ) -> Result<Vec<String>, String> {
+        self.client
+            .query(
+                "SELECT display_key FROM client_display_blacklist WHERE client_id=$1 ORDER BY display_key LIMIT 256",
+                &[&client_id],
+            )
+            .await
+            .map(|rows| rows.into_iter().map(|row| row.get(0)).collect())
+            .map_err(|error| format!("list client display blacklist: {error}"))
+    }
+
+    pub async fn set_client_display_blacklist(
+        &self,
+        client_id: &str,
+        keys: &[String],
+    ) -> Result<bool, String> {
+        let mut connection = connect().await?;
+        let transaction = connection
+            .transaction()
+            .await
+            .map_err(|error| format!("begin client display blacklist: {error}"))?;
+        let exists = transaction
+            .query_opt("SELECT 1 FROM clients WHERE id=$1", &[&client_id])
+            .await
+            .map_err(|error| format!("check client display blacklist owner: {error}"))?
+            .is_some();
+        if !exists {
+            return Ok(false);
+        }
+        transaction
+            .execute(
+                "DELETE FROM client_display_blacklist WHERE client_id=$1",
+                &[&client_id],
+            )
+            .await
+            .map_err(|error| format!("clear client display blacklist: {error}"))?;
+        for key in keys.iter().take(256) {
+            transaction
+                .execute(
+                    "INSERT INTO client_display_blacklist (client_id, display_key) VALUES ($1,$2)",
+                    &[&client_id, key],
+                )
+                .await
+                .map_err(|error| format!("save client display blacklist: {error}"))?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("commit client display blacklist: {error}"))?;
+        Ok(true)
     }
 
     pub async fn list_client_admin_users(
@@ -2810,7 +2871,7 @@ impl PostgresStore {
             touch_binding: None, theme: None, max_displays: None,
             client_auth_token_hash: None,
         };
-        self.register_client(&client, &[ClientDisplayRegistration { display_index: 0, connector: Some("HDMI-A-1".into()), label: Some("Probe".into()), width: Some(1920), height: Some(1080), refresh_rate: Some(60.0), enabled: Some(true), last_error: None }]).await?;
+        self.register_client(&client, &[ClientDisplayRegistration { display_index: 0, connector: Some("HDMI-A-1".into()), label: Some("Probe".into()), width: Some(1920), height: Some(1080), refresh_rate: Some(60.0), enabled: Some(true), last_error: None, display_key: None, gpu: None, gpu_driver: None, drm_device: None }]).await?;
         if !self.set_client_assignment(&id, Some("client-layout")).await? {
             return Err("setting display listing client assignment affected no rows".into());
         }
@@ -2981,6 +3042,10 @@ impl PostgresStore {
             refresh_rate: Some(60.0),
             enabled: Some(true),
             last_error: None,
+            display_key: None,
+            gpu: None,
+            gpu_driver: None,
+            drm_device: None,
         };
         self.register_client(&client, &[display]).await?;
         let row = self
@@ -3060,6 +3125,7 @@ pub async fn apply_initial_schema() -> Result<(), String> {
         ("0004_schedule_display_settings", DISPLAY_SETTINGS_MIGRATION),
         ("0005_schedule_end_action", SCHEDULE_END_ACTION_MIGRATION),
         ("0007_client_heartbeat_cpu_temp", CLIENT_HEARTBEAT_CPU_TEMP_MIGRATION),
+        ("0008_client_display_blacklist", CLIENT_DISPLAY_BLACKLIST_MIGRATION),
     ] {
         let applied = transaction
             .query_opt("SELECT 1 FROM schema_migrations WHERE version=$1", &[&version])

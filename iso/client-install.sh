@@ -242,7 +242,7 @@ PACKAGES=(linux-image-amd64 initramfs-tools systemd systemd-sysv dbus dbus-user-
     whiptail sway chromium seatd libgl1-mesa-dri mesa-vulkan-drivers
     fonts-noto fonts-noto-color-emoji firmware-linux-free firmware-atheros grub-efi-amd64
     openssh-server parted dosfstools e2fsprogs rsync openssh-client wlr-randr wlrctl
-    libnss3-tools openssl efibootmgr ddcutil cec-utils)
+    libnss3-tools openssl efibootmgr ddcutil cec-utils ffmpeg)
 target_exec apt-get install -y --no-install-recommends "${PACKAGES[@]}"
 stage payload
 install -d -m 0755 "$TARGET/opt/screentra-cast" "$TARGET/var/log"

@@ -113,6 +113,20 @@ provision_postgresql() {
     log "PostgreSQL is ready: local peer-authenticated database '$POSTGRES_DB'."
 }
 
+ensure_ffmpeg() {
+    if command -v ffmpeg >/dev/null 2>&1; then
+        log "FFmpeg already installed: $(command -v ffmpeg)"
+        return 0
+    fi
+    if ! command -v apt-get >/dev/null 2>&1; then
+        log "FATAL: FFmpeg is required by the server runtime, but apt-get is unavailable."
+        exit 1
+    fi
+    log "Installing FFmpeg server runtime dependency..."
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ffmpeg
+}
+
 provision_local_tls() {
     case "$LOCAL_HOSTNAME" in
         ''|*[!a-zA-Z0-9.-]*)
@@ -195,6 +209,8 @@ if ! id "$BOARD_USER" >/dev/null 2>&1; then
 else
     log "User '$BOARD_USER' already exists."
 fi
+
+ensure_ffmpeg
 
 if [ ! -f "$ENV_FILE" ]; then
     FRESH_INSTALL="true"

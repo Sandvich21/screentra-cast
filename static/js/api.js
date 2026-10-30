@@ -152,7 +152,7 @@ window.API = {
     },
 
     async getLayout(id) {
-        const res = await fetch(`/api/layouts/${id}`);
+        const res = await fetch(`/api/layouts/${id}/edit`);
         if (!res.ok) throw new Error('Failed to fetch layout');
         return normalizeLayoutFromApi(await _readApiJsonBounded(res));
     },

@@ -199,6 +199,10 @@ pub struct ClientDisplayRegistration {
     pub refresh_rate: Option<f32>,
     pub enabled: Option<bool>,
     pub last_error: Option<String>,
+    pub display_key: Option<String>,
+    pub gpu: Option<String>,
+    pub gpu_driver: Option<String>,
+    pub drm_device: Option<String>,
 }
 #[derive(Debug, Clone)]
 pub struct ClientAdminUser {
@@ -223,6 +227,16 @@ pub struct ClientDisplayRecord {
     pub last_error: Option<String>,
     pub orientation: String,
     pub control_method: String,
+    pub display_key: Option<String>,
+    pub gpu: Option<String>,
+    pub gpu_driver: Option<String>,
+    pub drm_device: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClientDisplayBlacklist {
+    pub client_id: String,
+    pub display_key: String,
 }
 
 impl Database {
@@ -908,6 +922,30 @@ impl Database {
         tx.commit().map_err(|e| e.to_string())?;
         Ok(deleted)
     }
+    pub fn list_client_display_blacklist(&self, client_id: &str) -> Result<Vec<String>, String> {
+        let conn = self.conn()?;
+        let mut stmt = conn
+            .prepare("SELECT display_key FROM client_display_blacklist WHERE client_id = ?1 ORDER BY display_key LIMIT 256")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([client_id], |row| row.get(0)).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<String>, _>>().map_err(|e| e.to_string())
+    }
+
+    pub fn set_client_display_blacklist(&self, client_id: &str, keys: &[String]) -> Result<bool, String> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let exists: bool = tx
+            .query_row("SELECT EXISTS(SELECT 1 FROM clients WHERE id = ?1)", [client_id], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        if !exists { return Ok(false); }
+        tx.execute("DELETE FROM client_display_blacklist WHERE client_id = ?1", [client_id]).map_err(|e| e.to_string())?;
+        for key in keys {
+            tx.execute("INSERT INTO client_display_blacklist (client_id, display_key) VALUES (?1, ?2)", params![client_id, key]).map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
     pub fn set_client_display_count(
         &self,
         client_id: &str,
@@ -1099,20 +1137,25 @@ impl Database {
         .map_err(|e| e.to_string())?;
         for display in displays {
             tx.execute(
-                "INSERT INTO client_displays (client_id, display_index, connector, label, width, height, refresh_rate, enabled, last_seen, last_error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "INSERT INTO client_displays (client_id, display_index, connector, label, width, height, refresh_rate, enabled, last_seen, last_error, display_key, gpu, gpu_driver, drm_device)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(client_id, display_index) DO UPDATE SET
                     connector=excluded.connector, label=excluded.label,
                     width=COALESCE(excluded.width, client_displays.width),
                     height=COALESCE(excluded.height, client_displays.height),
                     refresh_rate=COALESCE(excluded.refresh_rate, client_displays.refresh_rate),
                     enabled=COALESCE(excluded.enabled, client_displays.enabled),
-                    last_seen=excluded.last_seen, last_error=excluded.last_error",
+                    last_seen=excluded.last_seen, last_error=excluded.last_error,
+                    display_key=COALESCE(excluded.display_key, client_displays.display_key),
+                    gpu=COALESCE(excluded.gpu, client_displays.gpu),
+                    gpu_driver=COALESCE(excluded.gpu_driver, client_displays.gpu_driver),
+                    drm_device=COALESCE(excluded.drm_device, client_displays.drm_device)",
                 params![
                     client.id, display.display_index, display.connector, display.label,
                     display.width, display.height, display.refresh_rate,
                     display.enabled.map(|v| if v { 1 } else { 0 }),
-                    client.last_seen, display.last_error,
+                    client.last_seen, display.last_error, display.display_key,
+                    display.gpu, display.gpu_driver, display.drm_device,
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -1298,7 +1341,7 @@ impl Database {
             )
             .unwrap_or((false, None));
         let mut stmt = conn
-            .prepare("SELECT client_id, display_index, connector, label, width, height, refresh_rate, enabled, assigned_layout_id, active_layout_id, last_seen, last_error, orientation, control_method FROM client_displays WHERE client_id = ?1 ORDER BY display_index ASC LIMIT 4096")
+            .prepare("SELECT client_id, display_index, connector, label, width, height, refresh_rate, enabled, assigned_layout_id, active_layout_id, last_seen, last_error, orientation, control_method, display_key, gpu, gpu_driver, drm_device FROM client_displays WHERE client_id = ?1 ORDER BY display_index ASC LIMIT 4096")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([client_id], |row| {
@@ -1317,6 +1360,10 @@ impl Database {
                     last_error: row.get(11)?,
                     orientation: row.get(12).unwrap_or_else(|_| "normal".to_string()),
                     control_method: row.get(13).unwrap_or_else(|_| "auto".to_string()),
+                    display_key: row.get(14).unwrap_or(None),
+                    gpu: row.get(15).unwrap_or(None),
+                    gpu_driver: row.get(16).unwrap_or(None),
+                    drm_device: row.get(17).unwrap_or(None),
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -1732,6 +1779,11 @@ impl Database {
                 url                        TEXT,
                 client_auth_token_hash     TEXT
             );
+            CREATE TABLE IF NOT EXISTS client_display_blacklist (
+                client_id TEXT NOT NULL,
+                display_key TEXT NOT NULL,
+                PRIMARY KEY (client_id, display_key)
+            );
             CREATE INDEX IF NOT EXISTS idx_clients_last_seen ON clients(last_seen);
             -- Idempotent migration: ALTER TABLE will fail with duplicate-column if already present; that's fine.
             -- (SQLite has no "ADD COLUMN IF NOT EXISTS" before 3.35.)
@@ -1792,6 +1844,10 @@ CREATE TABLE IF NOT EXISTS client_displays (
                 last_error         TEXT,
                 orientation        TEXT NOT NULL DEFAULT 'normal',
                 control_method      TEXT NOT NULL DEFAULT 'auto',
+                display_key         TEXT,
+                gpu                 TEXT,
+                gpu_driver          TEXT,
+                drm_device          TEXT,
                 PRIMARY KEY (client_id, display_index)
             );
 CREATE INDEX IF NOT EXISTS idx_client_displays_client ON client_displays(client_id);

@@ -538,19 +538,19 @@ required_packages() {
             # python3, sudo, curl, wget, openssl, ca-certificates, dbus, logind
             # display:  (only supported kiosk compositor) + sway (for wlr-randr)
             # browser: chromium
-            echo "python3 python3-venv sudo curl wget openssl ca-certificates dbus libnss3-tools  sway wlrctl seatd chromium ddcutil cec-utils"
+            echo "python3 python3-venv sudo curl wget openssl ca-certificates dbus libnss3-tools  sway wlrctl seatd chromium ddcutil cec-utils ffmpeg firmware-amd-graphics mesa-va-drivers vainfo"
             ;;
         fedora|rhel)
-            echo "python3 sudo curl wget openssl ca-certificates dbus nss-tools  seatd chromium"
+            echo "python3 sudo curl wget openssl ca-certificates dbus nss-tools  seatd chromium ffmpeg"
             ;;
         arch)
-            echo "python sudo curl wget openssl ca-certificates dbus nss  seatd chromium"
+            echo "python sudo curl wget openssl ca-certificates dbus nss  seatd chromium ffmpeg"
             ;;
         alpine)
-            echo "python3 sudo curl wget openssl ca-certificates dbus  seatd chromium"
+            echo "python3 sudo curl wget openssl ca-certificates dbus  seatd chromium ffmpeg"
             ;;
         suse)
-            echo "python3 sudo curl wget openssl ca-certificates dbus libnss3-tools  seatd chromium"
+            echo "python3 sudo curl wget openssl ca-certificates dbus libnss3-tools  seatd chromium ffmpeg"
             ;;
         *)
             echo ""
@@ -4260,7 +4260,8 @@ function props(w){return w.props || w.properties || {};}
 function isYouTubeUrl(u){return /(?:youtube\.com|youtu\.be)/i.test(String(u||''));}
 function youtubeId(u){const s=String(u||'');let m=s.match(/[?&]v=([^&]+)/); if(m) return m[1]; m=s.match(/youtu\.be\/([^?&/]+)/); if(m) return m[1]; m=s.match(/youtube\.com\/(?:embed|shorts)\/([^?&/]+)/); return m?m[1]:'';}
 function youtubeEmbedUrl(u,p){const id=youtubeId(u); const params=new URLSearchParams({autoplay:'1',mute:(p.mute||p.muted)?'1':'0',loop:'1',playsinline:'1',rel:'0'}); if(id) params.set('playlist',id); return id ? ('https://www.youtube.com/embed/'+encodeURIComponent(id)+'?'+params.toString()) : String(u||'');}
-function styleFor(w){const x=(Number(w.x)||0)*100,y=(Number(w.y)||0)*100,ww=(Number(w.w??w.width)||0.1)*100,hh=(Number(w.h??w.height)||0.1)*100,z=Number(w.z)||1;return `left:${x}%;top:${y}%;width:${ww}%;height:${hh}%;z-index:${z};`;}
+function cachedLayoutPercent(value){value=Number(value)||0;return Math.abs(value)>1?value/100:value;}
+function styleFor(w){const x=cachedLayoutPercent(Number(w.x)||0),y=cachedLayoutPercent(Number(w.y)||0),ww=cachedLayoutPercent(Number(w.w??w.width)||0.1),hh=cachedLayoutPercent(Number(w.h??w.height)||0.1),z=Number(w.z)||1;return `left:${x*100}%;top:${y*100}%;width:${ww*100}%;height:${hh*100}%;z-index:${z};`;}
 function wmoIcon(code){const m={'0':'☀️','1':'🌤️','2':'⛅','3':'☁️','45':'🌫️','48':'🌫️','51':'🌦️','53':'🌦️','55':'🌦️','61':'🌧️','63':'🌧️','65':'🌧️','71':'❄️','73':'❄️','75':'❄️','80':'🌦️','81':'🌧️','82':'🌧️','95':'⛈️','96':'⛈️','99':'⛈️'};return m[String(code)]||'🌤️';}
 function wmoIconHtml(code,p){const key=String(code),custom=p&&p.custom_icons&&p.custom_icons[key];if(custom)return `<img src="${esc(custom)}" style="width:100%;height:100%;object-fit:contain;">`;const n=Number(code),sun=n<=1,cloud=n>=2,rain=(n>=51&&n<=67)||(n>=80&&n<=82),snow=n>=71&&n<=77,storm=n>=95;let body='';if(sun)body+='<circle cx="28" cy="28" r="13" fill="#facc15"/><g stroke="#facc15" stroke-width="4"> <path d="M28 5v9M28 42v9M5 28h9M42 28h9M12 12l7 7M37 37l7 7M44 12l-7 7M19 37l-7 7"/></g>';if(cloud)body+='<path d="M20 47h27a12 12 0 0 0 0-24 18 18 0 0 0-34 5 10 10 0 0 0 7 19z" fill="#cbd5e1" stroke="#64748b" stroke-width="2"/>';if(rain)body+='<g stroke="#38bdf8" stroke-width="4" stroke-linecap="round"><path d="M22 43l-4 9M34 43l-4 9M46 43l-4 9"/></g>';if(snow)body+='<g stroke="#e0f2fe" stroke-width="3" stroke-linecap="round"><path d="M20 42v14M13 49h14M15 44l10 10M25 44L15 54M37 42v14M30 49h14M32 44l10 10M42 44L32 54"/></g>';if(storm)body+='<path d="M30 32h12L29 57l3-16H21l9-19z" fill="#facc15"/>';if(!body)body='<circle cx="32" cy="32" r="20" fill="#facc15"/>';return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" style="width:100%;height:100%;padding:8px;">${body}</svg>`;}
 function weatherFor(p,i){const d=p._weather_data||{},q=d.daily||{},codes=q.weather_code||q.weathercode||[],code=codes[i]??d.current_weather?.weather_code??d.current_weather?.weathercode??2,winds=q.wind_speed||q.windspeed||[],wind=winds[i]??d.current_weather?.windspeed??0;return {code,icon:wmoIcon(code),high:q.temperature_2m_max?.[i],low:q.temperature_2m_min?.[i],precip:q.precipitation_probability_max?.[i]??0,wind};}
