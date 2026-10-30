@@ -5633,12 +5633,13 @@ const btn = document.createElement('button');
       head?.insertAdjacentElement('afterbegin', toggle);
       const actions = document.createElement('div');
       actions.className = 'client-actions';
-      actions.innerHTML = `<button class="btn btn-secondary btn-sm client-nudge">Nudge</button><button class="btn btn-ghost btn-sm client-preview">Preview</button><button class="btn btn-danger btn-sm client-restart" title="Restart the client device">Restart Client</button>`;
+      actions.innerHTML = `<button class="btn btn-secondary btn-sm client-nudge">Nudge</button><button class="btn btn-ghost btn-sm client-preview">Preview</button><button class="btn btn-accent btn-sm client-live-preview">Open Live Preview</button><button class="btn btn-danger btn-sm client-restart" title="Restart the client device">Restart Client</button>`;
       const actionAnchor = card.querySelector('.client-card-footer') || card.querySelector('.client-last-seen');
       if (actionAnchor) actionAnchor.insertAdjacentElement('beforebegin', actions); else card.appendChild(actions);
       const nudgeBtn = actions.querySelector('.client-nudge');
       const restartBtn = actions.querySelector('.client-restart');
       const previewBtn = actions.querySelector('.client-preview');
+      const livePreviewBtn = actions.querySelector('.client-live-preview');
       const status = card.querySelector('.client-assignment-status');
       if (clientObj) {
         nudgeBtn.onclick = async () => {
@@ -5669,6 +5670,17 @@ const btn = document.createElement('button');
         previewBtn.onclick = () => {
           if (!clientObj.assigned_layout_id) { if (status) status.textContent = 'No assigned layout to preview.'; return; }
           window.open(`/preview.html?layout=${encodeURIComponent(clientObj.assigned_layout_id)}`, '_blank');
+        };
+        livePreviewBtn.onclick = (event) => {
+          event.stopPropagation();
+          const liveButton = card.querySelector('.client-display-live-button');
+          if (liveButton) {
+            liveButton.scrollIntoView({behavior:'smooth', block:'center'});
+            liveButton.click();
+          } else {
+            if (status) status.textContent = 'Opening client display previews…';
+            App.openClientDetail(clientObj);
+          }
         };
       }
       const checkbox = toggle.querySelector('input');

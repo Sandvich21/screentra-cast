@@ -606,7 +606,7 @@ html[data-theme="classic"] {
 .client-bulk-summary { color:var(--accent-blue); font-weight:800; font-size:.82rem; text-transform:uppercase; letter-spacing:.06em; }
 .client-bulk-bar select { min-width:240px; }
 .client-bulk-status { color:var(--text-dim,#94a3b8); font-size:.78rem; flex-basis:100%; }
-.client-actions { display:flex; gap:.4rem; margin-top:.55rem; }
+.client-actions { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:.55rem; }
 .btn-ghost { background:transparent; color:var(--status-not-enrolled-text); border:1px solid rgba(148,163,184,.35); }
 .btn-ghost:hover { background:var(--btn-ghost-hover); color:var(--btn-ghost-text); }
 .btn-sm { padding:.35rem .65rem; font-size:.78rem; border-radius:6px; }
