@@ -5456,11 +5456,13 @@ PLAYER_HTML = r'''<!doctype html>
 </head>
 <body><div id="player"><div class="fallback"><div><strong>Waiting for assigned layout</strong><span>Heartbeat will cache a layout when assigned.</span></div></div></div>
 <script>
+const cachedServerUrl=__SCREENTRA_SERVER_URL__;
 let currentHash='';
 async function readTextBounded(response,maximum){const reader=response.body&&response.body.getReader?response.body.getReader():null;if(!reader)throw new Error('response body is unavailable');const decoder=new TextDecoder();let total=0,text='';try{while(true){const part=await reader.read();if(part.done){text+=decoder.decode();return text;}const value=part.value||new Uint8Array();total+=value.byteLength;if(total>maximum){try{await reader.cancel();}catch(_e){}throw new Error('response exceeds its size limit');}text+=decoder.decode(value,{stream:true});}}finally{reader.releaseLock();}}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function normWidgetType(w){return (w.widget_type || w.type || '').toLowerCase().replace(/_/g,'-');}
 function props(w){return w.props || w.properties || {};}
+function cachedAssetUrl(u){const value=String(u||'');return value.startsWith('/uploads/')&&cachedServerUrl?cachedServerUrl+value:value;}
 function isYouTubeUrl(u){return /(?:youtube\.com|youtu\.be)/i.test(String(u||''));}
 function youtubeId(u){const s=String(u||'');let m=s.match(/[?&]v=([^&]+)/); if(m) return m[1]; m=s.match(/youtu\.be\/([^?&/]+)/); if(m) return m[1]; m=s.match(/youtube\.com\/(?:embed|shorts)\/([^?&/]+)/); return m?m[1]:'';}
 function youtubeEmbedUrl(u,p){const id=youtubeId(u); const params=new URLSearchParams({autoplay:'1',mute:(p.mute||p.muted)?'1':'0',loop:'1',playsinline:'1',rel:'0'}); if(id) params.set('playlist',id); return id ? ('https://www.youtube.com/embed/'+encodeURIComponent(id)+'?'+params.toString()) : String(u||'');}
@@ -5488,15 +5490,15 @@ function initCachedCameraStreamWidgets(widgets){const nodes=document.querySelect
 function parseVideoWaitAfter(value){var text=String(value==null?'':value).trim().toLowerCase().replace(/\s*(?:seconds?|secs?|s)\s*$/,'').trim(),range=text.match(/^(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)$/),min,max;if(range){min=Number(range[1]);max=Number(range[2]);}else if(/^\d+(?:\.\d+)?$/.test(text)){min=max=Number(text);}else{return{min:0,max:0};}if(!Number.isFinite(min)||!Number.isFinite(max))return{min:0,max:0};min=Math.max(0,Math.min(86400,min));max=Math.max(0,Math.min(86400,max));if(max<min){var swap=min;min=max;max=swap;}return{min:min,max:max};}
 function videoWaitAfterSeconds(value){var parsed=parseVideoWaitAfter(value);if(parsed.max<=parsed.min)return parsed.min;var random=Math.max(0,Math.min(.999999999,Math.random()));return Number.isInteger(parsed.min)&&Number.isInteger(parsed.max)?parsed.min+Math.floor(random*(parsed.max-parsed.min+1)):parsed.min+(parsed.max-parsed.min)*random;}
 function videoWaitAfterHasDelay(value){return parseVideoWaitAfter(value).max>0;}
-function initCachedVideoWidgets(widgets){const nodes=document.querySelectorAll('[data-video-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-video-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget),list=p&&Array.isArray(p.playlist)?p.playlist:[];if(!list.length)return;let index=0,waitTimer=null;const advance=()=>{const current=list[index]||{},wait=videoWaitAfterSeconds(current.wait_after);const go=()=>{waitTimer=null;index=(index+1)%list.length;node.src=String(list[index].url||'');if(typeof node.load==='function')node.load();const result=typeof node.play==='function'?node.play():null;if(result&&typeof result.catch==='function')result.catch(()=>{});};if(wait>0)waitTimer=setTimeout(go,Math.round(wait*1000));else go();};node.src=String(list[0].url||'');node.loop=list.length===1&&p.loop!==false&&!videoWaitAfterHasDelay(list[0]&&list[0].wait_after);node.onended=list.length>1||(list.length===1&&p.loop!==false&&videoWaitAfterHasDelay(list[0]&&list[0].wait_after))?advance:null;node.onerror=list.length>1?advance:null;});}
+function initCachedVideoWidgets(widgets){const nodes=document.querySelectorAll('[data-video-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-video-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget),list=p&&Array.isArray(p.playlist)?p.playlist:[];if(!list.length)return;let index=0,waitTimer=null;const advance=()=>{const current=list[index]||{},wait=videoWaitAfterSeconds(current.wait_after);const go=()=>{waitTimer=null;index=(index+1)%list.length;node.src=cachedAssetUrl(String(list[index].url||''));if(typeof node.load==='function')node.load();const result=typeof node.play==='function'?node.play():null;if(result&&typeof result.catch==='function')result.catch(()=>{});};if(wait>0)waitTimer=setTimeout(go,Math.round(wait*1000));else go();};node.src=cachedAssetUrl(String(list[0].url||''));node.loop=list.length===1&&p.loop!==false&&!videoWaitAfterHasDelay(list[0]&&list[0].wait_after);node.onended=list.length>1||(list.length===1&&p.loop!==false&&videoWaitAfterHasDelay(list[0]&&list[0].wait_after))?advance:null;node.onerror=list.length>1?advance:null;});}
 async function renderWidget(w){const t=normWidgetType(w),p=Object.assign({_widget_type:t},props(w));if(t==='weather')await loadWeather(p);else if(t==='calendar')await loadCalendar(p);let inner='';
  if((t==='weather'||t==='calendar')&&Array.isArray(p.template_elements)&&p.template_elements.length) inner=templateHtml(Object.assign({},w,{props:p}));
  else if(t==='text') inner=`<div style="width:100%;height:100%;display:flex;align-items:${p.valign||'center'};justify-content:${p.align==='left'?'flex-start':p.align==='right'?'flex-end':'center'};padding:1rem;color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||24)*2}px;text-align:${p.align||'center'};">${esc(p.text||'Text')}</div>`;
  else if(t==='countdown') { const target=p.countdown_mode==='duration' ? Date.now() + Math.max(1,Number(p.duration_value||1))*({seconds:1000,minutes:60000,hours:3600000,days:86400000}[p.duration_unit||'minutes']||60000) : new Date(p.targetDate||'').getTime(); const diff=Math.max(0,target-Date.now()); const d=Math.floor(diff/86400000),h=Math.floor(diff%86400000/3600000),m=Math.floor(diff%3600000/60000),s=Math.floor(diff%60000/1000); const text=Number.isFinite(target)&&target>0?(d?d+'d '+h+'h':h?h+'h '+m+'m':m?m+'m '+s+'s':s+'s'):(p.expiry_text||'Choose a date and time'); inner=`<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;padding:1rem;color:${p.color||'#fff'};font-size:${countdownFontSize(p)}px;font-weight:800;line-height:1;text-align:center;overflow:hidden;white-space:nowrap;">${esc(text)}</div>`; }
- else if(t==='video') { const list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url?[{url:p.url}]:[]),u=String((list[0]||{}).url||''); const fit=['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'; inner=`<video data-video-widget-id="${esc(w.id||'')}" src="${esc(u)}" autoplay playsinline preload="auto" ${p.loop !== false && list.length === 1 ? 'loop' : ''} ${p.muted||p.mute?'muted':''} style="width:100%;height:100%;object-fit:${fit};background:#000;"></video>`;}
- else if(t==='image') inner=`<img src="${esc(p.url||p.src||'')}" style="width:100%;height:100%;object-fit:${p.fit||'cover'};">`;
+ else if(t==='video') { const list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url?[{url:p.url}]:[]),u=String((list[0]||{}).url||''); const fit=['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'; inner=`<video data-video-widget-id="${esc(w.id||'')}" src="${esc(cachedAssetUrl(u))}" autoplay playsinline preload="auto" ${p.loop !== false && list.length === 1 ? 'loop' : ''} ${p.muted||p.mute?'muted':''} style="width:100%;height:100%;object-fit:${fit};background:#000;"></video>`;}
+ else if(t==='image') inner=`<img src="${esc(cachedAssetUrl(p.url||p.src||''))}" style="width:100%;height:100%;object-fit:${p.fit||'cover'};">`;
  else if(t==='camera') { if(w._addon_type==='rtsp-stream'||p._addon_type==='rtsp-stream'){const fit=['cover','contain','fill'].includes(p.fit)?p.fit:'cover'; inner=`<div style="position:relative;width:100%;height:100%;background:#020617;overflow:hidden;"><img data-camera-stream-widget-id="${esc(w.id||'')}" src="/camera-stream.mjpeg?widget_id=${encodeURIComponent(String(w.id||''))}" style="width:100%;height:100%;object-fit:${fit};background:#020617;"></div>`;}else{const cameraFilter=cachedCameraFilterName(p.filter);const facing=['user','environment','left','right'].includes(p.facing_mode)?p.facing_mode:'environment';if(p.capture_enabled===true) inner=`<div style="position:relative;width:100%;height:100%;background:#020617;color:#cbd5e1;"><video data-camera-widget-id="${esc(w.id||'')}" data-camera-filter="${cameraFilter}" autoplay playsinline muted style="width:100%;height:100%;object-fit:cover;background:#020617;filter:${cachedCameraFilterCss(cameraFilter)};"></video>${cachedCameraFilterOverlay(cameraFilter,w.id)}<span style="position:absolute;left:.5rem;bottom:.5rem;padding:.2rem .45rem;border-radius:.25rem;background:rgba(2,6,23,.75);font:600 12px system-ui;">Camera · ${esc(facing)}</span></div>`;else inner=`<div data-camera-widget-id="${esc(w.id||'')}" style="width:100%;height:100%;display:grid;place-items:center;border:1px dashed #334155;background:#020617;color:#94a3b8;font:600 14px system-ui;text-align:center;">📷 Camera preview<br><small style="font-weight:400;">capture disabled</small></div>`;}}
- else if(t==='video') { const list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url?[{url:p.url}]:[]), u=String((list[0]||{}).url||''); if(isYouTubeUrl(u)){ inner=`<iframe src="${esc(youtubeEmbedUrl(u,Object.assign({},p,{muted:true})))}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:0;background:#000;"></iframe>`; } else { const fit=['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'; inner=`<video src="${esc(u)}" autoplay playsinline preload="auto" ${p.loop !== false && list.length === 1 ? 'loop' : ''} ${p.muted||p.mute?'muted':''} style="width:100%;height:100%;object-fit:${fit};background:#000;"></video>`; } }
+ else if(t==='video') { const list=Array.isArray(p.playlist)&&p.playlist.length?p.playlist:(p.url?[{url:p.url}]:[]), u=String((list[0]||{}).url||''); if(isYouTubeUrl(u)){ inner=`<iframe src="${esc(youtubeEmbedUrl(u,Object.assign({},p,{muted:true})))}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:0;background:#000;"></iframe>`; } else { const fit=['cover','contain','fill','none','scale-down'].includes(p.fit)?p.fit:'cover'; inner=`<video src="${esc(cachedAssetUrl(u))}" autoplay playsinline preload="auto" ${p.loop !== false && list.length === 1 ? 'loop' : ''} ${p.muted||p.mute?'muted':''} style="width:100%;height:100%;object-fit:${fit};background:#000;"></video>`; } }
  else if(t==='clock') inner=`<div class="clock" data-clock style="color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||48)*2}px"></div>`;
  else if(t==='datetime'||t==='date') inner=`<div class="date" data-date style="color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||36)*2}px"></div>`;
  else if(t==='rectangle') inner=`<div style="width:100%;height:100%;background:${p.color||'#e94560'};border-radius:${p.radius||0}px;"></div>`;
@@ -5539,10 +5541,13 @@ __cursorLoadConfig();
 # unreachable, fall back to the cached PLAYER_HTML so the player still shows
 # the last cached layout offline.
 LIVE_PROBE_TIMEOUT_SECS = float(os.environ.get('RIPLEY_LIVE_PROBE_TIMEOUT', '0.6'))
+ENABLE_LIVE_PLAYER_REDIRECT = os.environ.get('SCREENTRA_LIVE_PLAYER_REDIRECT', '').strip().lower() in ('1', 'true', 'yes')
 # Keep the no-layout diagnostic page available at /no-layout.html for later
 # re-enablement, but do not replace a working display with it during the
 # temporary stale-assignment policy.
-SHOW_NO_LAYOUT_SCREEN = os.environ.get('SCREENTRA_SHOW_NO_LAYOUT_SCREEN', '').strip().lower() in ('1', 'true', 'yes')
+# Intentionally disabled during the cached-layout stabilization period. Restore the
+# previous environment-controlled switch here when explicit no-layout UX is wanted.
+SHOW_NO_LAYOUT_SCREEN = False
 
 
 def _live_player_url() -> str | None:
@@ -5674,6 +5679,15 @@ def _client_auth_token(cache_dir: Path) -> str:
         return _read_real_file(cache_dir.parent / 'client-auth-token', 4096).decode('utf-8').strip()
     except Exception:
         return ''
+
+
+def _heartbeat_has_live_assignment(cache_dir: Path) -> bool:
+    """Allow live-player redirect only after a recent valid assignment sync."""
+    try:
+        status = _read_json_file(cache_dir / 'last-heartbeat.json', {})
+        return status.get('connection') == 'online' and bool(status.get('assigned_layout_id'))
+    except Exception:
+        return False
 
 
 def _fetch_player_capability(server_url: str, client_id: str, display_index: int, cache_dir: Path) -> str | None:
@@ -6323,7 +6337,11 @@ class Handler(BaseHTTPRequestHandler):
             # from the heartbeat's cached client-config.json when available;
             # fall back to the index.
             live_url = _live_player_url()
-            if not _camera_layout_has_rtsp_widget(self.cache_dir) and live_url and _server_reachable(live_url, LIVE_PROBE_TIMEOUT_SECS):
+            if (ENABLE_LIVE_PLAYER_REDIRECT
+                    and _heartbeat_has_live_assignment(self.cache_dir)
+                    and not _camera_layout_has_rtsp_widget(self.cache_dir)
+                    and live_url
+                    and _server_reachable(live_url, LIVE_PROBE_TIMEOUT_SECS)):
                 connector = _connector_for_display_index(display_index)
                 if connector:
                     client_id = _client_id_from_env() or _client_id_from_cache()
@@ -6335,6 +6353,7 @@ class Handler(BaseHTTPRequestHandler):
             # cached layout from the renderer script's PLAYER_HTML constant.
             display_index = int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0'))
             html = PLAYER_HTML.replace('<title>Screentra Cast Cached Player</title>', f'<title>Screentra Cast Display {display_index}</title>')
+            html = html.replace('__SCREENTRA_SERVER_URL__', json.dumps(_live_player_url() or ''))
             return self.send_text(200, html, 'text/html; charset=utf-8')
         if path == '/admin.html':
             return self.send_text(200, ADMIN_HTML, 'text/html; charset=utf-8')

@@ -52,6 +52,25 @@ class PlayerRendererFileTests(unittest.TestCase):
             path.write_text('{"safe":1,"safe":2}', encoding='utf-8')
             self.assertEqual(renderer._read_json_file(path, {'fallback': True}), {'fallback': True})
 
+    def test_live_redirect_requires_online_assignment(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp)
+            (cache / 'last-heartbeat.json').write_text(
+                '{"connection":"offline","assigned_layout_id":"layout-1"}',
+                encoding='utf-8',
+            )
+            self.assertFalse(renderer._heartbeat_has_live_assignment(cache))
+            (cache / 'last-heartbeat.json').write_text(
+                '{"connection":"online","assigned_layout_id":null}',
+                encoding='utf-8',
+            )
+            self.assertFalse(renderer._heartbeat_has_live_assignment(cache))
+            (cache / 'last-heartbeat.json').write_text(
+                '{"connection":"online","assigned_layout_id":"layout-1"}',
+                encoding='utf-8',
+            )
+            self.assertTrue(renderer._heartbeat_has_live_assignment(cache))
+
     def test_log_tail_rejects_symlinked_files(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
