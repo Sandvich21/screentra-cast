@@ -45,6 +45,9 @@ MAX_JSON_FILE_BYTES = 1 << 20
 MAX_COMMAND_RESPONSE_BYTES = 64 * 1024
 MAX_TEXT_RESPONSE_BYTES = 64 * 1024
 MAX_PROC_METRICS_BYTES = 64 * 1024
+# Keep a last-known-good layout through a brief false-unassigned response.
+# A real unassignment is still honored after this bounded confirmation window.
+LAYOUT_UNASSIGNED_GRACE_SECONDS = 120
 
 
 def _read_bounded_local_text(path: str, maximum: int = MAX_PROC_METRICS_BYTES) -> str:
@@ -1180,6 +1183,41 @@ def read_command_result(cache_dir):
         return None, None
 
 
+def _preserve_cached_layout_on_empty_config(cache_dir, config_path, data):
+    """Keep the last good assignment through a brief false-unassigned response."""
+    marker_path = Path(cache_dir) / 'unassigned-layout-confirmation.json'
+    if data.get('layout') is not None:
+        try:
+            marker_path.unlink()
+        except FileNotFoundError:
+            pass
+        return False
+    previous = _read_cache_json(config_path, {})
+    previous_layout_id = previous.get('assigned_layout_id') if isinstance(previous, dict) else None
+    if not previous_layout_id:
+        return False
+    # If the server still reports an assignment but cannot return its layout,
+    # never replace a usable cached layout with the no-layout screen.
+    if data.get('assigned_layout_id') is not None:
+        return True
+    now = time.time()
+    marker = _read_cache_json(marker_path, {})
+    try:
+        first_seen = float(marker.get('first_seen', 0))
+    except (TypeError, ValueError):
+        first_seen = 0
+    if marker.get('layout_id') != previous_layout_id or first_seen <= 0:
+        _atomic_write_text(marker_path, json.dumps({'layout_id': previous_layout_id, 'first_seen': now}))
+        return True
+    if now - first_seen < LAYOUT_UNASSIGNED_GRACE_SECONDS:
+        return True
+    try:
+        marker_path.unlink()
+    except FileNotFoundError:
+        pass
+    return False
+
+
 def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='assigned-layout-display-{index}.json'):
     url = server.rstrip('/') + '/api/clients/' + quote(client_id, safe='') + '/displays/' + str(display_index) + '/config'
     try:
@@ -1197,7 +1235,8 @@ def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='
             pass
         _ensure_real_directory(Path(cache_dir), create=True)
         config_path = Path(cache_dir, 'client-config.json' if display_index == 0 else f'display-config-{display_index}.json')
-        config_text = json.dumps(data, indent=2)
+        preserve_cached_layout = _preserve_cached_layout_on_empty_config(cache_dir, config_path, data)
+        config_text = None if preserve_cached_layout else json.dumps(data, indent=2)
         comparable = dict(data) if isinstance(data, dict) else data
         if isinstance(comparable, dict):
             comparable.pop('server_time', None)
@@ -1218,7 +1257,7 @@ def fetch_config(server, client_id, cache_dir, display_index=0, config_pattern='
             _atomic_write_text_if_changed(Path(cache_dir, target), json.dumps(data['layout'], indent=2))
             if display_index == 0:
                 _atomic_write_text_if_changed(Path(cache_dir, 'assigned-layout.json'), json.dumps(data['layout'], indent=2))
-        else:
+        elif not preserve_cached_layout:
             for stale in [Path(cache_dir, target), Path(cache_dir, 'assigned-layout.json') if display_index == 0 else None]:
                 if stale is None: continue
                 try: stale.unlink()
