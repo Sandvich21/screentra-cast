@@ -32,6 +32,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -10628,6 +10629,22 @@ struct CameraStreamQuery {
     player_capability: Option<String>,
 }
 
+const MAX_CONCURRENT_CAMERA_STREAMS: usize = 8;
+static CAMERA_STREAM_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+fn camera_stream_limiter() -> Arc<Semaphore> {
+    CAMERA_STREAM_LIMITER
+        .get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_CAMERA_STREAMS)))
+        .clone()
+}
+
+fn camera_stream_layout_is_assigned(
+    assigned_layout_id: Option<&str>,
+    requested_layout_id: &str,
+) -> bool {
+    assigned_layout_id == Some(requested_layout_id)
+}
+
 fn camera_stream_options(props: &serde_json::Value) -> (u32, u32, bool) {
     let object = props.as_object();
     let bounded_u32 = |key: &str, default: u32, minimum: u32, maximum: u32| {
@@ -10659,15 +10676,41 @@ async fn camera_stream_mjpeg(
     }
 
     let authorized = match (query.client_id.as_deref(), query.player_capability.as_deref()) {
-        (Some(client_id), Some(capability)) => auth.verify_player_capability(capability, client_id, None),
+        (Some(client_id), Some(capability)) => {
+            match auth.player_capability_display_index(capability, client_id) {
+                Some(display_index)
+                    if auth.verify_player_capability(capability, client_id, Some(display_index)) =>
+                {
+                    let (assigned_layout_id, _) = repository
+                        .get_display_config(client_id, display_index)
+                        .await
+                        .map_err(|_| internal_server_error())?;
+                    camera_stream_layout_is_assigned(
+                        assigned_layout_id.as_deref(),
+                        &query.layout_id,
+                    )
+                }
+                _ => false,
+            }
+        }
         _ => match crate::auth::extract_token(&headers) {
             Some(token) => auth.token_payload(&token).await.is_some(),
             None => false,
         },
     };
     if !authorized {
-        return Err((StatusCode::UNAUTHORIZED, "camera stream authorization required".to_string()));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "camera stream authorization required".to_string(),
+        ));
     }
+
+    let stream_permit = camera_stream_limiter().try_acquire_owned().map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "camera stream capacity exhausted".to_string(),
+        )
+    })?;
 
     let layout = repository
         .get_layout(&query.layout_id)
@@ -10753,6 +10796,7 @@ async fn camera_stream_mjpeg(
         .take()
         .ok_or((StatusCode::SERVICE_UNAVAILABLE, "FFmpeg output unavailable".to_string()))?;
     let stream = tokio_util::io::ReaderStream::new(stdout).map(move |chunk| {
+        let _stream_permit = &stream_permit;
         let _child = &child;
         chunk
     });
@@ -11499,6 +11543,19 @@ mod tests {
         let public_props = &public_layout.widgets[0].props;
         assert!(public_props.get("ical_url").is_none());
         assert_eq!(public_props.get("_calendar_source_configured").and_then(serde_json::Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn camera_stream_rejects_unassigned_layouts() {
+        assert!(camera_stream_layout_is_assigned(
+            Some("layout-1"),
+            "layout-1"
+        ));
+        assert!(!camera_stream_layout_is_assigned(
+            Some("layout-1"),
+            "layout-2"
+        ));
+        assert!(!camera_stream_layout_is_assigned(None, "layout-1"));
     }
 
     #[test]
