@@ -4213,7 +4213,7 @@ MAX_ERROR_BYTES = 512
 MAX_STATIC_HTML_BYTES = 2 * 1024 * 1024
 CAMERA_STREAM_URL_BYTES = 4096
 CAMERA_WIDGET_ID_BYTES = 128
-CAMERA_STREAM_FPS = 5
+CAMERA_STREAM_FPS = 15
 WEATHER_ICON_SLUGS = frozenset({
     'clear-day', 'clear-night', 'mostly-clear-day', 'mostly-clear-night',
     'partly-cloudy-day', 'partly-cloudy-night', 'overcast-day', 'overcast-night',
@@ -5420,14 +5420,14 @@ function youtubeEmbedUrl(u,p){const id=youtubeId(u); const params=new URLSearchP
 function cachedLayoutPercent(value){value=Number(value)||0;return Math.abs(value)>1?value/100:value;}
 function styleFor(w){const x=cachedLayoutPercent(Number(w.x)||0),y=cachedLayoutPercent(Number(w.y)||0),ww=cachedLayoutPercent(Number(w.w??w.width)||0.1),hh=cachedLayoutPercent(Number(w.h??w.height)||0.1),z=Number(w.z)||1;return `left:${x*100}%;top:${y*100}%;width:${ww*100}%;height:${hh*100}%;z-index:${z};`;}
 function wmoIcon(code){const m={'0':'☀️','1':'🌤️','2':'⛅','3':'☁️','45':'🌫️','48':'🌫️','51':'🌦️','53':'🌦️','55':'🌦️','61':'🌧️','63':'🌧️','65':'🌧️','71':'❄️','73':'❄️','75':'❄️','80':'🌦️','81':'🌧️','82':'🌧️','95':'⛈️','96':'⛈️','99':'⛈️'};return m[String(code)]||'🌤️';}
-function wmoIconHtml(code,p){const key=String(code),custom=p&&p.custom_icons&&p.custom_icons[key];if(custom)return `<img src="${esc(custom)}" style="width:100%;height:100%;object-fit:contain;">`;const slugs={'0':'clear-day','1':'mostly-clear-day','2':'partly-cloudy-day','3':'overcast-day','45':'fog-day','48':'overcast-day-fog','51':'drizzle','53':'drizzle','55':'extreme-drizzle','61':'rain','63':'rain','65':'extreme-rain','71':'snow','73':'snow','75':'extreme-snow','80':'partly-cloudy-day-rain','81':'overcast-day-rain','82':'extreme-day-rain','95':'thunderstorms-day','96':'thunderstorms-day-hail','99':'extreme-thunderstorms-day'},slug=slugs[key]||'partly-cloudy-day';return `<img class="ripley-weather-icon" src="/assets/weather/meteocons/fill/${slug}.svg?v=20261028111500-weather-animated-refresh" alt="Weather" loading="eager" decoding="async" style="display:block;width:100%;height:100%;object-fit:contain;">`;}
+function wmoIconHtml(code,p,staticOnly=false){const key=String(code),custom=p&&p.custom_icons&&p.custom_icons[key];if(custom)return `<img src="${esc(custom)}" style="width:100%;height:100%;object-fit:contain;">`;const slugs={'0':'clear-day','1':'mostly-clear-day','2':'partly-cloudy-day','3':'overcast-day','45':'fog-day','48':'overcast-day-fog','51':'drizzle','53':'drizzle','55':'extreme-drizzle','61':'rain','63':'rain','65':'extreme-rain','71':'snow','73':'snow','75':'extreme-snow','80':'partly-cloudy-day-rain','81':'overcast-day-rain','82':'extreme-day-rain','95':'thunderstorms-day','96':'thunderstorms-day-hail','99':'extreme-thunderstorms-day','0_night':'clear-night','1_night':'mostly-clear-night','2_night':'partly-cloudy-night','3_night':'overcast-night','45_night':'fog-night','48_night':'overcast-night-fog','80_night':'partly-cloudy-night-rain','81_night':'overcast-night-rain','82_night':'extreme-night-rain','95_night':'thunderstorms-night','96_night':'thunderstorms-night-hail','99_night':'extreme-thunderstorms-night-hail'},slug=slugs[key]||'partly-cloudy-day',prefix=staticOnly?'/assets/weather/meteocons/fill-static/':'/assets/weather/meteocons/fill/';return `<img class="ripley-weather-icon" src="${prefix}${slug}.svg?v=20261030100000-weather-animation-budget" alt="Weather" loading="eager" decoding="async" style="display:block;width:100%;height:100%;object-fit:contain;">`;}
 function weatherFor(p,i){const d=p._weather_data||{},q=d.daily||{},codes=q.weather_code_day||q.weather_code||q.weathercode||[],code=codes[i]??d.current_weather?.weather_code??d.current_weather?.weathercode??2,winds=q.wind_speed||q.windspeed||[],windRaw=winds[i]??d.current_weather?.windspeed??0,metric=String(p.unit||(p.units==='metric'?'C':'F')).toUpperCase()!=='F',sourceF=d.source==='noaa_nws',display=v=>{if(v==null||Number.isNaN(Number(v)))return '';const n=Number(v);return Math.round(sourceF?(metric?(n-32)*5/9:n):(metric?n:n*9/5+32));},highRaw=q.temperature_2m_max?.[i]??d.current_weather?.temperature,lowRaw=q.temperature_2m_min?.[i]??highRaw,currentRaw=d.current_weather?.temperature??highRaw,descriptions={'0':'Clear','1':'Mainly clear','2':'Partly cloudy','3':'Overcast','45':'Fog','48':'Rime fog','51':'Light drizzle','53':'Moderate drizzle','55':'Dense drizzle','61':'Slight rain','63':'Moderate rain','65':'Heavy rain','71':'Slight snow','73':'Moderate snow','75':'Heavy snow','80':'Rain showers','81':'Heavy rain showers','82':'Violent rain showers','95':'Thunderstorm','96':'Thunderstorm with hail','99':'Severe thunderstorm'};return {code,icon:wmoIcon(code),current:display(currentRaw),high:display(highRaw),low:display(lowRaw),desc:d.source==='unavailable'?'':(descriptions[String(code)]||''),precip:q.precipitation_probability_max?.[i]??0,wind:Math.round(Number(windRaw||0)*(metric?1.60934:1)),unit:metric?'°C':'°F',windUnit:metric?'km/h':'mph'};}
 function calendarOverrideMatches(event,override){const type=String(override&&(override.match_type||override.match)||(override&&override.uid?'uid':'title')).toLowerCase(),value=String(override&&(override.match_value||override.value||(type==='uid'?override.uid:override.title))||'').trim();if(!value)return false;if(override.source_date&&String(override.source_date)!==String(event.source_date||''))return false;if(type==='uid')return String(event.uid||'').trim()===value;return String(event.summary||'').trim().toLocaleLowerCase()===value.toLocaleLowerCase();}function applyCalendarOverrides(events,overrides,timeFormat){const list=Array.isArray(overrides)?overrides:[];return(Array.isArray(events)?events:[]).map(event=>{const o=list.find(item=>calendarOverrideMatches(event,item));if(!o)return event;const date=/^\d{4}-\d{2}-\d{2}$/.test(String(o.date||''))?String(o.date):event.date,corrected=String(o.time||''),match=corrected.match(/^(\d{1,2}):(\d{2})$/);let time=event.time;if(match){const hour=Number(match[1]),minute=Number(match[2]);if(hour>=0&&hour<=23&&minute>=0&&minute<=59)time=timeFormat==='24'?String(hour).padStart(2,'0')+':'+String(minute).padStart(2,'0'):(hour%12||12)+':'+String(minute).padStart(2,'0')+' '+(hour>=12?'PM':'AM');}return Object.assign({},event,{date,time,sort_time:match?Number(match[1])*60+Number(match[2]):event.sort_time,override_applied:true});});}function parseCalendarText(raw,maxEvents,timeFormat,overrides){const unfolded=String(raw||'').replace(/\r?\n[ \t]/g,''),out=[];const blocks=unfolded.match(/BEGIN:VEVENT[\s\S]*?END:VEVENT/g)||[];blocks.forEach(block=>{const start=(block.match(/(?:^|\n)DTSTART(?:;[^:]+)?:([^\n]+)/)||[])[1],uid=((block.match(/(?:^|\n)UID:(.*)/)||[])[1]||'').trim(),summary=((block.match(/(?:^|\n)SUMMARY:(.*)/)||[])[1]||'').trim(),location=((block.match(/(?:^|\n)LOCATION:(.*)/)||[])[1]||'').trim();if(!start||!summary)return;const date=start.match(/^(\d{4})(\d{2})(\d{2})/);if(!date)return;const hh=(start.match(/T(\d{2})(\d{2})/)||[])[1],mm=(start.match(/T\d{2}(\d{2})/)||[])[1];let time='All day';if(hh!=null){const n=Number(hh);time=timeFormat==='24'?String(n).padStart(2,'0')+':'+(mm||'00'):(n%12||12)+':'+(mm||'00')+' '+(n>=12?'PM':'AM');}out.push({uid,summary,location,time,date:date[1]+'-'+date[2]+'-'+date[3],source_date:date[1]+'-'+date[2]+'-'+date[3],source_start:start,sort_time:hh==null?0:Number(hh)*60+Number(mm||'0')});});const today=new Date().toISOString().slice(0,10);return applyCalendarOverrides(out,overrides,timeFormat).filter(e=>e.date>=today).sort((a,b)=>a.date.localeCompare(b.date)||(Number(a.sort_time)||0)-(Number(b.sort_time)||0)||a.summary.localeCompare(b.summary)).slice(0,Math.max(1,Math.min(30,Number(maxEvents)||7)));}
 function calendarFor(p,i){return Array.isArray(p._calendar_events)?p._calendar_events[i]||null:null;}
 function loadCalendar(p){const u=p.ical_url||p.ics_url||p.calendar_url||'';if(!u)return Promise.resolve();return fetch('/api/ics-proxy?url='+encodeURIComponent(u),{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error('calendar '+r.status);return readTextBounded(r,4*1024*1024);}).then(t=>{p._calendar_events=parseCalendarText(t,p.max_events,p.time_format==='24'?'24':'12',p.calendar_time_overrides);}).catch(()=>{p._calendar_events=[];});}
 function repeatCount(p,e){const r=e.repeat||{},t=String(p._widget_type||p.widget_type||'').toLowerCase();if(r.group&&t==='calendar'){const requested=Math.max(1,Math.min(30,Number(p.max_events)||Number(r.count)||5)),es=Array.isArray(p.template_elements)?p.template_elements:[],hasCalendarExemplar=es.some(item=>{const q=item&&item.props||{},source=q.variable_source||(item&&item.type==='variable_icon'?'weather':'date');return source==='calendar'&&!(item.repeat&&item.repeat.group);});return hasCalendarExemplar?Math.max(1,requested-1):requested;}return r.group?Math.max(1,Math.min(14,Number(p.shown_days)||Number(r.count)||4)):Math.max(1,Number(r.count)||1);}
 function groupMetrics(es){const g={};es.forEach(e=>{const id=e.repeat&&e.repeat.group;if(!id)return;const r=e.repeat,x=Number(e.x)||0,y=Number(e.y)||0,w=Number(e.width)||120,h=Number(e.height)||80,m=g[id]||(g[id]={minX:x,minY:y,maxX:x+w,maxY:y+h,gapX:Number(r.gap_x)||0,gapY:Number(r.gap_y)||0,mode:r.mode||'rows'});m.minX=Math.min(m.minX,x);m.minY=Math.min(m.minY,y);m.maxX=Math.max(m.maxX,x+w);m.maxY=Math.max(m.maxY,y+h);});return g;}
-function templateEl(e,p,i,g,dw,dh){const q=Object.assign({},e.props||{}),r=e.repeat||{},m=r.group&&g[r.group];if(i&&q.variable_source!=='calendar'){const n=Number(q.day_offset??q.weather_day_offset)||0;q.day_offset=n+i;q.weather_day_offset=n+i;}let x=Number(e.x)||0,y=Number(e.y)||0,w=Number(e.width)||120,h=Number(e.height)||80;if(m&&i){if((m.mode||'rows')==='columns')x+=i*(m.maxX-m.minX+m.gapX);else y+=i*(m.maxY-m.minY+m.gapY);}const a=q.align||'center',j=a==='left'?'flex-start':a==='right'?'flex-end':'center';let st=`position:absolute;box-sizing:border-box;left:${x/dw*100}%;top:${y/dh*100}%;width:${w/dw*100}%;height:${h/dh*100}%;display:flex;align-items:center;justify-content:${j};text-align:${a};overflow:hidden;z-index:${Number(e.z)||0};color:${q.color||'#fff'};font-size:clamp(4px,min(calc(${(Number(q.font_size)||24)/dw*100}cqw),calc(${(Number(q.font_size)||24)/dh*100}cqh)),${(Number(q.font_size)||24)*4}px);font-weight:${['variable_icon','variable_text','variable','date'].includes(e.type)?800:(q.font_weight||700)};line-height:1.08;`;let inner='';if(e.type==='rectangle')st+=`background:${q.color||'#1e293b'};opacity:${Number(q.opacity??100)/100};border-radius:${Number(q.radius)||0}px;`;else if(e.type==='text')inner=esc(q.text||'Text');else if(['variable_icon','variable_text','variable','date'].includes(e.type)){const k=q.variable_key||'';if(q.variable_source==='calendar'){const base=Number(q.calendar_event_index??(r.group?0:(q.day_offset??q.weather_day_offset)))||0,idx=Math.max(0,Math.min(29,base+(r.group?i+1:0))),ev=calendarFor(p,idx);if(k==='calendar_event_title')inner=esc(ev?.summary||'');else if(k==='calendar_event_time')inner=esc(ev?.time||'');else if(k==='calendar_event_location')inner=esc(ev?.location||'');else if(k==='calendar_event_date'){const d=ev?new Date(ev.date+'T00:00:00'):null;inner=esc(d&&!isNaN(d)?d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):'');}}else {const source=q.variable_source||(e.type==='variable_icon'?'weather':'date');if(source==='weather'){const wx=weatherFor(p,Math.max(0,Math.min(6,Number(q.day_offset??q.weather_day_offset)||0)));if(k==='weather_icon'||e.type==='variable_icon'||q.display_mode==='weather_icon')inner=wmoIconHtml(wx.code,p);else if(k==='current_temp')inner=esc(wx.current===''?'':wx.current+wx.unit);else if(k==='high_temp')inner=esc(wx.high===''?'':'High '+wx.high+wx.unit);else if(k==='low_temp')inner=esc(wx.low===''?'':'Low '+wx.low+wx.unit);else if(k==='weather_description')inner=esc(wx.desc);else if(k==='precip_chance')inner=esc(wx.precip+'%');else if(k==='wind_speed')inner=esc(wx.wind===''?'':'Wind '+wx.wind+' '+wx.windUnit);else inner=esc(q.default_text||q.label||k);}else if(source==='date'){const d=new Date();d.setDate(d.getDate()+(Number(q.day_offset??q.weather_day_offset)||0));if(k==='day_name')inner=esc(d.toLocaleDateString(undefined,{weekday:'long'}));else if(k==='date_number')inner=esc(String(d.getDate()));else if(k==='month_day')inner=esc(d.toLocaleDateString(undefined,{month:'short',day:'numeric'}));else inner=esc(d.toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'}));}else inner=esc(q.default_text||q.label||k);}}else inner=esc(q.label||e.type||'');return `<div style="${st}">${inner}</div>`;}
+function templateEl(e,p,i,g,dw,dh){const q=Object.assign({},e.props||{}),r=e.repeat||{},m=r.group&&g[r.group];if(i&&q.variable_source!=='calendar'){const n=Number(q.day_offset??q.weather_day_offset)||0;q.day_offset=n+i;q.weather_day_offset=n+i;}let x=Number(e.x)||0,y=Number(e.y)||0,w=Number(e.width)||120,h=Number(e.height)||80;if(m&&i){if((m.mode||'rows')==='columns')x+=i*(m.maxX-m.minX+m.gapX);else y+=i*(m.maxY-m.minY+m.gapY);}const a=q.align||'center',j=a==='left'?'flex-start':a==='right'?'flex-end':'center';let st=`position:absolute;box-sizing:border-box;left:${x/dw*100}%;top:${y/dh*100}%;width:${w/dw*100}%;height:${h/dh*100}%;display:flex;align-items:center;justify-content:${j};text-align:${a};overflow:hidden;z-index:${Number(e.z)||0};color:${q.color||'#fff'};font-size:clamp(4px,min(calc(${(Number(q.font_size)||24)/dw*100}cqw),calc(${(Number(q.font_size)||24)/dh*100}cqh)),${(Number(q.font_size)||24)*4}px);font-weight:${['variable_icon','variable_text','variable','date'].includes(e.type)?800:(q.font_weight||700)};line-height:1.08;`;let inner='';if(e.type==='rectangle')st+=`background:${q.color||'#1e293b'};opacity:${Number(q.opacity??100)/100};border-radius:${Number(q.radius)||0}px;`;else if(e.type==='text')inner=esc(q.text||'Text');else if(['variable_icon','variable_text','variable','date'].includes(e.type)){const k=q.variable_key||'';if(q.variable_source==='calendar'){const base=Number(q.calendar_event_index??(r.group?0:(q.day_offset??q.weather_day_offset)))||0,idx=Math.max(0,Math.min(29,base+(r.group?i+1:0))),ev=calendarFor(p,idx);if(k==='calendar_event_title')inner=esc(ev?.summary||'');else if(k==='calendar_event_time')inner=esc(ev?.time||'');else if(k==='calendar_event_location')inner=esc(ev?.location||'');else if(k==='calendar_event_date'){const d=ev?new Date(ev.date+'T00:00:00'):null;inner=esc(d&&!isNaN(d)?d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):'');}}else {const source=q.variable_source||(e.type==='variable_icon'?'weather':'date');if(source==='weather'){const wx=weatherFor(p,Math.max(0,Math.min(6,Number(q.day_offset??q.weather_day_offset)||0)));if(k==='weather_icon'||e.type==='variable_icon'||q.display_mode==='weather_icon')inner=wmoIconHtml(wx.code,p,false);else if(k==='current_temp')inner=esc(wx.current===''?'':wx.current+wx.unit);else if(k==='high_temp')inner=esc(wx.high===''?'':'High '+wx.high+wx.unit);else if(k==='low_temp')inner=esc(wx.low===''?'':'Low '+wx.low+wx.unit);else if(k==='weather_description')inner=esc(wx.desc);else if(k==='precip_chance')inner=esc(wx.precip+'%');else if(k==='wind_speed')inner=esc(wx.wind===''?'':'Wind '+wx.wind+' '+wx.windUnit);else inner=esc(q.default_text||q.label||k);}else if(source==='date'){const d=new Date();d.setDate(d.getDate()+(Number(q.day_offset??q.weather_day_offset)||0));if(k==='day_name')inner=esc(d.toLocaleDateString(undefined,{weekday:'long'}));else if(k==='date_number')inner=esc(String(d.getDate()));else if(k==='month_day')inner=esc(d.toLocaleDateString(undefined,{month:'short',day:'numeric'}));else inner=esc(d.toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'}));}else inner=esc(q.default_text||q.label||k);}}else inner=esc(q.label||e.type||'');return `<div style="${st}">${inner}</div>`;}
 function templateHtml(w){const p=props(w),es=Array.isArray(p.template_elements)?p.template_elements:[];if(!es.length)return '';const g=groupMetrics(es);let dw=Number(p.template_width)||760,dh=Number(p.template_height)||427.5;es.forEach(e=>{dw=Math.max(dw,(Number(e.x)||0)+(Number(e.width)||120));dh=Math.max(dh,(Number(e.y)||0)+(Number(e.height)||80));});es.forEach(e=>{const r=e.repeat||{},m=r.group&&g[r.group],count=repeatCount(p,e);if(!m||!r.group)return;const stepX=(m.maxX-m.minX)+m.gapX,stepY=(m.maxY-m.minY)+m.gapY;if((m.mode||r.mode||'rows')==='columns')dw=Math.max(dw,m.maxX+Math.max(0,count-1)*stepX);else dh=Math.max(dh,m.maxY+Math.max(0,count-1)*stepY);});return `<div style="position:relative;width:100%;height:100%;overflow:hidden;container-type:size;">${es.slice().sort((a,b)=>(Number(a.z)||0)-(Number(b.z)||0)).map(e=>Array.from({length:repeatCount(p,e)},(_,i)=>templateEl(e,p,i,g,dw,dh)).join('')).join('')}</div>`;}
 async function loadWeather(p){const lat=Number(p.lat||0),lon=Number(p.lon||0);if(!lat||!lon)return;try{const r=await fetch(`/api/weather/forecast?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`,{cache:'no-store'});if(r.ok)p._weather_data=JSON.parse(await readTextBounded(r,4*1024*1024));}catch(_e){}}
 function countdownFontSize(p){return Math.max(8,Math.min(160,Number(p.font_size||p.fontSize||48)||48))*2;}
@@ -5438,7 +5438,10 @@ function cachedCameraFilterCss(value){return ({none:'none',grayscale:'grayscale(
 function cachedCameraFilterOverlay(value,id){return cachedCameraFilterName(value)==='halloween'?`<span data-camera-filter-overlay="halloween" data-camera-filter-overlay-id="${esc(id||'')}" aria-hidden="true" style="position:absolute;inset:0;pointer-events:none;background:linear-gradient(135deg,rgba(249,115,22,.34),rgba(88,28,135,.42));mix-blend-mode:screen;opacity:.8;"></span>`:'';}
 function initCachedCameraWidgets(widgets){const nodes=document.querySelectorAll('[data-camera-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-camera-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget);if(!p||p.capture_enabled!==true||!navigator.mediaDevices||typeof navigator.mediaDevices.getUserMedia!=='function'||node.tagName!=='VIDEO')return;const facing=['user','environment','left','right'].includes(p.facing_mode)?p.facing_mode:'environment';const constraints={video:{facingMode:{ideal:facing},width:{ideal:1280,max:1280},height:{ideal:720,max:720},frameRate:{ideal:30,max:30}},audio:false};node.muted=true;node.autoplay=true;node.playsInline=true;navigator.mediaDevices.getUserMedia(constraints).then(stream=>{node.srcObject=stream;const result=typeof node.play==='function'?node.play():null;if(result&&typeof result.catch==='function')result.catch(()=>{});}).catch(()=>{});});}
 function initCachedCameraStreamWidgets(widgets){const nodes=document.querySelectorAll('[data-camera-stream-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-camera-stream-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget);if(!p||node.tagName!=='IMG')return;const wait=Math.max(1000,Math.min(60000,Number(p.reconnect_seconds)*1000||5000)),stallLimit=90000;let timer=null,reconnecting=false,lastSignature='',unchangedSince=Date.now();const base='/camera-stream.mjpeg?widget_id='+encodeURIComponent(id);const reconnect=()=>{if(reconnecting)return;reconnecting=true;if(timer){clearTimeout(timer);timer=null;}node.removeAttribute('src');node.src='about:blank';setTimeout(()=>{node.src=base+'&retry='+Date.now();reconnecting=false;},400);};node.onerror=()=>{if(timer||reconnecting)return;timer=setTimeout(()=>{timer=null;reconnect();},wait);};const canvas=document.createElement('canvas');canvas.width=16;canvas.height=9;const context=canvas.getContext('2d',{willReadFrequently:true});if(context){node.__cameraWatchdog=setInterval(()=>{if(!node.isConnected){clearInterval(node.__cameraWatchdog);return;}if(!node.complete||!node.naturalWidth||reconnecting)return;let signature='';try{context.drawImage(node,0,0,16,9);const pixels=context.getImageData(0,0,16,9).data;let sum=0;for(let i=0;i<pixels.length;i+=16)sum=(sum+pixels[i]*3+pixels[i+1]*5+pixels[i+2]*7)>>>0;signature=String(sum);}catch(_e){return;}if(signature!==lastSignature){lastSignature=signature;unchangedSince=Date.now();}else if(Date.now()-unchangedSince>=stallLimit)reconnect();},5000);}}); }
-function initCachedVideoWidgets(widgets){const nodes=document.querySelectorAll('[data-video-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-video-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget),list=p&&Array.isArray(p.playlist)?p.playlist:[];if(!list.length)return;let index=0;const advance=()=>{index=(index+1)%list.length;node.src=String(list[index].url||'');if(typeof node.load==='function')node.load();const result=typeof node.play==='function'?node.play():null;if(result&&typeof result.catch==='function')result.catch(()=>{});};node.src=String(list[0].url||'');node.loop=list.length===1&&p.loop!==false;node.onended=list.length>1?advance:null;node.onerror=list.length>1?advance:null;});}
+function parseVideoWaitAfter(value){var text=String(value==null?'':value).trim().toLowerCase().replace(/\s*(?:seconds?|secs?|s)\s*$/,'').trim(),range=text.match(/^(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)$/),min,max;if(range){min=Number(range[1]);max=Number(range[2]);}else if(/^\d+(?:\.\d+)?$/.test(text)){min=max=Number(text);}else{return{min:0,max:0};}if(!Number.isFinite(min)||!Number.isFinite(max))return{min:0,max:0};min=Math.max(0,Math.min(86400,min));max=Math.max(0,Math.min(86400,max));if(max<min){var swap=min;min=max;max=swap;}return{min:min,max:max};}
+function videoWaitAfterSeconds(value){var parsed=parseVideoWaitAfter(value);if(parsed.max<=parsed.min)return parsed.min;var random=Math.max(0,Math.min(.999999999,Math.random()));return Number.isInteger(parsed.min)&&Number.isInteger(parsed.max)?parsed.min+Math.floor(random*(parsed.max-parsed.min+1)):parsed.min+(parsed.max-parsed.min)*random;}
+function videoWaitAfterHasDelay(value){return parseVideoWaitAfter(value).max>0;}
+function initCachedVideoWidgets(widgets){const nodes=document.querySelectorAll('[data-video-widget-id]');nodes.forEach(node=>{const id=node.getAttribute('data-video-widget-id'),widget=(widgets||[]).find(item=>String(item.id)===String(id)),p=widget&&props(widget),list=p&&Array.isArray(p.playlist)?p.playlist:[];if(!list.length)return;let index=0,waitTimer=null;const advance=()=>{const current=list[index]||{},wait=videoWaitAfterSeconds(current.wait_after);const go=()=>{waitTimer=null;index=(index+1)%list.length;node.src=String(list[index].url||'');if(typeof node.load==='function')node.load();const result=typeof node.play==='function'?node.play():null;if(result&&typeof result.catch==='function')result.catch(()=>{});};if(wait>0)waitTimer=setTimeout(go,Math.round(wait*1000));else go();};node.src=String(list[0].url||'');node.loop=list.length===1&&p.loop!==false&&!videoWaitAfterHasDelay(list[0]&&list[0].wait_after);node.onended=list.length>1||(list.length===1&&p.loop!==false&&videoWaitAfterHasDelay(list[0]&&list[0].wait_after))?advance:null;node.onerror=list.length>1?advance:null;});}
 async function renderWidget(w){const t=normWidgetType(w),p=Object.assign({_widget_type:t},props(w));if(t==='weather')await loadWeather(p);else if(t==='calendar')await loadCalendar(p);let inner='';
  if((t==='weather'||t==='calendar')&&Array.isArray(p.template_elements)&&p.template_elements.length) inner=templateHtml(Object.assign({},w,{props:p}));
  else if(t==='text') inner=`<div style="width:100%;height:100%;display:flex;align-items:${p.valign||'center'};justify-content:${p.align==='left'?'flex-start':p.align==='right'?'flex-end':'center'};padding:1rem;color:${p.color||'#fff'};font-size:${Number(p.font_size||p.fontSize||24)*2}px;text-align:${p.align||'center'};">${esc(p.text||'Text')}</div>`;
@@ -5904,15 +5907,42 @@ def _camera_stream_command(stream_url: str, props: dict | None = None) -> list[s
     # Per-widget settings are clamped here as a defense-in-depth boundary.
     props = props if isinstance(props, dict) else {}
     try:
-        output_fps = max(1, min(30, int(props.get('output_fps', CAMERA_STREAM_FPS))))
+        camera_max_fps = max(1, min(30, int(os.environ.get('SCREENTRA_CAMERA_MAX_FPS', '30'))))
     except (TypeError, ValueError):
-        output_fps = CAMERA_STREAM_FPS
+        camera_max_fps = 30
     try:
-        output_width = max(320, min(1920, int(props.get('output_width', 960))))
+        output_fps = max(1, min(camera_max_fps, int(props.get('output_fps', CAMERA_STREAM_FPS))))
     except (TypeError, ValueError):
-        output_width = 960
-    interpolate = props.get('frame_interpolation') is True and output_fps > 1
-    if interpolate:
+        output_fps = min(CAMERA_STREAM_FPS, camera_max_fps)
+    try:
+        camera_max_width = max(320, min(1920, int(os.environ.get('SCREENTRA_CAMERA_MAX_WIDTH', '1920'))))
+    except (TypeError, ValueError):
+        camera_max_width = 1920
+    try:
+        output_width = max(320, min(camera_max_width, int(props.get('output_width', 960))))
+    except (TypeError, ValueError):
+        output_width = min(960, camera_max_width)
+    # Synthetic interpolation is opt-in. With the VA-API path, minterpolate runs
+    # after hwdownload and can stall the MJPEG relay under load; plain fps
+    # output keeps the Radeon decode/scale path continuous and duplicates only as needed.
+    interpolate = props.get('frame_interpolation', False) is True and output_fps > 1
+    hwaccel = os.environ.get('SCREENTRA_FFMPEG_HWACCEL', '').strip().lower()
+    vaapi_device = os.environ.get('SCREENTRA_VAAPI_DEVICE', '/dev/dri/renderD129').strip()
+    use_vaapi = hwaccel == 'vaapi' and vaapi_device.startswith('/dev/dri/')
+    if use_vaapi:
+        # Keep interpolation in system memory because minterpolate is not a
+        # VA-API filter. Decode and resize on the Radeon, then download once for
+        # fps/interpolation and the CPU MJPEG encoder.
+        gpu_scale = f'scale_vaapi=w={output_width}:h=-2:force_original_aspect_ratio=decrease,hwdownload,format=nv12'
+        if interpolate:
+            source_fps = max(1, (output_fps + 1) // 2)
+            video_filter = (
+                f'{gpu_scale},fps={source_fps},'
+                f'minterpolate=fps={output_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1,format=yuv420p'
+            )
+        else:
+            video_filter = f'{gpu_scale},fps={output_fps},format=yuv420p'
+    elif interpolate:
         source_fps = max(1, (output_fps + 1) // 2)
         video_filter = (
             f'fps={source_fps},scale={output_width}:-2:force_original_aspect_ratio=decrease,'
@@ -5921,7 +5951,7 @@ def _camera_stream_command(stream_url: str, props: dict | None = None) -> list[s
     else:
         video_filter = f'fps={output_fps},scale={output_width}:-2:force_original_aspect_ratio=decrease'
     ffmpeg_bin = os.environ.get('SCREENTRA_FFMPEG_BIN') or shutil.which('ffmpeg') or 'ffmpeg'
-    return [
+    command = [
         ffmpeg_bin,
         '-nostdin',
         '-hide_banner',
@@ -5932,6 +5962,10 @@ def _camera_stream_command(stream_url: str, props: dict | None = None) -> list[s
         '-probesize', '1000000',
         '-rtsp_transport', 'tcp',
         '-timeout', '10000000',
+    ]
+    if use_vaapi:
+        command.extend(['-hwaccel', 'vaapi', '-hwaccel_device', vaapi_device, '-hwaccel_output_format', 'vaapi'])
+    command.extend([
         '-i', stream_url,
         '-an',
         '-vf', video_filter,
@@ -5939,7 +5973,8 @@ def _camera_stream_command(stream_url: str, props: dict | None = None) -> list[s
         '-fps_mode', 'vfr',
         '-f', 'mpjpeg',
         'pipe:1',
-    ]
+    ])
+    return command
 
 
 def _serve_camera_stream(handler, widget_id: str) -> None:
@@ -6742,6 +6777,7 @@ ready to send as the 'displays' field in heartbeat payload.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -6785,7 +6821,46 @@ def _connector_sort_key(connector: Dict[str, Any]) -> tuple[int, str]:
     return priority, str(connector.get('name') or '')
 
 
-def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
+def _gpu_metadata(entry: Path) -> Dict[str, Optional[str]]:
+    """Return stable, non-secret GPU identity for a DRM connector."""
+    card = entry.name.split('-', 1)[0]
+    drm_device = card
+    try:
+        for candidate in sorted(Path('/dev/dri/by-path').glob(f'pci-*-{card}')):
+            if candidate.name.endswith('-card') and candidate.exists():
+                drm_device = str(candidate)
+                break
+    except Exception:
+        pass
+    device = entry / 'device'
+    driver = ''
+    try:
+        driver = os.path.basename(os.path.realpath(device / 'driver'))
+    except Exception:
+        pass
+    vendor = _read(device / 'vendor') or None
+    device_id = _read(device / 'device') or None
+    pci_match = re.search(r'pci-[^-]+-[^-]+-[^-]+', drm_device)
+    gpu_id = pci_match.group(0) if pci_match else drm_device
+    gpu_name = {
+        '0x1002': 'AMD', '0x10de': 'NVIDIA', '0x8086': 'Intel',
+    }.get((vendor or '').lower(), vendor or 'Unknown GPU')
+    return {
+        'gpu': gpu_name,
+        'gpu_driver': driver or None,
+        'gpu_vendor': vendor,
+        'gpu_device': device_id,
+        'drm_device': drm_device,
+        'gpu_id': gpu_id,
+    }
+
+
+def display_key(display: Dict[str, Any]) -> str:
+    """Stable blacklist key: DRM device identity plus connector."""
+    return str(display.get('display_key') or f"{display.get('drm_device') or display.get('connector') or ''}|{display.get('connector') or ''}")
+
+
+def detect_displays(max_displays: int = 8, blacklisted_keys=None) -> List[Dict[str, Any]]:
     """Return a list of detected DRM connector displays.
 
     Each entry: { display_index, connector, label, width, height, refresh_rate, enabled, connected }
@@ -6799,6 +6874,7 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
     except (TypeError, ValueError):
         display_limit = MAX_DISPLAYS
 
+    blacklist = {str(value) for value in (blacklisted_keys or []) if isinstance(value, str) and value}
     if drm_root.exists():
         connectors = []
         for entry in sorted(drm_root.iterdir()):
@@ -6820,6 +6896,10 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
                 break
             entry = conn['entry']
             connector = conn['name'].split('-', 1)[1] if '-' in conn['name'] else conn['name']
+            gpu = _gpu_metadata(entry)
+            key = f"{gpu['drm_device']}|{connector}"
+            if key in blacklist:
+                continue
             width = _read_int(entry / 'modes') and None
             # best-effort parse modes file (similar to display.rs parse_mode_line)
             width_val = None
@@ -6843,6 +6923,8 @@ def detect_displays(max_displays: int = 8) -> List[Dict[str, Any]]:
                 'connected': conn['status'] == 'connected',
                 'enabled': conn['enabled'] and conn['status'] == 'connected',
                 'last_error': None,
+                **gpu,
+                'display_key': key,
             })
 
     # No physical connector means no supported display. Never synthesize a
@@ -6894,6 +6976,7 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
     # Optional operator-set cap (per-box). None means every connected physical
     # display is eligible, including displays with no touch/input device.
     "max_displays": None,
+    "display_blacklist": [],
     # Cache of the most recent detection for offline debugging. Useful when
     # the user opens /admin and the display count looks wrong after a
     # hotplug or cable swap.
@@ -6907,13 +6990,16 @@ def detect_count(max_scan: int = 16) -> int:
     Count connected connectors even if currently disabled in the compositor, so
     an operator can re-enable DP-4 after touchscreen-only mode turned it off.
     """
-    displays = _det.detect_displays(max_displays=max_scan)
+    config = load_config(Path(os.environ.get('SCREENTRA_CLIENT_DIR') or os.environ.get('RIPLEY_CLIENT_DIR') or os.path.expanduser('~/.local/share/screentra-client')) / 'config.json')
+    displays = _det.detect_displays(max_displays=max_scan, blacklisted_keys=config.get('display_blacklist'))
     return sum(1 for d in displays if d.get("connected", d.get("enabled")))
 
 
 def detect_full(max_scan: int = 16) -> List[Dict[str, Any]]:
     """Return the raw detection list (same shape as heartbeat 'displays' field)."""
-    return _det.detect_displays(max_displays=max_scan)
+    config_path = Path(os.environ.get('SCREENTRA_CLIENT_DIR') or os.environ.get('RIPLEY_CLIENT_DIR') or os.path.expanduser('~/.local/share/screentra-client')) / 'config.json'
+    config = load_config(config_path)
+    return _det.detect_displays(max_displays=max_scan, blacklisted_keys=config.get('display_blacklist'))
 
 
 def _ensure_real_directory(path: Path, create: bool = False) -> bool:
@@ -10255,6 +10341,11 @@ while IFS='|' read -r idx connector port; do
         XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" HOME="$BOARD_HOME" \
         RIPLEY_DISPLAY_INDEX="$idx" RIPLEY_RENDER_PORT="$port" \
         RIPLEY_RENDER_BASE_PORT="$BASE_PORT" \
+        SCREENTRA_FFMPEG_BIN="${SCREENTRA_FFMPEG_BIN:-}" \
+        SCREENTRA_FFMPEG_HWACCEL="${SCREENTRA_FFMPEG_HWACCEL:-}" \
+        SCREENTRA_VAAPI_DEVICE="${SCREENTRA_VAAPI_DEVICE:-}" \
+        SCREENTRA_CAMERA_MAX_FPS="${SCREENTRA_CAMERA_MAX_FPS:-}" \
+        SCREENTRA_CAMERA_MAX_WIDTH="${SCREENTRA_CAMERA_MAX_WIDTH:-}" \
         python3 "$CLIENT_DIR/screentra-client-renderer.py" \
         --host 127.0.0.1 --port "$port" --cache-dir "$CACHE_DIR" \
         >> "$LOG" 2>&1 &
@@ -10346,11 +10437,13 @@ while IFS='|' read -r idx connector port; do
         )
         GPU_CHROMIUM_ARGS=(
             --use-gl=egl
+            --use-angle=gl
             --ignore-gpu-blocklist
             --enable-gpu-rasterization
             --enable-zero-copy
+            --enable-native-gpu-memory-buffers
             --enable-accelerated-2d-canvas
-            --enable-features=VaapiVideoDecoder,VaapiVideoEncoder
+            --enable-features=UseOzonePlatform,VaapiVideoDecoder,VaapiVideoEncoder
         )
         log "Chromium GPU acceleration enabled for display $idx"
     fi

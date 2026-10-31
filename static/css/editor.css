@@ -732,7 +732,14 @@
   font-size: .65rem;
   text-align: center;
 }
+.media-playlist-wait {
+  flex: 0 0 auto;
+  color: var(--text-dim, #8b949e);
+  font-size: .65rem;
+  text-align: center;
+}
 .media-playlist-duration input,
+.media-playlist-wait input,
 .media-playlist-defaults input {
   display: block;
   width: 58px;
@@ -745,6 +752,7 @@
   color: var(--text, #e6edf3);
   font-size: .78rem;
 }
+.media-playlist-wait input { width: 96px; }
 .media-playlist-actions { flex-wrap: wrap; margin-bottom: .55rem; }
 .media-playlist-defaults { justify-content: space-between; }
 .media-playlist-defaults label {

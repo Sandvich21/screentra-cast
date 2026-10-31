@@ -1623,6 +1623,38 @@ function initCameraStreamWidgets(widgets, root) {
 // Video playlist support is shared by the live player and standalone Layout Preview.
 // Keep this initializer at top level so preview.js can invoke the canonical runtime.
 var videoWidgets = {};
+function parseVideoWaitAfter(value) {
+  var text = String(value == null ? '' : value).trim().toLowerCase();
+  text = text.replace(/\s*(?:seconds?|secs?|s)\s*$/, '').trim();
+  var range = text.match(/^(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)$/);
+  var min, max;
+  if (range) {
+    min = Number(range[1]);
+    max = Number(range[2]);
+  } else if (/^\d+(?:\.\d+)?$/.test(text)) {
+    min = max = Number(text);
+  } else {
+    return {min: 0, max: 0};
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return {min: 0, max: 0};
+  min = Math.max(0, Math.min(86400, min));
+  max = Math.max(0, Math.min(86400, max));
+  if (max < min) { var swap = min; min = max; max = swap; }
+  return {min: min, max: max};
+}
+function videoWaitAfterSeconds(value, randomFn) {
+  var parsed = parseVideoWaitAfter(value);
+  if (parsed.max <= parsed.min) return parsed.min;
+  var random = typeof randomFn === 'function' ? Number(randomFn()) : Math.random();
+  random = Number.isFinite(random) ? Math.max(0, Math.min(0.999999999, random)) : 0;
+  if (Number.isInteger(parsed.min) && Number.isInteger(parsed.max)) {
+    return parsed.min + Math.floor(random * (parsed.max - parsed.min + 1));
+  }
+  return parsed.min + (parsed.max - parsed.min) * random;
+}
+function videoWaitAfterHasDelay(value) {
+  return parseVideoWaitAfter(value).max > 0;
+}
 function shuffleVideoPlaylist(arr) { var a = arr.slice(); for (var i=a.length-1;i>0;i--) { var j=Math.floor(Math.random()*(i+1)), t=a[i]; a[i]=a[j]; a[j]=t; } return a; }
 function initVideoWidgets(widgets, root) {
   (widgets || []).forEach(function(w) {
@@ -1631,10 +1663,10 @@ function initVideoWidgets(widgets, root) {
     var node = (root || document).querySelector('[data-video-widget-id="' + w.id + '"]');
     if (!node || !playlist.length) return;
     var ordered = p.shuffle ? shuffleVideoPlaylist(playlist) : playlist.slice(), state = videoWidgets[w.id];
-    var key = ordered.map(function(x){return x.url;}).join('|') + '|' + (p.loop ? '1' : '0') + '|' + (p.shuffle ? '1' : '0');
+    var key = ordered.map(function(x){return x.url + ':' + String(x.wait_after || '');}).join('|') + '|' + (p.loop ? '1' : '0') + '|' + (p.shuffle ? '1' : '0');
     if (state && state.node === node && state.key === key) return;
-    if (state) { state.node.pause(); if (state.endedHandler) state.node.removeEventListener('ended', state.endedHandler); if (state.endCheckHandler) state.node.removeEventListener('timeupdate', state.endCheckHandler); state.node.onended = null; state.node.onerror = null; }
-    state = {node:node, list:ordered, index:0, loop:p.loop !== false, shuffle:!!p.shuffle, failed:{}, key:key, advancing:false, finished:false}; videoWidgets[w.id]=state;
+    if (state) { state.node.pause(); if (state.waitTimer) clearTimeout(state.waitTimer); if (state.endedHandler) state.node.removeEventListener('ended', state.endedHandler); if (state.endCheckHandler) state.node.removeEventListener('timeupdate', state.endCheckHandler); state.node.onended = null; state.node.onerror = null; }
+    state = {node:node, list:ordered, index:0, loop:p.loop !== false, shuffle:!!p.shuffle, failed:{}, key:key, advancing:false, finished:false, waitTimer:null}; videoWidgets[w.id]=state;
     if (typeof ripleyPreviewMode !== 'undefined' && ripleyPreviewMode) {
       // Preview playback must be muted before the first play() call. Setting
       // muted only after play() races the browser autoplay policy.
@@ -1658,9 +1690,7 @@ function initVideoWidgets(widgets, root) {
       var attempt=state.node.play();
       if (attempt && typeof attempt.catch === 'function') attempt.catch(function(){});
     }
-    function advanceAfterEnd() {
-      if (state.advancing || state.finished) return;
-      state.advancing=true;
+    function advanceToNext() {
       state.index++;
       if (state.index >= state.list.length) {
         if (!state.loop) { state.finished=true; state.advancing=false; return; }
@@ -1669,6 +1699,21 @@ function initVideoWidgets(widgets, root) {
         state.failed={};
       }
       try { play(); } finally { state.advancing=false; }
+    }
+    function advanceAfterEnd() {
+      if (state.advancing || state.finished) return;
+      state.advancing=true;
+      var currentItem=state.list[state.index];
+      var hasNext = state.index + 1 < state.list.length || state.loop;
+      var waitSeconds = hasNext ? videoWaitAfterSeconds(currentItem && currentItem.wait_after) : 0;
+      if (waitSeconds > 0) {
+        state.waitTimer=setTimeout(function(){
+          state.waitTimer=null;
+          advanceToNext();
+        }, Math.round(waitSeconds * 1000));
+        return;
+      }
+      advanceToNext();
     }
     function checkVideoEnd() {
       if (state.advancing || state.finished) return;
@@ -1694,7 +1739,7 @@ function initVideoWidgets(widgets, root) {
     }
     state.endedHandler = advanceAfterEnd;
     state.endCheckHandler = checkVideoEnd;
-    node.loop = state.list.length === 1 && state.loop;
+    node.loop = state.list.length === 1 && state.loop && !videoWaitAfterHasDelay(state.list[0] && state.list[0].wait_after);
     node.addEventListener('ended', state.endedHandler);
     node.addEventListener('timeupdate', state.endCheckHandler);
     node.onerror = skipFailedVideo;

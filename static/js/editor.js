@@ -2497,10 +2497,12 @@ const Editor = {
     const rows = items.map((item, index) => {
       const url = item?.url || '';
       const name = item?.name || url || `Video ${index + 1}`;
+      const waitAfter = item?.wait_after == null ? '' : String(item.wait_after);
       return `<div class="media-playlist-row" draggable="true" data-video-playlist-row="${index}">
         <span class="media-playlist-drag" title="Drag to reorder" aria-hidden="true">☰</span>
         <div class="media-playlist-thumb media-playlist-video-thumb" aria-hidden="true">▶</div>
         <span class="media-playlist-name" title="${this.esc(name)}">${index + 1}. ${this.esc(name)}</span>
+        <label class="media-playlist-wait">Wait after<input type="text" data-video-wait-index="${index}" value="${this.esc(waitAfter)}" placeholder="0 or 1-10secs" title="Seconds, or a range such as 1-10secs"></label>
         <button type="button" data-video-move-up="${index}" class="btn btn-secondary btn-sm" ${index === 0 ? 'disabled' : ''} title="Move up">↑</button>
         <button type="button" data-video-move-down="${index}" class="btn btn-secondary btn-sm" ${index === items.length - 1 ? 'disabled' : ''} title="Move down">↓</button>
         <button type="button" data-video-remove-index="${index}" class="btn btn-danger btn-sm" title="Remove video">×</button>
@@ -2515,7 +2517,7 @@ const Editor = {
         <input type="file" data-video-upload accept="video/mp4,video/webm,video/ogg,video/quicktime" style="display:none;">
         <button type="button" data-action="clear-video-playlist" class="btn btn-danger btn-sm" ${items.length ? '' : 'disabled'}>Clear playlist</button>
       </div>
-      <small data-video-status class="tpl-field-help">Videos play in the order shown.</small>
+      <small data-video-status class="tpl-field-help">Videos play in the order shown. Wait after each video: enter seconds or a range such as 1-10secs.</small>
     </div>`;
   },
 
@@ -3255,6 +3257,22 @@ const Editor = {
       E.props.querySelectorAll('[data-video-move-down]').forEach(button => {
         button.onclick = () => moveVideo(Number(button.dataset.videoMoveDown), Number(button.dataset.videoMoveDown) + 1);
       });
+      E.props.querySelectorAll('[data-video-wait-index]').forEach(input => {
+        input.onchange = () => {
+          const live = liveVideo();
+          const items = Array.isArray(live.props.playlist) ? live.props.playlist.slice() : [];
+          const index = Number(input.dataset.videoWaitIndex);
+          if (!items[index]) return;
+          const value = String(input.value || '').trim();
+          if (value) items[index] = { ...items[index], wait_after: value };
+          else {
+            items[index] = { ...items[index] };
+            delete items[index].wait_after;
+          }
+          live.props.playlist = items;
+          refreshVideoEditor();
+        };
+      });
       E.props.querySelectorAll('[data-video-remove-index]').forEach(button => {
         button.onclick = () => {
           const live = liveVideo();
@@ -3978,11 +3996,12 @@ const Editor = {
         const added = tracks.some(t => t.url === url);
         return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(148,163,184,.12);"><div data-video-thumb-url="${this.esc(url)}" style="width:88px;height:50px;flex:0 0 88px;border-radius:4px;overflow:hidden;background:#000;display:grid;place-items:center;color:#666;font-size:18px;">▶</div><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${this.esc(f.name || url)}">${this.esc(f.name || url)}</span><button type="button" data-video-add-index="${i}" ${added ? 'disabled' : ''} style="padding:4px 8px;">${added ? 'Added' : 'Add'}</button><button type="button" data-video-delete-index="${i}" title="Delete from server" style="padding:4px 8px;color:#dc2626;">🗑</button></div>`;
       }).join('') || '<small style="color:#888;">No matching saved videos.</small>';
-      playlistBox.innerHTML = tracks.map((t, i) => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(148,163,184,.12);"><div data-video-thumb-url="${this.esc(t.url || '')}" style="width:88px;height:50px;flex:0 0 88px;border-radius:4px;overflow:hidden;background:#000;display:grid;place-items:center;color:#666;font-size:18px;">▶</div><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${this.esc(t.name || t.url)}">${i + 1}. ${this.esc(t.name || t.url)}</span><button type="button" data-video-remove-index="${i}" style="padding:4px 8px;">Remove</button></div>`).join('') || '<small style="color:#888;">Playlist is empty.</small>';
+      playlistBox.innerHTML = tracks.map((t, i) => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(148,163,184,.12);"><div data-video-thumb-url="${this.esc(t.url || '')}" style="width:88px;height:50px;flex:0 0 88px;border-radius:4px;overflow:hidden;background:#000;display:grid;place-items:center;color:#666;font-size:18px;">▶</div><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${this.esc(t.name || t.url)}">${i + 1}. ${this.esc(t.name || t.url)}</span><label style="display:flex;flex-direction:column;gap:2px;font-size:11px;color:#aaa;flex:0 0 118px;">Wait after<input type="text" data-video-wait-index="${i}" value="${this.esc(t.wait_after == null ? '' : String(t.wait_after))}" placeholder="0 or 1-10secs" title="Seconds, or a range such as 1-10secs" style="width:100%;box-sizing:border-box;padding:4px;border-radius:4px;border:1px solid var(--border,#30363d);background:var(--bg-elev,#21262d);color:var(--text,#e6edf3);"></label><button type="button" data-video-remove-index="${i}" style="padding:4px 8px;">Remove</button></div>`).join('') || '<small style="color:#888;">Playlist is empty.</small>';
       hydrateVideoThumbs(box);
     };
     libraryBox.onclick = e => { const button = e.target.closest('[data-video-delete-index]'); if (button) { const f = files[Number(button.dataset.videoDeleteIndex)]; if (!f) return; const name = f.name || ''; const url = f.url || ('/uploads/videos/' + name); const otherWidgets = (this.currentLayout?.widgets || []).filter(w => w.id !== widget.id && w.props?.playlist?.some(t => t.url === url)); const msg = otherWidgets.length ? 'WARNING: This video is also used in ' + otherWidgets.length + ' other widget(s) in this layout. Those will show a blank slot.' : ''; if (!confirm('Delete "' + name + '" from the server? This cannot be undone.' + (msg ? '\n\n' + msg : ''))) return; API.deleteFile('videos', name).then(() => { files = files.filter(x => x.name !== name); if (current().some(t => t.url === url)) { const w = live(); w.props.playlist = w.props.playlist.filter(t => t.url !== url); if (!w.props.playlist.length) w.props.url = ''; this.selectedWidget = w; this.saveCurrent(); } render(); }).catch(err => { alert('Delete failed: ' + (err?.message || err)); }); } else { const button = e.target.closest('[data-video-add-index]'); if (!button) return; const f = files[Number(button.dataset.videoAddIndex)]; if (!f) return; const url = f.url || ('/uploads/videos/' + f.name); const tracks = current().slice(); if (!tracks.some(t => t.url === url)) tracks.push({ name: f.name || url, url }); commit(tracks); } };
     playlistBox.onclick = e => { const button = e.target.closest('[data-video-remove-index]'); if (!button) return; const tracks = current().slice(); tracks.splice(Number(button.dataset.videoRemoveIndex), 1); commit(tracks); };
+    playlistBox.onchange = e => { const input = e.target.closest('[data-video-wait-index]'); if (!input) return; const tracks = current().slice(); const index = Number(input.dataset.videoWaitIndex); if (!tracks[index]) return; const value = String(input.value || '').trim(); tracks[index] = { ...tracks[index] }; if (value) tracks[index].wait_after = value; else delete tracks[index].wait_after; commit(tracks); };
     if (search) search.oninput = render;
     const close = () => { overlay.remove(); this._videoPickerOverlay = null; };
     box.querySelector('[data-video-picker-close]').onclick = close; overlay.onclick = e => { if (e.target === overlay) close(); };
