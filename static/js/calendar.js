@@ -2,7 +2,8 @@
 var p = new URLSearchParams(location.search);
 var requestedFont = p.get('font_family');
 if (requestedFont && requestedFont.length <= 200 && !/[<>]|javascript:/i.test(requestedFont)) document.documentElement.style.fontFamily = requestedFont;
-var ICS_URL = p.get('ics') || '';
+var CALENDAR_LAYOUT_ID = p.get('layout_id') || '';
+var CALENDAR_WIDGET_ID = p.get('widget_id') || '';
 var TIME_FORMAT = p.get('time_format') === '24' ? '24' : '12';
 var MAX_CALENDAR_RESPONSE_BYTES = 4 * 1024 * 1024;
 function readCalendarTextBounded(response, maximumBytes) {
@@ -368,8 +369,8 @@ function getSampleEvents() {
 
 function renderCalendar() {
   var el = document.getElementById('calendar');
-  if (!ICS_URL) {
-    // No ICS URL configured — use sample ICS data so the widget shows something.
+  if (!CALENDAR_LAYOUT_ID || !CALENDAR_WIDGET_ID) {
+    // No server-side calendar reference configured — use sample data.
     try {
       events = getSampleEvents();
     } catch (e) {
@@ -381,7 +382,7 @@ function renderCalendar() {
   var now = Date.now();
   if (now - lastFetch > 60000) {
     lastFetch = now;
-    fetch('/api/ics-proxy?url=' + encodeURIComponent(ICS_URL))
+    fetch('/api/ics-proxy?layout_id=' + encodeURIComponent(CALENDAR_LAYOUT_ID) + '&widget_id=' + encodeURIComponent(CALENDAR_WIDGET_ID))
       .then(function(r) { return readCalendarTextBounded(r, MAX_CALENDAR_RESPONSE_BYTES); })
       .then(function(text) {
         events = parseICS(text);

@@ -56,6 +56,9 @@ pub const POLICY_SERVER_UPDATE: Policy = Policy::new(3, Duration::from_secs(300)
 pub const POLICY_INTERACTIVE_SUBMIT: Policy = Policy::new(60, Duration::from_secs(60));
 /// Provider-backed traffic proxy requests have a separate quota bucket.
 pub const POLICY_TRAFFIC: Policy = Policy::new(6, Duration::from_secs(300));
+/// Calendar proxy requests are public player traffic and must not become an
+/// unbounded outbound-fetch relay.
+pub const POLICY_ICS_PROXY: Policy = Policy::new(30, Duration::from_secs(300));
 
 /// Maximum number of accepted commands in one burst per client/action.
 pub const CLIENT_COMMAND_BURST_LIMIT: i64 = 10;

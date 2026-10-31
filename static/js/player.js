@@ -807,11 +807,10 @@ function ripleyParseCalendarText(raw, maxEvents, timeFormat, overrides) {
   var todayKey = new Date().toISOString().slice(0, 10);
   return out.filter(function(event){ return event.date >= todayKey; }).sort(function(a,b){return a.date.localeCompare(b.date) || (Number(a.sort_time) || 0) - (Number(b.sort_time) || 0) || a.summary.localeCompare(b.summary);}).slice(0, Math.max(1, Math.min(30, Number(maxEvents) || 7)));
 }
-async function ripleyLoadCalendarData(widgetProps) {
-  var url = widgetProps.ics_url || widgetProps.ical_url || widgetProps.ical || widgetProps.calendar_url || '';
-  if (!url || !Array.isArray(widgetProps.template_elements) || !widgetProps.template_elements.length) return [];
+async function ripleyLoadCalendarData(widgetProps, layoutId, widgetId) {
+  if (!layoutId || !widgetId || widgetProps._calendar_source_configured !== true || !Array.isArray(widgetProps.template_elements) || !widgetProps.template_elements.length) return [];
   try {
-    var response = await playerFetch('/api/ics-proxy?url=' + encodeURIComponent(url), {cache:'no-store'});
+    var response = await playerFetch('/api/ics-proxy?layout_id=' + encodeURIComponent(layoutId) + '&widget_id=' + encodeURIComponent(widgetId), {cache:'no-store'});
     if (!response.ok) throw new Error('calendar ' + response.status);
     widgetProps._calendar_events = ripleyParseCalendarText(await readPlayerTextBounded(response), ripleyCalendarRequiredEventCount(widgetProps), widgetProps.time_format === '24' ? '24' : '12', widgetProps.calendar_time_overrides);
   } catch (_) { widgetProps._calendar_events = []; }
@@ -1150,7 +1149,8 @@ function buildWidgetHTML(w) {
     }).join('');
     html += '<div style="width:100%;height:100%;box-sizing:border-box;overflow:hidden;padding:.6rem;color:#fff;background:rgba(30,41,59,.55);font-family:system-ui,sans-serif;"><div style="font-weight:700;">🚧 ' + ripleyTplEsc(p.area_label || 'Traffic') + '</div>' + trafficDefaultHtml + '<div style="font-size:.85em;margin-top:.4rem;">' + (trafficRows || (p.hide_if_empty !== false ? '' : '<div>No active traffic events</div>')) + '</div></div>';
   } else if (w.widget_type === 'calendar') {
-    var calSrc = '/calendar.html?ics=' + encodeURIComponent(p.ics_url || p.ical_url || p.ical || p.calendar_url || '') + '&template=' + encodeURIComponent(p.template || 'list') + '&color=' + encodeURIComponent(p.color || '#ffffff') + '&accent=' + encodeURIComponent(p.accent_color || '#e94560') + '&maxevents=' + ripleyNumber(p.max_events, 5, 1, 50) + '&time_format=' + encodeURIComponent(p.time_format === '24' ? '24' : '12') + '&incweather=' + (p.include_weather === 'true' ? 'true' : 'false') + '&lat=' + ripleyNumber(p.lat, 0, -90, 90) + '&lon=' + ripleyNumber(p.lon, 0, -180, 180) + (p.font_family || p.fontFamily ? '&font_family=' + encodeURIComponent(p.font_family || p.fontFamily) : '');
+    var calRef = p._calendar_source_configured === true ? 'layout_id=' + encodeURIComponent(w._layout_id || '') + '&widget_id=' + encodeURIComponent(w.id || '') + '&' : '';
+    var calSrc = '/calendar.html?' + calRef + 'template=' + encodeURIComponent(p.template || 'list') + '&color=' + encodeURIComponent(p.color || '#ffffff') + '&accent=' + encodeURIComponent(p.accent_color || '#e94560') + '&maxevents=' + ripleyNumber(p.max_events, 5, 1, 50) + '&time_format=' + encodeURIComponent(p.time_format === '24' ? '24' : '12') + '&incweather=' + (p.include_weather === 'true' ? 'true' : 'false') + '&lat=' + ripleyNumber(p.lat, 0, -90, 90) + '&lon=' + ripleyNumber(p.lon, 0, -180, 180) + (p.font_family || p.fontFamily ? '&font_family=' + encodeURIComponent(p.font_family || p.fontFamily) : '');
     html += '<iframe src="' + calSrc + '" style="width:100%;height:100%;border:none;background:transparent;" allowTransparency="true"></iframe>';
   } else if (w.widget_type === 'weather') {
     var weatherLocation = p.weather_location || p.location || '';
@@ -1968,7 +1968,7 @@ async function init() {
           await ripleyLoadWeatherData(wp);
         }
         if (ws[j].widget_type === 'calendar' && Array.isArray(wp.template_elements) && wp.template_elements.length) {
-          await ripleyLoadCalendarData(wp);
+          await ripleyLoadCalendarData(wp, ly.id, ws[j].id);
         }
         if (ws[j].widget_type === 'traffic') {
           await ripleyLoadTrafficData(wp, ws[j].id);

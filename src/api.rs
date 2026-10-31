@@ -5,7 +5,7 @@ use crate::display::detect_displays;
 use crate::models::{
     AddLayoutSetEntry, CreateLayoutSet, CreateLayoutSetItem, DisplayAssignment, DisplayInfo, DisplayMode, DisplayState,
     Layout, LayoutFolder, LayoutSetEntry, LayoutSetSummary, LayoutSetWithItems, SystemStatus, TemplateMeta,
-    UpdateLayoutSet, UpdateLayoutSetEntry, WidgetPreset, WidgetPresetAsset, WidgetPresetMeta,
+    UpdateLayoutSet, UpdateLayoutSetEntry, WidgetPreset, WidgetPresetAsset, WidgetPresetMeta, WidgetType,
 };
 use crate::schedule::ScheduleEntry;
 use crate::system::get_system_status;
@@ -1972,6 +1972,7 @@ async fn list_layouts(
         .into_iter()
         .map(|mut layout| {
             redact_camera_stream_sources(&mut layout);
+            redact_calendar_sources(&mut layout);
             layout
         })
         .collect();
@@ -1989,6 +1990,7 @@ async fn get_layout(
         .map_err(|_| internal_server_error())?
         .ok_or((StatusCode::NOT_FOUND, "Layout not found".to_string()))?;
     redact_camera_stream_sources(&mut layout);
+    redact_calendar_sources(&mut layout);
     Ok(AxumJson(layout))
 }
 
@@ -4196,14 +4198,32 @@ async fn traffic_events(
     })))
 }
 
-async fn ics_proxy(
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Result<String, (StatusCode, String)> {
-    let url = params
-        .get("url")
-        .ok_or((StatusCode::BAD_REQUEST, "Missing url parameter".to_string()))?;
+#[derive(Debug, Deserialize)]
+struct IcsProxyQuery {
+    layout_id: String,
+    widget_id: String,
+}
 
-    let (resolved_host, resolved_port, resolved_ip) = validate_proxy_url(url).map_err(|reason| {
+async fn ics_proxy(
+    State(repository): State<ClientRepository>,
+    axum::extract::Query(params): axum::extract::Query<IcsProxyQuery>,
+) -> Result<String, (StatusCode, String)> {
+    validate_optional_layout_id(Some(&params.layout_id))?;
+    if params.widget_id.trim().is_empty()
+        || params.widget_id.len() > 128
+        || params.widget_id.chars().any(|character| character.is_control())
+    {
+        return Err((StatusCode::BAD_REQUEST, "Invalid widget identifier".to_string()));
+    }
+    let layout = repository
+        .get_layout(&params.layout_id)
+        .await
+        .map_err(|_| internal_server_error())?
+        .ok_or((StatusCode::NOT_FOUND, "Layout not found".to_string()))?;
+    let url = calendar_source_url(&layout, &params.widget_id)
+        .ok_or((StatusCode::NOT_FOUND, "Calendar source not found".to_string()))?;
+
+    let (resolved_host, resolved_port, resolved_ip) = validate_proxy_url(&url).map_err(|reason| {
         log::warn!("proxy URL rejected: {reason}");
         let status =
             if reason.starts_with("dns resolve") || reason == "dns resolve returned no addresses" {
@@ -4227,7 +4247,7 @@ async fn ics_proxy(
         .map_err(|_| internal_server_error())?;
 
     let res = client
-        .get(url)
+        .get(&url)
         .header("User-Agent", "DigitalSignage/1.0")
         .send()
         .await
@@ -10493,6 +10513,55 @@ fn redact_camera_stream_sources(layout: &mut Layout) {
     }
 }
 
+fn calendar_source_url(layout: &Layout, widget_id: &str) -> Option<String> {
+    let widget = layout
+        .widgets
+        .iter()
+        .find(|widget| widget.id == widget_id && widget.widget_type == WidgetType::Calendar)?;
+    ["ics_url", "ical_url", "ical", "calendar_url"]
+        .into_iter()
+        .find_map(|key| {
+            widget
+                .props
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+}
+
+fn redact_calendar_sources(layout: &mut Layout) {
+    for widget in &mut layout.widgets {
+        if widget.widget_type != WidgetType::Calendar {
+            continue;
+        }
+        let configured = ["ics_url", "ical_url", "ical", "calendar_url"]
+            .into_iter()
+            .any(|key| {
+                widget
+                    .props
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+            });
+        let Some(props) = widget.props.as_object_mut() else {
+            continue;
+        };
+        for key in ["ics_url", "ical_url", "ical", "calendar_url"] {
+            props.remove(key);
+        }
+        if configured {
+            props.insert(
+                "_calendar_source_configured".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        } else {
+            props.remove("_calendar_source_configured");
+        }
+    }
+}
+
 /// Keep protected RTSP credentials from being destroyed by a redacted layout
 /// round-trip. Public layout reads intentionally omit `stream_url`; an older
 /// editor or a non-editor write may therefore send the same widget back
@@ -10547,6 +10616,7 @@ async fn get_player_layout(
         .map_err(|_| internal_server_error())?
         .ok_or((StatusCode::NOT_FOUND, "Layout not found".to_string()))?;
     redact_camera_stream_sources(&mut layout);
+    redact_calendar_sources(&mut layout);
     Ok(AxumJson(layout))
 }
 
@@ -10707,6 +10777,7 @@ async fn render_layout(
         .ok_or((StatusCode::NOT_FOUND, format!("Layout {} not found", id)))?;
     let mut public_layout = layout;
     redact_camera_stream_sources(&mut public_layout);
+    redact_calendar_sources(&mut public_layout);
     let widgets_json = serde_json::to_value(&public_layout.widgets)
         .map_err(|_| internal_server_error())?;
     let widgets_arr = widgets_json.as_array().cloned().unwrap_or_default();
@@ -11387,6 +11458,49 @@ fn reverse_name(ip: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::models::{Widget, WidgetType};
+
+    #[test]
+    fn public_calendar_proxy_resolves_only_a_calendar_widget_source() {
+        let layout = Layout {
+            id: "layout-1".to_string(),
+            name: "Calendar".to_string(),
+            widgets: vec![Widget {
+                id: "calendar-1".to_string(),
+                widget_type: WidgetType::Calendar,
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+                z: 0,
+                props: serde_json::json!({"ical_url": "https://calendar.example/events.ics"}),
+            }],
+            interactive: false,
+            canvas_orientation: "landscape".to_string(),
+            folder_id: None,
+            page_type: "single".to_string(),
+            timing_mode: "global".to_string(),
+            duration: 15,
+            shuffle: false,
+            items: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        assert_eq!(
+            calendar_source_url(&layout, "calendar-1").as_deref(),
+            Some("https://calendar.example/events.ics")
+        );
+        assert_eq!(calendar_source_url(&layout, "missing"), None);
+
+        let mut public_layout = layout.clone();
+        redact_calendar_sources(&mut public_layout);
+        let public_props = &public_layout.widgets[0].props;
+        assert!(public_props.get("ical_url").is_none());
+        assert_eq!(public_props.get("_calendar_source_configured").and_then(serde_json::Value::as_bool), Some(true));
+    }
+
     #[test]
     fn user_fields_are_bounded() {
         assert!(normalize_display_name("Operator").is_ok());
@@ -14020,8 +14134,9 @@ struct RateLimitLayerState {
 /// - /api/files/*: 60 requests / 60 seconds / IP
 /// - client registration/polling traffic: 120 requests / 60 seconds / IP
 /// - authenticated client-control mutations: 30 requests / 60 seconds / IP
-/// - server update export/import: 3 requests / 300 seconds / IP
+/// - /api/version/update/export|import: 3 requests / 300 seconds / IP
 /// - /api/interactive/submit: 60 requests / 60 seconds / IP
+/// - /api/ics-proxy: 30 requests / 300 seconds / IP
 async fn rate_limit_files_layer(
     State(layer_state): State<RateLimitLayerState>,
     req: axum::extract::Request,
@@ -14046,6 +14161,8 @@ async fn rate_limit_files_layer(
         ("interactive_submit", crate::rate_limit::POLICY_INTERACTIVE_SUBMIT)
     } else if path == "/api/traffic/events" || path == "/api/traffic/map.png" {
         ("traffic", crate::rate_limit::POLICY_TRAFFIC)
+    } else if path == "/api/ics-proxy" {
+        ("ics_proxy", crate::rate_limit::POLICY_ICS_PROXY)
     } else {
         return next.run(req).await;
     };

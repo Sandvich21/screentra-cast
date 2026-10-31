@@ -4761,7 +4761,6 @@ ${targetSection}
                 }
                 return '/weather.html?' + params.toString();
             case 'calendar':
-                params.set('ics', props.ics_url || '');
                 params.set('template', props.template || 'list');
                 params.set('color', props.color || '#ffffff');
                 params.set('accent', props.accent || props.accent_color || '#e94560');

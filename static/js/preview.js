@@ -145,8 +145,8 @@ async function refreshPreviewTraffic(layout){
  }));
 }
 async function refreshPreviewCalendars(layout){
- const widgets=(layout.widgets||[]).filter(function(w){var p=w&&w.props||{};return w&&((w.widget_type||w.type)==='calendar')&&Array.isArray(p.template_elements)&&p.template_elements.length&&(p.ics_url||p.ical_url||p.ical||p.calendar_url);});
- await Promise.all(widgets.map(async function(w){try{var p=w.props;var url=p.ics_url||p.ical_url||p.ical||p.calendar_url;var r=await fetch('/api/ics-proxy?url='+encodeURIComponent(url),{cache:'no-store'});if(r.ok){p._calendar_events=ripleyParseCalendarText(await readPreviewTextBounded(r),ripleyCalendarRequiredEventCount(p),p.time_format === '24' ? '24' : '12',p.calendar_time_overrides);}}catch(_e){w.props._calendar_events=[];}}));
+ const widgets=(layout.widgets||[]).filter(function(w){var p=w&&w.props||{};return w&&((w.widget_type||w.type)==='calendar')&&p._calendar_source_configured===true&&Array.isArray(p.template_elements)&&p.template_elements.length;});
+ await Promise.all(widgets.map(async function(w){try{var p=w.props;var r=await fetch('/api/ics-proxy?layout_id='+encodeURIComponent(layout.id)+'&widget_id='+encodeURIComponent(w.id),{cache:'no-store'});if(r.ok){p._calendar_events=ripleyParseCalendarText(await readPreviewTextBounded(r),ripleyCalendarRequiredEventCount(p),p.time_format === '24' ? '24' : '12',p.calendar_time_overrides);}}catch(_e){w.props._calendar_events=[];}}));
 }
 async function load(){
  // preview mode skips player.js init(), so load installed fonts here.
