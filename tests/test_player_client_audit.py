@@ -198,8 +198,10 @@ class PlayerClientAuditTests(unittest.TestCase):
         self.assertNotIn('_read_bounded_text(prev_layout_path', source)
         self.assertLess(
             source.index("previous_orientation = 'normal'"),
-            source.index("fetch_config(args.server, probe['client_id']"),
+            source.index("data = payload(args)"),
         )
+        self.assertNotIn("probe['client_id']", source)
+        self.assertNotIn('pre-heartbeat config refresh', source)
 
     def test_display_override_modal_escapes_connector_html(self):
         source = (ROOT / 'static/js/app.js').read_text()

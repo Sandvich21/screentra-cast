@@ -1378,14 +1378,6 @@ def main():
             previous_orientation = _read_json_file(Path(args.cache_dir) / 'client-config.json', {}).get('orientation', 'normal')
         except Exception:
             pass
-        # Refresh configuration before building the registration payload so the
-        # heartbeat acknowledges the revision the player has just fetched.
-        probe = payload(args)
-        try:
-            fetch_config(args.server, probe['client_id'], args.cache_dir, display_index=0, config_pattern=args.display_config_pattern)
-            fetch_all_displays(args.server, probe['client_id'], args.cache_dir, len(probe.get('displays') or []), args.display_config_pattern, start_index=1)
-        except Exception as e:
-            print(f'pre-heartbeat config refresh failed: {e}', flush=True)
         data = payload(args)
         try:
             status, body = post(args.server, data)
