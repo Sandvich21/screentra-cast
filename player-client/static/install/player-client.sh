@@ -1513,8 +1513,14 @@ MAX_JSON_FILE_BYTES = 1 << 20
 MAX_COMMAND_RESPONSE_BYTES = 64 * 1024
 MAX_TEXT_RESPONSE_BYTES = 64 * 1024
 MAX_PROC_METRICS_BYTES = 64 * 1024
-# Keep a last-known-good layout through a brief false-unassigned response.
-# A real unassignment is still honored after this bounded confirmation window.
+# Keep the last-known-good layout indefinitely when the server reports no
+# assignment.  This is intentionally temporary: a transient server/config
+# race must never replace working signage with a no-layout screen.  A later
+# assignment still replaces the cached layout normally; restore an explicit
+# unassignment policy here when operators want that behavior again.
+PRESERVE_CACHED_LAYOUT_ON_UNASSIGNED = True
+# Retained for compatibility with diagnostics/tests that report the old
+# confirmation interval; the temporary preserve policy above takes precedence.
 LAYOUT_UNASSIGNED_GRACE_SECONDS = 120
 
 
@@ -2652,7 +2658,7 @@ def read_command_result(cache_dir):
 
 
 def _preserve_cached_layout_on_empty_config(cache_dir, config_path, data):
-    """Keep the last good assignment through a brief false-unassigned response."""
+    """Keep the last good assignment when the server reports no layout."""
     marker_path = Path(cache_dir) / 'unassigned-layout-confirmation.json'
     if data.get('layout') is not None:
         try:
@@ -2668,6 +2674,8 @@ def _preserve_cached_layout_on_empty_config(cache_dir, config_path, data):
     # never replace a usable cached layout with the no-layout screen.
     if data.get('assigned_layout_id') is not None:
         return True
+    if PRESERVE_CACHED_LAYOUT_ON_UNASSIGNED:
+        return True
     now = time.time()
     marker = _read_cache_json(marker_path, {})
     try:
@@ -2677,7 +2685,7 @@ def _preserve_cached_layout_on_empty_config(cache_dir, config_path, data):
     if marker.get('layout_id') != previous_layout_id or first_seen <= 0:
         _atomic_write_text(marker_path, json.dumps({'layout_id': previous_layout_id, 'first_seen': now}))
         return True
-    if now - first_seen < LAYOUT_UNASSIGNED_GRACE_SECONDS:
+    if now - first_seen < 120:
         return True
     try:
         marker_path.unlink()
@@ -5531,6 +5539,10 @@ __cursorLoadConfig();
 # unreachable, fall back to the cached PLAYER_HTML so the player still shows
 # the last cached layout offline.
 LIVE_PROBE_TIMEOUT_SECS = float(os.environ.get('RIPLEY_LIVE_PROBE_TIMEOUT', '0.6'))
+# Keep the no-layout diagnostic page available at /no-layout.html for later
+# re-enablement, but do not replace a working display with it during the
+# temporary stale-assignment policy.
+SHOW_NO_LAYOUT_SCREEN = os.environ.get('SCREENTRA_SHOW_NO_LAYOUT_SCREEN', '').strip().lower() in ('1', 'true', 'yes')
 
 
 def _live_player_url() -> str | None:
@@ -6294,7 +6306,7 @@ class Handler(BaseHTTPRequestHandler):
             # button) instead of redirecting to the server's minimal fallback
             # card. This gives the operator everything they need to configure
             # the touchscreen + pick a layout right from the screen.
-            if not layout_target.exists():
+            if not layout_target.exists() and SHOW_NO_LAYOUT_SCREEN:
                 try:
                     no_layout_path = Path(__file__).with_name('no-layout.html')
                     html = _read_real_file(no_layout_path, MAX_STATIC_HTML_BYTES).decode('utf-8')

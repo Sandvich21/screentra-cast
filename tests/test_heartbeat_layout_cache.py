@@ -60,7 +60,7 @@ class HeartbeatLayoutCacheTests(unittest.TestCase):
                 'layout-1',
             )
 
-    def test_confirmed_unassignment_clears_after_grace_period(self):
+    def test_sustained_unassignment_keeps_last_good_layout(self):
         with tempfile.TemporaryDirectory() as temp:
             cache = Path(temp)
             good = {
@@ -82,7 +82,8 @@ class HeartbeatLayoutCacheTests(unittest.TestCase):
                     heartbeat.fetch_config('https://server.example:3000', 'client-1', cache)
                 with mock.patch.object(heartbeat.time, 'time', return_value=1000 + heartbeat.LAYOUT_UNASSIGNED_GRACE_SECONDS + 1):
                     heartbeat.fetch_config('https://server.example:3000', 'client-1', cache)
-            self.assertFalse((cache / 'assigned-layout-display-0.json').exists())
+            self.assertTrue((cache / 'assigned-layout-display-0.json').exists())
+            self.assertEqual(json.loads((cache / 'assigned-layout-display-0.json').read_text())['id'], 'layout-1')
 
 
 if __name__ == '__main__':

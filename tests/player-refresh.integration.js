@@ -21,6 +21,10 @@ assert.match(source, /fetchAndCacheLayout\(targetId, true\)/);
 assert.match(source, /initVideoWidgets\(target\.widgets \|\| \[\], root\)/);
 assert.match(source, /initVideoWidgets\(target\.widgets \|\| \[\], rg\)/);
 assert.match(source, /sxRenderSingle\(layoutId, myConnector, true\)/);
+assert.match(source, /var lastKnownGoodDisplay = null/);
+assert.match(source, /retaining last rendered layout/);
+assert.match(source, /retaining current rendered content/);
+assert.doesNotMatch(source, /rg\.innerHTML = .*No layout assigned/);
 assert.doesNotMatch(source, /currentContentKey = null; renderLoop\(\)/);
 assert.match(previewSource, /function preparePreviewVideoPlayback\(root\)/);
 assert.match(previewSource, /video\.muted=true/);
@@ -65,8 +69,8 @@ assert.doesNotMatch(editorCss, /\.interactive-widget:hover \.interactive-widget-
 const context = {
   console,
   URLSearchParams,
-  window: { location: { pathname: '/preview.html', search: '' } },
-  location: { pathname: '/preview.html', search: '' },
+  window: { location: { pathname: '/preview.html', search: '', hash: '' } },
+  location: { pathname: '/preview.html', search: '', hash: '' },
   document: { documentElement: {}, querySelector: () => null, getElementById: () => null },
   ripleyWeatherIconSvg: () => '<svg></svg>',
   ripleyWeatherIconDescription: () => 'sample',

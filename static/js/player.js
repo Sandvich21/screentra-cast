@@ -1818,6 +1818,10 @@ async function init() {
 
   var myConnector = myDisplay.connector;
   var currentContentKey = null;
+  // A transient empty assignment must not replace a working layout with a
+  // misleading no-layout screen. Keep the last successful display assignment
+  // in memory until a later real assignment arrives.
+  var lastKnownGoodDisplay = null;
 
   async function fetchClientDisplayAssignment() {
     if (!clientId) return null;
@@ -2175,18 +2179,24 @@ async function init() {
         layoutId = a && a.layout_id;
       }
       if (!layoutId) {
-        sxStop();
-        rg.innerHTML = '<div style="position:absolute;inset:0;display:grid;place-items:center;color:#94a3b8;font-family:system-ui,sans-serif;text-align:center;padding:24px;">'
-                     + '<div><div style="font-size:clamp(28px,3.6vw,48px);font-weight:800;color:#e2e8f0;margin-bottom:.4em;background:linear-gradient(90deg,#38bdf8,#22d3ee);-webkit-background-clip:text;background-clip:text;color:transparent;">No layout assigned</div>'
-                     + '<div style="font-size:clamp(14px,1.4vw,18px);">Display ' + ripleyTplEsc(myConnector) + ' is registered but has no active layout.<br>'
-                     + 'Open the editor and assign a layout to this display.</div></div>';
-        currentContentKey = null;
-        return;
+        if (lastKnownGoodDisplay && lastKnownGoodDisplay.assigned_layout_id) {
+          clientDisplay = lastKnownGoodDisplay;
+          layoutId = clientDisplay.assigned_layout_id;
+          lg('No current layout assignment; retaining last rendered layout ' + layoutId);
+        } else {
+          // Leave the current DOM untouched. On a fresh/unconfigured client
+          // this is an empty background; after playback it preserves the last
+          // rendered frame instead of showing a disruptive status page.
+          sxStop();
+          lg('No current layout assignment; retaining current rendered content');
+          return;
+        }
       }
 
       // If the server sent a layout_set, run the slideshow engine
       if (clientDisplay && clientDisplay.layout_set && clientDisplay.layout_set.items && clientDisplay.layout_set.items.length) {
         await sxRun(clientDisplay, myConnector);
+        lastKnownGoodDisplay = clientDisplay;
         currentContentKey = 'slideshow:' + clientDisplay.layout_set.id;
         return;
       }
@@ -2197,6 +2207,7 @@ async function init() {
       lg('Loading layout ' + layoutId + ' for ' + myConnector);
       currentContentKey = layoutKey;
       await sxRenderSingle(layoutId, myConnector, true);
+      lastKnownGoodDisplay = clientDisplay;
     } catch(e) {
       lg('Render error: ' + e.message);
       console.error(e);

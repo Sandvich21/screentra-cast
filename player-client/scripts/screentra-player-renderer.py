@@ -1322,6 +1322,10 @@ __cursorLoadConfig();
 # unreachable, fall back to the cached PLAYER_HTML so the player still shows
 # the last cached layout offline.
 LIVE_PROBE_TIMEOUT_SECS = float(os.environ.get('RIPLEY_LIVE_PROBE_TIMEOUT', '0.6'))
+# Keep the no-layout diagnostic page available at /no-layout.html for later
+# re-enablement, but do not replace a working display with it during the
+# temporary stale-assignment policy.
+SHOW_NO_LAYOUT_SCREEN = os.environ.get('SCREENTRA_SHOW_NO_LAYOUT_SCREEN', '').strip().lower() in ('1', 'true', 'yes')
 
 
 def _live_player_url() -> str | None:
@@ -2085,7 +2089,7 @@ class Handler(BaseHTTPRequestHandler):
             # button) instead of redirecting to the server's minimal fallback
             # card. This gives the operator everything they need to configure
             # the touchscreen + pick a layout right from the screen.
-            if not layout_target.exists():
+            if not layout_target.exists() and SHOW_NO_LAYOUT_SCREEN:
                 try:
                     no_layout_path = Path(__file__).with_name('no-layout.html')
                     html = _read_real_file(no_layout_path, MAX_STATIC_HTML_BYTES).decode('utf-8')
