@@ -52,6 +52,13 @@ class PlayerRendererFileTests(unittest.TestCase):
             path.write_text('{"safe":1,"safe":2}', encoding='utf-8')
             self.assertEqual(renderer._read_json_file(path, {'fallback': True}), {'fallback': True})
 
+    def test_cached_calendar_uses_published_layout_widget_proxy(self):
+        source = renderer.PLAYER_HTML
+        self.assertIn("function loadCalendar(p,layoutId,widgetId)", source)
+        self.assertIn("/api/ics-proxy?layout_id=", source)
+        self.assertIn("loadCalendar(p,w._layout_id||'',w.id)", source)
+        self.assertNotIn("/api/ics-proxy?url=", source)
+
     def test_live_redirect_requires_online_assignment(self):
         with tempfile.TemporaryDirectory() as temp:
             cache = Path(temp)
