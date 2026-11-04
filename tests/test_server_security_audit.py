@@ -102,8 +102,6 @@ class ServerSecurityAuditTests(unittest.TestCase):
         source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
         for marker, end_marker, forbidden in (
             ('fn normalize_widget_preset_props(', 'fn widget_preset_assets_from_export(', ('Invalid widget preset props_json:',)),
-            ('async fn export_update_bundle_handler(', 'fn update_failure_stage(', ('format!("inspect bundle:',)),
-            ('async fn import_update_bundle_handler(', 'struct UpdateLastFailure', ('update applied but', 'format!("update applied but')),
             ('async fn reset_default_widget_presets(', 'async fn setup_status(', ('read default templates:', 'parse default templates:')),
         ):
             start = source.index(marker)
@@ -113,8 +111,7 @@ class ServerSecurityAuditTests(unittest.TestCase):
 
         source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
         for marker, end_marker, forbidden in (
-            ('async fn apply_github_update_handler(', 'struct PlayerClientBundleBuildResult', ('Err((StatusCode::INTERNAL_SERVER_ERROR, message))', 'StatusCode::BAD_GATEWAY, error')),
-            ('async fn build_player_client_bundle_handler(', 'async fn get_system_time(', ('bundle builder missing:', 'server bundle builder missing:', 'download file not available:')),
+            ('async fn apply_github_update_handler(', 'const MAX_STATE_BUNDLE_BYTES:', ('Err((StatusCode::INTERNAL_SERVER_ERROR, message))', 'StatusCode::BAD_GATEWAY, error')),
             ('async fn get_system_time(', 'async fn set_timezone(', ('timedatectl:', 'timedatectl show failed:')),
         ):
             start = source.index(marker)
@@ -125,7 +122,6 @@ class ServerSecurityAuditTests(unittest.TestCase):
         source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')
         self.assertNotIn('StatusCode::INTERNAL_SERVER_ERROR, format!', source)
         self.assertNotIn('format!("multipart:', source)
-        self.assertIn('"Invalid multipart request"', source)
 
     def test_news_refresh_does_not_return_upstream_or_feed_errors(self):
         source = (ROOT / 'src/api.rs').read_text(encoding='utf-8')

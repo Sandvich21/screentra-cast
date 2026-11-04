@@ -945,35 +945,6 @@ window.API = {
         if (!res.ok) throw new Error('Failed to get version info');
         return _readApiJsonBounded(res);
     },
-    exportBundleUrl() {
-        return '/api/version/export';
-    },
-    async importBundle(file) {
-        const form = new FormData();
-        form.append('bundle', file);
-        const res = await fetch('/api/version/import', { method: 'POST', body: form });
-        if (!res.ok) throw new Error('Import failed (status ' + res.status + ')');
-    },
-    async getUpdatePreview() {
-        const res = await fetch('/api/version/update/preview');
-        if (!res.ok) throw new Error('Failed to get update preview');
-        return _readApiJsonBounded(res);
-    },
-    exportUpdateBundleUrl() {
-        return '/api/version/update/export';
-    },
-    async importUpdateBundle(file, forceSkipRollback) {
-        const form = new FormData();
-        form.append('bundle', file);
-        let url = '/api/version/update/import';
-        if (forceSkipRollback) url += '?force=true';
-        const res = await fetch(url, { method: 'POST', body: form });
-        if (!res.ok) {
-            const text = await readApiError(res);
-            throw new Error('Update import failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
-        }
-        return _readApiJsonBounded(res);
-    },
     async getGithubUpdateStatus() {
         const res = await fetch('/api/version/update/github');
         if (!res.ok) throw new Error('Failed to get GitHub update status');
@@ -1006,52 +977,6 @@ window.API = {
             throw new Error('GitHub update failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
         return _readApiJsonBounded(res);
-    },
-    async getVersionUpdateLastFailure() {
-        const res = await fetch('/api/version/update/last-failure');
-        if (!res.ok) {
-            if (res.status === 401 || res.status === 403) return { failed: false };
-            throw new Error('Failed to read last-failure marker');
-        }
-        return _readApiJsonBounded(res);
-    },
-    async buildPlayerClientBundle() {
-        const res = await fetch('/api/version/player-client-bundle/build', { method: 'POST' });
-        if (!res.ok) {
-            const text = await readApiError(res);
-            throw new Error('Player bundle build failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
-        }
-        return _readApiJsonBounded(res);
-    },
-    playerClientBundleUrl() {
-        return '/install/player-client-bundle.tar.gz';
-    },
-    playerClientBootstrapUrl() {
-        return '/install/player-client-bundle-install.sh';
-    },
-    playerClientBundleDownloadUrl() {
-        return '/install/player-client-bundle-download.tar.gz';
-    },
-    playerClientBootstrapDownloadUrl() {
-        return '/install/player-client-bundle-bootstrap.sh';
-    },
-    async buildServerBundle() {
-        const res = await fetch('/api/version/server-bundle/build', { method: 'POST' });
-        if (!res.ok) {
-            const text = await readApiError(res);
-            throw new Error('Server bundle build failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
-        }
-        return _readApiJsonBounded(res);
-    },
-    serverBundleUrl() {
-        return '/install/ripley-signage-server-bundle.tar.gz';
-    },
-    serverBootstrapUrl() {
-        return '/install/ripley-signage-server-bundle-install.sh';
-    },
-    async restartService() {
-        const res = await fetch('/api/version/restart', { method: 'POST' });
-        if (!res.ok) throw new Error('Restart failed (status ' + res.status + ')');
     },
 
 

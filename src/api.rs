@@ -1672,23 +1672,13 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             "/api/widget-presets/reset-defaults",
             post(reset_default_widget_presets),
         )
-        // Version manager
-        .route(
-            "/install/player-client-bundle-download.tar.gz",
-            get(download_player_client_bundle_handler),
-        )
-        .route(
-            "/install/player-client-bundle-bootstrap.sh",
-            get(download_player_client_bootstrap_handler),
-        )
+        // Version manager: the dashboard exposes GitHub Release Updates only.
+        // Server installers still consume this signed static release asset.
         .route(
             "/install/screentra-cast-installers.tar.gz",
             get(download_screentra_cast_installers_handler),
         )
         .route("/api/version", get(get_version))
-        .route("/api/version/export", get(export_state_bundle_handler))
-        .route("/api/version/import", post(import_state_bundle_handler).layer(DefaultBodyLimit::max(1024 * 1024 * 1024)))
-        .route("/api/version/restart", post(restart_service_handler))
         // Interactive submissions — POST is unauthenticated (player-side data collection)
         .route(
             "/api/interactive/submit",
@@ -1714,18 +1704,6 @@ pub fn router(runtime_state: RuntimeState) -> Router {
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route(
-            "/api/version/update/export",
-            get(export_update_bundle_handler),
-        )
-        .route(
-            "/api/version/update/import",
-            post(import_update_bundle_handler).layer(DefaultBodyLimit::max(1024 * 1024 * 1024)),
-        )
-        .route(
-            "/api/version/update/last-failure",
-            get(update_last_failure_handler),
-        )
-        .route(
             "/api/version/update/github",
             get(github_update_status_handler),
         )
@@ -1742,23 +1720,6 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             post(apply_github_update_handler),
         )
         .route("/api/audit", get(list_audit_events_handler))
-        .route("/api/version/update/preview", get(update_preview_handler))
-        .route(
-            "/api/version/player-client-bundle/build",
-            post(build_player_client_bundle_handler),
-        )
-        .route(
-            "/api/version/server-bundle/build",
-            post(build_server_bundle_handler),
-        )
-        .route(
-            "/api/version/player-client-bundle/download",
-            get(download_player_client_bundle_handler),
-        )
-        .route(
-            "/api/version/player-client-bundle/bootstrap",
-            get(download_player_client_bootstrap_handler),
-        )
         // System time
         .route("/api/system/time", get(get_system_time))
         .route(
@@ -6180,529 +6141,6 @@ async fn get_version() -> Result<AxumJson<crate::version::VersionInfo>, (StatusC
     }))
 }
 
-async fn export_state_bundle_handler(
-    State(runtime_state): State<RuntimeState>,
-) -> Result<
-    (
-        [(axum::http::header::HeaderName, axum::http::HeaderValue); 1],
-        Vec<u8>,
-    ),
-    (StatusCode, String),
-> {
-    if matches!(runtime_state.client_repository(), ClientRepository::Postgres(_)) {
-        return Err((
-            StatusCode::NOT_IMPLEMENTED,
-            "State bundles currently support only the SQLite backend".to_string(),
-        ));
-    }
-    // Drop the lock before doing file I/O so we don't hold the DB open during the tar.
-    drop(runtime_state);
-    // Use the install dir for the bundle — /tmp may be a small tmpfs on the player device.
-    let dest = std::path::PathBuf::from(crate::version::install_dir_for_static()).join(format!(
-        ".signage-export-{}.tar.gz",
-        chrono::Utc::now().timestamp()
-    ));
-    crate::version::export_state_bundle(&dest)
-        .map_err(|_| internal_server_error())?;
-    let bundle_size = tokio::fs::metadata(&dest)
-        .await
-        .map_err(|_| internal_server_error())?
-        .len();
-    if bundle_size > MAX_STATE_BUNDLE_BYTES {
-        let _ = tokio::fs::remove_file(&dest).await;
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "Generated state bundle is too large".to_string(),
-        ));
-    }
-    let bytes = read_bounded_async_file(&dest, MAX_STATE_BUNDLE_BYTES)
-        .await
-        .map_err(|_| internal_server_error())?;
-    let _ = tokio::fs::remove_file(&dest).await;
-    let header = [(
-        axum::http::header::CONTENT_DISPOSITION,
-        axum::http::HeaderValue::from_static(
-            "attachment; filename=\"signage-state-bundle.tar.gz\"",
-        ),
-    )];
-    Ok((header, bytes))
-}
-
-const MAX_STATE_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
-
-async fn stage_multipart_bundle(
-    mut field: axum::extract::multipart::Field<'_>,
-    prefix: &str,
-) -> Result<PathBuf, (StatusCode, String)> {
-    let dest = PathBuf::from(crate::version::install_dir_for_static())
-        .join(format!(".{prefix}-{}.tar.gz", Uuid::new_v4()));
-    let mut file = tokio::fs::File::create(&dest)
-        .await
-        .map_err(|_| internal_server_error())?;
-    let mut total = 0u64;
-    loop {
-        let next = match field.chunk().await {
-            Ok(next) => next,
-            Err(_) => {
-                let _ = tokio::fs::remove_file(&dest).await;
-                return Err((StatusCode::BAD_REQUEST, "Unable to read bundle".to_string()));
-            }
-        };
-        let Some(chunk) = next else { break };
-        total = total.saturating_add(chunk.len() as u64);
-        if total > MAX_STATE_BUNDLE_BYTES {
-            let _ = tokio::fs::remove_file(&dest).await;
-            return Err((
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Bundle is too large".to_string(),
-            ));
-        }
-        if file.write_all(&chunk).await.is_err() {
-            let _ = tokio::fs::remove_file(&dest).await;
-            return Err(internal_server_error());
-        }
-    }
-    if file.flush().await.is_err() {
-        let _ = tokio::fs::remove_file(&dest).await;
-        return Err(internal_server_error());
-    }
-    Ok(dest)
-}
-
-async fn import_state_bundle_handler(
-    State(runtime_state): State<RuntimeState>,
-    mut multipart: Multipart,
-) -> Result<StatusCode, (StatusCode, String)> {
-    if matches!(runtime_state.client_repository(), ClientRepository::Postgres(_)) {
-        return Err((
-            StatusCode::NOT_IMPLEMENTED,
-            "State bundles currently support only the SQLite backend".to_string(),
-        ));
-    }
-    // The DB needs to be closed before we replace the file underneath it. SQLite holds
-    // a file handle; if we overwrite the file, existing connections become stale.
-    // We work around this by closing all prepared statements via a no-op query, but
-    // in practice the caller must restart the service after import. The handler will
-    // close the DB lock so we don't hold the file open during the copy.
-    drop(runtime_state);
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid multipart request".to_string()))?
-    {
-        let name = field.name().unwrap_or("").to_string();
-        if name == "bundle" || name == "file" {
-            let dest = stage_multipart_bundle(field, "signage-import").await?;
-            // Synchronous import (it's not that slow)
-            let import_dest = dest.clone();
-            let result = tokio::task::spawn_blocking(move || crate::version::import_state_bundle(&import_dest))
-                .await
-                .map_err(|_| internal_server_error())?
-                .map_err(|_| internal_server_error());
-            let _ = tokio::fs::remove_file(&dest).await;
-            result?;
-            // Restart the configured service so the new DB is loaded. The
-            // helper prefers explicit service configuration, then detects the
-            // current user/system unit instead of assuming a legacy unit.
-            let _ = tokio::task::spawn_blocking(crate::version::restart_configured_service).await;
-            return Ok(StatusCode::NO_CONTENT);
-        }
-    }
-    Err((
-        StatusCode::BAD_REQUEST,
-        "No bundle file in upload".to_string(),
-    ))
-}
-
-async fn update_preview_handler(
-) -> Result<AxumJson<crate::version::UpdateManifest>, (StatusCode, String)> {
-    // Build an in-memory manifest of what WOULD be exported, without writing a tarball.
-    // Useful for the UI to show "this is what's in your update bundle" before exporting.
-    let exe = std::env::current_exe().map_err(|_| internal_server_error())?;
-    let install_dir = crate::version::install_dir_for_static();
-    let static_dir = crate::version::static_dir_path();
-    let binary_sha256 =
-        crate::version::sha256_of_file(&exe).unwrap_or_else(|_| "unknown".to_string());
-    let binary_size = crate::version::file_size(&exe).unwrap_or(0);
-    let has_changelog = std::path::Path::new(&format!("{}/CHANGELOG.md", install_dir)).exists();
-    let has_static = static_dir.exists();
-    let runtime_dependencies = crate::version::detect_runtime_deps();
-    Ok(AxumJson(crate::version::UpdateManifest {
-        version: crate::version::VERSION.to_string(),
-        pkg_name: crate::version::PKG_NAME.to_string(),
-        build_time: crate::version::BUILD_TIME.to_string(),
-        git_commit: crate::version::GIT_COMMIT.to_string(),
-        source_binary_path: exe.to_string_lossy().to_string(),
-        source_install_dir: install_dir,
-        binary_sha256,
-        binary_size_bytes: binary_size,
-        static_sha256: crate::version::sha256_of_directory(&static_dir)
-            .unwrap_or_else(|_| "unknown".to_string()),
-        has_binary: true,
-        has_static,
-        has_changelog,
-        runtime_dependencies,
-        exported_at: chrono::Utc::now().to_rfc3339(),
-    }))
-}
-
-async fn audit_update_import_failure(
-    state: &RuntimeState,
-    principal: &crate::middleware::AuthenticatedPrincipal,
-    detail: &'static str,
-) {
-    let _ = state
-        .client_repository()
-        .record_audit_event(
-            Some(&principal.username),
-            Some(&principal.role),
-            "server_update_import",
-            Some("server-update-bundle"),
-            "failure",
-            Some(detail),
-            &Utc::now().to_rfc3339(),
-        )
-        .await;
-}
-
-async fn audit_update_export_failure(
-    state: &RuntimeState,
-    principal: &crate::middleware::AuthenticatedPrincipal,
-    detail: &'static str,
-) {
-    let _ = state
-        .client_repository()
-        .record_audit_event(
-            Some(&principal.username),
-            Some(&principal.role),
-            "server_update_export",
-            Some("server-update-bundle"),
-            "failure",
-            Some(detail),
-            &Utc::now().to_rfc3339(),
-        )
-        .await;
-}
-
-async fn export_update_bundle_handler(
-    State(state): State<RuntimeState>,
-    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
-) -> Result<
-    (
-        [(axum::http::header::HeaderName, axum::http::HeaderValue); 1],
-        Vec<u8>,
-    ),
-    (StatusCode, String),
-> {
-    let dest = std::path::PathBuf::from(crate::version::install_dir_for_static()).join(format!(
-        ".signage-update-export-{}.tar.gz",
-        chrono::Utc::now().timestamp()
-    ));
-    let _manifest = match crate::version::export_update_bundle(&dest) {
-        Ok(manifest) => manifest,
-        Err(_error) => {
-            audit_update_export_failure(&state, &principal, "bundle export failed").await;
-            return Err(internal_server_error());
-        }
-    };
-    let bundle_size = match tokio::fs::metadata(&dest).await {
-        Ok(metadata) => metadata.len(),
-        Err(_error) => {
-            audit_update_export_failure(&state, &principal, "bundle metadata failed").await;
-            return Err(internal_server_error());
-        }
-    };
-    if bundle_size > MAX_STATE_BUNDLE_BYTES {
-        let _ = tokio::fs::remove_file(&dest).await;
-        audit_update_export_failure(&state, &principal, "bundle too large").await;
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "Generated update bundle is too large".to_string(),
-        ));
-    }
-    let bytes = match read_bounded_async_file(&dest, MAX_STATE_BUNDLE_BYTES).await {
-        Ok(bytes) => bytes,
-        Err(_error) => {
-            audit_update_export_failure(&state, &principal, "bundle read failed").await;
-            return Err(internal_server_error());
-        }
-    };
-    let _ = tokio::fs::remove_file(&dest).await;
-    let header = [(
-        axum::http::header::CONTENT_DISPOSITION,
-        axum::http::HeaderValue::from_static(
-            "attachment; filename=\"signage-update-bundle.tar.gz\"",
-        ),
-    )];
-    let _ = state
-        .client_repository()
-        .record_audit_event(
-            Some(&principal.username),
-            Some(&principal.role),
-            "server_update_export",
-            Some("server-update-bundle"),
-            "success",
-            Some("bundle exported"),
-            &Utc::now().to_rfc3339(),
-        )
-        .await;
-    Ok((header, bytes))
-}
-
-fn update_failure_stage(error: &str) -> (&'static str, &'static str) {
-    if error.starts_with("update bundle signature rejected:")
-        || error.starts_with("manifest")
-        || error.starts_with("parse manifest:")
-        || error.starts_with("static SHA256 mismatch")
-        || error.starts_with("binary SHA256 mismatch")
-        || error.starts_with("bundle missing")
-        || error.starts_with("required runtime dependency missing:")
-        || error.starts_with("new binary")
-        || error.starts_with("could not execute new binary")
-    {
-        ("server_update_verify", "bundle verification rejected")
-    } else if error.starts_with("unsafe archive")
-        || error.starts_with("archive contains")
-        || error.starts_with("could not list update archive")
-        || error.starts_with("could not inspect update archive entry types")
-        || error.starts_with("inspect update archive")
-    {
-        ("server_update_verify", "archive validation rejected")
-    } else if error.contains("auto-rolled back") {
-        ("server_update_rollback", "automatic rollback completed")
-    } else if error.starts_with("failed to swap binary")
-        || error.starts_with("static swap failed")
-    {
-        ("server_update_swap", "atomic application swap failed")
-    } else {
-        ("server_update_apply", "application update stage failed")
-    }
-}
-
-async fn import_update_bundle_handler(
-    State(state): State<RuntimeState>,
-    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-    mut multipart: Multipart,
-) -> Result<AxumJson<crate::version::UpdateResult>, (StatusCode, String)> {
-    let force_skip_rollback = params
-        .get("force")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
-
-    let mut bundle_path: Option<PathBuf> = None;
-    loop {
-        let field = match multipart.next_field().await {
-            Ok(Some(field)) => field,
-            Ok(None) => break,
-            Err(_error) => {
-                audit_update_import_failure(&state, &principal, "multipart rejected").await;
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Invalid multipart request".to_string(),
-                ));
-            }
-        };
-        let name = field.name().unwrap_or("").to_string();
-        if name == "bundle" || name == "file" {
-            if let Some(previous_path) = bundle_path.take() {
-                let _ = tokio::fs::remove_file(&previous_path).await;
-                audit_update_import_failure(&state, &principal, "duplicate bundle fields").await;
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Update upload must contain exactly one bundle file".to_string(),
-                ));
-            }
-            match stage_multipart_bundle(field, "signage-update-import").await {
-                Ok(path) => bundle_path = Some(path),
-                Err(error) => {
-                    audit_update_import_failure(&state, &principal, "bundle field read failed").await;
-                    return Err(error);
-                }
-            }
-        }
-    }
-    let dest = match bundle_path {
-        Some(path) => path,
-        None => {
-            audit_update_import_failure(&state, &principal, "bundle file missing").await;
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "No bundle file in upload".to_string(),
-            ));
-        }
-    };
-    let import_dest = dest.clone();
-    let worker_result = tokio::task::spawn_blocking(move || {
-        crate::version::import_update_bundle(&import_dest, force_skip_rollback)
-    })
-    .await;
-    let _ = tokio::fs::remove_file(&dest).await;
-    let result = match worker_result {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => {
-            let status = if error.starts_with("update bundle signature rejected:")
-                || error.starts_with("unsafe archive")
-                || error.starts_with("archive contains")
-                || error.starts_with("manifest")
-            {
-                StatusCode::BAD_REQUEST
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            let (stage_event, stage_detail) = update_failure_stage(&error);
-            let _ = state
-                .client_repository()
-                .record_audit_event(
-                    Some(&principal.username),
-                    Some(&principal.role),
-                    stage_event,
-                    Some("server-update-bundle"),
-                    "failure",
-                    Some(stage_detail),
-                    &Utc::now().to_rfc3339(),
-                )
-                .await;
-            let _ = state
-                .client_repository()
-                .record_audit_event(
-                    Some(&principal.username),
-                    Some(&principal.role),
-                    "server_update_import",
-                    Some("server-update-bundle"),
-                    "failure",
-                    Some("bundle verification or application rejected"),
-                    &Utc::now().to_rfc3339(),
-                )
-                .await;
-            return Err((status, error));
-        }
-        Err(_error) => {
-            let _ = state
-                .client_repository()
-                .record_audit_event(
-                    Some(&principal.username),
-                    Some(&principal.role),
-                    "server_update_import",
-                    Some("server-update-bundle"),
-                    "failure",
-                    Some("update worker failed"),
-                    &Utc::now().to_rfc3339(),
-                )
-                .await;
-            return Err(internal_server_error());
-        }
-    };
-    let (configured_service, _) = crate::version::configured_service();
-    let restart = tokio::task::spawn_blocking(crate::version::restart_configured_service).await;
-    match restart {
-        Ok(Ok(())) => {
-            let _ = state
-                .client_repository()
-                .record_audit_event(
-                    Some(&principal.username),
-                    Some(&principal.role),
-                    "server_update_restart",
-                    Some(&configured_service),
-                    "success",
-                    Some("service restart returned success"),
-                    &Utc::now().to_rfc3339(),
-                )
-                .await;
-        }
-        Ok(Err(_error)) => {
-            let _ = state
-                .client_repository()
-                .record_audit_event(
-                    Some(&principal.username),
-                    Some(&principal.role),
-                    "server_update_restart",
-                    Some(&configured_service),
-                    "failure",
-                    Some("service restart returned failure"),
-                    &Utc::now().to_rfc3339(),
-                )
-                .await;
-            let _ = state
-                .client_repository()
-                .record_audit_event(
-                    Some(&principal.username),
-                    Some(&principal.role),
-                    "server_update_import",
-                    Some("server-update-bundle"),
-                    "failure",
-                    Some("bundle applied but service restart returned failure"),
-                    &Utc::now().to_rfc3339(),
-                )
-                .await;
-            return Err(internal_server_error());
-        }
-        Err(_e) => {
-            let _ = state
-                .client_repository()
-                .record_audit_event(
-                    Some(&principal.username),
-                    Some(&principal.role),
-                    "server_update_restart",
-                    Some(&configured_service),
-                    "failure",
-                    Some("service restart could not be started"),
-                    &Utc::now().to_rfc3339(),
-                )
-                .await;
-            let _ = state
-                .client_repository()
-                .record_audit_event(
-                    Some(&principal.username),
-                    Some(&principal.role),
-                    "server_update_import",
-                    Some("server-update-bundle"),
-                    "failure",
-                    Some("bundle applied but service restart could not be started"),
-                    &Utc::now().to_rfc3339(),
-                )
-                .await;
-            return Err(internal_server_error());
-        }
-    }
-    let _ = state
-        .client_repository()
-        .record_audit_event(
-            Some(&principal.username),
-            Some(&principal.role),
-            "server_update_swap",
-            Some("server-update-bundle"),
-            "success",
-            Some("binary and static assets swapped atomically"),
-            &Utc::now().to_rfc3339(),
-        )
-        .await;
-    let _ = state
-        .client_repository()
-        .record_audit_event(
-            Some(&principal.username),
-            Some(&principal.role),
-            "server_update_import",
-            Some("server-update-bundle"),
-            "success",
-            Some("bundle verified, applied, and service restarted"),
-            &Utc::now().to_rfc3339(),
-        )
-        .await;
-    Ok(AxumJson(result))
-}
-
-#[derive(Serialize)]
-struct UpdateLastFailure {
-    failed: bool,
-    timestamp: Option<String>,
-    git_commit: Option<String>,
-    version: Option<String>,
-    error: Option<String>,
-    backup_binary: Option<String>,
-    backup_static: Option<String>,
-}
-
 async fn list_audit_events_handler(
     State(state): State<RuntimeState>,
     Query(params): Query<HashMap<String, String>>,
@@ -6719,42 +6157,6 @@ async fn list_audit_events_handler(
         .map(AxumJson)
         .map_err(|_| internal_server_error())
 }
-async fn update_last_failure_handler() -> AxumJson<UpdateLastFailure> {
-    let install = crate::version::install_dir_for_static();
-    match crate::version::read_last_update_failed(&install) {
-        Some(v) => AxumJson(UpdateLastFailure {
-            failed: true,
-            timestamp: v
-                .get("timestamp")
-                .and_then(|x| x.as_str())
-                .map(String::from),
-            git_commit: v
-                .get("git_commit")
-                .and_then(|x| x.as_str())
-                .map(String::from),
-            version: v.get("version").and_then(|x| x.as_str()).map(String::from),
-            error: v.get("error").and_then(|x| x.as_str()).map(String::from),
-            backup_binary: v
-                .get("backup_binary")
-                .and_then(|x| x.as_str())
-                .map(String::from),
-            backup_static: v
-                .get("backup_static")
-                .and_then(|x| x.as_str())
-                .map(String::from),
-        }),
-        None => AxumJson(UpdateLastFailure {
-            failed: false,
-            timestamp: None,
-            git_commit: None,
-            version: None,
-            error: None,
-            backup_binary: None,
-            backup_static: None,
-        }),
-    }
-}
-
 #[derive(Deserialize)]
 struct GithubUpdateSettingsPayload {
     auto_update: bool,
@@ -6840,116 +6242,7 @@ async fn apply_github_update_handler(
     }
 }
 
-#[derive(Serialize)]
-struct PlayerClientBundleBuildResult {
-    ok: bool,
-    path: String,
-    url: String,
-    bootstrap_url: String,
-    size_bytes: u64,
-    sha256: String,
-    stdout: String,
-}
-
-async fn build_player_client_bundle_handler(
-) -> Result<AxumJson<PlayerClientBundleBuildResult>, (StatusCode, String)> {
-    let script = std::path::PathBuf::from(crate::version::install_dir_for_static())
-        .join("tools/build-player-client-bundle.py");
-    if !script.exists() {
-        return Err(internal_server_error());
-    }
-    let output = tokio::task::spawn_blocking(move || {
-        let mut command = std::process::Command::new("python3");
-        command
-            .arg(&script)
-            .current_dir(crate::version::install_dir_for_static());
-        bounded_command_output(command, 1024 * 1024, Duration::from_secs(30))
-    })
-    .await
-    .map_err(|_| internal_server_error())?
-    .map_err(|_| internal_server_error())?;
-    let (status, stdout_bytes) = output;
-    let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
-    if !status.success() {
-        return Err(internal_server_error());
-    }
-    let json_line = stdout.lines().last().unwrap_or("{}");
-    #[derive(Deserialize)]
-    struct RawBundleResult {
-        ok: bool,
-        path: String,
-        url: String,
-        size_bytes: u64,
-        sha256: String,
-    }
-    let raw: RawBundleResult = serde_json::from_str(json_line)
-        .map_err(|_| internal_server_error())?;
-    Ok(AxumJson(PlayerClientBundleBuildResult {
-        ok: raw.ok,
-        path: raw.path,
-        url: raw.url,
-        bootstrap_url: "/install/player-client-bundle-install.sh".to_string(),
-        size_bytes: raw.size_bytes,
-        sha256: raw.sha256,
-        stdout,
-    }))
-}
-
-#[derive(Serialize)]
-struct ServerBundleBuildResult {
-    ok: bool,
-    path: String,
-    url: String,
-    bootstrap_url: String,
-    size_bytes: u64,
-    sha256: String,
-    stdout: String,
-}
-
-async fn build_server_bundle_handler(
-) -> Result<AxumJson<ServerBundleBuildResult>, (StatusCode, String)> {
-    let script = std::path::PathBuf::from(crate::version::install_dir_for_static())
-        .join("tools/build-server-bundle.py");
-    if !script.exists() {
-        return Err(internal_server_error());
-    }
-    let output = tokio::task::spawn_blocking(move || {
-        let mut command = std::process::Command::new("python3");
-        command
-            .arg(&script)
-            .current_dir(crate::version::install_dir_for_static());
-        bounded_command_output(command, 1024 * 1024, Duration::from_secs(30))
-    })
-    .await
-    .map_err(|_| internal_server_error())?
-    .map_err(|_| internal_server_error())?;
-    let (status, stdout_bytes) = output;
-    let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
-    if !status.success() {
-        return Err(internal_server_error());
-    }
-    let json_line = stdout.lines().last().unwrap_or("{}");
-    #[derive(Deserialize)]
-    struct RawServerBundleResult {
-        ok: bool,
-        path: String,
-        url: String,
-        bootstrap_url: String,
-        size_bytes: u64,
-        sha256: String,
-    }
-    let raw: RawServerBundleResult = serde_json::from_str(json_line)
-        .map_err(|_| internal_server_error())?;
-    Ok(AxumJson(ServerBundleBuildResult {
-        ok: raw.ok,
-        path: raw.path,
-        url: raw.url,
-        bootstrap_url: raw.bootstrap_url,
-        size_bytes: raw.size_bytes,
-        sha256: raw.sha256,
-        stdout,
-    }))
-}
+const MAX_STATE_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
 
 fn attachment_headers(
     filename: &'static str,
@@ -7007,30 +6300,6 @@ async fn download_static_install_file(
     Ok((attachment_headers(filename, content_type), bytes))
 }
 
-async fn download_player_client_bundle_handler() -> Result<
-    (
-        [(axum::http::header::HeaderName, axum::http::HeaderValue); 2],
-        Vec<u8>,
-    ),
-    (StatusCode, String),
-> {
-    download_static_install_file("player-client-bundle.tar.gz", "application/gzip").await
-}
-
-async fn download_player_client_bootstrap_handler() -> Result<
-    (
-        [(axum::http::header::HeaderName, axum::http::HeaderValue); 2],
-        Vec<u8>,
-    ),
-    (StatusCode, String),
-> {
-    download_static_install_file(
-        "player-client-bundle-install.sh",
-        "text/x-shellscript; charset=utf-8",
-    )
-    .await
-}
-
 async fn download_screentra_cast_installers_handler() -> Result<
     (
         [(axum::http::header::HeaderName, axum::http::HeaderValue); 2],
@@ -7043,14 +6312,6 @@ async fn download_screentra_cast_installers_handler() -> Result<
         "application/gzip",
     )
     .await
-}
-
-async fn restart_service_handler() -> Result<StatusCode, (StatusCode, String)> {
-    tokio::task::spawn_blocking(crate::version::restart_configured_service)
-        .await
-        .map_err(|_| internal_server_error())?
-        .map(|_| StatusCode::NO_CONTENT)
-        .map_err(|_| internal_server_error())
 }
 
 // ── System Time / Timezone handlers ───────────────────────
@@ -11643,31 +10904,6 @@ mod tests {
     }
 
     #[test]
-    fn player_bundle_download_handlers_use_published_filenames() {
-        let source = include_str!("api.rs");
-        let bundle_start = source
-            .find("async fn download_player_client_bundle_handler(")
-            .expect("bundle download handler");
-        let bundle_end = bundle_start
-            + source[bundle_start..]
-                .find("async fn download_player_client_bootstrap_handler(")
-                .expect("bootstrap handler boundary");
-        let bundle_span = &source[bundle_start..bundle_end];
-        assert!(bundle_span.contains("player-client-bundle.tar.gz"));
-        assert!(!bundle_span.contains("ripley-player-client-bundle.tar.gz"));
-
-        let bootstrap_start = bundle_end;
-        let bootstrap_end = bootstrap_start
-            + source[bootstrap_start..]
-                .find("async fn download_screentra_cast_installers_handler(")
-                .expect("installer handler boundary");
-        let bootstrap_span = &source[bootstrap_start..bootstrap_end];
-        assert!(bootstrap_span.contains("player-client-bundle-install.sh"));
-        assert!(!bootstrap_span.contains("ripley-player-client-bundle-install.sh"));
-    }
-
-
-    #[test]
     fn scene_mutation_handlers_do_not_unwrap_reload_results() {
         let source = include_str!("api.rs");
         let start = source.find("async fn create_scene(").expect("create_scene handler");
@@ -12676,70 +11912,6 @@ mod tests {
         assert_eq!(removed.0, StatusCode::FORBIDDEN);
         let _ = std::fs::remove_file(db_path);
     }
-
-    #[tokio::test]
-    async fn authenticated_audit_listing_reads_bounded_update_failure_events() {
-        let db_path = std::env::temp_dir().join(format!("screentra-audit-api-{}.db", Uuid::new_v4()));
-        let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open test database"));
-        let state = RuntimeState::sqlite(db.clone());
-        let principal = crate::middleware::AuthenticatedPrincipal {
-            username: "audit-test".to_string(),
-            role: "admin".to_string(),
-        };
-
-        audit_update_import_failure(&state, &principal, "bundle file missing").await;
-        let result = list_audit_events_handler(State(state), Query(HashMap::new()))
-            .await
-            .expect("audit listing should succeed");
-        assert_eq!(result.0.len(), 1);
-        assert_eq!(result.0[0].event_type, "server_update_import");
-        assert_eq!(result.0[0].outcome, "failure");
-        assert_eq!(result.0[0].detail.as_deref(), Some("bundle file missing"));
-        let _ = std::fs::remove_file(db_path);
-    }
-
-    #[tokio::test]
-    async fn disposable_sqlite_invalid_update_failure_is_audited() {
-        let db_path = std::env::temp_dir().join(format!("screentra-update-audit-{}.db", Uuid::new_v4()));
-        let archive_path = std::env::temp_dir().join(format!("screentra-invalid-update-{}.tar.gz", Uuid::new_v4()));
-        std::fs::write(&archive_path, b"not a tar archive").expect("write disposable invalid archive");
-        let db = Arc::new(Database::open(db_path.to_str().unwrap()).expect("open test database"));
-        let state = RuntimeState::sqlite(db);
-        let principal = crate::middleware::AuthenticatedPrincipal {
-            username: "audit-test".to_string(),
-            role: "admin".to_string(),
-        };
-
-        let error = crate::version::import_update_bundle(&archive_path, false)
-            .expect_err("invalid disposable update must be rejected");
-        let (stage_event, stage_detail) = update_failure_stage(&error);
-        state
-            .client_repository()
-            .record_audit_event(
-                Some(&principal.username),
-                Some(&principal.role),
-                stage_event,
-                Some("server-update-bundle"),
-                "failure",
-                Some(stage_detail),
-                &Utc::now().to_rfc3339(),
-            )
-            .await
-            .expect("record staged update failure");
-        audit_update_import_failure(&state, &principal, "bundle verification or application rejected").await;
-
-        let result = list_audit_events_handler(State(state), Query(HashMap::new()))
-            .await
-            .expect("audit listing should succeed");
-        assert_eq!(result.0.len(), 2);
-        assert_eq!(result.0[0].event_type, "server_update_import");
-        assert_eq!(result.0[0].detail.as_deref(), Some("bundle verification or application rejected"));
-        assert_eq!(result.0[1].event_type, "server_update_verify");
-        assert_eq!(result.0[1].detail.as_deref(), Some("archive validation rejected"));
-        let _ = std::fs::remove_file(archive_path);
-        let _ = std::fs::remove_file(db_path);
-    }
-
 
     #[test]
     fn virtual_clients_are_not_classified_as_stale_or_pending_after_publish() {
@@ -14202,7 +13374,6 @@ struct RateLimitLayerState {
 /// - /api/files/*: 60 requests / 60 seconds / IP
 /// - client registration/polling traffic: 120 requests / 60 seconds / IP
 /// - authenticated client-control mutations: 30 requests / 60 seconds / IP
-/// - /api/version/update/export|import: 3 requests / 300 seconds / IP
 /// - /api/interactive/submit: 60 requests / 60 seconds / IP
 /// - /api/ics-proxy: 30 requests / 300 seconds / IP
 async fn rate_limit_files_layer(
@@ -14219,8 +13390,6 @@ async fn rate_limit_files_layer(
         && !client_registration;
     let (bucket, policy) = if path.starts_with("/api/files/") {
         ("files", crate::rate_limit::POLICY_FILES)
-    } else if path == "/api/version/update/export" || path == "/api/version/update/import" {
-        ("server_update", crate::rate_limit::POLICY_SERVER_UPDATE)
     } else if client_control {
         ("client_control", crate::rate_limit::POLICY_CLIENT_CONTROL)
     } else if path.starts_with("/api/clients/") {
@@ -14241,7 +13410,7 @@ async fn rate_limit_files_layer(
     {
         crate::rate_limit::Decision::Allow => next.run(req).await,
         crate::rate_limit::Decision::Deny { retry_after_secs } => {
-            if bucket == "client_control" || bucket == "server_update" {
+            if bucket == "client_control" {
                 let principal = req
                     .extensions()
                     .get::<crate::middleware::AuthenticatedPrincipal>();
@@ -14606,8 +13775,7 @@ const MAX_PAYLOAD_BYTES_SMALL: usize = 256;
 const MAX_CHECKBOX_LIST_ITEMS: usize = 64;
 const MAX_CHECKBOX_LIST_ITEM_LEN: usize = 128;
 
-/// Body cap for /api/interactive/submit. The router-wide DefaultBodyLimit remains 1 GiB
-/// for /api/version/update/import; we narrow it locally here.
+/// Body cap for /api/interactive/submit.
 const MAX_INTERACTIVE_BODY_BYTES: u64 = 8 * 1024;
 
 /// Reject control chars (newlines, tabs, escape sequences) and cap length.

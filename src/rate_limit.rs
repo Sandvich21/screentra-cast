@@ -46,9 +46,6 @@ pub const POLICY_REGISTER: Policy = Policy::new(120, Duration::from_secs(60));
 /// tighter than the general client bucket because each accepted request can
 /// change physical-display state or queue a player action.
 pub const POLICY_CLIENT_CONTROL: Policy = Policy::new(30, Duration::from_secs(60));
-/// Per-IP cap for server update export/import. Update operations are expensive
-/// and high impact, so a short burst must not become an update loop.
-pub const POLICY_SERVER_UPDATE: Policy = Policy::new(3, Duration::from_secs(300));
 /// Per-IP cap for interactive submissions. The endpoint is open (no admin token),
 /// so this is the only abuse control besides the 8 KiB body cap inside the
 /// handler. 60 req/min/IP keeps one interactive browser saturated while still
@@ -251,8 +248,6 @@ mod tests {
         assert_eq!(POLICY_REGISTER.window, Duration::from_secs(60));
         assert_eq!(POLICY_CLIENT_CONTROL.max_requests, 30);
         assert_eq!(POLICY_CLIENT_CONTROL.window, Duration::from_secs(60));
-        assert_eq!(POLICY_SERVER_UPDATE.max_requests, 3);
-        assert_eq!(POLICY_SERVER_UPDATE.window, Duration::from_secs(300));
     }
 
     #[test]

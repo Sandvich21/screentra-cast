@@ -636,9 +636,6 @@ const App = {
         this.wireAddonManager();
         this.wireSystemTime();
         this.wireExternalMonitoring();
-        // Surface last-failure state if any. Shows the failure banner and
-        // the force checkbox only when there's a previous partial failure.
-        this.refreshVersionUpdateFailure();
         // If an import completed just before the service restarted, verify the
         // newly serving process reports the signed build identity.
         this.verifyPendingUpdate();
@@ -650,7 +647,7 @@ const App = {
         try {
             const running = await API.getVersion();
             const actual = running && running.git_commit ? running.git_commit : 'unknown';
-            const status = document.getElementById('version-update-status');
+            const status = document.getElementById('github-update-status') || document.getElementById('version-update-status');
             if (expected !== 'unknown' && actual !== expected) {
                 if (status) status.textContent = '✕ Update applied but running build identity does not match expected commit.';
                 try { localStorage.removeItem('ripley-pending-update-commit'); } catch (e) {}
@@ -661,32 +658,6 @@ const App = {
         } catch (e) {
             // Keep the marker so the next system-page refresh can retry after
             // the restarted service finishes coming back up.
-        }
-    },
-    async refreshVersionUpdateFailure() {
-        try {
-            const r = await API.getVersionUpdateLastFailure();
-            const banner = document.getElementById('version-update-last-failure-banner');
-            const forceWrap = document.getElementById('version-update-force-wrap');
-            const forceCb = document.getElementById('version-update-force');
-            if (!banner || !forceWrap) return;
-            if (r && r.failed) {
-                banner.style.display = '';
-                const at = document.getElementById('version-update-failure-time');
-                const ac = document.getElementById('version-update-failure-commit');
-                const ae = document.getElementById('version-update-failure-error');
-                if (at) at.textContent = 'when: ' + esc(r.timestamp || 'unknown');
-                if (ac) ac.textContent = 'commit: ' + esc(r.git_commit || 'unknown');
-                if (ae) ae.textContent = 'error: ' + esc(r.error || 'unknown');
-                forceWrap.style.display = '';
-                if (forceCb) forceCb.checked = false;
-            } else {
-                banner.style.display = 'none';
-                forceWrap.style.display = 'none';
-                if (forceCb) forceCb.checked = false;
-            }
-        } catch (e) {
-            // ignore — system page still works without it
         }
     },
     renderSystem(s) {
@@ -1771,226 +1742,6 @@ const App = {
         }
         await loadGithubUpdate();
 
-        // Wire Export button — download the bundle
-        const exportBtn = document.getElementById('btn-version-export');
-        if (exportBtn && !exportBtn.dataset.wired) {
-            exportBtn.dataset.wired = '1';
-            exportBtn.onclick = async () => {
-                const status = document.getElementById('version-migration-status');
-                if (status) status.textContent = 'Building bundle...';
-                try {
-                    const res = await fetch(API.exportBundleUrl());
-                    if (!res.ok) throw new Error('Export failed: ' + res.status);
-                    const blob = await readAppBlobBounded(res, 64 * 1024 * 1024);
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = 'signage-state-bundle-' + new Date().toISOString().slice(0, 10) + '.tar.gz';
-                    document.body.appendChild(a);
-                    a.click();
-                    a.remove();
-                    URL.revokeObjectURL(url);
-                    if (status) status.textContent = '✓ Downloaded (' + (blob.size / 1024).toFixed(1) + ' KB)';
-                } catch (err) {
-                    if (status) status.textContent = '✕ ' + err.message;
-                }
-            };
-        }
-
-        // Wire Import button
-        const importBtn = document.getElementById('btn-version-import');
-        const importFile = document.getElementById('version-import-file');
-        if (importBtn && importFile && !importBtn.dataset.wired) {
-            importBtn.dataset.wired = '1';
-            importBtn.onclick = () => importFile.click();
-            importFile.onchange = async () => {
-                if (!importFile.files || !importFile.files[0]) return;
-                if (!(await App.confirm('Import bundle?', 'This will REPLACE the current database, uploads, and backups index with the contents of this bundle. The service will restart. This cannot be undone.'))) {
-                    importFile.value = '';
-                    return;
-                }
-                const status = document.getElementById('version-migration-status');
-                if (status) status.textContent = 'Uploading bundle...';
-                try {
-                    await API.importBundle(importFile.files[0]);
-                    if (status) status.textContent = '✓ Bundle imported. Service restarting...';
-                    setTimeout(() => { window.location.reload(); }, 3000);
-                } catch (err) {
-                    if (status) status.textContent = '✕ ' + err.message;
-                }
-                importFile.value = '';
-            };
-        }
-
-
-
-        // Load update-bundle preview
-        const updatePreview = document.getElementById('version-update-preview');
-        if (updatePreview) {
-            try {
-                const u = await API.getUpdatePreview();
-                const mb = ((u.binary_size_bytes || 0) / (1024 * 1024)).toFixed(1);
-                const shortHash = (u.binary_sha256 || '').slice(0, 16);
-                const deps = (u.runtime_dependencies && u.runtime_dependencies.binaries || []).join(', ');
-                updatePreview.textContent = [
-                    `Version: ${u.version || '—'}  commit: ${u.git_commit || 'unknown'}`,
-                    `Binary: ${mb} MB  sha256: ${shortHash}…`,
-                    `Static: ${u.has_static ? 'included' : 'missing'}  Changelog: ${u.has_changelog ? 'included' : 'none'}`,
-                    `Runtime deps checked on import: ${deps || 'none'}`,
-                ].join('\n');
-            } catch (err) {
-                updatePreview.textContent = 'Could not load update manifest: ' + err.message;
-            }
-        }
-
-        // Wire Update Export button — native download of binary+static+deps update file
-        const updateExportBtn = document.getElementById('btn-version-update-export');
-        if (updateExportBtn && !updateExportBtn.dataset.wired) {
-            updateExportBtn.dataset.wired = '1';
-            updateExportBtn.onclick = () => {
-                const status = document.getElementById('version-update-status');
-                if (status) status.textContent = 'Building update file; download should start shortly...';
-                // Use top-level navigation so the browser handles Content-Disposition,
-                // filenames, large files, cookies, and download prompts reliably.
-                window.location.href = API.exportUpdateBundleUrl();
-            };
-        }
-
-        // Wire Update Import button
-        const updateImportBtn = document.getElementById('btn-version-update-import');
-        const updateImportFile = document.getElementById('version-update-import-file');
-        const forceCb = document.getElementById('version-update-force');
-        const forceWrap = document.getElementById('version-update-force-wrap');
-        if (updateImportBtn && updateImportFile && !updateImportBtn.dataset.wired) {
-            updateImportBtn.dataset.wired = '1';
-            updateImportBtn.onclick = () => updateImportFile.click();
-            updateImportFile.onchange = async () => {
-                if (!updateImportFile.files || !updateImportFile.files[0]) return;
-                if (!(await App.confirm('Install update?', 'This will replace the running signage binary and static frontend files, keep a rollback backup, and restart the service. Database and uploads are NOT changed.'))) {
-                    updateImportFile.value = '';
-                    return;
-                }
-                const status = document.getElementById('version-update-status');
-                if (status) status.textContent = 'Uploading update file...';
-                const force = !!(forceCb && forceCb.checked);
-                try {
-                    const result = await API.importUpdateBundle(updateImportFile.files[0], force);
-                    const commit = result.manifest && result.manifest.git_commit ? result.manifest.git_commit : 'unknown';
-                    if (status) status.textContent = '✓ Update applied (' + commit + '). Service restarting...';
-                    try {
-                        localStorage.setItem('ripley-pending-update-commit', commit);
-                        localStorage.setItem('ripley-last-update-reload', '1');
-                    } catch (e) {}
-                    setTimeout(() => { window.location.reload(); }, 4000);
-                } catch (err) {
-                    const msg = err && err.message ? err.message : 'unknown error';
-                    if (status) status.textContent = '✕ ' + msg;
-                }
-                updateImportFile.value = '';
-            };
-        }
-
-
-        const downloadViaLocation = (url, statusEl, label) => {
-            // Same mechanism as backup downloads: a real user click sets window.location.
-            // This avoids synthetic anchor/blob behavior and downloads the freshly built file.
-            const href = url + (url.includes('?') ? '&' : '?') + 'fresh=' + Date.now();
-            if (statusEl) statusEl.textContent = 'Starting download: ' + label;
-            window.location.href = href;
-        };
-
-        // Wire Player Client Bundle buttons — build tarball and download stable bootstrap
-        const playerBundlePreview = document.getElementById('version-player-bundle-preview');
-        const playerBundleStatus = document.getElementById('version-player-bundle-status');
-        const playerBundleBuildBtn = document.getElementById('btn-version-player-bundle-build');
-        const playerBundleDownloadBtn = document.getElementById('btn-version-player-bundle-download');
-        const playerBootstrapDownloadBtn = document.getElementById('btn-version-player-bootstrap-download');
-        if (playerBundleBuildBtn && !playerBundleBuildBtn.dataset.wired) {
-            playerBundleBuildBtn.dataset.wired = '1';
-            playerBundleBuildBtn.onclick = async () => {
-                if (playerBundleStatus) playerBundleStatus.textContent = 'Building player bundle...';
-                try {
-                    const r = await API.buildPlayerClientBundle();
-                    const sizeBytes = r.size_bytes || 0;
-                    const sizeText = sizeBytes < 1024 * 1024 ? ((sizeBytes / 1024).toFixed(1) + ' KB') : ((sizeBytes / (1024 * 1024)).toFixed(2) + ' MB');
-                    const shortHash = (r.sha256 || '').slice(0, 16);
-                    const curlTls = window.location.protocol === 'https:' ? " --proto '=https' --tlsv1.2" : '';
-                    if (playerBundlePreview) playerBundlePreview.textContent = [
-                        `Tarball: ${r.url}`,
-                        `Bootstrap: ${r.bootstrap_url}`,
-                        `Size: ${sizeText}  sha256: ${shortHash}…`,
-                        `Install command: curl --fail --show-error --location${curlTls} -o /tmp/ripley-player-client-bundle-install.sh ${window.location.origin}${r.bootstrap_url}`,
-                    ].join('\n');
-                    if (playerBundleStatus) playerBundleStatus.textContent = '✓ Bundle ready';
-                    // Auto-log to installer changelog
-                } catch (err) {
-                    if (playerBundleStatus) playerBundleStatus.textContent = '✕ ' + err.message;
-                }
-            };
-        }
-        if (playerBundleDownloadBtn && !playerBundleDownloadBtn.dataset.wired) {
-            playerBundleDownloadBtn.dataset.wired = '1';
-            playerBundleDownloadBtn.onclick = () => downloadViaLocation(API.playerClientBundleUrl(), playerBundleStatus, 'ripley-player-client-bundle.tar.gz');
-        }
-        if (playerBootstrapDownloadBtn && !playerBootstrapDownloadBtn.dataset.wired) {
-            playerBootstrapDownloadBtn.dataset.wired = '1';
-            playerBootstrapDownloadBtn.onclick = () => downloadViaLocation(API.playerClientBootstrapUrl(), playerBundleStatus, 'ripley-player-client-bundle-install.sh');
-        }
-        // Wire Server Bundle buttons — build server tarball and expose native downloads
-        const serverBundlePreview = document.getElementById('version-server-bundle-preview');
-        const serverBundleStatus = document.getElementById('version-server-bundle-status');
-        const serverBundleBuildBtn = document.getElementById('btn-version-server-bundle-build');
-        const serverBundleDownloadBtn = document.getElementById('btn-version-server-bundle-download');
-        const serverBootstrapDownloadBtn = document.getElementById('btn-version-server-bootstrap-download');
-        if (serverBundleBuildBtn && !serverBundleBuildBtn.dataset.wired) {
-            serverBundleBuildBtn.dataset.wired = '1';
-            serverBundleBuildBtn.onclick = async () => {
-                if (serverBundleStatus) serverBundleStatus.textContent = 'Building server bundle...';
-                try {
-                    const r = await API.buildServerBundle();
-                    const sizeBytes = r.size_bytes || 0;
-                    const sizeText = sizeBytes < 1024 * 1024 ? ((sizeBytes / 1024).toFixed(1) + ' KB') : ((sizeBytes / (1024 * 1024)).toFixed(2) + ' MB');
-                    const shortHash = (r.sha256 || '').slice(0, 16);
-                    const curlTls = window.location.protocol === 'https:' ? " --proto '=https' --tlsv1.2" : '';
-                    if (serverBundlePreview) serverBundlePreview.textContent = [
-                        `Tarball: ${r.url}`,
-                        `Bootstrap: ${r.bootstrap_url}`,
-                        `Size: ${sizeText}  sha256: ${shortHash}…`,
-                        `Install command: curl --fail --show-error --location${curlTls} -o /tmp/ripley-signage-server-bundle-install.sh ${window.location.origin}${r.bootstrap_url}`,
-                        `Run: RIPLEY_SERVER_DIR=~/ripley-kiosk /tmp/ripley-signage-server-bundle-install.sh`,
-                    ].join('\n');
-                    if (serverBundleStatus) serverBundleStatus.textContent = '✓ Server bundle ready';
-                    // Auto-log to installer changelog
-                } catch (err) {
-                    if (serverBundleStatus) serverBundleStatus.textContent = '✕ ' + err.message;
-                }
-            };
-        }
-        if (serverBundleDownloadBtn && !serverBundleDownloadBtn.dataset.wired) {
-            serverBundleDownloadBtn.dataset.wired = '1';
-            serverBundleDownloadBtn.onclick = () => downloadViaLocation(API.serverBundleUrl(), serverBundleStatus, 'ripley-signage-server-bundle.tar.gz');
-        }
-        if (serverBootstrapDownloadBtn && !serverBootstrapDownloadBtn.dataset.wired) {
-            serverBootstrapDownloadBtn.dataset.wired = '1';
-            serverBootstrapDownloadBtn.onclick = () => downloadViaLocation(API.serverBootstrapUrl(), serverBundleStatus, 'ripley-signage-server-bundle-install.sh');
-        }
-        // Wire Restart button
-        const restartBtn = document.getElementById('btn-version-restart');
-        if (restartBtn && !restartBtn.dataset.wired) {
-            restartBtn.dataset.wired = '1';
-            restartBtn.onclick = async () => {
-                if (!(await App.confirm('Restart signage service?', 'The current connection will drop and the page will reload.'))) return;
-                const status = document.getElementById('version-restart-status');
-                if (status) status.textContent = 'Restarting...';
-                try {
-                    await API.restartService();
-                    if (status) status.textContent = '✓ Service restarted. Reloading...';
-                    setTimeout(() => { window.location.reload(); }, 3000);
-                } catch (err) {
-                    if (status) status.textContent = '✕ ' + err.message;
-                }
-            };
-        }
     },
 
 

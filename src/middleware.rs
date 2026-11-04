@@ -296,20 +296,12 @@ fn required_capability(path: &str, method: &str) -> &'static str {
     if path == "/api/audit" {
         return "view_audit";
     }
-    if path == "/api/version/update/export"
-        || path == "/api/version/update/import"
-        || path == "/api/version/update/apply"
+    if path == "/api/version/update/apply"
         || path == "/api/version/update/github/settings"
-        || path == "/api/version/export"
     {
         return "server_update";
     }
-    if path.starts_with("/api/version/update/")
-        || path == "/api/version/restart"
-        || path.starts_with("/api/version/import")
-        || path.starts_with("/api/version/player-client-bundle/")
-        || path.starts_with("/api/version/server-bundle/")
-    {
+    if path.starts_with("/api/version/update/") {
         return "server_admin";
     }
     if path.starts_with("/api/interactive/submissions") {
@@ -466,10 +458,7 @@ fn required_step_up_scope(path: &str, method: &str) -> Option<String> {
     if path.starts_with("/api/addons/execution/approvals") && is_unsafe_method(method) {
         return Some("addon-execution-approval".to_string());
     }
-    if path == "/api/version/export"
-        || path == "/api/version/update/export"
-        || path == "/api/version/update/import"
-        || path == "/api/version/update/apply"
+    if path == "/api/version/update/apply"
         || path == "/api/version/update/github/settings" {
         return Some("server-update".to_string());
     }
@@ -595,10 +584,10 @@ mod authorization_tests {
     }
 
     #[test]
-    fn state_export_requires_server_update_step_up() {
-        assert_eq!(required_capability("/api/version/export", "GET"), "server_update");
-        assert_eq!(required_step_up_scope("/api/version/export", "GET").as_deref(), Some("server-update"));
-        assert_eq!(required_step_up_scope("/api/version/update/export", "GET").as_deref(), Some("server-update"));
+    fn github_update_routes_require_server_update_step_up() {
+        assert_eq!(required_capability("/api/version/update/apply", "POST"), "server_update");
+        assert_eq!(required_step_up_scope("/api/version/update/apply", "POST").as_deref(), Some("server-update"));
+        assert_eq!(required_step_up_scope("/api/version/update/github/settings", "POST").as_deref(), Some("server-update"));
     }
 
     #[test]
@@ -645,8 +634,8 @@ mod authorization_tests {
         assert_eq!(required_capability("/api/clients/one/nudge", "POST"), "control_clients");
         assert_eq!(required_capability("/api/clients/one/assignment", "PUT"), "assign_clients");
         assert_eq!(required_capability("/api/backups", "GET"), "manage_backups");
-        assert_eq!(required_capability("/api/version/update/import", "POST"), "server_update");
-        assert_eq!(required_capability("/api/version/export", "GET"), "server_update");
+        assert_eq!(required_capability("/api/version/update/apply", "POST"), "server_update");
+        assert_eq!(required_capability("/api/version/update/github", "GET"), "server_admin");
         assert_eq!(required_capability("/api/audit", "GET"), "view_audit");
         assert_eq!(required_capability("/api/layouts/one", "GET"), "viewer");
         assert_eq!(required_capability("/api/clients/one", "DELETE"), "manage_clients");
@@ -705,7 +694,6 @@ mod authorization_tests {
 
     #[test]
     fn step_up_scopes_cover_high_impact_operations() {
-        assert_eq!(required_step_up_scope("/api/version/update/import", "POST"), Some("server-update".to_string()));
         assert_eq!(required_step_up_scope("/api/version/update/apply", "POST"), Some("server-update".to_string()));
         assert_eq!(required_step_up_scope("/api/version/update/github/settings", "POST"), Some("server-update".to_string()));
         assert_eq!(required_capability("/api/version/update/apply", "POST"), "server_update");
