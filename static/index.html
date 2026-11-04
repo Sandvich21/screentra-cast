@@ -1063,27 +1063,10 @@
                             </div>
                         </div>
 
-                        <!-- Migration -->
+                        <!-- GitHub Release Updates -->
                         <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
-                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">🚚 Migration (Move to a new device)</h3>
-                            <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:1rem;">
-                                Bundle the entire app state (database, uploads, backups index) into a single tarball,
-                                transfer it to the new device, then import it. Backup files (.tar.gz) are
-                                intentionally excluded to keep the bundle small — re-export them separately if needed.
-                            </div>
-                            <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
-                                <button class="btn btn-primary" id="btn-version-export">⬇ Export State Bundle</button>
-                                <input type="file" id="version-import-file" accept=".tar.gz" style="display:none">
-                                <button class="btn btn-accent" id="btn-version-import">⬆ Import State Bundle</button>
-                                <span id="version-migration-status" style="font-size:0.85rem; color:var(--text-dim,#888); margin-left:0.5rem; align-self:center;"></span>
-                            </div>
-                        </div>
-
-                        <!-- Application Update -->
-                        <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
-                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">⬆️ Application Update (Move code changes)</h3>
-                            <div class="sys-card" id="github-update-card" style="padding:0.85rem 1rem; margin-bottom:1rem; background:rgba(255,255,255,0.025); border:1px solid rgba(148,163,184,0.2);">
-                                <h4 style="margin:0 0 0.35rem 0; font-size:0.95rem;">🐙 GitHub Release Updates</h4>
+                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">🐙 GitHub Release Updates</h3>
+                            <div class="sys-card" id="github-update-card" style="padding:0.85rem 1rem; background:rgba(255,255,255,0.025); border:1px solid rgba(148,163,184,0.2);">
                                 <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.75rem;">Check the official stable GitHub release, verify its signed bundle, and apply it with the existing rollback-protected updater.</div>
                                 <div id="github-update-details" style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.7rem; white-space:pre-wrap;">Loading GitHub release status...</div>
                                 <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
@@ -1096,78 +1079,8 @@
                                     <span id="github-update-status" style="font-size:0.8rem; color:var(--text-dim,#888);"></span>
                                 </div>
                             </div>
-                            <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:1rem;">
-                                Export a portable update file containing this instance's server binary, static frontend files,
-                                and runtime dependency manifest. Import that file on another instance to update it to these changes.
-                                State/data is not included here — use Migration for database/uploads.
-                            </div>
-                            <div id="version-update-preview" style="font-size:0.78rem; color:var(--text-dim,#888); margin-bottom:0.75rem; font-family:monospace; white-space:pre-wrap;">Loading update manifest...</div>
-                            <div id="version-update-last-failure-banner" class="version-update-failure-banner" style="display:none;">
-                                <strong>⚠ Last update failed and was auto-rolled back.</strong>
-                                <div class="version-update-failure-detail">
-                                    <span id="version-update-failure-time"></span>
-                                    <span id="version-update-failure-commit"></span>
-                                    <span id="version-update-failure-error"></span>
-                                </div>
-                                <div class="version-update-failure-hint">Check the force-update box below to retry without auto-rollback if you believe the bundle is correct despite the failure.</div>
-                            </div>
-                            <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
-                                <button class="btn btn-primary" id="btn-version-update-export">⬇ Export Update File</button>
-                                <input type="file" id="version-update-import-file" accept=".tar.gz,.update.tar.gz" style="display:none">
-                                <button class="btn btn-accent" id="btn-version-update-import">⬆ Import Update File</button>
-                                <label id="version-update-force-wrap" style="display:none; font-size:0.78rem; color:var(--text-dim,#cbd5e1); align-items:center; gap:0.35rem; padding:0.25rem 0.5rem; border-radius:4px; background:rgba(252,165,165,0.15); border:1px solid rgba(252,165,165,0.35); cursor:pointer;" title="Skip auto-rollback on partial failure. Use only if you know the bundle is correct and want to see what went wrong without losing the new binary.">
-                                    <input type="checkbox" id="version-update-force">
-                                    <span>Force update (skip auto-rollback)</span>
-                                </label>
-                                <span id="version-update-status" style="font-size:0.85rem; color:var(--text-dim,#888); margin-left:0.5rem; align-self:center;"></span>
-                            </div>
                         </div>
 
-
-                        <!-- Player Client Bundle -->
-                        <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
-                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">🧩 Player Client Tarball</h3>
-                            <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:1rem;">
-                                Build a downloadable tarball installer for Debian/player devices from the current player-client package.
-                                This is code/scripts/assets only (normally around 45–60 KB compressed): no layouts, cache, DB, uploads, or assignments are included.
-                                This is separate from State Bundles and Application Update Files, so client/player updates do not require a new server app version.
-                            </div>
-                            <div id="version-player-bundle-preview" style="font-size:0.78rem; color:var(--text-dim,#888); margin-bottom:0.75rem; font-family:monospace; white-space:pre-wrap;">Bundle not built in this browser session.</div>
-                            <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
-                                <button class="btn btn-primary" id="btn-version-player-bundle-build">⚙ Build/Refresh Tarball</button>
-                                <button class="btn btn-secondary" id="btn-version-player-bundle-download" type="button">⬇ Download Tarball</button>
-                                <button class="btn btn-secondary" id="btn-version-player-bootstrap-download" type="button">⬇ Download Bootstrap Script</button>
-                                <span id="version-player-bundle-status" style="font-size:0.85rem; color:var(--text-dim,#888); margin-left:0.5rem; align-self:center;"></span>
-                            </div>
-                        </div>
-
-                        <!-- Server Bundle -->
-                        <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
-                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">🖥️ Server Tarball</h3>
-                            <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:1rem;">
-                                Build a downloadable server install tarball for the signage server code/static/scripts/tools.
-                                This is code/assets only: no database, layouts, uploads, backups, target build artifacts, cert private keys, or runtime state are included.
-                                The bootstrap script downloads the tarball, installs/checks server build requirements, copies the code, builds the release binary, and can optionally start a user service.
-                            </div>
-                            <div id="version-server-bundle-preview" style="font-size:0.78rem; color:var(--text-dim,#888); margin-bottom:0.75rem; font-family:monospace; white-space:pre-wrap;">Server bundle not built in this browser session.</div>
-                            <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
-                                <button class="btn btn-primary" id="btn-version-server-bundle-build" type="button">⚙ Build/Refresh Server Tarball</button>
-                                <button class="btn btn-secondary" id="btn-version-server-bundle-download" type="button">⬇ Download Server Tarball</button>
-                                <button class="btn btn-secondary" id="btn-version-server-bootstrap-download" type="button">⬇ Download Server Install Script</button>
-                                <span id="version-server-bundle-status" style="font-size:0.85rem; color:var(--text-dim,#888); margin-left:0.5rem; align-self:center;"></span>
-                            </div>
-                        </div>
-
-                        <!-- Service control -->
-                        <div class="sys-card" style="padding:1rem 1.25rem;">
-                            <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">🔄 Service Control</h3>
-                            <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:1rem;">
-                                Restart the signage service to pick up a new binary or apply config changes.
-                                The current connection will drop — the page will reload automatically.
-                            </div>
-                            <button class="btn btn-danger" id="btn-version-restart">↻ Restart Service</button>
-                            <span id="version-restart-status" style="font-size:0.85rem; color:var(--text-dim,#888); margin-left:0.5rem;"></span>
-                        </div>
                     </div>
                 </details>
             </div>
