@@ -19,6 +19,24 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Provision verification public keys into build workspace
+        env:
+          SERVER_UPDATE_SIGNING_KEY: ${{ secrets.SCREENTRA_CAST_SERVER_UPDATE_SIGNING_KEY }}
+          CLIENT_UPDATE_SIGNING_KEY: ${{ secrets.SCREENTRA_CAST_CLIENT_UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SERVER_UPDATE_SIGNING_KEY"
+          test -n "$CLIENT_UPDATE_SIGNING_KEY"
+          umask 077
+          printf '%s\n' "$SERVER_UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/server-update-signing.key"
+          printf '%s\n' "$CLIENT_UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/client-update-signing.key"
+          openssl pkey -in "$RUNNER_TEMP/server-update-signing.key" -pubout \
+            -out static/install/screentra-cast-server-update.pub
+          openssl pkey -in "$RUNNER_TEMP/client-update-signing.key" -pubout \
+            -out static/install/screentra-cast-client-update.pub
+          cp static/install/screentra-cast-server-update.pub "$RUNNER_TEMP/screentra-cast-server-update.pub"
+          cp static/install/screentra-cast-client-update.pub "$RUNNER_TEMP/screentra-cast-client-update.pub"
+
       - name: Build release binary
         env:
           SIGNAGE_GIT_COMMIT: ${{ github.sha }}
@@ -97,7 +115,9 @@ jobs:
         run: |
           gh release upload "${{ github.event.release.tag_name }}" \
             "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" \
+            "$RUNNER_TEMP/screentra-cast-server-update.pub" \
             "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz" \
             "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz.sig" \
             "$RUNNER_TEMP/screentra-cast-player-client-bundle.tar.gz.sha256" \
+            "$RUNNER_TEMP/screentra-cast-client-update.pub" \
             --clobber
