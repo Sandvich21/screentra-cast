@@ -10575,14 +10575,18 @@ while IFS='|' read -r idx connector port; do
     GPU_ENV_ARGS=()
     GPU_CHROMIUM_ARGS=()
     if [ "${SCREENTRA_GPU_ACCEL:-0}" = "1" ]; then
-        # The WX 2100 is the active DRM device on clients that opt in through
-        # the kiosk unit drop-in. Keep the default installer portable: clients
-        # without this opt-in continue using their existing GPU selection.
-        GPU_ENV_ARGS=(
-            DRI_PRIME=1
-            LIBVA_DRIVER_NAME=radeonsi
-            LIBVA_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri
-        )
+        # Keep GPU selection hardware-neutral. The active DRM device and VA-API
+        # driver vary by client (for example Intel iHD versus AMD radeonsi),
+        # so only pass an explicit override when the client unit supplies one.
+        if [ -n "${SCREENTRA_DRI_PRIME:-}" ]; then
+            GPU_ENV_ARGS+=("DRI_PRIME=${SCREENTRA_DRI_PRIME}")
+        fi
+        if [ -n "${SCREENTRA_LIBVA_DRIVER_NAME:-}" ]; then
+            GPU_ENV_ARGS+=("LIBVA_DRIVER_NAME=${SCREENTRA_LIBVA_DRIVER_NAME}")
+        fi
+        if [ -n "${SCREENTRA_LIBVA_DRIVERS_PATH:-}" ]; then
+            GPU_ENV_ARGS+=("LIBVA_DRIVERS_PATH=${SCREENTRA_LIBVA_DRIVERS_PATH}")
+        fi
         GPU_CHROMIUM_ARGS=(
             --use-gl=egl
             --use-angle=gl
@@ -10593,7 +10597,7 @@ while IFS='|' read -r idx connector port; do
             --enable-accelerated-2d-canvas
             --enable-features=UseOzonePlatform,VaapiVideoDecoder,VaapiVideoEncoder
         )
-        log "Chromium GPU acceleration enabled for display $idx"
+        log "Chromium GPU acceleration enabled for display $idx (driver selection: automatic or explicit client override)"
     fi
     sudo -u "$BOARD_USER" env \
         SCREENTRA_GPU_ACCEL="${SCREENTRA_GPU_ACCEL:-0}" \
