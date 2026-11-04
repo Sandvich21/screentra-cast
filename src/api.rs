@@ -1595,6 +1595,11 @@ pub fn router(runtime_state: RuntimeState) -> Router {
                 .layer(DefaultBodyLimit::max(16 * 1024)),
         )
         .route(
+            "/api/backups/software/destination",
+            post(backup_api::save_software_backup_destination)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
             "/api/backups/{id}",
             delete(backup_api::delete_backup),
         )
@@ -1718,6 +1723,10 @@ pub fn router(runtime_state: RuntimeState) -> Router {
         .route(
             "/api/version/update/apply",
             post(apply_github_update_handler),
+        )
+        .route(
+            "/api/version/update/rollback",
+            post(rollback_github_update_handler),
         )
         .route("/api/audit", get(list_audit_events_handler))
         // System time
@@ -6160,6 +6169,12 @@ async fn list_audit_events_handler(
 #[derive(Deserialize)]
 struct GithubUpdateSettingsPayload {
     auto_update: bool,
+    #[serde(default = "default_github_release_channel")]
+    release_channel: String,
+}
+
+fn default_github_release_channel() -> String {
+    "stable".to_string()
 }
 
 async fn github_update_status_handler() -> AxumJson<crate::github_update::UpdateStatus> {
@@ -6178,6 +6193,7 @@ async fn github_update_settings_handler(
 ) -> Result<AxumJson<crate::github_update::UpdateStatus>, (StatusCode, String)> {
     crate::github_update::save_settings(&crate::github_update::UpdateSettings {
         auto_update: payload.auto_update,
+        release_channel: payload.release_channel,
     })
     .map_err(|_| internal_server_error())?;
     Ok(AxumJson(crate::github_update::read_status()))
@@ -6237,6 +6253,39 @@ async fn apply_github_update_handler(
             let message = format!("update applied but restart task failed: {error}");
             let _ = crate::github_update::mark_error(&message);
             log::error!("{message}");
+            Err(internal_server_error())
+        }
+    }
+}
+
+async fn rollback_github_update_handler(
+    State(state): State<RuntimeState>,
+    Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+) -> Result<AxumJson<crate::version::RollbackResult>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(crate::version::rollback_previous_update)
+        .await
+        .map_err(|_| internal_server_error())?
+        .map_err(|_| (StatusCode::CONFLICT, "No previous application version is retained".to_string()))?;
+    let _ = state
+        .client_repository()
+        .record_audit_event(
+            Some(&principal.username),
+            Some(&principal.role),
+            "server_update_rollback",
+            Some("github-release"),
+            "success",
+            Some("retained previous signed application version restored; restarting service"),
+            &Utc::now().to_rfc3339(),
+        )
+        .await;
+    match tokio::task::spawn_blocking(crate::version::restart_configured_service).await {
+        Ok(Ok(())) => Ok(AxumJson(result)),
+        Ok(Err(error)) => {
+            let _ = crate::github_update::mark_error(format!("rollback applied but restart failed: {error}"));
+            Err(internal_server_error())
+        }
+        Err(error) => {
+            let _ = crate::github_update::mark_error(format!("rollback applied but restart task failed: {error}"));
             Err(internal_server_error())
         }
     }

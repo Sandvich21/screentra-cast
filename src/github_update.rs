@@ -48,15 +48,33 @@ async fn read_release_json<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&bytes).map_err(|error| format!("parse GitHub release response: {error}"))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSettings {
-    /// When enabled, the background loop checks and installs stable releases.
+    /// When enabled, the background loop checks and installs the selected channel.
     pub auto_update: bool,
+    /// `stable` selects published stable releases; `rc` selects published
+    /// GitHub pre-releases. Both channels still require the signed bundle.
+    #[serde(default = "default_release_channel")]
+    pub release_channel: String,
+}
+
+fn default_release_channel() -> String {
+    "stable".to_string()
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            auto_update: false,
+            release_channel: default_release_channel(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateStatus {
     pub auto_update: bool,
+    pub release_channel: String,
     pub state: String,
     pub current_version: String,
     pub current_commit: String,
@@ -72,6 +90,8 @@ pub struct UpdateStatus {
     pub asset_digest: Option<String>,
     pub blocked_release_tag: Option<String>,
     pub error: Option<String>,
+    pub rollback_available: bool,
+    pub previous_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,9 +174,14 @@ pub fn read_settings() -> UpdateSettings {
 }
 
 pub fn save_settings(settings: &UpdateSettings) -> Result<UpdateSettings, String> {
+    let channel = validated_release_channel(&settings.release_channel)?;
+    let settings = UpdateSettings {
+        auto_update: settings.auto_update,
+        release_channel: channel.to_string(),
+    };
     let path = settings_path();
-    atomic_write_json(&path, settings)?;
-    Ok(settings.clone())
+    atomic_write_json(&path, &settings)?;
+    Ok(settings)
 }
 
 pub fn read_status() -> UpdateStatus {
@@ -165,6 +190,11 @@ pub fn read_status() -> UpdateStatus {
         .and_then(|bytes| serde_json::from_slice::<UpdateStatus>(&bytes).ok())
         .unwrap_or_default();
     status.auto_update = settings.auto_update;
+    status.release_channel = validated_release_channel(&settings.release_channel)
+        .unwrap_or("stable")
+        .to_string();
+    status.rollback_available = version::rollback_available();
+    status.previous_version = version::previous_version();
     if status.current_version.is_empty() {
         status.current_version = version::VERSION.to_string();
     }
@@ -231,40 +261,70 @@ fn github_client() -> Result<Client, String> {
         .map_err(|e| format!("create GitHub client: {e}"))
 }
 
-async fn fetch_latest_release() -> Result<(GithubRelease, GithubAsset), String> {
+fn validated_release_channel(value: &str) -> Result<&'static str, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "stable" => Ok("stable"),
+        "rc" | "release-candidate" | "pre-release" => Ok("rc"),
+        _ => Err("release channel must be stable or rc".to_string()),
+    }
+}
+
+fn selected_release_channel() -> &'static str {
+    validated_release_channel(&read_settings().release_channel).unwrap_or("stable")
+}
+
+fn release_is_applicable(tag: &str, channel: &str) -> bool {
+    match channel {
+        "rc" => match (semver_tuple(tag), semver_tuple(version::VERSION)) {
+            (Some(candidate), Some(current)) => {
+                candidate > current || (candidate == current && normalized_version(tag) != normalized_version(version::VERSION))
+            }
+            _ => normalized_version(tag) != normalized_version(version::VERSION),
+        },
+        _ => is_newer_release(tag),
+    }
+}
+
+async fn fetch_release_for_channel(channel: &str) -> Result<(GithubRelease, GithubAsset), String> {
     let repo = repository()?;
     let configured_asset = asset_name();
-    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    let response = github_client()?
-        .get(url)
-        .send()
-        .await
+    let url = if channel == "rc" {
+        format!("https://api.github.com/repos/{repo}/releases?per_page=100")
+    } else {
+        format!("https://api.github.com/repos/{repo}/releases/latest")
+    };
+    let response = github_client()?.get(url).send().await
         .map_err(|e| format!("GitHub release request failed: {e}"))?;
     let status = response.status();
     if !status.is_success() {
         return Err(format!("GitHub release request returned HTTP {status}"));
     }
-    let release: GithubRelease = read_release_json(response).await?;
-    if release.draft || release.prerelease {
-        return Err("GitHub latest release is not a stable published release".to_string());
-    }
-    let asset = release
-        .assets
-        .iter()
-        .find(|asset| asset.name == configured_asset)
-        .cloned()
-        .ok_or_else(|| {
-            format!(
-                "GitHub release {} does not contain required asset {}",
-                release.tag_name, configured_asset
-            )
+    let releases: Vec<GithubRelease> = if channel == "rc" {
+        read_release_json(response).await?
+    } else {
+        vec![read_release_json(response).await?]
+    };
+    let release = releases.into_iter()
+        .filter(|release| !release.draft && (channel == "rc" && release.prerelease || channel != "rc" && !release.prerelease))
+        .find(|release| release.assets.iter().any(|asset| asset.name == configured_asset))
+        .ok_or_else(|| if channel == "rc" {
+            format!("GitHub has no published RC/pre-release containing required asset {configured_asset}")
+        } else {
+            format!("GitHub has no published stable release containing required asset {configured_asset}")
         })?;
+    let asset = release.assets.iter().find(|asset| asset.name == configured_asset)
+        .cloned().ok_or_else(|| "selected GitHub release asset disappeared".to_string())?;
     Ok((release, asset))
+}
+
+async fn fetch_latest_release() -> Result<(GithubRelease, GithubAsset), String> {
+    fetch_release_for_channel(selected_release_channel()).await
 }
 
 fn release_status(release: &GithubRelease, asset: &GithubAsset) -> UpdateStatus {
     let mut status = read_status();
     status.auto_update = read_settings().auto_update;
+    status.release_channel = selected_release_channel().to_string();
     status.current_version = version::VERSION.to_string();
     status.current_commit = version::GIT_COMMIT.to_string();
     status.checked_at = Some(Utc::now().to_rfc3339());
@@ -278,7 +338,7 @@ fn release_status(release: &GithubRelease, asset: &GithubAsset) -> UpdateStatus 
     status.asset_size_bytes = Some(asset.size);
     status.asset_digest = asset.digest.clone();
     status.error = None;
-    status.state = if is_newer_release(&release.tag_name) {
+    status.state = if release_is_applicable(&release.tag_name, &status.release_channel) {
         "available".to_string()
     } else {
         "current".to_string()
@@ -497,7 +557,10 @@ pub async fn run_auto_update_loop(repository: ClientRepository) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer_release, normalized_version, read_bounded_json, MAX_PERSISTED_JSON_BYTES};
+    use super::{
+        is_newer_release, normalized_version, read_bounded_json, release_is_applicable,
+        validated_release_channel, MAX_PERSISTED_JSON_BYTES,
+    };
     use std::fs;
     use uuid::Uuid;
 
@@ -514,5 +577,23 @@ mod tests {
         fs::write(&path, vec![b'x'; MAX_PERSISTED_JSON_BYTES + 1]).unwrap();
         assert!(read_bounded_json(path.clone()).is_none());
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn release_channels_are_limited_to_stable_and_rc() {
+        assert_eq!(validated_release_channel("stable"), Ok("stable"));
+        assert_eq!(validated_release_channel("release-candidate"), Ok("rc"));
+        assert!(validated_release_channel("branch-main").is_err());
+        assert!(release_is_applicable("v9.0.0-rc.1", "rc"));
+    }
+
+    #[test]
+    fn rc_same_version_is_accepted_when_current_is_stable() {
+        assert!(release_is_applicable("v0.1.5-rc.1", "rc"));
+    }
+
+    #[test]
+    fn stable_channel_does_not_downgrade() {
+        assert!(!release_is_applicable("v0.1.0", "stable"));
     }
 }

@@ -969,6 +969,144 @@ pub struct UpdateResult {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PreviousVersionRecord {
+    version: String,
+    commit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RollbackResult {
+    pub restored_version: Option<String>,
+    pub backup_binary_path: String,
+    pub backup_static_path: String,
+    pub message: String,
+}
+
+fn previous_version_path() -> PathBuf {
+    PathBuf::from(install_dir_for_static()).join("server-update-previous.json")
+}
+
+fn write_previous_version_record() {
+    let record = PreviousVersionRecord {
+        version: VERSION.to_string(),
+        commit: GIT_COMMIT.to_string(),
+    };
+    if let Ok(bytes) = serde_json::to_vec_pretty(&record) {
+        let path = previous_version_path();
+        let tmp = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+        if fs::write(&tmp, bytes).is_ok() {
+            let _ = fs::rename(tmp, path);
+        }
+    }
+}
+
+fn read_previous_version() -> Option<String> {
+    let bytes = fs::read(previous_version_path()).ok()?;
+    let record: PreviousVersionRecord = serde_json::from_slice(&bytes).ok()?;
+    (!record.version.is_empty()).then_some(record.version)
+}
+
+pub fn previous_version() -> Option<String> {
+    read_previous_version()
+}
+
+fn cleanup_old_update_backups(exe: &Path, install_dir: &str, keep_timestamp: &str) {
+    let Some(parent) = exe.parent() else { return; };
+    let binary_prefix = format!("{}{}.bak.", exe.file_name().unwrap_or_default().to_string_lossy(), "");
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&binary_prefix) && !name.ends_with(keep_timestamp) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+    if let Ok(entries) = fs::read_dir(install_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("static.rollback.") && !name.ends_with(keep_timestamp) {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+}
+
+fn update_backup_pair(exe: &Path, install_dir: &str) -> Option<(PathBuf, PathBuf, String)> {
+    let parent = exe.parent()?;
+    let prefix = format!("{}.bak.", exe.file_name()?.to_string_lossy());
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(parent).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let timestamp = name.strip_prefix(&prefix)?.to_string();
+        if timestamp.chars().all(|c| c.is_ascii_digit()) {
+            let static_backup = PathBuf::from(install_dir).join(format!("static.rollback.{timestamp}"));
+            if static_backup.is_dir() {
+                candidates.push((timestamp, entry.path(), static_backup));
+            }
+        }
+    }
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates.pop().map(|(timestamp, binary, static_backup)| (binary, static_backup, timestamp))
+}
+
+/// Return the one retained application backup, if a previous update exists.
+pub fn rollback_available() -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false; };
+    update_backup_pair(&exe, &install_dir_for_static()).is_some()
+}
+
+/// Swap the currently installed application with the one retained by the last
+/// successful update. The currently running version is retained as the new
+/// rollback target, so the operation remains reversible once.
+pub fn rollback_previous_update() -> Result<RollbackResult, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let install_dir = install_dir_for_static();
+    let static_dir = static_dir_path();
+    let (backup_binary, backup_static, old_timestamp) = update_backup_pair(&exe, &install_dir)
+        .ok_or_else(|| "no previous application version is retained".to_string())?;
+    let restored_version = read_previous_version();
+    let timestamp = Utc::now().timestamp_nanos_opt().unwrap_or_else(|| Utc::now().timestamp_micros()).to_string();
+    let current_binary = exe.with_extension(format!("rollback-current-{timestamp}"));
+    let current_static = static_dir.with_file_name(format!("static.rollback-current-{timestamp}"));
+
+    write_previous_version_record();
+    fs::rename(&exe, &current_binary).map_err(|e| format!("stage current binary for rollback: {e}"))?;
+    if let Err(error) = fs::rename(&static_dir, &current_static) {
+        let _ = fs::rename(&current_binary, &exe);
+        return Err(format!("stage current static files for rollback: {error}"));
+    }
+    if let Err(error) = fs::rename(&backup_binary, &exe) {
+        let _ = fs::rename(&current_static, &static_dir);
+        let _ = fs::rename(&current_binary, &exe);
+        return Err(format!("restore previous binary: {error}"));
+    }
+    if let Err(error) = fs::rename(&backup_static, &static_dir) {
+        let _ = fs::rename(&exe, &backup_binary);
+        let _ = fs::rename(&current_binary, &exe);
+        let _ = fs::rename(&current_static, &static_dir);
+        return Err(format!("restore previous static files: {error}"));
+    }
+    let _ = republish_local_ca(&static_dir);
+
+    // Keep the version we rolled back from as the sole rollback pair.
+    let new_binary_backup = format!("{}.bak.{timestamp}", exe.to_string_lossy());
+    let new_static_backup =
+        PathBuf::from(&install_dir).join(format!("static.rollback.{timestamp}"));
+    fs::rename(&current_binary, &new_binary_backup)
+        .map_err(|e| format!("retain rolled-back binary: {e}"))?;
+    fs::rename(&current_static, &new_static_backup)
+        .map_err(|e| format!("retain rolled-back static files: {e}"))?;
+    cleanup_old_update_backups(&exe, &install_dir, &timestamp);
+
+    Ok(RollbackResult {
+        restored_version,
+        backup_binary_path: new_binary_backup,
+        backup_static_path: new_static_backup.to_string_lossy().to_string(),
+        message: format!("Restored the previous application version (backup {old_timestamp}). Service is restarting."),
+    })
+}
+
 fn validate_archive_member_name(name: &str) -> Result<(), String> {
     let normalized = name.replace('\\', "/");
     if normalized.is_empty()
@@ -1131,6 +1269,7 @@ pub fn import_update_bundle(src: &Path, force_skip_rollback: bool) -> Result<Upd
         .unwrap_or_else(|| Utc::now().timestamp_micros());
     let backup_binary_path = format!("{}.bak.{}", exe.to_string_lossy(), ts);
     let _ = fs::copy(&exe, &backup_binary_path);
+    write_previous_version_record();
 
     // 8. Swap the binary (atomic rename of the temp file)
     let binary_swapped = match swap_binary(&new_binary, &exe) {
@@ -1246,6 +1385,7 @@ pub fn import_update_bundle(src: &Path, force_skip_rollback: bool) -> Result<Upd
     // more success cycle so an admin can still rollback to "the one before
     // this one" by hand; if they want them gone, they can rm.
     clear_last_update_failed(&install_dir);
+    cleanup_old_update_backups(&exe, &install_dir, &ts.to_string());
 
     Ok(UpdateResult {
         manifest,

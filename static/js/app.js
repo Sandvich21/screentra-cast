@@ -829,53 +829,117 @@ const App = {
         this.loadBackups();
     },
     async setupSoftwareBackup() {
-        const shareInput = document.getElementById('backup-software-share-path');
+        const destinationSelect = document.getElementById('backup-software-destination');
+        const saveDestinationBtn = document.getElementById('btn-save-software-backup-destination');
+        const shareKind = document.getElementById('backup-software-share-kind');
+        const shareServer = document.getElementById('backup-software-share-server');
+        const shareRemotePath = document.getElementById('backup-software-share-remote-path');
+        const shareLabel = document.getElementById('backup-software-share-label');
+        const shareUsername = document.getElementById('backup-software-share-username');
+        const sharePassword = document.getElementById('backup-software-share-password');
+        const shareDomain = document.getElementById('backup-software-share-domain');
+        const usernameWrap = document.getElementById('backup-software-share-username-wrap');
+        const passwordWrap = document.getElementById('backup-software-share-password-wrap');
+        const domainWrap = document.getElementById('backup-software-share-domain-wrap');
         const saveShareBtn = document.getElementById('btn-save-software-backup-share');
         const clearShareBtn = document.getElementById('btn-clear-software-backup-share');
         const createBtn = document.getElementById('btn-create-software-backup');
         const status = document.getElementById('software-backup-status');
         const details = document.getElementById('software-backup-details');
-        if (!shareInput || !saveShareBtn || !clearShareBtn || !createBtn || !status || !details) return;
+        if (!destinationSelect || !saveDestinationBtn || !shareKind || !shareServer || !shareRemotePath || !shareLabel || !shareUsername || !sharePassword || !shareDomain || !usernameWrap || !passwordWrap || !domainWrap || !saveShareBtn || !clearShareBtn || !createBtn || !status || !details) return;
 
+        const updateShareForm = () => {
+            const smb = shareKind.value === 'smb';
+            usernameWrap.style.display = smb ? '' : 'none';
+            passwordWrap.style.display = smb ? '' : 'none';
+            domainWrap.style.display = smb ? '' : 'none';
+            sharePassword.required = smb;
+            shareUsername.required = smb;
+        };
+        const clearCredentialInputs = () => {
+            shareUsername.value = '';
+            sharePassword.value = '';
+            shareDomain.value = '';
+        };
         const render = (settings) => {
-            shareInput.value = settings.share_path || '';
+            destinationSelect.value = settings.destination || 'remote';
+            if (settings.share_kind) shareKind.value = settings.share_kind;
+            shareServer.value = settings.share_server || '';
+            shareRemotePath.value = settings.share_remote_path || '';
+            shareLabel.value = settings.share_label || '';
+            clearCredentialInputs();
+            updateShareForm();
             clearShareBtn.disabled = !settings.configured;
-            createBtn.disabled = !settings.writable;
-            if (!settings.configured) {
-                status.textContent = 'No shared folder configured.';
-                details.textContent = 'Enter the local mount path of an SMB/NFS or other shared folder already mounted on the server.';
-                return;
-            }
-            if (!settings.writable) {
-                status.textContent = settings.available ? 'Shared folder is not writable.' : 'Shared folder is unavailable.';
-            } else {
-                status.textContent = 'Shared folder is ready.';
-            }
+            const localNeeded = destinationSelect.value !== 'remote';
+            const remoteNeeded = destinationSelect.value !== 'local';
+            const canCreate = (!localNeeded || settings.local_writable) && (!remoteNeeded || settings.writable);
+            createBtn.disabled = !canCreate;
+            const localState = settings.local_writable ? 'server device ready' : 'server device unavailable';
+            const remoteState = !settings.configured ? 'remote share not configured' : (settings.mounted && settings.writable ? 'remote share mounted and ready' : (settings.mounted ? 'remote share not writable' : 'remote share not mounted'));
+            status.textContent = `Server device: ${localState} · Remote share: ${remoteState}`;
             const last = settings.last_backup;
+            const outcome = last ? [
+                last.local ? `server device ${last.local.success ? 'stored' : 'failed'}` : null,
+                last.remote ? `remote share ${last.remote.success ? 'stored' : 'failed'}` : null,
+            ].filter(Boolean).join(' · ') : '';
             details.textContent = last
-                ? `Last backup: ${last.filename} · ${(last.bytes / 1024 / 1024).toFixed(2)} MB · version ${last.version || 'unknown'} · ${last.created_at}`
+                ? `Last backup: ${last.filename} · ${(last.bytes / 1024 / 1024).toFixed(2)} MB · version ${last.version || 'unknown'} · ${last.created_at}${outcome ? `\nResult: ${outcome}` : ''}`
                 : 'No server software backup has been created yet.';
         };
         const load = async () => {
             try { render(await API.getSoftwareBackupSettings()); }
             catch (e) { status.textContent = '✕ ' + e.message; createBtn.disabled = true; }
         };
+        if (!shareKind.dataset.wired) {
+            shareKind.dataset.wired = '1';
+            shareKind.addEventListener('change', updateShareForm);
+            updateShareForm();
+        }
+        if (!saveDestinationBtn.dataset.wired) {
+            saveDestinationBtn.dataset.wired = '1';
+            saveDestinationBtn.onclick = async () => {
+                saveDestinationBtn.disabled = true;
+                status.textContent = 'Saving backup destination…';
+                try { render(await API.saveSoftwareBackupDestination(destinationSelect.value)); }
+                catch (e) { status.textContent = '✕ ' + e.message; }
+                finally { saveDestinationBtn.disabled = false; }
+            };
+        }
         if (!saveShareBtn.dataset.wired) {
             saveShareBtn.dataset.wired = '1';
             saveShareBtn.onclick = async () => {
-                const value = shareInput.value.trim();
-                if (!value) { status.textContent = 'Enter a shared folder path first.'; return; }
+                const kind = shareKind.value;
+                const payload = {
+                    kind,
+                    server: shareServer.value.trim(),
+                    remote_path: shareRemotePath.value.trim(),
+                    label: shareLabel.value.trim(),
+                };
+                if (kind === 'smb') {
+                    payload.username = shareUsername.value;
+                    payload.password = sharePassword.value;
+                    payload.domain = shareDomain.value.trim();
+                    if (!payload.username || !payload.password) { status.textContent = 'Enter the SMB username and password.'; return; }
+                }
+                if (!payload.server || !payload.remote_path) { status.textContent = 'Enter the share server and remote share/export.'; return; }
                 saveShareBtn.disabled = true;
-                status.textContent = 'Testing and saving shared folder…';
-                try { render(await API.saveSoftwareBackupShare(value)); }
-                catch (e) { status.textContent = '✕ ' + e.message; }
-                finally { saveShareBtn.disabled = false; }
+                status.textContent = 'Adding and mounting remote share…';
+                try {
+                    render(await API.saveManagedSoftwareBackupShare(payload));
+                    status.textContent = 'Remote share added and mounted. Credentials were saved on the server and cleared from the dashboard.';
+                } catch (e) {
+                    clearCredentialInputs();
+                    status.textContent = '✕ ' + e.message;
+                } finally {
+                    clearCredentialInputs();
+                    saveShareBtn.disabled = false;
+                }
             };
         }
         if (!clearShareBtn.dataset.wired) {
             clearShareBtn.dataset.wired = '1';
             clearShareBtn.onclick = async () => {
-                if (!(await App.confirm('Remove shared backup folder?', 'This only removes the saved destination. Existing backup files are not deleted.'))) return;
+                if (!(await App.confirm('Remove remote backup share?', 'This stops and removes the server mount and protected credential file. Existing files on the share are not deleted.'))) return;
                 clearShareBtn.disabled = true;
                 try { render(await API.clearSoftwareBackupShare()); }
                 catch (e) { status.textContent = '✕ ' + e.message; clearShareBtn.disabled = false; }
@@ -884,7 +948,7 @@ const App = {
         if (!createBtn.dataset.wired) {
             createBtn.dataset.wired = '1';
             createBtn.onclick = async () => {
-                if (!(await App.confirm('Create server software backup?', 'This creates a signed server binary and frontend backup in the configured shared folder. Runtime database, uploads, and local CA files are excluded.'))) return;
+                if (!(await App.confirm('Create server software backup?', 'One signed artifact will be created and stored atomically in each selected destination. A failure in one destination will not remove a successful copy in the other.'))) return;
                 createBtn.disabled = true;
                 status.textContent = 'Creating server software backup…';
                 try { render(await API.createSoftwareBackup()); }
@@ -1675,16 +1739,19 @@ const App = {
         const githubStatus = document.getElementById('github-update-status');
         const githubCheckBtn = document.getElementById('btn-github-update-check');
         const githubApplyBtn = document.getElementById('btn-github-update-apply');
+        const githubRollbackBtn = document.getElementById('btn-github-update-rollback');
+        const githubChannel = document.getElementById('github-release-channel');
         const githubAuto = document.getElementById('github-auto-update');
         const renderGithubUpdate = (u) => {
             if (!u) return;
             if (githubAuto) githubAuto.checked = !!u.auto_update;
+            if (githubChannel) githubChannel.value = u.release_channel === 'rc' ? 'rc' : 'stable';
             const latest = u.latest_version || u.latest_tag || 'not checked';
             const state = u.state || 'unknown';
             if (githubDetails) {
                 const lines = [
                     `Current: ${u.current_version || 'unknown'}${u.current_commit && u.current_commit !== 'unknown' ? ' (' + u.current_commit + ')' : ''}`,
-                    `Latest stable: ${latest}`,
+                    `Latest ${u.release_channel === 'rc' ? 'RC / pre-release' : 'stable'}: ${latest}`,
                     u.latest_name ? `Release: ${u.latest_name}` : '',
                     u.asset_name ? `Artifact: ${u.asset_name}` : '',
                     u.checked_at ? `Last checked: ${u.checked_at}` : '',
@@ -1693,6 +1760,7 @@ const App = {
                 githubDetails.textContent = lines.join('\n');
             }
             if (githubApplyBtn) githubApplyBtn.disabled = state !== 'available';
+            if (githubRollbackBtn) githubRollbackBtn.disabled = !u.rollback_available;
             if (githubStatus) {
                 githubStatus.textContent = u.error ? '✕ ' + u.error : (state === 'available' ? 'Update available' : state === 'current' ? 'Already current' : '');
             }
@@ -1714,7 +1782,8 @@ const App = {
         if (githubApplyBtn && !githubApplyBtn.dataset.wired) {
             githubApplyBtn.dataset.wired = '1';
             githubApplyBtn.onclick = async () => {
-                if (!(await App.confirm('Update server software?', 'The signed stable GitHub release will replace the server binary and frontend, preserve application data, and restart the service.'))) return;
+                const channel = githubChannel?.value === 'rc' ? 'RC / pre-release' : 'stable';
+                if (!(await App.confirm('Update server software?', `The signed ${channel} GitHub release will replace the server binary and frontend, preserve application data, and restart the service. The previous version will be retained for rollback.`))) return;
                 githubApplyBtn.disabled = true;
                 if (githubStatus) githubStatus.textContent = 'Downloading and verifying update…';
                 try {
@@ -1729,15 +1798,46 @@ const App = {
                 }
             };
         }
+        if (githubRollbackBtn && !githubRollbackBtn.dataset.wired) {
+            githubRollbackBtn.dataset.wired = '1';
+            githubRollbackBtn.onclick = async () => {
+                if (!(await App.confirm('Revert server software?', 'The retained previous server binary and frontend will be restored, application data will be preserved, and the service will restart.'))) return;
+                githubRollbackBtn.disabled = true;
+                if (githubStatus) githubStatus.textContent = 'Restoring the previous version…';
+                try {
+                    await API.rollbackGithubUpdate();
+                    if (githubStatus) githubStatus.textContent = '✓ Previous version restored. Service restarting…';
+                    setTimeout(() => window.location.reload(), 4000);
+                } catch (e) {
+                    if (githubStatus) githubStatus.textContent = '✕ ' + e.message;
+                    await loadGithubUpdate();
+                }
+            };
+        }
         if (githubAuto && !githubAuto.dataset.wired) {
             githubAuto.dataset.wired = '1';
             githubAuto.onchange = async () => {
                 const desired = githubAuto.checked;
                 githubAuto.disabled = true;
                 if (githubStatus) githubStatus.textContent = desired ? 'Enabling automatic updates…' : 'Disabling automatic updates…';
-                try { renderGithubUpdate(await API.setGithubAutoUpdate(desired)); }
+                try { renderGithubUpdate(await API.setGithubAutoUpdate(desired, githubChannel?.value || 'stable')); }
                 catch (e) { githubAuto.checked = !desired; if (githubStatus) githubStatus.textContent = '✕ ' + e.message; }
                 finally { githubAuto.disabled = false; }
+            };
+        }
+        if (githubChannel && !githubChannel.dataset.wired) {
+            githubChannel.dataset.wired = '1';
+            githubChannel.onchange = async () => {
+                const desired = githubChannel.value === 'rc' ? 'rc' : 'stable';
+                githubChannel.disabled = true;
+                if (githubStatus) githubStatus.textContent = 'Saving release channel…';
+                try {
+                    renderGithubUpdate(await API.setGithubAutoUpdate(!!githubAuto?.checked, desired));
+                    await loadGithubUpdate();
+                } catch (e) {
+                    if (githubStatus) githubStatus.textContent = '✕ ' + e.message;
+                    await loadGithubUpdate();
+                } finally { githubChannel.disabled = false; }
             };
         }
         await loadGithubUpdate();
@@ -3963,10 +4063,15 @@ ${targetSection}
             // Source/key drive the function. Default Text is only a fallback placeholder.
             if (source === 'date') return dateText();
             if (source === 'calendar') {
-                const n = (Number(props.day_offset ?? props.weather_day_offset) || 0) + 1;
-                if (key === 'calendar_event_time') return `Day ${n} 9:00 AM`;
-                if (key === 'calendar_event_location') return `Day ${n} location`;
-                return `Day ${n} event`;
+                const index = Math.max(0, Math.min(29, Number(props.calendar_event_index ?? props.day_offset ?? props.weather_day_offset) || 0));
+                const event = Array.isArray(props._calendar_events) ? props._calendar_events[index] : null;
+                if (event) {
+                    if (key === 'calendar_event_time') return event.time || '';
+                    if (key === 'calendar_event_location') return event.location || '';
+                    if (key === 'calendar_event_date') return event.date || '';
+                    return event.summary || '';
+                }
+                return 'Loading calendar…';
             }
             if (source === 'weather') {
                 const idx = weatherOffset();

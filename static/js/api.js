@@ -60,7 +60,7 @@ function _stepUpScopeForRequest(input, init) {
     const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
     const url = typeof input === 'string' ? input : (input && input.url) || '';
     const path = new URL(url, window.location.href).pathname;
-    if (path === '/api/version/update/apply' || path === '/api/version/update/github/settings') return 'server-update';
+    if (path === '/api/version/update/apply' || path === '/api/version/update/rollback' || path === '/api/version/update/github/settings') return 'server-update';
     if (path.startsWith('/api/addons/execution/approvals') && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') return 'addon-execution-approval';
     return null;
 }
@@ -150,7 +150,10 @@ window.API = {
 
     async getLayout(id) {
         const res = await fetch(`/api/layouts/${id}/edit`);
-        if (!res.ok) throw new Error('Failed to fetch layout');
+        if (!res.ok) {
+            const detail = await readApiError(res);
+            throw new Error(`Failed to fetch layout (${res.status})${detail ? ': ' + detail : ''}`);
+        }
         return normalizeLayoutFromApi(await _readApiJsonBounded(res));
     },
 
@@ -758,6 +761,26 @@ window.API = {
         return _readApiJsonBounded(res);
     },
 
+    async saveManagedSoftwareBackupShare(payload) {
+        const res = await fetch('/api/backups/software/share', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to add remote share');
+        return _readApiJsonBounded(res);
+    },
+
+    async saveSoftwareBackupDestination(destination) {
+        const res = await fetch('/api/backups/software/destination', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ destination }),
+        });
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to save backup destination');
+        return _readApiJsonBounded(res);
+    },
+
     async clearSoftwareBackupShare() {
         const res = await fetch('/api/backups/software/share', { method: 'DELETE' });
         if (!res.ok) throw new Error('Failed to remove shared backup folder');
@@ -955,11 +978,11 @@ window.API = {
         }
         return _readApiJsonBounded(res);
     },
-    async setGithubAutoUpdate(autoUpdate) {
+    async setGithubAutoUpdate(autoUpdate, releaseChannel = 'stable') {
         const res = await fetch('/api/version/update/github/settings', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ auto_update: !!autoUpdate }),
+            body: JSON.stringify({ auto_update: !!autoUpdate, release_channel: releaseChannel }),
         });
         if (!res.ok) {
             const text = await readApiError(res);
@@ -972,6 +995,14 @@ window.API = {
         if (!res.ok) {
             const text = await readApiError(res);
             throw new Error('GitHub update failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
+        }
+        return _readApiJsonBounded(res);
+    },
+    async rollbackGithubUpdate() {
+        const res = await fetch('/api/version/update/rollback', { method: 'POST' });
+        if (!res.ok) {
+            const text = await readApiError(res);
+            throw new Error('Rollback failed (status ' + res.status + ')' + (text ? ': ' + text : ''));
         }
         return _readApiJsonBounded(res);
     },

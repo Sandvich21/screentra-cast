@@ -11,7 +11,7 @@ use chrono::Utc;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path as StdPath, PathBuf};
-use std::process::Stdio;
+use std::process::{Command as StdCommand, Stdio};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use uuid::Uuid;
@@ -400,6 +400,45 @@ pub async fn create_backup(
 const SOFTWARE_BACKUP_SETTINGS_FILE: &str = "server-software-backup-settings.json";
 const MAX_SOFTWARE_BACKUP_BYTES: u64 = 1 << 30;
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SoftwareBackupDestination {
+    Local,
+    Remote,
+    Both,
+}
+
+impl Default for SoftwareBackupDestination {
+    fn default() -> Self {
+        Self::Remote
+    }
+}
+
+impl SoftwareBackupDestination {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Remote => "remote",
+            Self::Both => "both",
+        }
+    }
+
+    fn needs_local(self) -> bool {
+        matches!(self, Self::Local | Self::Both)
+    }
+
+    fn needs_remote(self) -> bool {
+        matches!(self, Self::Remote | Self::Both)
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SoftwareBackupDestinationResult {
+    pub filename: Option<String>,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct SoftwareBackupRecord {
     filename: String,
@@ -408,25 +447,68 @@ pub struct SoftwareBackupRecord {
     version: String,
     git_commit: String,
     created_at: String,
+    #[serde(default)]
+    local: Option<SoftwareBackupDestinationResult>,
+    #[serde(default)]
+    remote: Option<SoftwareBackupDestinationResult>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct SoftwareBackupShareConfig {
+    kind: Option<String>,
+    server: Option<String>,
+    remote_path: Option<String>,
+    label: Option<String>,
+    managed: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 struct SoftwareBackupSettings {
+    // This is always the local mount path used by the backup writer. It is
+    // never a remote URL and never contains credentials.
     share_path: Option<String>,
+    #[serde(default)]
+    share: SoftwareBackupShareConfig,
+    #[serde(default)]
+    destination: SoftwareBackupDestination,
     last_backup: Option<SoftwareBackupRecord>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 pub struct SoftwareBackupShareRequest {
-    pub share_path: String,
+    // Legacy requests may still provide an already-mounted local path.
+    pub share_path: Option<String>,
+    // Managed requests provide these fields; username/password are accepted
+    // only for this request and are never placed in settings or responses.
+    pub kind: Option<String>,
+    pub server: Option<String>,
+    pub remote_path: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub domain: Option<String>,
+    pub label: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct SoftwareBackupDestinationRequest {
+    pub destination: SoftwareBackupDestination,
 }
 
 #[derive(Debug, serde::Serialize)]
 pub struct SoftwareBackupSettingsResponse {
     pub configured: bool,
     pub share_path: Option<String>,
+    pub share_kind: Option<String>,
+    pub share_server: Option<String>,
+    pub share_remote_path: Option<String>,
+    pub share_label: Option<String>,
+    pub managed_share: bool,
+    pub mounted: bool,
+    pub destination: &'static str,
     pub available: bool,
     pub writable: bool,
+    pub local_available: bool,
+    pub local_writable: bool,
     pub last_backup: Option<SoftwareBackupRecord>,
 }
 
@@ -507,26 +589,173 @@ fn validate_software_backup_share(raw: &str, test_write: bool) -> Result<PathBuf
     Ok(path)
 }
 
+fn local_software_backup_dir(test_write: bool) -> Result<PathBuf, String> {
+    let data_dir = PathBuf::from(signage_data_dir());
+    checked_backup_dir(true)?;
+    let path = data_dir.join("software-backups");
+    fs::create_dir_all(&path).map_err(|error| format!("create local software backup folder: {error}"))?;
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| format!("inspect local software backup folder: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Local software backup folder is invalid".to_string());
+    }
+    if test_write {
+        validate_software_backup_share(&path.to_string_lossy(), true)?;
+    }
+    Ok(path)
+}
+
+fn copy_software_backup_to_destination(
+    source: &StdPath,
+    destination: &StdPath,
+    filename: &str,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    let destination = validate_software_backup_share(&destination.to_string_lossy(), false)?;
+    let final_path = destination.join(filename);
+    if final_path.exists() {
+        return Err("backup filename already exists".to_string());
+    }
+    let temporary = destination.join(format!(".{}.tmp-{}", filename, Uuid::new_v4()));
+    let result = (|| {
+        fs::copy(source, &temporary).map_err(|_| "copy backup to destination failed".to_string())?;
+        restrict_backup_file(&temporary)?;
+        let copied_sha256 = crate::version::sha256_of_file(&temporary)?;
+        if copied_sha256 != expected_sha256 {
+            return Err("backup digest verification failed".to_string());
+        }
+        fs::rename(&temporary, &final_path)
+            .map_err(|_| "finalize backup at destination failed".to_string())?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+const SOFTWARE_BACKUP_SHARE_HELPER: &str = "/usr/local/libexec/screentra-cast-share-helper";
+const SOFTWARE_BACKUP_MANAGED_MOUNT_PATH: &str = "/mnt/screentra-cast-backups/software";
+
+#[derive(serde::Serialize)]
+struct ShareHelperRequest<'a> {
+    operation: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    username: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain: Option<&'a str>,
+}
+
+#[derive(serde::Deserialize)]
+struct ShareHelperResponse {
+    ok: bool,
+    mounted: bool,
+    mount_path: Option<String>,
+    error: Option<String>,
+}
+
+async fn run_share_helper(request: &ShareHelperRequest<'_>) -> Result<ShareHelperResponse, String> {
+    let payload = serde_json::to_vec(request).map_err(|_| "share request could not be prepared".to_string())?;
+    let mut child = Command::new("sudo")
+        .args(["-n", SOFTWARE_BACKUP_SHARE_HELPER])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "server share helper is not available".to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(&payload)
+            .await
+            .map_err(|_| "server share helper request failed".to_string())?;
+    }
+    let output = tokio::time::timeout(std::time::Duration::from_secs(120), child.wait_with_output())
+        .await
+        .map_err(|_| "server share helper timed out".to_string())?
+        .map_err(|_| "server share helper failed".to_string())?;
+    if output.stdout.len() > 64 * 1024 {
+        return Err("server share helper returned an invalid response".to_string());
+    }
+    let response: ShareHelperResponse = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "server share helper returned an invalid response".to_string())?;
+    if !output.status.success() || !response.ok {
+        // The helper deliberately returns only a generic, credential-free
+        // error. Do not relay command output or mount details to the UI.
+        return Err(response
+            .error
+            .unwrap_or_else(|| "server share operation failed".to_string()));
+    }
+    Ok(response)
+}
+
+fn path_is_mounted(path: &StdPath) -> bool {
+    StdCommand::new("mountpoint")
+        .args(["-q", &path.to_string_lossy()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 fn software_backup_settings_response(
     settings: SoftwareBackupSettings,
 ) -> SoftwareBackupSettingsResponse {
     let (available, writable) = match settings.share_path.as_deref() {
-        Some(path) => match validate_software_backup_share(path, true) {
-            Ok(_) => (true, true),
-            Err(_) => {
-                let available = fs::symlink_metadata(path)
-                    .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
-                    .unwrap_or(false);
-                (available, false)
+        Some(path) => {
+            let mounted = if settings.share.managed {
+                path_is_mounted(StdPath::new(path))
+            } else {
+                true
+            };
+            if !mounted {
+                (false, false)
+            } else {
+                match validate_software_backup_share(path, true) {
+                    Ok(_) => (true, true),
+                    Err(_) => {
+                        let available = fs::symlink_metadata(path)
+                            .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+                            .unwrap_or(false);
+                        (available, false)
+                    }
+                }
             }
-        },
+        }
         None => (false, false),
+    };
+    let mounted = settings
+        .share_path
+        .as_deref()
+        .map(|path| if settings.share.managed { path_is_mounted(StdPath::new(path)) } else { available })
+        .unwrap_or(false);
+    let (local_available, local_writable) = match local_software_backup_dir(true) {
+        Ok(path) => (true, validate_software_backup_share(&path.to_string_lossy(), true).is_ok()),
+        Err(_) => (false, false),
     };
     SoftwareBackupSettingsResponse {
         configured: settings.share_path.is_some(),
         share_path: settings.share_path,
+        share_kind: settings.share.kind,
+        share_server: settings.share.server,
+        share_remote_path: settings.share.remote_path,
+        share_label: settings.share.label,
+        managed_share: settings.share.managed,
+        mounted,
+        destination: settings.destination.as_str(),
         available,
         writable,
+        local_available,
+        local_writable,
         last_backup: settings.last_backup,
     }
 }
@@ -541,11 +770,73 @@ pub async fn get_software_backup_settings(
 pub async fn save_software_backup_share(
     Json(request): Json<SoftwareBackupShareRequest>,
 ) -> Result<AxumJson<SoftwareBackupSettingsResponse>, (StatusCode, String)> {
-    let path = validate_software_backup_share(&request.share_path, true)
-        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let managed = request.kind.is_some()
+        || request.server.is_some()
+        || request.remote_path.is_some()
+        || request.username.is_some()
+        || request.password.is_some()
+        || request.domain.is_some();
     let mut settings = load_software_backup_settings()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
-    settings.share_path = Some(path.to_string_lossy().to_string());
+
+    if managed {
+        let kind = request.kind.as_deref().ok_or((StatusCode::BAD_REQUEST, "Select SMB or NFS".to_string()))?;
+        if kind != "smb" && kind != "nfs" {
+            return Err((StatusCode::BAD_REQUEST, "Share type is invalid".to_string()));
+        }
+        let server = request.server.as_deref().ok_or((StatusCode::BAD_REQUEST, "Enter the share server".to_string()))?;
+        let remote_path = request.remote_path.as_deref().ok_or((StatusCode::BAD_REQUEST, "Enter the SMB share or NFS export".to_string()))?;
+        if server.trim().is_empty() || server.len() > 255 || remote_path.trim().is_empty() || remote_path.len() > 1024 {
+            return Err((StatusCode::BAD_REQUEST, "Share connection details are invalid".to_string()));
+        }
+        if kind == "smb" && (request.username.as_deref().unwrap_or("").is_empty() || request.password.as_deref().unwrap_or("").is_empty()) {
+            return Err((StatusCode::BAD_REQUEST, "SMB username and password are required".to_string()));
+        }
+        let helper_request = ShareHelperRequest {
+            operation: "configure",
+            kind: Some(kind),
+            server: Some(server),
+            remote_path: Some(remote_path),
+            username: request.username.as_deref(),
+            password: request.password.as_deref(),
+            domain: request.domain.as_deref(),
+        };
+        let helper_response = run_share_helper(&helper_request)
+            .await
+            .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
+        if !helper_response.mounted {
+            return Err((StatusCode::BAD_GATEWAY, "Server share did not become mounted".to_string()));
+        }
+        let mount_path = helper_response
+            .mount_path
+            .filter(|path| path == SOFTWARE_BACKUP_MANAGED_MOUNT_PATH)
+            .ok_or((StatusCode::BAD_GATEWAY, "Server share helper returned an invalid mount path".to_string()))?;
+        settings.share_path = Some(mount_path);
+        settings.share = SoftwareBackupShareConfig {
+            kind: Some(kind.to_string()),
+            server: Some(server.to_string()),
+            remote_path: Some(remote_path.to_string()),
+            label: request.label.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string),
+            managed: true,
+        };
+    } else {
+        let raw_path = request.share_path.as_deref().ok_or((StatusCode::BAD_REQUEST, "Enter a share or configure SMB/NFS details".to_string()))?;
+        let path = validate_software_backup_share(raw_path, true)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        settings.share_path = Some(path.to_string_lossy().to_string());
+        settings.share = SoftwareBackupShareConfig::default();
+    }
+    save_software_backup_settings(&settings)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+    Ok(AxumJson(software_backup_settings_response(settings)))
+}
+
+pub async fn save_software_backup_destination(
+    Json(request): Json<SoftwareBackupDestinationRequest>,
+) -> Result<AxumJson<SoftwareBackupSettingsResponse>, (StatusCode, String)> {
+    let mut settings = load_software_backup_settings()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+    settings.destination = request.destination;
     save_software_backup_settings(&settings)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
     Ok(AxumJson(software_backup_settings_response(settings)))
@@ -555,7 +846,22 @@ pub async fn clear_software_backup_share(
 ) -> Result<AxumJson<SoftwareBackupSettingsResponse>, (StatusCode, String)> {
     let mut settings = load_software_backup_settings()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+    if settings.share.managed {
+        let helper_request = ShareHelperRequest {
+            operation: "remove",
+            kind: None,
+            server: None,
+            remote_path: None,
+            username: None,
+            password: None,
+            domain: None,
+        };
+        run_share_helper(&helper_request)
+            .await
+            .map_err(|error| (StatusCode::BAD_GATEWAY, error))?;
+    }
     settings.share_path = None;
+    settings.share = SoftwareBackupShareConfig::default();
     save_software_backup_settings(&settings)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
     Ok(AxumJson(software_backup_settings_response(settings)))
@@ -565,74 +871,93 @@ pub async fn create_software_backup(
 ) -> Result<AxumJson<SoftwareBackupSettingsResponse>, (StatusCode, String)> {
     let mut settings = load_software_backup_settings()
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
-    let configured_path = settings.share_path.clone().ok_or((
-        StatusCode::BAD_REQUEST,
-        "Configure a shared backup folder first".to_string(),
-    ))?;
-    let share = validate_software_backup_share(&configured_path, true)
-        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
-    let temporary = share.join(format!(
-        ".screentra-server-software-backup-{}.tar.gz",
-        Uuid::new_v4()
-    ));
-    let manifest = match crate::version::export_update_bundle(&temporary) {
+    let destination = settings.destination;
+    let local = if destination.needs_local() {
+        Some(local_software_backup_dir(true).map_err(|_| {
+            (StatusCode::INTERNAL_SERVER_ERROR, "Local software backup folder is unavailable".to_string())
+        })?)
+    } else {
+        None
+    };
+    let remote = if destination.needs_remote() {
+        let configured_path = settings.share_path.clone().ok_or((
+            StatusCode::BAD_REQUEST,
+            "Configure and test a remote shared folder first".to_string(),
+        ))?;
+        Some(validate_software_backup_share(&configured_path, true).map_err(|error| {
+            (StatusCode::BAD_REQUEST, error)
+        })?)
+    } else {
+        None
+    };
+
+    let data_dir = PathBuf::from(signage_data_dir());
+    checked_backup_dir(true).map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Server software backup staging is unavailable".to_string())
+    })?;
+    let source = data_dir.join(format!(".screentra-server-software-backup-{}.tar.gz", Uuid::new_v4()));
+    let manifest = match crate::version::export_update_bundle(&source) {
         Ok(manifest) => manifest,
         Err(error) => {
-            let _ = fs::remove_file(&temporary);
+            let _ = fs::remove_file(&source);
             log::error!("server software backup export failed: {error}");
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Server software backup failed".to_string(),
-            ));
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Server software backup failed".to_string()));
         }
     };
-    let size = fs::metadata(&temporary)
+    let size = fs::metadata(&source)
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Server software backup failed".to_string()))?
         .len();
     if size == 0 || size > MAX_SOFTWARE_BACKUP_BYTES {
-        let _ = fs::remove_file(&temporary);
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "Server software backup is outside the permitted size limit".to_string(),
-        ));
+        let _ = fs::remove_file(&source);
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, "Server software backup is outside the permitted size limit".to_string()));
     }
+    restrict_backup_file(&source).map_err(|_| {
+        let _ = fs::remove_file(&source);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Server software backup failed".to_string())
+    })?;
+    let sha256 = crate::version::sha256_of_file(&source).map_err(|_| {
+        let _ = fs::remove_file(&source);
+        (StatusCode::INTERNAL_SERVER_ERROR, "Server software backup could not be verified".to_string())
+    })?;
     let now = Utc::now();
     let filename = format!(
-        "screentra-server-software-backup-{}.tar.gz",
-        now.format("%Y%m%dT%H%M%SZ")
+        "screentra-server-software-backup-{}-{}.tar.gz",
+        now.format("%Y%m%dT%H%M%SZ"),
+        &Uuid::new_v4().to_string()[..8]
     );
-    let final_path = share.join(&filename);
-    if final_path.exists() {
-        let _ = fs::remove_file(&temporary);
-        return Err((
-            StatusCode::CONFLICT,
-            "A server software backup with that timestamp already exists".to_string(),
-        ));
-    }
-    fs::rename(&temporary, &final_path).map_err(|_| {
-        let _ = fs::remove_file(&temporary);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Server software backup could not be finalized".to_string(),
-        )
-    })?;
-    let sha256 = crate::version::sha256_of_file(&final_path).map_err(|_| {
-        let _ = fs::remove_file(&final_path);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Server software backup could not be verified".to_string(),
-        )
-    })?;
-    settings.last_backup = Some(SoftwareBackupRecord {
+    let local_result = local.map(|path| match copy_software_backup_to_destination(&source, &path, &filename, &sha256) {
+        Ok(()) => SoftwareBackupDestinationResult { filename: Some(filename.clone()), success: true, error: None },
+        Err(_) => SoftwareBackupDestinationResult { filename: None, success: false, error: Some("local destination failed".to_string()) },
+    });
+    let remote_result = remote.map(|path| match copy_software_backup_to_destination(&source, &path, &filename, &sha256) {
+        Ok(()) => SoftwareBackupDestinationResult { filename: Some(filename.clone()), success: true, error: None },
+        Err(_) => SoftwareBackupDestinationResult { filename: None, success: false, error: Some("remote destination failed".to_string()) },
+    });
+    let local_ok = local_result.as_ref().map(|result| result.success).unwrap_or(false);
+    let remote_ok = remote_result.as_ref().map(|result| result.success).unwrap_or(false);
+    let any_success = local_ok || remote_ok;
+    let all_success = (!destination.needs_local() || local_ok) && (!destination.needs_remote() || remote_ok);
+    let record = SoftwareBackupRecord {
         filename,
         bytes: size,
         sha256,
         version: manifest.version,
         git_commit: manifest.git_commit,
         created_at: now.to_rfc3339(),
-    });
-    save_software_backup_settings(&settings)
-        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Server software backup metadata could not be saved".to_string()))?;
+        local: local_result,
+        remote: remote_result,
+    };
+    let _ = fs::remove_file(&source);
+    settings.last_backup = Some(record);
+    save_software_backup_settings(&settings).map_err(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Server software backup metadata could not be saved".to_string())
+    })?;
+    if !any_success {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "Server software backup could not be stored".to_string()));
+    }
+    if !all_success {
+        log::warn!("server software backup completed with a destination failure");
+    }
     Ok(AxumJson(software_backup_settings_response(settings)))
 }
 
@@ -1525,6 +1850,62 @@ mod tests {
     }
 
     #[test]
+    fn software_backup_destination_round_trip_supports_local_remote_and_both() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = test_root("software-destination");
+        std::fs::create_dir_all(&root).unwrap();
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &root); }
+        for destination in [
+            SoftwareBackupDestination::Local,
+            SoftwareBackupDestination::Remote,
+            SoftwareBackupDestination::Both,
+        ] {
+            let settings = SoftwareBackupSettings {
+                share_path: None,
+                share: SoftwareBackupShareConfig::default(),
+                destination,
+                last_backup: None,
+            };
+            save_software_backup_settings(&settings).unwrap();
+            let loaded = load_software_backup_settings().unwrap();
+            assert_eq!(loaded.destination.as_str(), destination.as_str());
+        }
+        let legacy = br#"{"share_path":null,"last_backup":null}"#;
+        std::fs::write(software_backup_settings_path(), legacy).unwrap();
+        assert_eq!(load_software_backup_settings().unwrap().destination.as_str(), "remote");
+        if let Some(value) = old_data_dir {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn software_backup_copy_is_atomic_and_digest_checked() {
+        let root = test_root("software-copy");
+        let source = root.join("source.tar.gz");
+        let local = root.join("local");
+        let remote = root.join("remote");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::create_dir_all(&remote).unwrap();
+        std::fs::write(&source, b"signed software bundle bytes").unwrap();
+        let digest = crate::version::sha256_of_file(&source).unwrap();
+        copy_software_backup_to_destination(&source, &local, "backup.tar.gz", &digest).unwrap();
+        copy_software_backup_to_destination(&source, &remote, "backup.tar.gz", &digest).unwrap();
+        assert_eq!(std::fs::read(local.join("backup.tar.gz")).unwrap(), b"signed software bundle bytes");
+        assert_eq!(std::fs::read(remote.join("backup.tar.gz")).unwrap(), b"signed software bundle bytes");
+        assert!(std::fs::read_dir(&local).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().contains(".tmp-")));
+        assert!(copy_software_backup_to_destination(&source, &local, "bad.tar.gz", "wrong").is_err());
+        assert!(!local.join("bad.tar.gz").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn software_backup_settings_round_trip_is_private_json() {
         let _guard = crate::PROCESS_ENV_TEST_LOCK
             .get_or_init(|| Mutex::new(()))
@@ -1536,6 +1917,8 @@ mod tests {
         unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &root); }
         let settings = SoftwareBackupSettings {
             share_path: Some("/mnt/signage-backups".to_string()),
+            share: SoftwareBackupShareConfig::default(),
+            destination: SoftwareBackupDestination::Remote,
             last_backup: None,
         };
         save_software_backup_settings(&settings).unwrap();

@@ -1394,42 +1394,92 @@ const Editor = {
   },
 
   async _refreshCalendarEditorPreviews() {
-    const widgets = (this.currentLayout?.widgets || []).filter(w => w.type === 'calendar' && (w.props?.ical_url || w.props?.ical || w.props?.calendar_url));
+    const layoutId = this.currentLayout?.id || '';
+    const calendarTimeZone = raw => {
+      const match = String(raw || '').match(/(?:^|\n)X-WR-TIMEZONE:([^\n]+)/i);
+      const candidate = (match && match[1] ? match[1].trim() : '') || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+      try { new Intl.DateTimeFormat('en-US', { timeZone: candidate }).format(); return candidate; } catch (_) { return 'UTC'; }
+    };
+    const calendarParts = (value, timeZone) => {
+      const text = String(value || '').replace(/\r$/, '');
+      const dateOnly = text.match(/^(\d{4})(\d{2})(\d{2})$/);
+      if (dateOnly) return { date: `${dateOnly[1]}-${dateOnly[2]}-${dateOnly[3]}`, time: 'All day', sortTime: 0 };
+      const local = text.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/);
+      if (!local) return null;
+      let date = `${local[1]}-${local[2]}-${local[3]}`, hour = Number(local[4]), minute = Number(local[5]);
+      if (/Z$/i.test(text)) {
+        const instant = new Date(Date.UTC(Number(local[1]), Number(local[2]) - 1, Number(local[3]), hour, minute, 0));
+        const parts = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(instant).reduce((out, part) => { out[part.type] = part.value; return out; }, {});
+        date = `${parts.year}-${parts.month}-${parts.day}`; hour = Number(parts.hour); minute = Number(parts.minute);
+      }
+      return { date, hour, minute, time: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`, sortTime: hour * 60 + minute };
+    };
+    const calendarTodayKey = timeZone => { const parts = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date()).reduce((out, part) => { out[part.type] = part.value; return out; }, {}); return `${parts.year}-${parts.month}-${parts.day}`; };
+    const widgets = (this.currentLayout?.widgets || []).filter(w => w.type === 'calendar' && (w.props?.ical_url || w.props?.ical || w.props?.calendar_url || w.props?._calendar_source_configured === true));
     for (const w of widgets) {
-      const root = document.querySelector(`[data-calendar-preview-id="${CSS.escape(w.id)}"]`);
-      if (!root) continue;
-      const url = w.props.ical_url || w.props.ical || w.props.calendar_url;
+      const selectorId = CSS.escape(w.id);
+      const root = document.querySelector(`[data-calendar-preview-id="${selectorId}"]`);
+      const templateRoot = document.querySelector(`[data-calendar-template-preview-id="${selectorId}"]`);
+      if (!root && !templateRoot) continue;
       try {
-        const response = await fetch(url);
+        if (!layoutId) throw new Error('Layout must be saved before its calendar can be loaded');
+        // Resolve the protected source through the server proxy. The editor
+        // must not fetch the stored iCal URL directly: that is unreliable
+        // across CORS boundaries and needlessly exposes the source to the UI.
+        const response = await fetch(`/api/ics-proxy?layout_id=${encodeURIComponent(layoutId)}&widget_id=${encodeURIComponent(w.id)}`, { cache: 'no-store' });
         if (!response.ok) throw new Error('iCal request failed');
-        const raw = (await readEditorResponseTextBounded(response, MAX_EDITOR_CALENDAR_BYTES)).replace(/\\r?\\n[ \\t]/g, '');
-        const events = [...raw.matchAll(/BEGIN:VEVENT([\\s\\S]*?)END:VEVENT/g)].map(m => {
+        const raw = (await readEditorResponseTextBounded(response, MAX_EDITOR_CALENDAR_BYTES)).replace(/\r?\n[ \t]/g, '');
+        const timeZone = calendarTimeZone(raw);
+        const events = [...raw.matchAll(/BEGIN:VEVENT([\s\S]*?)END:VEVENT/g)].map(m => {
           const block = m[1];
-          const start = (block.match(/DTSTART(?:;[^:]+)?:([^\\n]+)/) || [])[1] || '';
+          const startMatch = block.match(/(DTSTART(?:;[^:]+)?):([^\n]+)/);
+          const start = startMatch ? startMatch[2] : '';
           const uid = (block.match(/UID:(.*)/) || [,''])[1].trim();
-          const date = (start.match(/^(\\d{4})(\\d{2})(\\d{2})/) || [])[0];
           const summary = (block.match(/SUMMARY:(.*)/) || [,'iCal event'])[1].trim();
-          if (!date) return null;
-          const hh = (start.match(/T(\\d{2})(\\d{2})/) || [])[1];
-          const mm = (start.match(/T\\d{2}(\\d{2})/) || [])[1] || '00';
-          const hhNum = hh == null ? null : Number(hh);
-          const time = hhNum == null ? 'All day' : ((w.props.time_format || '12') === '24' ? `${String(hhNum).padStart(2, '0')}:${mm}` : `${hhNum % 12 || 12}:${mm} ${hhNum >= 12 ? 'PM' : 'AM'}`);
-          const sourceDate = `${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6,8)}`;
-          return { uid, source_start: start, source_date: sourceDate, date: sourceDate, time, summary };
+          const location = (block.match(/LOCATION:(.*)/) || [,''])[1].trim();
+          const parsed = calendarParts(start, timeZone);
+          if (!start || !parsed || !summary) return null;
+          const time = parsed.time === 'All day' || w.props.time_format === '24' ? parsed.time : `${parsed.hour % 12 || 12}:${String(parsed.minute).padStart(2, '0')} ${parsed.hour >= 12 ? 'PM' : 'AM'}`;
+          return { uid, source_start: start, source_date: parsed.date, date: parsed.date, sort_time: parsed.sortTime, time, summary, location };
         }).filter(Boolean);
         const timeFormat = w.props.time_format === '24' ? '24' : '12';
-        const adjustedEvents = this._applyCalendarEditorOverrides(events, w.props.calendar_time_overrides, timeFormat).sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time)).slice(0, Math.max(1, Math.min(10, Number(w.props.max_events) || 5)));
-        root.querySelectorAll('.editor-calendar-row,.editor-calendar-empty').forEach(x => x.remove());
-        const status = root.querySelector('.editor-calendar-status');
-        const html = adjustedEvents.length ? adjustedEvents.map(e => `<div class="editor-calendar-row"><b>${this.esc(new Date(`${e.date}T00:00:00`).toLocaleDateString(undefined,{month:'short',day:'numeric'}))}</b><span>${this.esc(e.time)} · ${this.esc(e.summary)}${e.override_applied ? ' · corrected' : ''}</span></div>`).join('') : '<div class="editor-calendar-empty">No iCal events found</div>';
-        if (status) status.insertAdjacentHTML('beforebegin', html);
-        if (status) status.textContent = 'iCal preview';
+        const adjustedEvents = this._applyCalendarEditorOverrides(events, w.props.calendar_time_overrides, timeFormat).filter(event => event.date >= calendarTodayKey(timeZone)).sort((a, b) => a.date.localeCompare(b.date) || (Number(a.sort_time) || 0) - (Number(b.sort_time) || 0) || a.summary.localeCompare(b.summary)).slice(0, Math.max(1, Math.min(30, Number(w.props.max_events) || 5)));
+        if (root) {
+          root.querySelectorAll('.editor-calendar-row,.editor-calendar-empty').forEach(x => x.remove());
+          const status = root.querySelector('.editor-calendar-status');
+          const html = adjustedEvents.length ? adjustedEvents.map(e => `<div class="editor-calendar-row"><b>${this.esc(new Date(`${e.date}T00:00:00`).toLocaleDateString(undefined,{month:'short',day:'numeric'}))}</b><span>${this.esc(e.time)} · ${this.esc(e.summary)}${e.override_applied ? ' · corrected' : ''}</span></div>`).join('') : '<div class="editor-calendar-empty">No upcoming iCal events</div>';
+          if (status) status.insertAdjacentHTML('beforebegin', html);
+          if (status) status.textContent = adjustedEvents.length ? 'Live iCal preview' : 'No upcoming iCal events';
+        }
+        if (templateRoot) {
+          templateRoot.querySelectorAll('[data-calendar-template-value]').forEach(node => {
+            const event = adjustedEvents[Number(node.dataset.calendarTemplateIndex) || 0];
+            const key = node.dataset.calendarTemplateValue || 'calendar_event_title';
+            let value = '';
+            if (event) {
+              if (key === 'calendar_event_time') value = event.time || '';
+              else if (key === 'calendar_event_location') value = event.location || '';
+              else if (key === 'calendar_event_date') value = new Date(`${event.date}T00:00:00`).toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'});
+              else value = event.summary || '';
+            }
+            node.textContent = value || 'Calendar unavailable';
+          });
+          const status = templateRoot.querySelector('.editor-calendar-template-status');
+          if (status) status.textContent = adjustedEvents.length ? 'Live iCal preview' : 'No upcoming iCal events';
+        }
       } catch (_) {
-        const status = root.querySelector('.editor-calendar-status');
-        root.querySelectorAll('.editor-calendar-row,.editor-calendar-empty').forEach(x => x.remove());
-        if (status) {
-          status.insertAdjacentHTML('beforebegin', '<div class="editor-calendar-empty">iCal unavailable</div>');
-          status.textContent = 'iCal unavailable · check the URL or server access';
+        if (root) {
+          const status = root.querySelector('.editor-calendar-status');
+          root.querySelectorAll('.editor-calendar-row,.editor-calendar-empty').forEach(x => x.remove());
+          if (status) {
+            status.insertAdjacentHTML('beforebegin', '<div class="editor-calendar-empty">iCal unavailable</div>');
+            status.textContent = 'iCal unavailable · check the URL or server access';
+          }
+        }
+        if (templateRoot) {
+          templateRoot.querySelectorAll('[data-calendar-template-value]').forEach(node => { node.textContent = 'Calendar unavailable'; });
+          const status = templateRoot.querySelector('.editor-calendar-template-status');
+          if (status) status.textContent = 'iCal unavailable · check the calendar source';
         }
       }
     }
@@ -1442,14 +1492,21 @@ const Editor = {
     let designW = Math.max(1, Number(p.template_width) || 760), designH = Math.max(1, Number(p.template_height) || 428);
     const groupFor = el => el.repeat?.group || el.repeat?.group_id || el.repeat_group || el.repeatGroup || null;
     const modeFor = el => groupFor(el) && (!el.repeat?.mode || el.repeat.mode === 'none') ? 'rows' : (el.repeat?.mode || 'none');
-    const countFor = el => groupFor(el) ? Math.max(1, Math.min(30, Number(p.max_events) || Number(el.repeat?.count) || 5)) : Math.max(1, Math.min(30, Number(el.repeat?.count) || 1));
+    const hasCalendarExemplar = elements.some(el => {
+      const q = el.props || {};
+      const source = q.variable_source || (el.type === 'variable_icon' ? 'weather' : 'date');
+      return source === 'calendar' && !groupFor(el);
+    });
+    const countFor = el => groupFor(el)
+      ? Math.max(1, Math.min(30, (Number(p.max_events) || Number(el.repeat?.count) || 5) - (hasCalendarExemplar ? 1 : 0)))
+      : Math.max(1, Math.min(30, Number(el.repeat?.count) || 1));
     const groups = {};
     elements.forEach(el => { const g = groupFor(el); if (!g) return; const r = el.repeat || {}; const m = groups[g] || (groups[g] = {minX:Infinity,minY:Infinity,maxX:-Infinity,maxY:-Infinity,gapX:Number(r.gap_x)||0,gapY:Number(r.gap_y)||0}); const x=Number(el.x)||0,y=Number(el.y)||0,wid=Number(el.width)||120,hei=Number(el.height)||80; m.minX=Math.min(m.minX,x);m.minY=Math.min(m.minY,y);m.maxX=Math.max(m.maxX,x+wid);m.maxY=Math.max(m.maxY,y+hei);m.gapX=Number(r.gap_x)||m.gapX;m.gapY=Number(r.gap_y)||m.gapY; });
     const posFor = (el, i) => { const m = groups[groupFor(el)]; if (!m || !i) return {x:Number(el.x)||0,y:Number(el.y)||0}; const mode=modeFor(el); return {x:(Number(el.x)||0)+(mode==='columns'?i*((m.maxX-m.minX)+m.gapX):0), y:(Number(el.y)||0)+(mode==='rows'?i*((m.maxY-m.minY)+m.gapY):0)}; };
     elements.forEach(el => { for (let i=0;i<countFor(el);i++){const q=posFor(el,i);designW=Math.max(designW,q.x+(Number(el.width)||120));designH=Math.max(designH,q.y+(Number(el.height)||80));} });
-    const sample = (el, i) => { const q=el.props||{}, key=q.variable_key||''; if (q.variable_source==='date'||key==='full_date') { const d=new Date();d.setDate(d.getDate()+i);return d.toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'}); } if(key==='calendar_event_time')return '9:00 AM'; if(key==='calendar_event_location')return 'United States'; if(key==='calendar_event_title')return ['New Year’s Day','Martin Luther King Jr. Day','Presidents’ Day','Memorial Day','Independence Day'][i%5]; return q.default_text||q.label||key; };
-    const html=elements.slice().sort((a,b)=>(Number(a.z)||0)-(Number(b.z)||0)).map(el=>Array.from({length:countFor(el)},(_,i)=>{const q=el.props||{},sampleIndex=groupFor(el)?i+1:i,pos=posFor(el,i),align=q.align||'center',justify=align==='left'?'flex-start':align==='right'?'flex-end':'center',style=`position:absolute;left:${pos.x/designW*100}%;top:${pos.y/designH*100}%;width:${(Number(el.width)||120)/designW*100}%;height:${(Number(el.height)||80)/designH*100}%;z-index:${Number(el.z)||0};display:flex;align-items:center;justify-content:${justify};overflow:hidden;box-sizing:border-box;color:${this.esc(q.color||'#fff')};font-size:${this.templateEditorFontCss(Number(q.font_size)||24, designW)};`;let content='';if(el.type==='text')content=this.esc(q.text||'Text box');else if(['variable_text','variable_icon','variable','date'].includes(el.type))content=this.esc(sample(el,sampleIndex));else if(el.type==='image')content=q.url?`<img src="${this.esc(q.url)}" style="max-width:100%;max-height:100%;object-fit:contain;">`:'🖼️';else if(el.type==='rectangle')content=`<span style="position:absolute;inset:0;background:${this.esc(q.color||'#1e293b')};opacity:${Math.max(0,Math.min(100,Number(q.opacity??100)))/100};border-radius:${Number(q.radius)||0}px;"></span>`;else content=this.esc(q.label||el.type||'');return `<div style="${style}">${content}</div>`;}).join('')).join('');
-    return `<div class="editor-calendar-template-preview" style="position:relative;width:100%;height:100%;overflow:hidden;container-type:inline-size;background:rgba(15,23,42,.35);">${html}</div>`;
+    const sample = (el, i) => { const q=el.props||{}, key=q.variable_key||''; if (q.variable_source==='date'||key==='full_date') { const d=new Date();d.setDate(d.getDate()+i);return d.toLocaleDateString(undefined,{weekday:'long',month:'short',day:'numeric'}); } if(key==='calendar_event_time')return 'Loading calendar…'; if(key==='calendar_event_location')return 'Loading calendar…'; if(key==='calendar_event_title')return 'Loading calendar…'; if(key==='calendar_event_date')return 'Loading calendar…'; return q.default_text||q.label||key; };
+    const html=elements.slice().sort((a,b)=>(Number(a.z)||0)-(Number(b.z)||0)).map(el=>Array.from({length:countFor(el)},(_,i)=>{const q=el.props||{},sampleIndex=groupFor(el)?i+1:i,pos=posFor(el,i),align=q.align||'center',justify=align==='left'?'flex-start':align==='right'?'flex-end':'center',style=`position:absolute;left:${pos.x/designW*100}%;top:${pos.y/designH*100}%;width:${(Number(el.width)||120)/designW*100}%;height:${(Number(el.height)||80)/designH*100}%;z-index:${Number(el.z)||0};display:flex;align-items:center;justify-content:${justify};overflow:hidden;box-sizing:border-box;color:${this.esc(q.color||'#fff')};font-size:${this.templateEditorFontCss(Number(q.font_size)||24, designW)};`;let content='';if(el.type==='text')content=this.esc(q.text||'Text box');else if(['variable_text','variable_icon','variable','date'].includes(el.type)){const value=this.esc(sample(el,sampleIndex));const isCalendar=q.variable_source==='calendar'&&['calendar_event_title','calendar_event_time','calendar_event_date','calendar_event_location'].includes(q.variable_key||'');content=isCalendar?`<span data-calendar-template-value="${this.esc(q.variable_key)}" data-calendar-template-index="${sampleIndex}">${value}</span>`:value;}else if(el.type==='image')content=q.url?`<img src="${this.esc(q.url)}" style="max-width:100%;max-height:100%;object-fit:contain;">`:'🖼️';else if(el.type==='rectangle')content=`<span style="position:absolute;inset:0;background:${this.esc(q.color||'#1e293b')};opacity:${Math.max(0,Math.min(100,Number(q.opacity??100)))/100};border-radius:${Number(q.radius)||0}px;"></span>`;else content=this.esc(q.label||el.type||'');return `<div style="${style}">${content}</div>`;}).join('')).join('');
+    return `<div class="editor-calendar-template-preview" data-calendar-template-preview-id="${this.esc(w.id)}" style="position:relative;width:100%;height:100%;overflow:hidden;container-type:inline-size;background:rgba(15,23,42,.35);">${html}<small class="editor-calendar-template-status" style="position:absolute;left:4px;right:4px;bottom:3px;color:#94a3b8;font-size:10px;pointer-events:none;">Loading calendar…</small></div>`;
   },
 
   _calendarEditorPreviewHtml(w) {
@@ -3444,7 +3501,35 @@ const Editor = {
       try {
         await pendingLayoutLoad;
       } catch (e) {
-        throw new Error('The editable layout could not be loaded; save was blocked to protect the RTSP source.');
+        // A layout can be opened while auth is still settling. Retry the
+        // protected representation at save time instead of permanently
+        // poisoning this layout with the first 401/403/transport failure.
+        this._layoutLoadPromise = null;
+        let protectedLayout = null;
+        try {
+          protectedLayout = await API.getLayout(this.currentLayoutId);
+          const current = this.currentLayout;
+          const protectedWidgets = (protectedLayout?.widgets || []).filter(widget => widget.type === 'camera' && widget.props?._addon_type === 'rtsp-stream');
+          protectedWidgets.forEach(widget => {
+            const target = (current?.widgets || []).find(item => item.id === widget.id);
+            const streamUrl = widget.props?.stream_url;
+            if (target && streamUrl && !target.props?.stream_url) {
+              target.props = Object.assign({}, target.props || {}, { stream_url: streamUrl });
+            }
+          });
+          this._layoutLoadReadyId = this.currentLayoutId;
+        } catch (retryError) {
+          const current = this.currentLayout;
+          const hasProtectedRtsp = (current?.widgets || []).some(widget => widget.type === 'camera' && widget.props?._addon_type === 'rtsp-stream');
+          if (hasProtectedRtsp) {
+            const detail = retryError?.message || e?.message || 'protected layout request failed';
+            throw new Error(`The editable layout could not be loaded; save was blocked to protect the RTSP source. (${detail})`);
+          }
+          // Calendar-only and other layouts contain no protected RTSP source;
+          // their current in-memory edits can be saved safely even if the
+          // optional protected reread was unavailable.
+          this._layoutLoadReadyId = this.currentLayoutId;
+        }
       }
       if (this._layoutLoadReadyId !== this.currentLayoutId) {
         throw new Error('The editable layout is not ready; save was blocked to protect the RTSP source.');

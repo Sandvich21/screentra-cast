@@ -975,19 +975,78 @@
                             <div class="sys-card" style="margin-top:1rem; padding:1rem 1.25rem;">
                                 <h3 style="margin:0 0 0.5rem 0; font-size:1rem;">Server Software Backup</h3>
                                 <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.8rem;">
-                                    Save a signed backup of the running server binary and frontend to a shared folder. Runtime database,
-                                    uploads, backups, and the deployment-local CA are excluded. Mount the SMB/NFS share on the server first,
-                                    then enter its local mount path below.
+                                    Create one signed backup of the running server binary and frontend, then store it on the server device, a remote share, or both. Runtime database,
+                                    uploads, existing backups, and the deployment-local CA are excluded.
                                 </div>
-                                <label for="backup-software-share-path" style="display:block; font-size:0.8rem; margin-bottom:0.35rem;">Shared folder path</label>
-                                <input id="backup-software-share-path" type="text" maxlength="4096" spellcheck="false" placeholder="/mnt/signage-backups" style="width:100%; box-sizing:border-box; margin-bottom:0.65rem; font-family:monospace;">
-                                <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
-                                    <button id="btn-save-software-backup-share" class="btn btn-secondary" type="button">Save &amp; Test Shared Folder</button>
+                                <details id="software-backup-destinations" class="sys-collapsible" style="margin-top:0.75rem;">
+                                    <summary>
+                                        <span class="sys-collapsible-icon">🗄️</span>
+                                        <span class="sys-collapsible-title">Backup destinations</span>
+                                        <span class="sys-collapsible-hint">Choose local, remote, or both</span>
+                                    </summary>
+                                    <div class="sys-collapsible-body" style="padding:0.85rem 0;">
+                                        <label for="backup-software-destination" style="display:block; font-size:0.8rem; margin-bottom:0.35rem;">Store backup files on</label>
+                                        <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
+                                            <select id="backup-software-destination" style="min-width:16rem;">
+                                                <option value="local">Server software device only</option>
+                                                <option value="remote">Remote file share only</option>
+                                                <option value="both">Both server device and remote share</option>
+                                            </select>
+                                            <button id="btn-save-software-backup-destination" class="btn btn-secondary" type="button">Save Destination</button>
+                                        </div>
+                                        <div style="font-size:0.78rem; color:var(--text-dim,#888); margin-top:0.6rem;">
+                                            Local backups are kept in the server data area under <code>software-backups</code>; they never replace the running installation.
+                                        </div>
+                                    </div>
+                                </details>
+                                <details id="software-backup-remote-share" class="sys-collapsible" style="margin-top:0.75rem;">
+                                    <summary>
+                                        <span class="sys-collapsible-icon">🔗</span>
+                                        <span class="sys-collapsible-title">Add remote share</span>
+                                        <span class="sys-collapsible-hint">Configure the server-side mounted folder</span>
+                                    </summary>
+                                    <div class="sys-collapsible-body" style="padding:0.85rem 0;">
+                                        <div style="font-size:0.78rem; color:var(--text-dim,#888); margin-bottom:0.65rem;">
+                                            Add the share here once. The server creates and owns the protected mount. The username and password are sent only during setup, then saved in a root-only server credential file; they are never returned to this dashboard, stored in backup settings, or shown again.
+                                        </div>
+                                        <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(13rem,1fr)); gap:0.65rem;">
+                                            <label style="font-size:0.8rem;">Share type
+                                                <select id="backup-software-share-kind" style="width:100%; box-sizing:border-box; margin-top:0.3rem;">
+                                                    <option value="smb">SMB / Windows share</option>
+                                                    <option value="nfs">NFS export</option>
+                                                </select>
+                                            </label>
+                                            <label style="font-size:0.8rem;">Server name or IP
+                                                <input id="backup-software-share-server" type="text" maxlength="255" autocomplete="off" spellcheck="false" placeholder="fileserver" style="width:100%; box-sizing:border-box; margin-top:0.3rem;">
+                                            </label>
+                                            <label style="font-size:0.8rem;">SMB share or NFS export
+                                                <input id="backup-software-share-remote-path" type="text" maxlength="1024" autocomplete="off" spellcheck="false" placeholder="backups or /exports/backups" style="width:100%; box-sizing:border-box; margin-top:0.3rem; font-family:monospace;">
+                                            </label>
+                                            <label style="font-size:0.8rem;">Label (optional)
+                                                <input id="backup-software-share-label" type="text" maxlength="128" autocomplete="off" placeholder="Backup share" style="width:100%; box-sizing:border-box; margin-top:0.3rem;">
+                                            </label>
+                                            <label id="backup-software-share-username-wrap" style="font-size:0.8rem;">SMB username
+                                                <input id="backup-software-share-username" type="text" maxlength="256" autocomplete="username" spellcheck="false" style="width:100%; box-sizing:border-box; margin-top:0.3rem;">
+                                            </label>
+                                            <label id="backup-software-share-password-wrap" style="font-size:0.8rem;">SMB password
+                                                <input id="backup-software-share-password" type="password" maxlength="4096" autocomplete="new-password" style="width:100%; box-sizing:border-box; margin-top:0.3rem;">
+                                            </label>
+                                            <label id="backup-software-share-domain-wrap" style="font-size:0.8rem;">Domain (optional)
+                                                <input id="backup-software-share-domain" type="text" maxlength="256" autocomplete="off" spellcheck="false" style="width:100%; box-sizing:border-box; margin-top:0.3rem;">
+                                            </label>
+                                        </div>
+                                        <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center; margin-top:0.75rem;">
+                                            <button id="btn-save-software-backup-share" class="btn btn-secondary" type="button">Add &amp; Mount Share</button>
+                                            <button id="btn-clear-software-backup-share" class="btn btn-danger" type="button" disabled>Remove Server Share</button>
+                                        </div>
+                                        <div style="font-size:0.75rem; color:var(--text-dim,#888); margin-top:0.6rem;">Removing the saved share stops and removes the server mount and protected credential file. It does not delete backup files already stored on the share.</div>
+                                    </div>
+                                </details>
+                                <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center; margin-top:0.85rem;">
                                     <button id="btn-create-software-backup" class="btn btn-primary" type="button" disabled>Create Server Software Backup</button>
-                                    <button id="btn-clear-software-backup-share" class="btn btn-danger" type="button" disabled>Remove Saved Folder</button>
                                     <span id="software-backup-status" role="status" aria-live="polite" style="font-size:0.8rem; color:var(--text-dim,#888);"></span>
                                 </div>
-                                <div id="software-backup-details" style="margin-top:0.65rem; font-size:0.78rem; color:var(--text-dim,#888); white-space:pre-wrap;">Loading shared folder status...</div>
+                                <div id="software-backup-details" style="margin-top:0.65rem; font-size:0.78rem; color:var(--text-dim,#888); white-space:pre-wrap;">Loading backup destination status...</div>
                             </div>
                         </div>
                     </div>
@@ -1084,14 +1143,22 @@
                         <div class="sys-card" style="padding:1rem 1.25rem; margin-bottom:1rem;">
                             <h3 style="margin:0 0 0.75rem 0; font-size:1rem;">🐙 GitHub Release Updates</h3>
                             <div class="sys-card" id="github-update-card" style="padding:0.85rem 1rem; background:rgba(255,255,255,0.025); border:1px solid rgba(148,163,184,0.2);">
-                                <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.75rem;">Check the official stable GitHub release, verify its signed bundle, and apply it with the existing rollback-protected updater.</div>
+                                <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.75rem;">Choose stable or RC/pre-release GitHub builds. Every channel uses the official signed bundle and keeps the previous installed version for rollback.</div>
                                 <div id="github-update-details" style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.7rem; white-space:pre-wrap;">Loading GitHub release status...</div>
                                 <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
                                     <button class="btn btn-secondary" id="btn-github-update-check" type="button">↻ Check for Updates</button>
                                     <button class="btn btn-primary" id="btn-github-update-apply" type="button" disabled>⬆ Update Server</button>
+                                    <button class="btn btn-secondary" id="btn-github-update-rollback" type="button" disabled>↩ Revert to Previous Version</button>
+                                    <label style="font-size:0.8rem; color:var(--text-dim,#cbd5e1); display:inline-flex; align-items:center; gap:0.35rem;">
+                                        <span>Release channel</span>
+                                        <select id="github-release-channel" class="select" style="min-width:9rem;">
+                                            <option value="stable">Stable</option>
+                                            <option value="rc">RC / Pre-release</option>
+                                        </select>
+                                    </label>
                                     <label style="font-size:0.8rem; color:var(--text-dim,#cbd5e1); display:inline-flex; align-items:center; gap:0.35rem; cursor:pointer;">
                                         <input type="checkbox" id="github-auto-update">
-                                        <span>Automatically check and apply stable updates</span>
+                                        <span>Automatically check and apply selected-channel updates</span>
                                     </label>
                                     <span id="github-update-status" style="font-size:0.8rem; color:var(--text-dim,#888);"></span>
                                 </div>
@@ -1124,11 +1191,11 @@
 
     <script defer src="/js/auth.js?v=20261003004000"></script>
     <script defer src="/js/traffic-runtime.js?v=20261011140500-manual-traffic-closure-classification"></script>
-    <script defer src="/js/api.js?v=20261027192535-camera-server-relay"></script>
+    <script defer src="/js/api.js?v=20261104150000-github-rc-rollback"></script>
     <script src="/js/filebrowser.js?v=1789404930"></script>
     
     <script src="/js/weather-icons.js?v=1791477110-alert-condition-icons"></script>
-    <script src="/js/editor.js?v=20261030-video-wait-after"></script>
+    <script src="/js/editor.js?v=20261104213000-calendar-editor-count"></script>
     <script src="/js/widget-schemas.js?v=1789404930"></script>
     <script src="/js/widget-template-editor.js?v=1789404930"></script>
     <!-- Layout Picker Modal for Layout Sets -->
@@ -1147,7 +1214,7 @@
         </div>
     </div>
 
-<script defer src="/js/app.js?v=20261104153051-dashboard-cleanup"></script>
+<script defer src="/js/app.js?v=20261104150000-github-rc-rollback"></script>
 
 <script src="/js/ripley-link-guard.js?v=1789404930"></script>
 </body>

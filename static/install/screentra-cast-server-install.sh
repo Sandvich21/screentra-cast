@@ -113,6 +113,20 @@ provision_postgresql() {
     log "PostgreSQL is ready: local peer-authenticated database '$POSTGRES_DB'."
 }
 
+ensure_share_tools() {
+    if command -v mount.cifs >/dev/null 2>&1 && command -v mount.nfs >/dev/null 2>&1; then
+        log "SMB/NFS mount tools already installed."
+        return 0
+    fi
+    if ! command -v apt-get >/dev/null 2>&1; then
+        log "FATAL: dashboard-managed SMB/NFS shares require apt-get with cifs-utils and nfs-common."
+        exit 1
+    fi
+    log "Installing SMB/NFS mount tools..."
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cifs-utils nfs-common
+}
+
 ensure_ffmpeg() {
     if command -v ffmpeg >/dev/null 2>&1; then
         log "FFmpeg already installed: $(command -v ffmpeg)"
@@ -211,6 +225,7 @@ else
 fi
 
 ensure_ffmpeg
+ensure_share_tools
 
 if [ ! -f "$ENV_FILE" ]; then
     FRESH_INSTALL="true"
@@ -271,6 +286,18 @@ rm -rf "$STAGING_DIR"
 chown -R "$BOARD_USER:$BOARD_USER" "$BOARD_INSTALL_DIR/static/"
 [ -d "$BOARD_INSTALL_DIR/static/js" ] || { log "FATAL: static extraction did not produce js/."; exit 1; }
 log "Static files extracted OK."
+
+# Install the root-only share helper separately from the board service user.
+SHARE_HELPER_SOURCE="$BOARD_INSTALL_DIR/static/install/screentra-share-helper.py"
+if [ ! -f "$SHARE_HELPER_SOURCE" ]; then
+    log "FATAL: static release is missing the dashboard SMB/NFS helper."
+    exit 1
+fi
+install -o root -g root -m 0755 "$SHARE_HELPER_SOURCE" /usr/local/libexec/screentra-cast-share-helper
+printf '%s\n' 'board ALL=(root) NOPASSWD: /usr/local/libexec/screentra-cast-share-helper' > /etc/sudoers.d/screentra-cast-share-helper
+chmod 0440 /etc/sudoers.d/screentra-cast-share-helper
+visudo -cf /etc/sudoers.d/screentra-cast-share-helper >/dev/null
+log "Dashboard SMB/NFS helper installed with a narrowly scoped sudo rule."
 
 if [ "$FRESH_INSTALL" = "true" ]; then
     provision_local_tls

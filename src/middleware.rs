@@ -297,6 +297,7 @@ fn required_capability(path: &str, method: &str) -> &'static str {
         return "view_audit";
     }
     if path == "/api/version/update/apply"
+        || path == "/api/version/update/rollback"
         || path == "/api/version/update/github/settings"
     {
         return "server_update";
@@ -459,6 +460,7 @@ fn required_step_up_scope(path: &str, method: &str) -> Option<String> {
         return Some("addon-execution-approval".to_string());
     }
     if path == "/api/version/update/apply"
+        || path == "/api/version/update/rollback"
         || path == "/api/version/update/github/settings" {
         return Some("server-update".to_string());
     }

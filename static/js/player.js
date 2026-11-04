@@ -411,9 +411,7 @@ function ripleyTplSample(el, widgetProps) {
         return {text: eventDateText, empty: eventDateText === ''};
       }
     }
-    if (key === 'calendar_event_time') return {text:'Day ' + n + ' 9:00 AM', empty: true};
-    if (key === 'calendar_event_location') return {text:'Day ' + n + ' location', empty: true};
-    return {text:'Day ' + n + ' event', empty: true};
+    return {text:'Calendar unavailable', empty: true};
   }
   if (source === 'traffic') {
     var trafficEvents = Array.isArray(widgetProps && widgetProps._traffic_data && widgetProps._traffic_data.events) ? widgetProps._traffic_data.events : [];
@@ -781,30 +779,51 @@ function ripleyApplyCalendarOverrides(events, overrides, timeFormat) {
     return Object.assign({}, event, {date: date, time: time, sort_time: match ? Number(match[1]) * 60 + Number(match[2]) : event.sort_time, override_applied: true});
   });
 }
+function ripleyCalendarTimeZone(raw) {
+  var match = String(raw || '').match(/(?:^|\n)X-WR-TIMEZONE:([^\n]+)/i);
+  var candidate = match && match[1] ? match[1].trim() : '';
+  if (!candidate) candidate = (Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+  try { new Intl.DateTimeFormat('en-US', {timeZone: candidate}).format(); return candidate; } catch (_) { return 'UTC'; }
+}
+function ripleyCalendarParts(value, property, timeZone) {
+  var text = String(value || '').replace(/\r$/, ''), dateOnly = text.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (dateOnly) return {date: dateOnly[1] + '-' + dateOnly[2] + '-' + dateOnly[3], time: 'All day', sortTime: 0};
+  var local = text.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/);
+  if (!local) return null;
+  var date = local[1] + '-' + local[2] + '-' + local[3], hh = Number(local[4]), mm = local[5], displayDate = date, displayHour = hh, displayMinute = mm;
+  if (/Z$/i.test(text)) {
+    var instant = new Date(Date.UTC(Number(local[1]), Number(local[2]) - 1, Number(local[3]), hh, Number(mm), 0));
+    var parts = new Intl.DateTimeFormat('en-US', {timeZone: timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'}).formatToParts(instant).reduce(function(out, part) { out[part.type] = part.value; return out; }, {});
+    displayDate = parts.year + '-' + parts.month + '-' + parts.day; displayHour = Number(parts.hour); displayMinute = parts.minute;
+  }
+  var minuteNumber = Number(displayMinute), time = String(displayHour).padStart(2, '0') + ':' + String(displayMinute).padStart(2, '0');
+  if (property && /TZID=/i.test(property)) {
+    // DTSTART;TZID=... is already a wall-clock value in that calendar zone.
+    // Google Calendar exports this form for events whose local time was edited.
+    time = String(displayHour).padStart(2, '0') + ':' + String(displayMinute).padStart(2, '0');
+  }
+  return {date: displayDate, time: time, hour: displayHour, minute: minuteNumber, sortTime: displayHour * 60 + minuteNumber};
+}
+function ripleyCalendarTodayKey(timeZone) {
+  var parts = new Intl.DateTimeFormat('en-US', {timeZone: timeZone, year: 'numeric', month: '2-digit', day: '2-digit'}).formatToParts(new Date()).reduce(function(out, part) { out[part.type] = part.value; return out; }, {});
+  return parts.year + '-' + parts.month + '-' + parts.day;
+}
 function ripleyParseCalendarText(raw, maxEvents, timeFormat, overrides) {
-  var unfolded = String(raw || '').replace(/\r?\n[ \t]/g, ''), out = [];
+  var unfolded = String(raw || '').replace(/\r?\n[ \t]/g, ''), out = [], timeZone = ripleyCalendarTimeZone(unfolded);
   var blocks = unfolded.match(/BEGIN:VEVENT[\s\S]*?END:VEVENT/g) || [];
   blocks.forEach(function(block) {
-    var start = (block.match(/(?:^|\n)DTSTART(?:;[^:]+)?:([^\n]+)/) || [])[1];
+    var startMatch = block.match(/(?:^|\n)(DTSTART(?:;[^:]+)?):([^\n]+)/), start = startMatch && startMatch[2];
     if (start) start = start.replace(/\r$/, '');
     var uid = (block.match(/(?:^|\n)UID:(.*)/) || [,''])[1].trim();
     var summary = (block.match(/(?:^|\n)SUMMARY:(.*)/) || [,''])[1].trim();
     var location = (block.match(/(?:^|\n)LOCATION:(.*)/) || [,''])[1].trim();
     if (!start || !summary) return;
-    var date = start.match(/^(\d{4})(\d{2})(\d{2})/);
-    var time = '';
-    if (date) {
-      var hh = (start.match(/T(\d{2})(\d{2})/) || [])[1], mm = (start.match(/T\d{2}(\d{2})/) || [])[1];
-      var hhNum = hh == null ? null : Number(hh), minuteText = mm || '00';
-      var sortTime = hhNum == null ? 0 : hhNum * 60 + Number(minuteText);
-      if (hhNum == null) time = 'All day';
-      else if (timeFormat === '24') time = String(hhNum).padStart(2, '0') + ':' + minuteText;
-      else { var ap = hhNum >= 12 ? 'PM' : 'AM'; time = (hhNum % 12 || 12) + ':' + minuteText + ' ' + ap; }
-      out.push({uid: uid, source_start: start, source_date: date[1] + '-' + date[2] + '-' + date[3], summary: summary, location: location, time: time, date: date[1] + '-' + date[2] + '-' + date[3], sort_time: sortTime});
-    }
+    var parsed = ripleyCalendarParts(start, startMatch && startMatch[1], timeZone);
+    if (!parsed) return;
+    out.push({uid: uid, source_start: start, source_date: parsed.date, summary: summary, location: location, time: timeFormat === '24' || parsed.time === 'All day' ? parsed.time : (parsed.hour % 12 || 12) + ':' + String(parsed.minute).padStart(2, '0') + ' ' + (parsed.hour >= 12 ? 'PM' : 'AM'), date: parsed.date, sort_time: parsed.sortTime});
   });
   out = ripleyApplyCalendarOverrides(out, overrides, timeFormat);
-  var todayKey = new Date().toISOString().slice(0, 10);
+  var todayKey = ripleyCalendarTodayKey(timeZone);
   return out.filter(function(event){ return event.date >= todayKey; }).sort(function(a,b){return a.date.localeCompare(b.date) || (Number(a.sort_time) || 0) - (Number(b.sort_time) || 0) || a.summary.localeCompare(b.summary);}).slice(0, Math.max(1, Math.min(30, Number(maxEvents) || 7)));
 }
 async function ripleyLoadCalendarData(widgetProps, layoutId, widgetId) {
