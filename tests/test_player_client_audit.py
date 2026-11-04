@@ -158,6 +158,13 @@ class PlayerClientAuditTests(unittest.TestCase):
             self.assertNotIn('11.1.1.54:3910', source)
             self.assertIn("new URL(window.location.href)", source)
 
+    def test_installer_retires_local_admin_service(self):
+        source = (ROOT / 'player-client/install/player-client.sh').read_text()
+        self.assertIn('disable --now screentra-client-admin.service', source)
+        self.assertNotIn('enable --now screentra-client-admin.service', source)
+        self.assertNotIn('SYSTEM_ADMIN_UNIT=', source)
+        self.assertNotIn('Admin: http://', source)
+
     def test_local_admin_mutations_require_same_origin_when_origin_is_sent(self):
         same = {'Host': '127.0.0.1:3910', 'Origin': 'http://127.0.0.1:3910'}
         cross = {'Host': '127.0.0.1:3910', 'Origin': 'http://evil.example'}

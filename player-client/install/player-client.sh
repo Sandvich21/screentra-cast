@@ -24,7 +24,6 @@ ACTOR_SERVICE_FILE="$SYSTEMD_USER_DIR/screentra-client-actor.service"
 ACTOR_SERVICE_NAME="screentra-client-actor.service"
 SERVICE="$SYSTEMD_USER_DIR/screentra-client-heartbeat.service"
 RENDER_SERVICE="$SYSTEMD_USER_DIR/screentra-client-renderer@.service"
-ADMIN_SERVICE="$SYSTEMD_USER_DIR/screentra-client-admin.service"
 KIOSK_SERVICE="$SYSTEMD_USER_DIR/screentra-kiosk-browser@.service"
 SYSTEMD_KIOSK_UNIT="/etc/systemd/system/screentra-cast-kiosk@.service"
 INSTALLER_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -7032,27 +7031,6 @@ EOF
 # at runtime by editing this Environment= line and reloading the renderer.
 sed -i "s|__RIPLEY_CURSOR_HIDE_SECS__|3.5|g" "$RENDER_SERVICE" 2>/dev/null || true
 
-cat > "$ADMIN_SERVICE" <<EOF
-[Unit]
-Description=Screentra Cast Player Local Admin Dashboard
-After=network-online.target screentra-client-heartbeat.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=$RENDERER --host 127.0.0.1 --port 3910 --cache-dir $INSTALL_DIR/cache
-Environment=RIPLEY_ADMIN_MODE=1
-Environment=RIPLEY_DISPLAY_INDEX=0
-Environment=RIPLEY_RENDER_BASE_PORT=3900
-Environment=RIPLEY_CURSOR_HIDE_SECS=3.5
-Restart=always
-RestartSec=5
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=default.target
-EOF
-
 cat > "$KIOSK_SERVICE" <<EOF
 [Unit]
 Description=Screentra Cast Fullscreen Kiosk Browser (display %i)
@@ -7159,36 +7137,11 @@ RestartSec=2
 WantedBy=multi-user.target
 EOF_SYSTEM_ACTOR
 
-SYSTEM_ADMIN_UNIT="/etc/systemd/system/screentra-client-admin.service"
-run_privileged tee "$SYSTEM_ADMIN_UNIT" >/dev/null <<EOF_SYSTEM_ADMIN
-[Unit]
-Description=Screentra Cast Player Local Admin Dashboard
-After=network-online.target screentra-client-heartbeat.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=$BOARD_USER
-Group=$BOARD_USER
-WorkingDirectory=$INSTALL_DIR
-Environment=HOME=$BOARD_HOME
-Environment=RIPLEY_CLIENT_DIR=$INSTALL_DIR
-Environment=RIPLEY_SERVER_URL=$SERVER_URL
-Environment=RIPLEY_CLIENT_ID=$CLIENT_ID
-Environment=RIPLEY_RENDER_BASE_PORT=3900
-Environment=RIPLEY_ADMIN_MODE=1
-Environment=RIPLEY_DISPLAY_INDEX=0
-Environment=PYTHONUNBUFFERED=1
-ExecStart=$RENDERER --host 127.0.0.1 --port 3910 --cache-dir $INSTALL_DIR/cache
-Restart=always
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF_SYSTEM_ADMIN
+# Remove the retired local admin dashboard from upgrades as well as fresh installs.
+run_privileged systemctl disable --now screentra-client-admin.service >/dev/null 2>&1 || true
+run_privileged rm -f /etc/systemd/system/screentra-client-admin.service
 run_privileged systemctl daemon-reload
 run_privileged systemctl enable --now screentra-client-actor.service
-run_privileged systemctl enable --now screentra-client-admin.service
 
 # Final ownership pass: generated helpers and service metadata must be
 # readable by the appliance runtime user.
@@ -7242,8 +7195,6 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl --user daemon-reload || true
   systemctl --user enable screentra-client-heartbeat.service || true
   systemctl --user enable screentra-client-actor.service || true
-  systemctl --user enable screentra-client-admin.service || true
-  systemctl --user restart screentra-client-admin.service || true
   # Start renderer/browser services for the governed active count. The
   # display-governance config defaults to the detected enabled connectors, but
   # the local/server admin pages can cap it. Display 0 is served by the system
@@ -7298,10 +7249,9 @@ echo "Client ID: $CLIENT_ID"
 echo "Service: screentra-client-heartbeat.service"
 
 echo "Renderer: http://127.0.0.1:3900/"
-echo "Admin: http://$(hostname -I 2>/dev/null | awk '{print $1}'):3910/"
 echo "Kiosk browser service: screentra-kiosk-browser@0.service"
 echo "Preferred display service: screentra-cast-kiosk@.service"
-echo "Helpers: screentra-client-preflight, screentra-client-status, screentra-client-heartbeat, screentra-client-renderer, screentra-client-admin, screentra-client-actor, screentra-kiosk-launcher"
+echo "Helpers: screentra-client-preflight, screentra-client-status, screentra-client-heartbeat, screentra-client-renderer, screentra-client-actor, screentra-kiosk-launcher"
 
 # ----------------------------------------------------------------------
 # Final verification: run a small probe script that confirms the

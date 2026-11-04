@@ -52,6 +52,11 @@ class PlayerRendererFileTests(unittest.TestCase):
             path.write_text('{"safe":1,"safe":2}', encoding='utf-8')
             self.assertEqual(renderer._read_json_file(path, {'fallback': True}), {'fallback': True})
 
+    def test_local_admin_routes_are_disabled(self):
+        source = renderer.PLAYER_HTML
+        self.assertFalse(renderer.LOCAL_ADMIN_ENABLED)
+        self.assertIn("path.startswith('/api/admin')", Path(MODULE_PATH).read_text())
+
     def test_cached_calendar_uses_published_layout_widget_proxy(self):
         source = renderer.PLAYER_HTML
         self.assertIn("function loadCalendar(p,layoutId,widgetId)", source)

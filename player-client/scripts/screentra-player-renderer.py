@@ -1328,8 +1328,9 @@ ENABLE_LIVE_PLAYER_REDIRECT = os.environ.get('SCREENTRA_LIVE_PLAYER_REDIRECT', '
 # Keep the no-layout diagnostic page available at /no-layout.html for later
 # re-enablement, but do not replace a working display with it during the
 # temporary stale-assignment policy.
-# Intentionally disabled during the cached-layout stabilization period. Restore the
-# previous environment-controlled switch here when explicit no-layout UX is wanted.
+# The client-local admin webpage is retired. Keep the implementation in this
+# source for rollback, but do not expose its routes from any renderer port.
+LOCAL_ADMIN_ENABLED = False
 SHOW_NO_LAYOUT_SCREEN = False
 
 
@@ -1874,6 +1875,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = unquote(self.path.split('?', 1)[0])
+        if not LOCAL_ADMIN_ENABLED and (path == '/login' or path == '/login.html' or path.startswith('/api/admin')):
+            return self.send_text(404, 'not found')
         if not _csrf_allows_mutation(self.headers):
             return self.send_text(403, json.dumps({'error': 'cross-origin mutation blocked'}), 'application/json')
         try:
@@ -2035,6 +2038,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
     def do_GET(self):
         path = unquote(self.path.split('?',1)[0])
+        if not LOCAL_ADMIN_ENABLED and (path == '/login' or path == '/login.html' or path == '/admin.html' or path.startswith('/api/admin')):
+            return self.send_text(404, 'not found')
         if path == '/camera-stream.mjpeg':
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query, keep_blank_values=False)
             widget_ids = query.get('widget_id', [])
