@@ -60,11 +60,8 @@ function _stepUpScopeForRequest(input, init) {
     const method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
     const url = typeof input === 'string' ? input : (input && input.url) || '';
     const path = new URL(url, window.location.href).pathname;
-    if (path === '/api/version/update/export' || path === '/api/version/update/import' || path === '/api/version/update/apply' || path === '/api/version/update/github/settings') return 'server-update';
+    if (path === '/api/version/update/apply' || path === '/api/version/update/github/settings') return 'server-update';
     if (path.startsWith('/api/addons/execution/approvals') && method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') return 'addon-execution-approval';
-    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
-
-    }
     return null;
 }
 
