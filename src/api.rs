@@ -1584,6 +1584,17 @@ pub fn router(runtime_state: RuntimeState) -> Router {
             post(backup_api::create_backup),
         )
         .route(
+            "/api/backups/software",
+            get(backup_api::get_software_backup_settings)
+                .post(backup_api::create_software_backup),
+        )
+        .route(
+            "/api/backups/software/share",
+            post(backup_api::save_software_backup_share)
+                .delete(backup_api::clear_software_backup_share)
+                .layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
             "/api/backups/{id}",
             delete(backup_api::delete_backup),
         )

@@ -745,6 +745,34 @@ window.API = {
         if (!res.ok) throw new Error('Failed to delete backup');
     },
 
+    async getSoftwareBackupSettings() {
+        const res = await fetch('/api/backups/software');
+        if (!res.ok) throw new Error('Failed to fetch software backup settings');
+        return _readApiJsonBounded(res);
+    },
+
+    async saveSoftwareBackupShare(sharePath) {
+        const res = await fetch('/api/backups/software/share', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ share_path: sharePath }),
+        });
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to save shared backup folder');
+        return _readApiJsonBounded(res);
+    },
+
+    async clearSoftwareBackupShare() {
+        const res = await fetch('/api/backups/software/share', { method: 'DELETE' });
+        if (!res.ok) throw new Error('Failed to remove shared backup folder');
+        return _readApiJsonBounded(res);
+    },
+
+    async createSoftwareBackup() {
+        const res = await fetch('/api/backups/software', { method: 'POST' });
+        if (!res.ok) throw new Error(await readApiError(res) || 'Failed to create server software backup');
+        return _readApiJsonBounded(res);
+    },
+
     // ── Schedules ──
     async listSchedules() {
         const res = await fetch('/api/schedules');

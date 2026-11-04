@@ -3,13 +3,13 @@ use crate::models::Backup;
 use crate::safe_archive;
 use crate::version::configured_service;
 use axum::{
-    extract::{FromRef, Multipart, Path, Query, State},
+    extract::{FromRef, Json, Multipart, Path, Query, State},
     http::{Response, StatusCode},
     response::Json as AxumJson,
 };
 use chrono::Utc;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path as StdPath, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -395,6 +395,245 @@ pub async fn create_backup(
     }
 
     Ok(AxumJson(backup))
+}
+
+const SOFTWARE_BACKUP_SETTINGS_FILE: &str = "server-software-backup-settings.json";
+const MAX_SOFTWARE_BACKUP_BYTES: u64 = 1 << 30;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct SoftwareBackupRecord {
+    filename: String,
+    bytes: u64,
+    sha256: String,
+    version: String,
+    git_commit: String,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct SoftwareBackupSettings {
+    share_path: Option<String>,
+    last_backup: Option<SoftwareBackupRecord>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SoftwareBackupShareRequest {
+    pub share_path: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct SoftwareBackupSettingsResponse {
+    pub configured: bool,
+    pub share_path: Option<String>,
+    pub available: bool,
+    pub writable: bool,
+    pub last_backup: Option<SoftwareBackupRecord>,
+}
+
+fn software_backup_settings_path() -> PathBuf {
+    PathBuf::from(signage_data_dir()).join(SOFTWARE_BACKUP_SETTINGS_FILE)
+}
+
+fn load_software_backup_settings() -> Result<SoftwareBackupSettings, String> {
+    let path = software_backup_settings_path();
+    match fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|error| format!("parse software backup settings: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(error) => Err(format!("read software backup settings: {error}")),
+    }
+}
+
+fn save_software_backup_settings(settings: &SoftwareBackupSettings) -> Result<(), String> {
+    let path = software_backup_settings_path();
+    let parent = path
+        .parent()
+        .ok_or_else(|| "software backup settings has no parent".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| format!("create backup settings directory: {error}"))?;
+    let temporary = parent.join(format!(".{}.tmp-{}", SOFTWARE_BACKUP_SETTINGS_FILE, Uuid::new_v4()));
+    let bytes = serde_json::to_vec_pretty(settings)
+        .map_err(|error| format!("serialize software backup settings: {error}"))?;
+    fs::write(&temporary, bytes).map_err(|error| format!("write software backup settings: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&temporary)
+            .map_err(|error| format!("inspect software backup settings: {error}"))?
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&temporary, permissions)
+            .map_err(|error| format!("restrict software backup settings: {error}"))?;
+    }
+    if let Err(error) = fs::rename(&temporary, &path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("replace software backup settings: {error}"));
+    }
+    Ok(())
+}
+
+fn validate_software_backup_share(raw: &str, test_write: bool) -> Result<PathBuf, String> {
+    let value = raw.trim();
+    if value.is_empty() || value.len() > 4096 || value.contains('\0') {
+        return Err("Shared backup folder path is invalid".to_string());
+    }
+    let path = PathBuf::from(value);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err("Shared backup folder must be an absolute path without '..'".to_string());
+    }
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| format!("Shared backup folder is unavailable: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Shared backup folder must be an existing directory, not a symlink".to_string());
+    }
+    if test_write {
+        let probe = path.join(format!(".screentra-cast-backup-write-test-{}", Uuid::new_v4()));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .map_err(|error| format!("Shared backup folder is not writable: {error}"))?;
+        file.write_all(b"screentra-cast backup write test")
+            .map_err(|error| format!("Shared backup folder write test failed: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("Shared backup folder sync test failed: {error}"))?;
+        drop(file);
+        fs::remove_file(&probe)
+            .map_err(|error| format!("Shared backup folder cleanup failed: {error}"))?;
+    }
+    Ok(path)
+}
+
+fn software_backup_settings_response(
+    settings: SoftwareBackupSettings,
+) -> SoftwareBackupSettingsResponse {
+    let (available, writable) = match settings.share_path.as_deref() {
+        Some(path) => match validate_software_backup_share(path, true) {
+            Ok(_) => (true, true),
+            Err(_) => {
+                let available = fs::symlink_metadata(path)
+                    .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+                    .unwrap_or(false);
+                (available, false)
+            }
+        },
+        None => (false, false),
+    };
+    SoftwareBackupSettingsResponse {
+        configured: settings.share_path.is_some(),
+        share_path: settings.share_path,
+        available,
+        writable,
+        last_backup: settings.last_backup,
+    }
+}
+
+pub async fn get_software_backup_settings(
+) -> Result<AxumJson<SoftwareBackupSettingsResponse>, (StatusCode, String)> {
+    let settings = load_software_backup_settings()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+    Ok(AxumJson(software_backup_settings_response(settings)))
+}
+
+pub async fn save_software_backup_share(
+    Json(request): Json<SoftwareBackupShareRequest>,
+) -> Result<AxumJson<SoftwareBackupSettingsResponse>, (StatusCode, String)> {
+    let path = validate_software_backup_share(&request.share_path, true)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let mut settings = load_software_backup_settings()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+    settings.share_path = Some(path.to_string_lossy().to_string());
+    save_software_backup_settings(&settings)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+    Ok(AxumJson(software_backup_settings_response(settings)))
+}
+
+pub async fn clear_software_backup_share(
+) -> Result<AxumJson<SoftwareBackupSettingsResponse>, (StatusCode, String)> {
+    let mut settings = load_software_backup_settings()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+    settings.share_path = None;
+    save_software_backup_settings(&settings)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+    Ok(AxumJson(software_backup_settings_response(settings)))
+}
+
+pub async fn create_software_backup(
+) -> Result<AxumJson<SoftwareBackupSettingsResponse>, (StatusCode, String)> {
+    let mut settings = load_software_backup_settings()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()))?;
+    let configured_path = settings.share_path.clone().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Configure a shared backup folder first".to_string(),
+    ))?;
+    let share = validate_software_backup_share(&configured_path, true)
+        .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+    let temporary = share.join(format!(
+        ".screentra-server-software-backup-{}.tar.gz",
+        Uuid::new_v4()
+    ));
+    let manifest = match crate::version::export_update_bundle(&temporary) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            log::error!("server software backup export failed: {error}");
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Server software backup failed".to_string(),
+            ));
+        }
+    };
+    let size = fs::metadata(&temporary)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Server software backup failed".to_string()))?
+        .len();
+    if size == 0 || size > MAX_SOFTWARE_BACKUP_BYTES {
+        let _ = fs::remove_file(&temporary);
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Server software backup is outside the permitted size limit".to_string(),
+        ));
+    }
+    let now = Utc::now();
+    let filename = format!(
+        "screentra-server-software-backup-{}.tar.gz",
+        now.format("%Y%m%dT%H%M%SZ")
+    );
+    let final_path = share.join(&filename);
+    if final_path.exists() {
+        let _ = fs::remove_file(&temporary);
+        return Err((
+            StatusCode::CONFLICT,
+            "A server software backup with that timestamp already exists".to_string(),
+        ));
+    }
+    fs::rename(&temporary, &final_path).map_err(|_| {
+        let _ = fs::remove_file(&temporary);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Server software backup could not be finalized".to_string(),
+        )
+    })?;
+    let sha256 = crate::version::sha256_of_file(&final_path).map_err(|_| {
+        let _ = fs::remove_file(&final_path);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Server software backup could not be verified".to_string(),
+        )
+    })?;
+    settings.last_backup = Some(SoftwareBackupRecord {
+        filename,
+        bytes: size,
+        sha256,
+        version: manifest.version,
+        git_commit: manifest.git_commit,
+        created_at: now.to_rfc3339(),
+    });
+    save_software_backup_settings(&settings)
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Server software backup metadata could not be saved".to_string()))?;
+    Ok(AxumJson(software_backup_settings_response(settings)))
 }
 
 fn restrict_backup_file(path: &StdPath) -> Result<(), String> {
@@ -1269,6 +1508,46 @@ mod tests {
         header.set_mode(0o644);
         header.set_cksum();
         builder.append_data(&mut header, path, data).unwrap();
+    }
+
+    #[test]
+    fn software_backup_share_validation_requires_existing_writable_absolute_directory() {
+        let root = test_root("software-share");
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(validate_software_backup_share("relative/share", false).is_err());
+        assert!(validate_software_backup_share(
+            &root.join("..").join(root.file_name().unwrap()).to_string_lossy(),
+            false,
+        ).is_err());
+        assert!(validate_software_backup_share(&root.to_string_lossy(), true).is_ok());
+        assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn software_backup_settings_round_trip_is_private_json() {
+        let _guard = crate::PROCESS_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        let root = test_root("software-settings");
+        std::fs::create_dir_all(&root).unwrap();
+        let old_data_dir = std::env::var_os("SIGNAGE_DATA_DIR");
+        unsafe { std::env::set_var("SIGNAGE_DATA_DIR", &root); }
+        let settings = SoftwareBackupSettings {
+            share_path: Some("/mnt/signage-backups".to_string()),
+            last_backup: None,
+        };
+        save_software_backup_settings(&settings).unwrap();
+        assert_eq!(load_software_backup_settings().unwrap().share_path, settings.share_path);
+        #[cfg(unix)]
+        assert_eq!(std::fs::metadata(software_backup_settings_path()).unwrap().permissions().mode() & 0o777, 0o600);
+        if let Some(value) = old_data_dir {
+            unsafe { std::env::set_var("SIGNAGE_DATA_DIR", value); }
+        } else {
+            unsafe { std::env::remove_var("SIGNAGE_DATA_DIR"); }
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

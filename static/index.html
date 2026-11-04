@@ -972,6 +972,23 @@
                             <div id="backups-list" class="backups-list">
                                 <p>Loading backups...</p>
                             </div>
+                            <div class="sys-card" style="margin-top:1rem; padding:1rem 1.25rem;">
+                                <h3 style="margin:0 0 0.5rem 0; font-size:1rem;">Server Software Backup</h3>
+                                <div style="font-size:0.8rem; color:var(--text-dim,#888); margin-bottom:0.8rem;">
+                                    Save a signed backup of the running server binary and frontend to a shared folder. Runtime database,
+                                    uploads, backups, and the deployment-local CA are excluded. Mount the SMB/NFS share on the server first,
+                                    then enter its local mount path below.
+                                </div>
+                                <label for="backup-software-share-path" style="display:block; font-size:0.8rem; margin-bottom:0.35rem;">Shared folder path</label>
+                                <input id="backup-software-share-path" type="text" maxlength="4096" spellcheck="false" placeholder="/mnt/signage-backups" style="width:100%; box-sizing:border-box; margin-bottom:0.65rem; font-family:monospace;">
+                                <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
+                                    <button id="btn-save-software-backup-share" class="btn btn-secondary" type="button">Save &amp; Test Shared Folder</button>
+                                    <button id="btn-create-software-backup" class="btn btn-primary" type="button" disabled>Create Server Software Backup</button>
+                                    <button id="btn-clear-software-backup-share" class="btn btn-danger" type="button" disabled>Remove Saved Folder</button>
+                                    <span id="software-backup-status" role="status" aria-live="polite" style="font-size:0.8rem; color:var(--text-dim,#888);"></span>
+                                </div>
+                                <div id="software-backup-details" style="margin-top:0.65rem; font-size:0.78rem; color:var(--text-dim,#888); white-space:pre-wrap;">Loading shared folder status...</div>
+                            </div>
                         </div>
                     </div>
                 </details>
@@ -1130,7 +1147,7 @@
         </div>
     </div>
 
-<script defer src="/js/app.js?v=20261031-calendar-proxy-hardening"></script>
+<script defer src="/js/app.js?v=20261104150719-server-software-backup"></script>
 
 <script src="/js/ripley-link-guard.js?v=1789404930"></script>
 </body>

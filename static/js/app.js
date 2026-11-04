@@ -854,8 +854,73 @@ const App = {
             };
         }
 
-
+        this.setupSoftwareBackup();
         this.loadBackups();
+    },
+    async setupSoftwareBackup() {
+        const shareInput = document.getElementById('backup-software-share-path');
+        const saveShareBtn = document.getElementById('btn-save-software-backup-share');
+        const clearShareBtn = document.getElementById('btn-clear-software-backup-share');
+        const createBtn = document.getElementById('btn-create-software-backup');
+        const status = document.getElementById('software-backup-status');
+        const details = document.getElementById('software-backup-details');
+        if (!shareInput || !saveShareBtn || !clearShareBtn || !createBtn || !status || !details) return;
+
+        const render = (settings) => {
+            shareInput.value = settings.share_path || '';
+            clearShareBtn.disabled = !settings.configured;
+            createBtn.disabled = !settings.writable;
+            if (!settings.configured) {
+                status.textContent = 'No shared folder configured.';
+                details.textContent = 'Enter the local mount path of an SMB/NFS or other shared folder already mounted on the server.';
+                return;
+            }
+            if (!settings.writable) {
+                status.textContent = settings.available ? 'Shared folder is not writable.' : 'Shared folder is unavailable.';
+            } else {
+                status.textContent = 'Shared folder is ready.';
+            }
+            const last = settings.last_backup;
+            details.textContent = last
+                ? `Last backup: ${last.filename} · ${(last.bytes / 1024 / 1024).toFixed(2)} MB · version ${last.version || 'unknown'} · ${last.created_at}`
+                : 'No server software backup has been created yet.';
+        };
+        const load = async () => {
+            try { render(await API.getSoftwareBackupSettings()); }
+            catch (e) { status.textContent = '✕ ' + e.message; createBtn.disabled = true; }
+        };
+        if (!saveShareBtn.dataset.wired) {
+            saveShareBtn.dataset.wired = '1';
+            saveShareBtn.onclick = async () => {
+                const value = shareInput.value.trim();
+                if (!value) { status.textContent = 'Enter a shared folder path first.'; return; }
+                saveShareBtn.disabled = true;
+                status.textContent = 'Testing and saving shared folder…';
+                try { render(await API.saveSoftwareBackupShare(value)); }
+                catch (e) { status.textContent = '✕ ' + e.message; }
+                finally { saveShareBtn.disabled = false; }
+            };
+        }
+        if (!clearShareBtn.dataset.wired) {
+            clearShareBtn.dataset.wired = '1';
+            clearShareBtn.onclick = async () => {
+                if (!(await App.confirm('Remove shared backup folder?', 'This only removes the saved destination. Existing backup files are not deleted.'))) return;
+                clearShareBtn.disabled = true;
+                try { render(await API.clearSoftwareBackupShare()); }
+                catch (e) { status.textContent = '✕ ' + e.message; clearShareBtn.disabled = false; }
+            };
+        }
+        if (!createBtn.dataset.wired) {
+            createBtn.dataset.wired = '1';
+            createBtn.onclick = async () => {
+                if (!(await App.confirm('Create server software backup?', 'This creates a signed server binary and frontend backup in the configured shared folder. Runtime database, uploads, and local CA files are excluded.'))) return;
+                createBtn.disabled = true;
+                status.textContent = 'Creating server software backup…';
+                try { render(await API.createSoftwareBackup()); }
+                catch (e) { status.textContent = '✕ ' + e.message; await load(); }
+            };
+        }
+        await load();
     },
     async loadBackups() {
         const container = document.getElementById('backups-list');
