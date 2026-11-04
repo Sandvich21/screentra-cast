@@ -165,6 +165,7 @@ while IFS='|' read -r idx connector port; do
         SCREENTRA_VAAPI_DEVICE="${SCREENTRA_VAAPI_DEVICE:-}" \
         SCREENTRA_CAMERA_MAX_FPS="${SCREENTRA_CAMERA_MAX_FPS:-}" \
         SCREENTRA_CAMERA_MAX_WIDTH="${SCREENTRA_CAMERA_MAX_WIDTH:-}" \
+        SCREENTRA_LIVE_PLAYER_REDIRECT="${SCREENTRA_LIVE_PLAYER_REDIRECT:-}" \
         python3 "$CLIENT_DIR/screentra-client-renderer.py" \
         --host 127.0.0.1 --port "$port" --cache-dir "$CACHE_DIR" \
         >> "$LOG" 2>&1 &

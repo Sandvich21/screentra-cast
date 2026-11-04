@@ -407,6 +407,10 @@ Environment=WLR_RENDERER=gles2
 Environment=SCREENTRA_DISPLAY_INDEX=%i
 Environment=SCREENTRA_RENDER_BASE_PORT=3900
 Environment=SCREENTRA_RENDERER_URL=http://127.0.0.1:3900/
+# Use the local renderer capability exchange, then redirect to the canonical
+# server player so physical displays use the same fonts and sizing as Preview.
+# RTSP layouts remain on the local cached renderer path.
+Environment=SCREENTRA_LIVE_PLAYER_REDIRECT=1
 Environment=SCREENTRA_BOARD_USER=board
 
 [Install]
@@ -10412,6 +10416,7 @@ while IFS='|' read -r idx connector port; do
         SCREENTRA_VAAPI_DEVICE="${SCREENTRA_VAAPI_DEVICE:-}" \
         SCREENTRA_CAMERA_MAX_FPS="${SCREENTRA_CAMERA_MAX_FPS:-}" \
         SCREENTRA_CAMERA_MAX_WIDTH="${SCREENTRA_CAMERA_MAX_WIDTH:-}" \
+        SCREENTRA_LIVE_PLAYER_REDIRECT="${SCREENTRA_LIVE_PLAYER_REDIRECT:-}" \
         python3 "$CLIENT_DIR/screentra-client-renderer.py" \
         --host 127.0.0.1 --port "$port" --cache-dir "$CACHE_DIR" \
         >> "$LOG" 2>&1 &
