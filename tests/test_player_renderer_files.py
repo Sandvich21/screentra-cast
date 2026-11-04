@@ -64,6 +64,22 @@ class PlayerRendererFileTests(unittest.TestCase):
         self.assertIn("loadCalendar(p,w._layout_id||'',w.id)", source)
         self.assertNotIn("/api/ics-proxy?url=", source)
 
+    def test_startup_screen_reports_connection_and_has_two_minute_gate(self):
+        source = renderer.STARTUP_STATUS_HTML
+        self.assertIn('Starting display', source)
+        self.assertIn('Server connected', source)
+        self.assertIn('Normal signage starts in', source)
+        self.assertIn('/api/startup-status.json', source)
+        with tempfile.TemporaryDirectory() as temp, \
+                mock.patch.object(renderer, '_live_player_url', return_value='https://server.example'), \
+                mock.patch.object(renderer, '_server_reachable', return_value=True), \
+                mock.patch.object(renderer.time, 'monotonic', return_value=renderer.STARTUP_STARTED_MONOTONIC + 7):
+            payload = renderer._startup_status_payload(Path(temp))
+        self.assertEqual(payload['duration_seconds'], 120)
+        self.assertEqual(payload['connection_state'], 'connected')
+        self.assertGreater(payload['remaining_seconds'], 112)
+        self.assertLessEqual(payload['remaining_seconds'], 113)
+
     def test_live_redirect_requires_online_assignment(self):
         with tempfile.TemporaryDirectory() as temp:
             cache = Path(temp)

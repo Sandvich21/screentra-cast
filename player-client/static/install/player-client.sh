@@ -5536,7 +5536,58 @@ __cursorLoadConfig();
 # unreachable, fall back to the cached PLAYER_HTML so the player still shows
 # the last cached layout offline.
 LIVE_PROBE_TIMEOUT_SECS = float(os.environ.get('RIPLEY_LIVE_PROBE_TIMEOUT', '0.6'))
+STARTUP_LAYOUT_SECONDS = 120
+STARTUP_STARTED_MONOTONIC = time.monotonic()
 ENABLE_LIVE_PLAYER_REDIRECT = os.environ.get('SCREENTRA_LIVE_PLAYER_REDIRECT', '').strip().lower() in ('1', 'true', 'yes')
+
+STARTUP_STATUS_HTML = r'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Screentra Cast Renderer Startup</title>
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#0d1117;color:#e6edf3;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}body{display:grid;place-items:center}.card{width:min(86vw,900px);padding:clamp(2rem,5vw,5rem);border:1px solid #30363d;border-radius:24px;background:#161b22;box-shadow:0 24px 80px rgba(0,0,0,.35);text-align:center}.eyebrow{color:#8b949e;font-size:clamp(.85rem,1.5vw,1.1rem);letter-spacing:.14em;text-transform:uppercase}.title{margin:.65rem 0 1.5rem;font-size:clamp(2rem,5vw,4.5rem);line-height:1.05}.status{display:inline-flex;align-items:center;gap:.7rem;padding:.7rem 1.1rem;border:1px solid #30363d;border-radius:999px;font-size:clamp(1.1rem,2.4vw,1.8rem);font-weight:700}.dot{width:.8em;height:.8em;border-radius:50%;background:#8b949e;box-shadow:0 0 18px currentColor}.status.connected{color:#3fb950;border-color:rgba(63,185,80,.45)}.status.offline{color:#f85149;border-color:rgba(248,81,73,.45)}.status.checking{color:#d29922;border-color:rgba(210,153,34,.45)}.detail{margin:1.5rem 0 0;color:#8b949e;font-size:clamp(.95rem,1.8vw,1.3rem)}.timer{margin-top:2rem;color:#e6edf3;font-size:clamp(1.2rem,2.5vw,1.8rem);font-variant-numeric:tabular-nums}.bar{height:8px;margin-top:1rem;border-radius:999px;background:#21262d;overflow:hidden}.bar>i{display:block;height:100%;width:100%;background:#e94560;transform-origin:left center;transition:transform 1s linear}
+</style>
+</head>
+<body>
+<main class="card" aria-live="polite">
+  <div class="eyebrow">Screentra Cast client renderer</div>
+  <h1 class="title">Starting display</h1>
+  <div id="status" class="status checking"><span class="dot"></span><span id="statusText">Checking server connection…</span></div>
+  <p id="detail" class="detail">The client is checking its connection to the Screentra Cast server.</p>
+  <div class="timer">Normal signage starts in <strong id="remaining">120</strong>s</div>
+  <div class="bar" aria-hidden="true"><i id="progress"></i></div>
+</main>
+<script>
+const startedAt=Date.now();
+const statusNode=document.getElementById('status');
+const statusText=document.getElementById('statusText');
+const detail=document.getElementById('detail');
+const remaining=document.getElementById('remaining');
+const progress=document.getElementById('progress');
+let duration=120;
+function paint(data){
+  duration=Math.max(1,Number(data.duration_seconds)||120);
+  const left=Math.max(0,Number(data.remaining_seconds)||0);
+  remaining.textContent=String(Math.ceil(left));
+  progress.style.transform=`scaleX(${Math.max(0,Math.min(1,left/duration))})`;
+  const state=data.connection_state==='connected'?'connected':data.connection_state==='offline'?'offline':'checking';
+  statusNode.className='status '+state;
+  statusText.textContent=state==='connected'?'Server connected':state==='offline'?'Server unavailable':'Checking server connection…';
+  detail.textContent=state==='connected'?'Connection is ready. The assigned signage will start automatically.':state==='offline'?'The client will continue checking and will start its normal cached/live renderer after the startup screen.':'The client is checking its connection to the Screentra Cast server.';
+  if(left<=0){window.location.reload();return;}
+  setTimeout(poll,2000);
+}
+async function poll(){
+  try{const response=await fetch('/api/startup-status.json?ts='+Date.now(),{cache:'no-store'});if(!response.ok)throw new Error('status '+response.status);paint(await response.json());}
+  catch(_error){paint({duration_seconds:duration,remaining_seconds:Math.max(0,duration-(Date.now()-startedAt)/1000),connection_state:'checking'});}
+}
+poll();
+</script>
+</body>
+</html>'''
+
 # Keep the no-layout diagnostic page available at /no-layout.html for later
 # re-enablement, but do not replace a working display with it during the
 # temporary stale-assignment policy.
@@ -5684,6 +5735,28 @@ def _heartbeat_has_live_assignment(cache_dir: Path) -> bool:
         return status.get('connection') == 'online' and bool(status.get('assigned_layout_id'))
     except Exception:
         return False
+
+
+def _startup_status_payload(cache_dir: Path) -> dict:
+    """Return non-sensitive startup state for the renderer's two-minute screen."""
+    elapsed = max(0.0, time.monotonic() - STARTUP_STARTED_MONOTONIC)
+    remaining = max(0.0, STARTUP_LAYOUT_SECONDS - elapsed)
+    server_url = _live_player_url()
+    heartbeat = _read_json_file(cache_dir / 'last-heartbeat.json', {})
+    heartbeat_state = heartbeat.get('connection') if isinstance(heartbeat, dict) else None
+    if server_url and _server_reachable(server_url, LIVE_PROBE_TIMEOUT_SECS):
+        connection_state = 'connected'
+    elif heartbeat_state == 'online':
+        connection_state = 'connected'
+    elif server_url:
+        connection_state = 'offline'
+    else:
+        connection_state = 'checking'
+    return {
+        'duration_seconds': STARTUP_LAYOUT_SECONDS,
+        'remaining_seconds': round(remaining, 1),
+        'connection_state': connection_state,
+    }
 
 
 def _fetch_player_capability(server_url: str, client_id: str, display_index: int, cache_dir: Path) -> str | None:
@@ -6307,7 +6380,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_text(200, json.dumps(data), 'application/json')
             except Exception:
                 return self.send_text(404, json.dumps({'error': 'no config yet'}), 'application/json')
+        if path == '/api/startup-status.json':
+            return self.send_text(200, json.dumps(_startup_status_payload(self.cache_dir)), 'application/json')
         if path in ('/', '/player.html'):
+            if time.monotonic() - STARTUP_STARTED_MONOTONIC < STARTUP_LAYOUT_SECONDS:
+                return self.send_text(200, STARTUP_STATUS_HTML, 'text/html; charset=utf-8')
             display_index = int(os.environ.get('RIPLEY_DISPLAY_INDEX', '0'))
             layout_target = Handler.cache_dir / f'assigned-layout-display-{display_index}.json'
             # Legacy fallback belongs to display 0 only. Other displays must not render
