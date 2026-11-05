@@ -5143,7 +5143,13 @@ document.addEventListener('DOMContentLoaded', () => App.init());
     } else if (status && !status.textContent) status.textContent = 'Showing known connected/seen clients.';
     App.clientDiagnostics.log(search ? 'clients:search:start' : 'clients:list:start', 'info', search ? 'detection search requested' : 'initial list load');
     try {
-      const clients = await API.getConnectedClients(search);
+      const [clients, serverVersion] = await Promise.all([
+        API.getConnectedClients(search),
+        API.getVersion().catch(() => null),
+      ]);
+      this._serverVersion = serverVersion && typeof serverVersion.version === 'string'
+        ? serverVersion
+        : null;
       this._lastClients = Array.isArray(clients) ? clients : [];
       this.renderConnectedClients(clients);
       const dur = Date.now() - t0;
@@ -7213,6 +7219,120 @@ ${_cmds.oneLiner}`;
   }
 })();
 
+// Connected Clients client-version update action v1
+(function extendClientVersionUpdateUi(){
+  if (typeof App === 'undefined' || typeof API === 'undefined') return;
+
+  function parseVersion(value) {
+    const match = String(value || '').trim().replace(/^v/i, '').match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/);
+    if (!match) return null;
+    return {
+      numbers: [Number(match[1]), Number(match[2]), Number(match[3])],
+      prerelease: match[4] ? match[4].split('.') : [],
+    };
+  }
+
+  function compareVersions(left, right) {
+    const a = parseVersion(left);
+    const b = parseVersion(right);
+    if (!a || !b) return null;
+    for (let i = 0; i < 3; i += 1) {
+      if (a.numbers[i] !== b.numbers[i]) return a.numbers[i] < b.numbers[i] ? -1 : 1;
+    }
+    if (!a.prerelease.length && !b.prerelease.length) return 0;
+    if (!a.prerelease.length) return 1;
+    if (!b.prerelease.length) return -1;
+    const length = Math.max(a.prerelease.length, b.prerelease.length);
+    for (let i = 0; i < length; i += 1) {
+      if (i >= a.prerelease.length) return -1;
+      if (i >= b.prerelease.length) return 1;
+      const av = a.prerelease[i];
+      const bv = b.prerelease[i];
+      if (av === bv) continue;
+      const an = /^\d+$/.test(av);
+      const bn = /^\d+$/.test(bv);
+      if (an && bn) return Number(av) < Number(bv) ? -1 : 1;
+      if (an !== bn) return an ? -1 : 1;
+      return av < bv ? -1 : 1;
+    }
+    return 0;
+  }
+
+  function updateAvailable(client) {
+    if (!client || client.is_virtual || client.enrolled === false) return false;
+    const serverVersion = App._serverVersion && App._serverVersion.version;
+    const comparison = compareVersions(client.version, serverVersion);
+    return comparison !== null && comparison < 0;
+  }
+
+  function statusElement(card) {
+    let status = card.querySelector('.client-update-status');
+    if (!status) {
+      status = document.createElement('div');
+      status.className = 'client-update-status';
+      status.style.cssText = 'margin-top:.35rem;font-size:.78rem;color:var(--text-dim,#94a3b8);';
+      const anchor = card.querySelector('.client-card-footer') || card.querySelector('.client-last-seen');
+      if (anchor) anchor.insertAdjacentElement('afterend', status);
+      else card.appendChild(status);
+    }
+    return status;
+  }
+
+  const previous = App.renderConnectedClients;
+  App.renderConnectedClients = function(clients){
+    previous.call(this, clients);
+    const serverVersion = App._serverVersion && App._serverVersion.version;
+    if (!serverVersion) return;
+    const byId = new Map((clients || []).map(client => [String(client.id), client]));
+    document.querySelectorAll('.client-card.enrolled:not(.virtual-client-card)').forEach(card => {
+      const client = byId.get(String(card.dataset.clientId));
+      if (!updateAvailable(client)) return;
+      if (card.querySelector('.client-update-button')) return;
+
+      const notice = document.createElement('div');
+      notice.className = 'client-update-notice';
+      notice.style.cssText = 'margin:.45rem 0;color:#fbbf24;font-size:.8rem;font-weight:600;';
+      notice.textContent = `Client v${client.version} is older than server v${serverVersion}`;
+      const actions = card.querySelector('.client-actions');
+      if (actions) actions.insertAdjacentElement('beforebegin', notice);
+      else {
+        const anchor = card.querySelector('.client-card-footer') || card.querySelector('.client-last-seen');
+        if (anchor) anchor.insertAdjacentElement('afterend', notice);
+        else card.appendChild(notice);
+      }
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn btn-warning btn-sm client-update-button';
+      button.textContent = 'Update Client';
+      button.title = `Update client from v${client.version} to the server version v${serverVersion}`;
+      if (actions) actions.appendChild(button);
+      else notice.insertAdjacentElement('afterend', button);
+      button.onclick = async (event) => {
+        event.stopPropagation();
+        if (typeof App.confirm === 'function' && !await App.confirm(
+          `Update client "${client.name || client.id}"?`,
+          'The client will download and verify the signed client installer from this server, then restart its client services.'
+        )) return;
+        button.disabled = true;
+        button.textContent = 'Queueing update…';
+        const status = statusElement(card);
+        try {
+          const result = await API.sendClientCommand(client.id, 'update_client');
+          button.textContent = 'Update queued ✓';
+          status.textContent = result.message || 'Update queued; the client will apply it on its next heartbeat.';
+          status.style.color = '#86efac';
+          setTimeout(() => App.loadConnectedClients(false), 7000);
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = 'Update Client';
+          status.textContent = 'Client update failed: ' + (error && error.message ? error.message : String(error));
+          status.style.color = '#fca5a5';
+        }
+      };
+    });
+  };
+})();
 
 // Scene / multi-display publish manager v1
 (function sceneManager(){
