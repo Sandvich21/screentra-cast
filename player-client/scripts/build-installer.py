@@ -2,6 +2,7 @@
 """Build screentra-player-client.sh installer from source files."""
 
 from pathlib import Path
+import base64
 import sys
 
 # Map: heredoc marker -> source file path (relative to the player-client tree)
@@ -52,6 +53,31 @@ def replace_section(text: str, marker: str, src: Path) -> str:
     return text[:start] + "\n" + content + text[end:]
 
 
+def replace_offline_font_bundle(text: str) -> str:
+    start_marker = "__OFFLINE_FONT_BUNDLE__"
+    if start_marker not in text:
+        raise ValueError("offline font bundle marker not found")
+    assets = [
+        (PLAYER_ROOT / "static/assets/fonts/berkshire-swash-400.woff2", "berkshire-swash-400.woff2"),
+        (PLAYER_ROOT / "static/assets/fonts/butcherman-400.woff2", "butcherman-400.woff2"),
+    ]
+    lines = [
+        'FONT_ASSET_DIR="$INSTALL_DIR/cache/assets/fonts"',
+        'mkdir -p "$FONT_ASSET_DIR"',
+    ]
+    for source, filename in assets:
+        if not source.is_file():
+            raise ValueError(f"offline font asset missing: {source}")
+        encoded = base64.b64encode(source.read_bytes()).decode("ascii")
+        lines.extend([
+            f"base64 -d > \\\"$FONT_ASSET_DIR/{filename}\\\" <<'OFFLINE_FONT_{filename.replace('.', '_').replace('-', '_')}'",
+            encoded,
+            f"OFFLINE_FONT_{filename.replace('.', '_').replace('-', '_')}",
+            f"chmod 0644 \"$FONT_ASSET_DIR/{filename}\"",
+        ])
+    return text.replace(start_marker, "\n".join(lines), 1)
+
+
 def render_installer() -> str:
     template = read_bounded_text(TEMPLATE, MAX_TEMPLATE_BYTES)
     for marker, src_path in SECTIONS.items():
@@ -67,6 +93,11 @@ def render_installer() -> str:
         except ValueError as e:
             print(f"ERROR: marker '{marker}' not found in template: {e}")
             raise
+    try:
+        template = replace_offline_font_bundle(template)
+    except (OSError, ValueError) as error:
+        print(f"ERROR: offline font bundle: {error}")
+        raise
     return template
 
 

@@ -5434,6 +5434,11 @@ ln -sf "$DISPLAY_GOVERNANCE" "$BIN_DIR/ripley-display-governance"
 
 ln -sf "$RENDERER" "$BIN_DIR/screentra-client-renderer"
 
+# Embedded offline display fonts are inserted by build-installer.py.
+# BEGIN_OFFLINE_FONT_BUNDLE
+__OFFLINE_FONT_BUNDLE__
+# END_OFFLINE_FONT_BUNDLE
+
 cat > "$TRANSCRIPTION_ADMISSION" <<'PY_TRANSCRIPTION_ADMISSION'
 #!/usr/bin/env python3
 """Pure, bounded admission for one inert transcription request.
