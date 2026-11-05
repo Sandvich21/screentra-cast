@@ -2082,6 +2082,7 @@ async fn update_layout(
         .ok_or((StatusCode::NOT_FOUND, "Layout not found".to_string()))?;
     layout.id = id;
     preserve_camera_stream_sources(&existing, &mut layout);
+    preserve_calendar_sources(&existing, &mut layout);
     if layout.page_type.is_empty() {
         layout.page_type = "single".to_string();
     }
@@ -9927,6 +9928,55 @@ fn preserve_camera_stream_sources(existing: &Layout, incoming: &mut Layout) {
     }
 }
 
+/// Preserve calendar feed sources when a public/redacted layout is sent back
+/// through the editor. The public layout removes the source URL and leaves a
+/// marker; an explicit editor clear still sends an empty source property and
+/// is therefore honored.
+fn preserve_calendar_sources(existing: &Layout, incoming: &mut Layout) {
+    for old_widget in &existing.widgets {
+        if old_widget.widget_type != WidgetType::Calendar {
+            continue;
+        }
+        let Some((source_key, source_url)) = ["ics_url", "ical_url", "ical", "calendar_url"]
+            .into_iter()
+            .find_map(|key| {
+                old_widget
+                    .props
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .map(|url| (key, url.to_string()))
+            })
+        else {
+            continue;
+        };
+        let Some(new_widget) = incoming.widgets.iter_mut().find(|widget| widget.id == old_widget.id) else {
+            continue;
+        };
+        if new_widget.widget_type != WidgetType::Calendar {
+            continue;
+        }
+        let Some(props) = new_widget.props.as_object_mut() else {
+            continue;
+        };
+        let has_source_property = ["ics_url", "ical_url", "ical", "calendar_url"]
+            .into_iter()
+            .any(|key| props.contains_key(key));
+        let has_source_value = ["ics_url", "ical_url", "ical", "calendar_url"]
+            .into_iter()
+            .any(|key| {
+                props
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|url| !url.trim().is_empty())
+            });
+        if !has_source_property && !has_source_value {
+            props.insert(source_key.to_string(), serde_json::Value::String(source_url));
+        }
+    }
+}
+
 async fn get_player_layout(
     State(repository): State<ClientRepository>,
     Path(id): Path<String>,
@@ -10864,6 +10914,43 @@ mod tests {
         let public_props = &public_layout.widgets[0].props;
         assert!(public_props.get("ical_url").is_none());
         assert_eq!(public_props.get("_calendar_source_configured").and_then(serde_json::Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn calendar_source_survives_redacted_layout_round_trip_but_explicit_clear_wins() {
+        let existing = Layout {
+            id: "layout-1".to_string(),
+            name: "Calendar".to_string(),
+            widgets: vec![Widget {
+                id: "calendar-1".to_string(),
+                widget_type: WidgetType::Calendar,
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+                z: 0,
+                props: serde_json::json!({"ical_url": "https://calendar.example/events.ics"}),
+            }],
+            interactive: false,
+            canvas_orientation: "landscape".to_string(),
+            folder_id: None,
+            page_type: "single".to_string(),
+            timing_mode: "global".to_string(),
+            duration: 15,
+            shuffle: false,
+            items: Vec::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let mut redacted = existing.clone();
+        redact_calendar_sources(&mut redacted);
+        preserve_calendar_sources(&existing, &mut redacted);
+        assert_eq!(calendar_source_url(&redacted, "calendar-1").as_deref(), Some("https://calendar.example/events.ics"));
+
+        let mut cleared = existing.clone();
+        cleared.widgets[0].props["ical_url"] = serde_json::Value::String(String::new());
+        preserve_calendar_sources(&existing, &mut cleared);
+        assert_eq!(calendar_source_url(&cleared, "calendar-1"), None);
     }
 
     #[test]
