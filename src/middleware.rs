@@ -482,6 +482,7 @@ pub async fn require_auth(
         return Ok(next.run(req).await);
     }
     let headers = req.headers();
+    let secure_step_up = crate::auth::request_is_https(headers);
     let token = extract_token(headers)
         .ok_or((StatusCode::UNAUTHORIZED, "auth required".to_string()))?;
     let payload = auth
@@ -528,11 +529,17 @@ pub async fn require_auth(
     });
     let mut response = next.run(req).await;
     if let Some(scope) = required_step_up_scope(&path, method.as_str()) {
-        let cookie = auth.step_up_cookie_value(&username, &scope);
-        if let Ok(value) = axum::http::HeaderValue::from_str(&cookie) {
-            response
-                .headers_mut()
-                .append(axum::http::header::SET_COOKIE, value);
+        let cookie = auth.step_up_cookie_value(
+            &username,
+            &scope,
+            secure_step_up,
+        );
+        if let Some(cookie) = cookie {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&cookie) {
+                response
+                    .headers_mut()
+                    .append(axum::http::header::SET_COOKIE, value);
+            }
         }
     }
     Ok(response)

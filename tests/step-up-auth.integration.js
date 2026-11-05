@@ -18,7 +18,8 @@ assert(auth.includes('step_up_ttl'), 'step-up TTL policy missing');
 assert(auth.includes('step_up_scope'), 'login re-authentication scope missing');
 assert(auth.includes('clear_step_up'), 'step-up clear endpoint missing');
 
-assert(auth.includes('HttpOnly; Secure; SameSite=Strict'), 'step-up cookie flags missing');
+assert(auth.includes('HttpOnly; SameSite=Strict; Secure'), 'step-up cookie flags missing');
+assert(auth.includes('if !secure'), 'step-up cookie must not be emitted over HTTP');
 assert(auth.includes('pub async fn step_up'), 'step-up endpoint missing');
 assert(auth.includes('get_active_password_hash'), 'step-up must verify the authenticated account password');
 assert(auth.includes('step_up_authentication'), 'step-up audit event missing');
@@ -27,8 +28,10 @@ assert(!auth.includes('println!("{}", body.password'), 'step-up password must no
 assert(middleware.includes('required_step_up_scope'), 'middleware step-up scope classifier missing');
 assert(middleware.includes('server-update'), 'server-update step-up scope missing');
 assert(middleware.includes('step-up authentication required'), 'middleware guard missing');
-assert(api.includes('.route("/step-up", post(crate::auth::step_up))'), 'step-up route not wired');
+assert(api.includes('"/step-up"') && api.includes('post(crate::auth::step_up)'), 'step-up route not wired');
 assert(clientApi.includes('_stepUpDialog'), 'dashboard step-up dialog missing');
+assert(clientApi.includes('X-Screentra-Step-Up'), 'dashboard must retry step-up with the in-memory token');
+assert(clientAuth.includes('data.step_up_token'), 'login must retain the step-up token for HTTP deployments');
 assert(!clientApi.includes('client-control'), 'client commands must not use step-up scopes');
 assert(clientAuth.includes('credentials: \'same-origin\''), 'login request must be same-origin');
 assert(clientApi.includes('credentials: init.credentials || \'same-origin\''), 'protected request retry must preserve same-origin cookies');

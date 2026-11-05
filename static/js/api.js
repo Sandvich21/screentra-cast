@@ -90,6 +90,8 @@ window.fetch = async function(input, init) {
             await _stepUpDialog(scope);
             const retryHeaders = new Headers(requestInit.headers);
             retryHeaders.delete('Authorization');
+            const stepUpToken = window.__screentraStepUpTokens && window.__screentraStepUpTokens[scope];
+            if (stepUpToken) retryHeaders.set('X-Screentra-Step-Up', stepUpToken);
             response = await _origFetch(input, Object.assign({}, requestInit, { headers: retryHeaders }));
         }
     }

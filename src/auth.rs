@@ -516,17 +516,23 @@ impl AuthState {
             && payload.get("scope").and_then(|v| v.as_str()) == Some(scope)
     }
 
-    pub fn step_up_cookie_value(&self, username: &str, scope: &str) -> String {
-        let ttl = Self::step_up_ttl(scope);
-        format!(
-            "screentra_cast_step_up={}; Path=/; Max-Age={}; HttpOnly; Secure; SameSite=Strict",
-            self.issue_step_up_for(username, scope),
-            ttl
-        )
+    pub fn step_up_cookie_value(&self, username: &str, scope: &str, secure: bool) -> Option<String> {
+        self.step_up_cookie_value_for_token(&self.issue_step_up_for(username, scope), scope, secure)
     }
 
-    pub fn clear_step_up_cookie_value() -> &'static str {
-        "screentra_cast_step_up=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"
+    pub fn step_up_cookie_value_for_token(&self, token: &str, scope: &str, secure: bool) -> Option<String> {
+        if !secure {
+            return None;
+        }
+        let ttl = Self::step_up_ttl(scope);
+        Some(format!(
+            "screentra_cast_step_up={}; Path=/; Max-Age={}; HttpOnly; SameSite=Strict{}",
+            token, ttl, "; Secure"
+        ))
+    }
+
+    pub fn clear_step_up_cookie_value(secure: bool) -> Option<String> {
+        secure.then(|| "screentra_cast_step_up=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict; Secure".to_string())
     }
 
     pub fn step_up_ttl(_scope: &str) -> u64 {
@@ -809,7 +815,7 @@ fn google_redirect_uri(headers: &HeaderMap) -> String {
     format!("{}/api/auth/google/callback", public_base(headers))
 }
 
-fn request_is_https(headers: &HeaderMap) -> bool {
+pub(crate) fn request_is_https(headers: &HeaderMap) -> bool {
     if let Some(proto) = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
@@ -965,6 +971,8 @@ pub struct LoginResponse {
     pub expires_in: u64,
     pub username: String,
     pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_up_token: Option<String>,
 }
 
 /// CSRF guard for POST /api/auth/login.
@@ -1222,24 +1230,37 @@ pub async fn login(
     {
         log::warn!("auth: failed to persist session for {}: {}", username, e);
     }
+    if let Some(scope) = body.step_up_scope.as_deref() {
+        if !AuthState::supported_step_up_scope(scope) {
+            return Err((StatusCode::BAD_REQUEST, "unsupported step-up scope".to_string()));
+        }
+    }
+    let step_up_token = body
+        .step_up_scope
+        .as_deref()
+        .map(|scope| auth.issue_step_up_for(&username, scope));
     let mut resp = Json(LoginResponse {
         token: token.clone(),
         expires_in: ttl,
         username: username.clone(),
         role,
+        step_up_token,
     })
-    .into_response();
+        .into_response();
     if let Some(cookie) = session_cookie_value(&headers, &token, ttl) {
         if let Ok(val) = HeaderValue::from_str(&cookie) {
             resp.headers_mut().insert(header::SET_COOKIE, val);
         }
     }
     if let Some(scope) = body.step_up_scope.as_deref() {
-        if !AuthState::supported_step_up_scope(scope) {
-            return Err((StatusCode::BAD_REQUEST, "unsupported step-up scope".to_string()));
-        }
-        if let Ok(val) = HeaderValue::from_str(&auth.step_up_cookie_value(&username, scope)) {
-            resp.headers_mut().append(header::SET_COOKIE, val);
+        if let Some(cookie) = auth.step_up_cookie_value(
+            &username,
+            scope,
+            request_is_https(&headers),
+        ) {
+            if let Ok(val) = HeaderValue::from_str(&cookie) {
+                resp.headers_mut().append(header::SET_COOKIE, val);
+            }
         }
     }
     Ok(resp)
@@ -1274,6 +1295,7 @@ pub struct StepUpRequest {
 pub async fn step_up(
     State(state): State<AuthAppState>,
     Extension(principal): Extension<crate::middleware::AuthenticatedPrincipal>,
+    headers: HeaderMap,
     Json(body): Json<StepUpRequest>,
 ) -> Result<Response, (StatusCode, String)> {
     if !AuthState::supported_step_up_scope(&body.scope) {
@@ -1358,25 +1380,33 @@ pub async fn step_up(
         "step-up authentication granted",
     )
     .await;
+    let step_up_token = state.auth.issue_step_up_for(&principal.username, &body.scope);
     let mut response = Json(serde_json::json!({
         "success": true,
         "scope": body.scope,
         "expires_in": AuthState::step_up_ttl(&body.scope),
+        "step_up_token": step_up_token.clone(),
     }))
-    .into_response();
-    let cookie = state
-        .auth
-        .step_up_cookie_value(&principal.username, &body.scope);
-    if let Ok(value) = HeaderValue::from_str(&cookie) {
-        response.headers_mut().insert(header::SET_COOKIE, value);
+        .into_response();
+    let cookie = state.auth.step_up_cookie_value_for_token(
+        &step_up_token,
+        &body.scope,
+        request_is_https(&headers),
+    );
+    if let Some(cookie) = cookie {
+        if let Ok(value) = HeaderValue::from_str(&cookie) {
+            response.headers_mut().insert(header::SET_COOKIE, value);
+        }
     }
     Ok(response)
 }
 
-pub async fn clear_step_up(State(_state): State<AuthAppState>) -> Response {
+pub async fn clear_step_up(State(_state): State<AuthAppState>, headers: HeaderMap) -> Response {
     let mut response = StatusCode::NO_CONTENT.into_response();
-    if let Ok(value) = HeaderValue::from_str(AuthState::clear_step_up_cookie_value()) {
-        response.headers_mut().insert(header::SET_COOKIE, value);
+    if let Some(cookie) = AuthState::clear_step_up_cookie_value(request_is_https(&headers)) {
+        if let Ok(value) = HeaderValue::from_str(&cookie) {
+            response.headers_mut().insert(header::SET_COOKIE, value);
+        }
     }
     response
 }
@@ -1769,6 +1799,23 @@ mod tests {
         let s = test_state();
         let tok = s.issue_for("admin", "admin");
         assert!(s.verify(&tok), "freshly-issued token should verify");
+    }
+
+    #[test]
+    fn step_up_cookie_is_only_emitted_over_https() {
+        let state = test_state();
+        assert!(state
+            .step_up_cookie_value("admin", "server-update", false)
+            .is_none());
+        let secure = state
+            .step_up_cookie_value("admin", "server-update", true)
+            .expect("HTTPS should receive the step-up cookie");
+        assert!(secure.contains("HttpOnly"));
+        assert!(secure.contains("Secure"));
+        assert!(AuthState::clear_step_up_cookie_value(false).is_none());
+        assert!(AuthState::clear_step_up_cookie_value(true)
+            .expect("HTTPS should clear the step-up cookie")
+            .contains("Secure"));
     }
 
     #[test]

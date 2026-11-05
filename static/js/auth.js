@@ -105,6 +105,10 @@
                     }
                     const data = await readAuthJsonBounded(res);
                     setToken(data.token);
+                    if (stepUpScope && data.step_up_token) {
+                        window.__screentraStepUpTokens = window.__screentraStepUpTokens || Object.create(null);
+                        window.__screentraStepUpTokens[stepUpScope] = data.step_up_token;
+                    }
                     return data;
                 },
                 configurable: true, enumerable: false, writable: true,
@@ -114,6 +118,7 @@
                     await _realFetch('/api/auth/step-up/clear', {
                         method: 'POST', credentials: 'same-origin',
                     });
+                    if (window.__screentraStepUpTokens) delete window.__screentraStepUpTokens['server-update'];
                 },
                 configurable: true, enumerable: false, writable: true,
             });
