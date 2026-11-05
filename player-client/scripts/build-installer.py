@@ -60,6 +60,8 @@ def replace_offline_font_bundle(text: str) -> str:
     assets = [
         (PLAYER_ROOT / "static/assets/fonts/berkshire-swash-400.woff2", "berkshire-swash-400.woff2"),
         (PLAYER_ROOT / "static/assets/fonts/butcherman-400.woff2", "butcherman-400.woff2"),
+        (PLAYER_ROOT / "static/assets/fonts/creepster-400.woff2", "creepster-400.woff2"),
+        (PLAYER_ROOT / "static/assets/fonts/nosifer-400.woff2", "nosifer-400.woff2"),
     ]
     lines = [
         'FONT_ASSET_DIR="$INSTALL_DIR/cache/assets/fonts"',

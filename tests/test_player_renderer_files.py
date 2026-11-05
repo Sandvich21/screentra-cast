@@ -153,6 +153,11 @@ class PlayerRendererFileTests(unittest.TestCase):
         self.assertIn("weatherAlertColorCodeHtml(wx.alerts)", source)
         self.assertIn("if(!items.length)return ''", source)
         self.assertIn("alerts:alerts", source)
+        self.assertIn("@font-face{font-family:'Creepster'", source)
+        self.assertIn("@font-face{font-family:'Nosifer'", source)
+        self.assertIn("container-type:size", source)
+        self.assertIn("raw.includes('creepster')", source)
+        self.assertIn("data-date-format", source)
 
 
 if __name__ == '__main__':
