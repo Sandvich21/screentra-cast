@@ -28,6 +28,7 @@ async function checkCachedPlayer(file) {
     setTimeout() {},
     fetch: async () => ({ ok: false }),
     window: { addEventListener() {} },
+    __SCREENTRA_SERVER_URL__: '',
     document: {
       documentElement: { contains: () => true, style: {} },
       querySelectorAll: () => [],
@@ -39,6 +40,13 @@ async function checkCachedPlayer(file) {
 
   assert.strictEqual(typeof context.renderWidget, 'function', `${file}: renderWidget missing`);
   assert.strictEqual(typeof context.tickCountdowns, 'function', `${file}: tickCountdowns missing`);
+
+  const textMarkup = await context.renderWidget({
+    widget_type: 'text',
+    props: { content: 'Days till', font_size: 26 },
+  });
+  assert.match(textMarkup, />Days till</, `${file}: cached text widget ignored persisted content`);
+  assert.doesNotMatch(textMarkup, />Text</, `${file}: cached text widget used placeholder text`);
 
   const markup = await context.renderWidget({
     widget_type: 'countdown',
