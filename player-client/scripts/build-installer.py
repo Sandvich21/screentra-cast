@@ -70,7 +70,7 @@ def replace_offline_font_bundle(text: str) -> str:
             raise ValueError(f"offline font asset missing: {source}")
         encoded = base64.b64encode(source.read_bytes()).decode("ascii")
         lines.extend([
-            f"base64 -d > \\\"$FONT_ASSET_DIR/{filename}\\\" <<'OFFLINE_FONT_{filename.replace('.', '_').replace('-', '_')}'",
+            f'base64 -d > "$FONT_ASSET_DIR/{filename}" <<\'OFFLINE_FONT_{filename.replace(".", "_").replace("-", "_")}\'',
             encoded,
             f"OFFLINE_FONT_{filename.replace('.', '_').replace('-', '_')}",
             f"chmod 0644 \"$FONT_ASSET_DIR/{filename}\"",
