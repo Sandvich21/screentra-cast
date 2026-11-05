@@ -145,6 +145,15 @@ class PlayerRendererFileTests(unittest.TestCase):
                 renderer._atomic_write_text(redirected / 'status.json', '{"safe":true}')
             self.assertFalse((outside / 'status.json').exists())
 
+    def test_cached_template_matches_server_text_and_weather_alert_semantics(self):
+        source = renderer.PLAYER_HTML
+        self.assertIn("font-family:${cachedFontFamily(q)};", source)
+        self.assertIn("inner=esc(q.content||q.text||'Text')", source)
+        self.assertIn("k==='weather-alert-code'", source)
+        self.assertIn("weatherAlertColorCodeHtml(wx.alerts)", source)
+        self.assertIn("if(!items.length)return ''", source)
+        self.assertIn("alerts:alerts", source)
+
 
 if __name__ == '__main__':
     unittest.main()
