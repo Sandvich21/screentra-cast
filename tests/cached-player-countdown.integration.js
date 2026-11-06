@@ -48,6 +48,17 @@ async function checkCachedPlayer(file) {
   assert.match(textMarkup, />Days till</, `${file}: cached text widget ignored persisted content`);
   assert.doesNotMatch(textMarkup, />Text</, `${file}: cached text widget used placeholder text`);
 
+  const percentageGeometryMarkup = await context.renderWidget({
+    widget_type: 'rectangle',
+    x: 0.4166666567325592,
+    y: 1.4814814329147339,
+    w: 49.89583206176758,
+    h: 24.44444465637207,
+    z: 5,
+    props: { color: '#363636' },
+  });
+  assert.match(percentageGeometryMarkup, /left:0\.416[0-9]+%;top:1\.481[0-9]+%;width:49\.895[0-9]+%;height:24\.444[0-9]+%;/, `${file}: small percentage geometry was misread as a normalized fraction`);
+
   const markup = await context.renderWidget({
     widget_type: 'countdown',
     x: 0,
@@ -59,11 +70,16 @@ async function checkCachedPlayer(file) {
       duration_value: 5,
       duration_unit: 'seconds',
       expiry_text: 'Expired',
+      color: '#ff8000',
+      font_family: 'Butcherman',
+      font_size: 40,
     },
   });
   assert.match(markup, /data-countdown-mode="duration"/, `${file}: duration mode missing from cached markup`);
   assert.match(markup, /data-countdown-duration-value="5"/, `${file}: duration value missing from cached markup`);
   assert.match(markup, /data-countdown-duration-unit="seconds"/, `${file}: duration unit missing from cached markup`);
+  assert.match(markup, /color:#ff8000/, `${file}: countdown color was not preserved`);
+  assert.match(markup, /font-size:clamp\(6px,calc\(4\.16666666666666\dcqw\),160px\)/, `${file}: countdown font size was not preserved`);
 
   const attrs = {};
   for (const [, name, value] of markup.matchAll(/data-countdown-([\w-]+)="([^"]*)"/g)) {
