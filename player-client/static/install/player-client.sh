@@ -393,6 +393,14 @@ User=root
 StandardInput=null
 StandardOutput=journal
 StandardError=journal
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ExecStart=/usr/local/bin/screentra-kiosk.sh
 Restart=always
 RestartSec=5
@@ -10293,7 +10301,7 @@ cat > "$KIOSK_LAUNCHER" <<'SH_KIOSK'
 # Sway instances. Each physical output gets its own local renderer and browser.
 set -euo pipefail
 
-LOG="${LOG:-/home/board/screentra-kiosk.log}"
+LOG="/var/log/screentra-cast/kiosk.log"
 BOARD_USER="${SCREENTRA_BOARD_USER:-board}"
 BOARD_HOME="$(getent passwd "$BOARD_USER" | cut -d: -f6)"
 : "${BOARD_HOME:=/home/$BOARD_USER}"
@@ -10307,15 +10315,20 @@ BASE_PORT="${SCREENTRA_RENDER_BASE_PORT:-3900}"
 CACHE_DIR="$BOARD_HOME/.local/share/screentra-client/cache"
 CLIENT_DIR="$BOARD_HOME/.local/share/screentra-client"
 CONFIG_JSON="$CLIENT_DIR/config.json"
-SWAY_CONFIG_DIR="$BOARD_HOME/.config/sway"
+SWAY_CONFIG_DIR="/run/screentra-cast/sway"
 
+install -d -o root -g root -m 0755 /var/log/screentra-cast
+install -d -o root -g root -m 0755 /run/screentra-cast
 log() { echo "[$(date)] $*" >> "$LOG"; }
 log "screentra-kiosk.sh starting (PID=$$)"
 log "Running as root, board=$BOARD_USER home=$BOARD_HOME"
 
 mkdir -p "$XDG_RUNTIME_DIR" "$CACHE_DIR" "$SWAY_CONFIG_DIR"
-chown "$BOARD_USER:$BOARD_USER" "$XDG_RUNTIME_DIR" "$CACHE_DIR" "$SWAY_CONFIG_DIR"
+chown "$BOARD_USER:$BOARD_USER" "$XDG_RUNTIME_DIR" "$CACHE_DIR"
+chown root:root /run/screentra-cast "$SWAY_CONFIG_DIR"
 chmod 0700 "$XDG_RUNTIME_DIR"
+chown root:root "$SWAY_CONFIG_DIR"
+chmod 0755 "$SWAY_CONFIG_DIR"
 
 # Kill stale children from an earlier compositor/browser stack.
 for prog in sway chromium swaybg; do
@@ -10426,7 +10439,8 @@ fi
         printf 'output * {\n    mode %s\n}\n' "$SCREENTRA_OUTPUT_MODE"
     fi
 } > "$SWAY_CONFIG_DIR/config"
-chown "$BOARD_USER:$BOARD_USER" "$SWAY_CONFIG_DIR/config"
+chown root:root "$SWAY_CONFIG_DIR/config"
+chmod 0644 "$SWAY_CONFIG_DIR/config"
 log "Sway config written"
 
 RENDERER_PIDS=()
@@ -10568,7 +10582,7 @@ while IFS='|' read -r idx connector port; do
         chromium \
         "${GPU_CHROMIUM_ARGS[@]}" \
         --class="screentra-cast-display-${idx}" \
-        --no-sandbox --ozone-platform=wayland --hide-cursor --ash-hide-cursor \
+        --ozone-platform=wayland --hide-cursor --ash-hide-cursor \
         --app="$BROWSER_URL" --kiosk --start-fullscreen \
         --no-first-run --disable-infobars --disable-session-crashed-bubble \
         --enable-logging=stderr --v=0 --disable-features=TranslateUI \
@@ -10660,6 +10674,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ExecStart=$RENDERER --host 127.0.0.1 --cache-dir $INSTALL_DIR/cache
 Environment=RIPLEY_DISPLAY_INDEX=%i
 Environment=RIPLEY_RENDER_BASE_PORT=3900
@@ -10683,6 +10707,16 @@ Wants=screentra-client-renderer@%i.service
 
 [Service]
 Type=simple
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ExecStart=$KIOSK_LAUNCHER
 Restart=on-failure
 RestartSec=5
@@ -10707,6 +10741,16 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 Environment=RIPLEY_PENDING_FILE=$INSTALL_DIR/cache/pending-command.json
 Environment=RIPLEY_RESULT_FILE=$INSTALL_DIR/cache/command-result.json
 Environment=SCREENTRA_SERVER_URL=$SERVER_URL
@@ -10737,6 +10781,16 @@ Wants=network-online.target
 Type=simple
 User=$BOARD_USER
 Group=$BOARD_USER
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 WorkingDirectory=$INSTALL_DIR
 Environment=HOME=$BOARD_HOME
 Environment=RIPLEY_CLIENT_DIR=$INSTALL_DIR
@@ -10763,6 +10817,16 @@ After=network-online.target screentra-client-heartbeat.service
 Type=simple
 User=$BOARD_USER
 Group=$BOARD_USER
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 WorkingDirectory=$INSTALL_DIR
 Environment=HOME=$BOARD_HOME
 Environment=RIPLEY_PENDING_FILE=$INSTALL_DIR/cache/pending-command.json

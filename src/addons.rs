@@ -4580,8 +4580,10 @@ mod tests {
         assert!(!root.join("addons/magic-mirror-camera").exists());
 
         let after_remove = ensure_bundled_standard_addons().unwrap();
-        assert_eq!(after_remove.len(), 3);
-        assert!(!after_remove
+        // Bundled standard addons are reconciled on every startup, so a
+        // removed bundled addon is restored on the next reconciliation.
+        assert_eq!(after_remove.len(), 4);
+        assert!(after_remove
             .iter()
             .any(|addon| addon.manifest.id == "magic-mirror-camera"));
 

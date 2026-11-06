@@ -393,6 +393,17 @@ Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
 StandardError=journal
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

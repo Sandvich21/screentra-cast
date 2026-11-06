@@ -4,7 +4,7 @@
 # Sway instances. Each physical output gets its own local renderer and browser.
 set -euo pipefail
 
-LOG="${LOG:-/home/board/screentra-kiosk.log}"
+LOG="/var/log/screentra-cast/kiosk.log"
 BOARD_USER="${SCREENTRA_BOARD_USER:-board}"
 BOARD_HOME="$(getent passwd "$BOARD_USER" | cut -d: -f6)"
 : "${BOARD_HOME:=/home/$BOARD_USER}"
@@ -18,15 +18,20 @@ BASE_PORT="${SCREENTRA_RENDER_BASE_PORT:-3900}"
 CACHE_DIR="$BOARD_HOME/.local/share/screentra-client/cache"
 CLIENT_DIR="$BOARD_HOME/.local/share/screentra-client"
 CONFIG_JSON="$CLIENT_DIR/config.json"
-SWAY_CONFIG_DIR="$BOARD_HOME/.config/sway"
+SWAY_CONFIG_DIR="/run/screentra-cast/sway"
 
+install -d -o root -g root -m 0755 /var/log/screentra-cast
+install -d -o root -g root -m 0755 /run/screentra-cast
 log() { echo "[$(date)] $*" >> "$LOG"; }
 log "screentra-kiosk.sh starting (PID=$$)"
 log "Running as root, board=$BOARD_USER home=$BOARD_HOME"
 
 mkdir -p "$XDG_RUNTIME_DIR" "$CACHE_DIR" "$SWAY_CONFIG_DIR"
-chown "$BOARD_USER:$BOARD_USER" "$XDG_RUNTIME_DIR" "$CACHE_DIR" "$SWAY_CONFIG_DIR"
+chown "$BOARD_USER:$BOARD_USER" "$XDG_RUNTIME_DIR" "$CACHE_DIR"
+chown root:root /run/screentra-cast "$SWAY_CONFIG_DIR"
 chmod 0700 "$XDG_RUNTIME_DIR"
+chown root:root "$SWAY_CONFIG_DIR"
+chmod 0755 "$SWAY_CONFIG_DIR"
 
 # Kill stale children from an earlier compositor/browser stack.
 for prog in sway chromium swaybg; do
@@ -137,7 +142,8 @@ fi
         printf 'output * {\n    mode %s\n}\n' "$SCREENTRA_OUTPUT_MODE"
     fi
 } > "$SWAY_CONFIG_DIR/config"
-chown "$BOARD_USER:$BOARD_USER" "$SWAY_CONFIG_DIR/config"
+chown root:root "$SWAY_CONFIG_DIR/config"
+chmod 0644 "$SWAY_CONFIG_DIR/config"
 log "Sway config written"
 
 RENDERER_PIDS=()
@@ -279,7 +285,7 @@ while IFS='|' read -r idx connector port; do
         chromium \
         "${GPU_CHROMIUM_ARGS[@]}" \
         --class="screentra-cast-display-${idx}" \
-        --no-sandbox --ozone-platform=wayland --hide-cursor --ash-hide-cursor \
+        --ozone-platform=wayland --hide-cursor --ash-hide-cursor \
         --app="$BROWSER_URL" --kiosk --start-fullscreen \
         --no-first-run --disable-infobars --disable-session-crashed-bubble \
         --enable-logging=stderr --v=0 --disable-features=TranslateUI \

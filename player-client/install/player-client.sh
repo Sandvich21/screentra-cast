@@ -215,6 +215,14 @@ User=root
 StandardInput=null
 StandardOutput=journal
 StandardError=journal
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ExecStart=/usr/local/bin/screentra-kiosk.sh
 Restart=always
 RestartSec=5
@@ -6929,7 +6937,7 @@ while IFS='|' read -r idx connector port; do
         WAYLAND_DISPLAY="$WAYLAND_DISPLAY" \
         chromium \
         --class="screentra-cast-display-${idx}" \
-        --no-sandbox --ozone-platform=wayland --hide-cursor --ash-hide-cursor \
+        --ozone-platform=wayland --hide-cursor --ash-hide-cursor \
         --app="$BROWSER_URL" --kiosk --start-fullscreen \
         --no-first-run --disable-infobars --disable-session-crashed-bubble \
         --enable-logging=stderr --v=0 --disable-features=TranslateUI \
@@ -7021,6 +7029,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ExecStart=$RENDERER --host 127.0.0.1 --cache-dir $INSTALL_DIR/cache
 Environment=RIPLEY_DISPLAY_INDEX=%i
 Environment=RIPLEY_RENDER_BASE_PORT=3900
@@ -7044,6 +7062,16 @@ Wants=screentra-client-renderer@%i.service
 
 [Service]
 Type=simple
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ExecStart=$KIOSK_LAUNCHER
 Restart=on-failure
 RestartSec=5
@@ -7068,6 +7096,16 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 Environment=RIPLEY_PENDING_FILE=$INSTALL_DIR/cache/pending-command.json
 Environment=RIPLEY_RESULT_FILE=$INSTALL_DIR/cache/command-result.json
 Environment=SCREENTRA_SERVER_URL=$SERVER_URL
@@ -7098,6 +7136,16 @@ Wants=network-online.target
 Type=simple
 User=$BOARD_USER
 Group=$BOARD_USER
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 WorkingDirectory=$INSTALL_DIR
 Environment=HOME=$BOARD_HOME
 Environment=RIPLEY_CLIENT_DIR=$INSTALL_DIR
@@ -7124,6 +7172,16 @@ After=network-online.target screentra-client-heartbeat.service
 Type=simple
 User=$BOARD_USER
 Group=$BOARD_USER
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 WorkingDirectory=$INSTALL_DIR
 Environment=HOME=$BOARD_HOME
 Environment=RIPLEY_PENDING_FILE=$INSTALL_DIR/cache/pending-command.json

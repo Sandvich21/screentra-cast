@@ -557,6 +557,7 @@ pub async fn run_auto_update_loop(repository: ClientRepository) {
 
 #[cfg(test)]
 mod tests {
+    use crate::version;
     use super::{
         is_newer_release, normalized_version, read_bounded_json, release_is_applicable,
         validated_release_channel, MAX_PERSISTED_JSON_BYTES,
@@ -589,7 +590,8 @@ mod tests {
 
     #[test]
     fn rc_same_version_is_accepted_when_current_is_stable() {
-        assert!(release_is_applicable("v0.1.5-rc.1", "rc"));
+        let candidate = format!("v{}-rc.1", version::VERSION);
+        assert!(release_is_applicable(&candidate, "rc"));
     }
 
     #[test]
