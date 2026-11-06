@@ -57,6 +57,8 @@ jobs:
       - name: Build and verify signed update bundle
         env:
           SCREENTRA_CAST_UPDATE_SIGNING_KEY: ${{ runner.temp }}/server-update-signing.key
+          SIGNAGE_GIT_COMMIT: ${{ github.sha }}
+          SIGNAGE_BUILD_TIME: ${{ github.event.release.published_at }}
         run: |
           cargo run --release -- --build-update-bundle "$RUNNER_TEMP/screentra-cast-server-update.tar.gz" > "$RUNNER_TEMP/update-manifest.json"
           test -s "$RUNNER_TEMP/screentra-cast-server-update.tar.gz"
