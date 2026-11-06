@@ -158,6 +158,12 @@ class PlayerRendererFileTests(unittest.TestCase):
         self.assertIn("container-type:size", source)
         self.assertIn("raw.includes('creepster')", source)
         self.assertIn("data-date-format", source)
+        self.assertIn("ss:seconds", source)
+        self.assertIn("/api/traffic/events", source)
+        self.assertIn("async function loadTraffic", source)
+        self.assertIn("cachedTrafficEvents(p)", source)
+        self.assertIn("source==='traffic'", source)
+        self.assertIn("cachedOpacity(p.opacity)", source)
 
 
 if __name__ == '__main__':
