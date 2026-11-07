@@ -106,4 +106,26 @@ assert.strictEqual(
   `${file}: traffic variable did not use the configured Road Closure description`,
 );
 
+const sizingMarkup = context.templateHtml({
+  widget_type: 'traffic',
+  props: {
+    _widget_type: 'traffic',
+    template_width: 328,
+    template_height: 82,
+    max_events: '4',
+    hide_if_empty: true,
+    _traffic_data: { available: true, events: [{ category: 'crash', description: 'One crash' }] },
+    template_elements: [
+      { type: 'image', width: 330, height: 80, x: 0, y: 0, z: 0, props: {}, repeat: { group: 'rows', count: 1, gap_y: 10, mode: 'rows', preserve_size: true, hide_if_empty: true } },
+      { type: 'rectangle', width: 306, height: 60, x: 12, y: 10, z: 1, props: {}, repeat: { group: 'rows', count: 1, gap_y: 10, mode: 'rows' } },
+      { type: 'variable_text', width: 300, height: 56, x: 16, y: 12, z: 2, props: { variable_source: 'traffic', variable_key: 'traffic_crashes_closures', font_size: 11 }, repeat: { group: 'rows', count: 1, gap_y: 10, mode: 'rows', preserve_size: true, hide_if_empty: true } },
+    ],
+  },
+});
+assert.match(
+  sizingMarkup,
+  /height:16(?:\.[0-9]+)?%;/,
+  `${file}: one traffic event collapsed the preserved multi-row template height`,
+);
+
 console.log('cached player traffic integration: Crash/Road Closure excludes road work and preserves configured descriptions');
