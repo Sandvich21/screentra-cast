@@ -116,9 +116,9 @@ const sizingMarkup = context.templateHtml({
     hide_if_empty: true,
     _traffic_data: { available: true, events: [{ category: 'crash', description: 'One crash' }] },
     template_elements: [
-      { type: 'image', width: 330, height: 80, x: 0, y: 0, z: 0, props: {}, repeat: { group: 'rows', count: 1, gap_y: 10, mode: 'rows', preserve_size: true, hide_if_empty: true } },
-      { type: 'rectangle', width: 306, height: 60, x: 12, y: 10, z: 1, props: {}, repeat: { group: 'rows', count: 1, gap_y: 10, mode: 'rows' } },
-      { type: 'variable_text', width: 300, height: 56, x: 16, y: 12, z: 2, props: { variable_source: 'traffic', variable_key: 'traffic_crashes_closures', font_size: 11 }, repeat: { group: 'rows', count: 1, gap_y: 10, mode: 'rows', preserve_size: true, hide_if_empty: true } },
+      { type: 'image', width: 330, height: 80, x: 0, y: 0, z: 0, props: {}, repeat: { group: 'rows', count: 1, gap_y: 10, mode: 'rows', order: 'bottom-up', preserve_size: true, hide_if_empty: true } },
+      { type: 'rectangle', width: 306, height: 60, x: 12, y: 10, z: 1, props: {}, repeat: { group: 'rows', count: 1, gap_y: 10, mode: 'rows', order: 'bottom-up' } },
+      { type: 'variable_text', width: 300, height: 56, x: 16, y: 12, z: 2, props: { variable_source: 'traffic', variable_key: 'traffic_crashes_closures', font_size: 11 }, repeat: { group: 'rows', count: 1, gap_y: 10, mode: 'rows', order: 'bottom-up', preserve_size: true, hide_if_empty: true } },
     ],
   },
 });
@@ -126,6 +126,11 @@ assert.match(
   sizingMarkup,
   /height:16(?:\.[0-9]+)?%;/,
   `${file}: one traffic event collapsed the preserved multi-row template height`,
+);
+assert.match(
+  sizingMarkup,
+  /top:80\.5[0-9]+%;width:90\.909[0-9]+%;height:16(?:\.[0-9]+)?%;/,
+  `${file}: bottom-up traffic row was placed at the top instead of the server's bottom anchor`,
 );
 
 console.log('cached player traffic integration: Crash/Road Closure excludes road work and preserves configured descriptions');
