@@ -10503,6 +10503,27 @@ if [ -n "$WLR_RENDERER_SELECTED" ]; then
 else
     log "No AMD amdgpu renderer workaround required; using wlroots default renderer"
 fi
+select_wlr_drm_no_atomic() {
+    if [ -n "${WLR_DRM_NO_ATOMIC:-}" ]; then
+        printf '%s' "$WLR_DRM_NO_ATOMIC"
+        return
+    fi
+    local vendor_file vendor driver
+    for vendor_file in /sys/class/drm/card*/device/vendor; do
+        [ -r "$vendor_file" ] || continue
+        vendor="$(cat "$vendor_file" 2>/dev/null || true)"
+        driver="$(basename "$(readlink "${vendor_file%/vendor}/driver" 2>/dev/null || true)")"
+        if [ "$vendor" = "0x8086" ] && [ "$driver" = "i915" ]; then
+            printf '1'
+            return
+        fi
+    done
+}
+WLR_DRM_NO_ATOMIC_SELECTED="$(select_wlr_drm_no_atomic)"
+if [ -n "$WLR_DRM_NO_ATOMIC_SELECTED" ]; then
+    SWAY_RENDERER_ENV+=("WLR_DRM_NO_ATOMIC=$WLR_DRM_NO_ATOMIC_SELECTED")
+    log "Using Intel i915 DRM atomic workaround: WLR_DRM_NO_ATOMIC=$WLR_DRM_NO_ATOMIC_SELECTED"
+fi
 log "Starting sway..."
 sudo -u "$BOARD_USER" env \
     HOME="$BOARD_HOME" PATH="$PATH" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
