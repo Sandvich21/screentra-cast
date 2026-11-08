@@ -227,10 +227,8 @@ ExecStart=/usr/local/bin/screentra-kiosk.sh
 Restart=always
 RestartSec=5
 Environment=HOME=/home/board
-# AMD amdgpu APUs need the GLES2 renderer for reliable DRM scan-out.
-# Pixman can start Sway but repeatedly fails to import the Chromium buffer,
-# leaving the physical output black.
-Environment=WLR_RENDERER=gles2
+# The launcher selects the GLES2 workaround only for AMD amdgpu hardware.
+# Other devices use wlroots' default renderer unless explicitly overridden.
 Environment=SCREENTRA_DISPLAY_INDEX=%i
 Environment=SCREENTRA_RENDER_BASE_PORT=3900
 Environment=SCREENTRA_RENDERER_URL=http://127.0.0.1:3900/

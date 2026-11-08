@@ -408,10 +408,8 @@ RestartSec=5
 # that controlled handoff as a successful stop rather than a crash.
 SuccessExitStatus=143 SIGTERM
 Environment=HOME=/home/board
-# AMD amdgpu APUs need the GLES2 renderer for reliable DRM scan-out.
-# Pixman can start Sway but repeatedly fails to import the Chromium buffer,
-# leaving the physical output black.
-Environment=WLR_RENDERER=gles2
+# The launcher selects the GLES2 workaround only for AMD amdgpu hardware.
+# Other devices use wlroots' default renderer unless explicitly overridden.
 Environment=SCREENTRA_DISPLAY_INDEX=%i
 Environment=SCREENTRA_RENDER_BASE_PORT=3900
 Environment=SCREENTRA_RENDERER_URL=http://127.0.0.1:3900/
@@ -10478,14 +10476,39 @@ while IFS='|' read -r idx connector port; do
     RENDERER_PIDS+=("$!")
 done <<< "$DISPLAY_SPEC"
 
-# Sway must be the sole DRM owner. AMD APUs use GLES2 for reliable scan-out;
-# callers can override this with WLR_RENDERER if a different GPU needs it.
+# Sway must be the sole DRM owner. The GLES2 workaround is only for AMD
+# amdgpu devices that need it for reliable DRM scan-out. Other hardware uses
+# wlroots' default renderer unless WLR_RENDERER is explicitly supplied.
+select_wlr_renderer() {
+    if [ -n "${WLR_RENDERER:-}" ]; then
+        printf '%s' "$WLR_RENDERER"
+        return
+    fi
+    local vendor_file vendor driver
+    for vendor_file in /sys/class/drm/card*/device/vendor; do
+        [ -r "$vendor_file" ] || continue
+        vendor="$(cat "$vendor_file" 2>/dev/null || true)"
+        driver="$(basename "$(readlink "${vendor_file%/vendor}/driver" 2>/dev/null || true)")"
+        if [ "$vendor" = "0x1002" ] && [ "$driver" = "amdgpu" ]; then
+            printf 'gles2'
+            return
+        fi
+    done
+}
+WLR_RENDERER_SELECTED="$(select_wlr_renderer)"
+SWAY_RENDERER_ENV=()
+if [ -n "$WLR_RENDERER_SELECTED" ]; then
+    SWAY_RENDERER_ENV+=("WLR_RENDERER=$WLR_RENDERER_SELECTED")
+    log "Using Sway renderer override: $WLR_RENDERER_SELECTED"
+else
+    log "No AMD amdgpu renderer workaround required; using wlroots default renderer"
+fi
 log "Starting sway..."
 sudo -u "$BOARD_USER" env \
     HOME="$BOARD_HOME" PATH="$PATH" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
     env -u WAYLAND_DISPLAY \
     WLR_BACKENDS="${WLR_BACKENDS:-drm}" \
-    WLR_RENDERER="${WLR_RENDERER:-gles2}" \
+    "${SWAY_RENDERER_ENV[@]}" \
     sway -d -c "$SWAY_CONFIG_DIR/config" \
     >> "$LOG" 2>&1 &
 SWAY_PID=$!
